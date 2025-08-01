@@ -123,6 +123,7 @@ paste = "1.0.15"
 async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
 priority-queue = "2.5"
+moka = "0.12.10"
 
 # Reth & Alloy deps
 # These should be kept in lockstep with the Reth dependencies - for compatability and built times
