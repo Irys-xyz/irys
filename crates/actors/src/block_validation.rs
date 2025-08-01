@@ -175,7 +175,7 @@ pub fn prev_output_is_valid(
 }
 
 // compares block timestamp against parent block
-// errors if the block has a lower timstamp than the parent block
+// errors if the block has a lower timestamp than the parent block
 // compares timestamps of block against current system time
 // errors on drift more than MAX_TIMESTAMP_DRIFT_SECS into future
 pub fn timestamp_is_valid(current: u128, parent: u128) -> eyre::Result<()> {
