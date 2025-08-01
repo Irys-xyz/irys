@@ -40,8 +40,8 @@ use std::{
 };
 use tracing::{debug, error, info};
 
-/// Maximum allowed clock drift for block timestamps in milliseconds
-const MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS: u128 = 15_000;
+/// Maximum allowed future clock drift for block timestamps in milliseconds
+pub const MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS: u128 = 15_000;
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
