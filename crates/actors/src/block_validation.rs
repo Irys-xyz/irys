@@ -716,7 +716,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,

@@ -194,7 +194,6 @@ impl CommitmentSnapshot {
                     .find(|t| t.id == commitment_tx.id);
 
                 if let Some(existing) = existing {
-                    debug!("DUPLICATING PLEDGE: {}", existing.id);
                     return CommitmentSnapshotStatus::Accepted;
                 }
 
@@ -539,19 +538,28 @@ mod tests {
     #[test]
     fn test_stake_commitment_amount_tracking() {
         let mut snapshot = CommitmentSnapshot::default();
-        
+
         // Create and add stakes with different amounts
         let test_cases = vec![
-            (Address::random(), U256::from(10_000_000_000_000_000_000_000u128)), // 10k tokens
-            (Address::random(), U256::from(50_000_000_000_000_000_000_000u128)), // 50k tokens
-            (Address::random(), U256::from(20_000_000_000_000_000_000_000u128)), // 20k tokens
+            (
+                Address::random(),
+                U256::from(10_000_000_000_000_000_000_000u128),
+            ), // 10k tokens
+            (
+                Address::random(),
+                U256::from(50_000_000_000_000_000_000_000u128),
+            ), // 50k tokens
+            (
+                Address::random(),
+                U256::from(20_000_000_000_000_000_000_000u128),
+            ), // 20k tokens
         ];
-        
+
         for (signer, amount) in &test_cases {
             let stake = create_test_commitment(*signer, CommitmentType::Stake, *amount);
             snapshot.add_commitment(&stake, &EpochSnapshot::default());
         }
-        
+
         // Verify all amounts are correctly stored
         for (signer, expected_amount) in &test_cases {
             assert_eq!(
@@ -575,9 +583,9 @@ mod tests {
 
         // Add pledges with different amounts
         let pledge_amounts = vec![
-            U256::from(1_000_000_000_000_000_000_000u128),  // 1k tokens
-            U256::from(2_500_000_000_000_000_000_000u128),  // 2.5k tokens
-            U256::from(5_000_000_000_000_000_000_000u128),  // 5k tokens
+            U256::from(1_000_000_000_000_000_000_000u128), // 1k tokens
+            U256::from(2_500_000_000_000_000_000_000u128), // 2.5k tokens
+            U256::from(5_000_000_000_000_000_000_000u128), // 5k tokens
             U256::from(10_000_000_000_000_000_000_000u128), // 10k tokens
         ];
 

@@ -277,16 +277,9 @@ impl Ord for CommitmentTransaction {
                 CommitmentType::Pledge {
                     pledge_count_before_executing: count_b,
                 },
-            ) => {
-                // Both are pledges, sort by count (lower first), then by fee
-                match count_a.cmp(count_b) {
-                    std::cmp::Ordering::Equal => {
-                        // Same count, sort by fee (higher first)
-                        other.user_fee().cmp(&self.user_fee())
-                    }
-                    ordering => ordering,
-                }
-            }
+            ) => count_a
+                .cmp(count_b)
+                .then_with(|| other.user_fee().cmp(&self.user_fee())),
             // Handle other cases (Unpledge, Unstake) - sort by fee
             _ => other.user_fee().cmp(&self.user_fee()),
         }
