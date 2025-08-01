@@ -636,8 +636,7 @@ impl EpochSnapshot {
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
                 signer: stake_commitment.signer,
-                // TODO: implement the staking cost lookups and use that value here
-                amount: 0,
+                amount: stake_commitment.commitment_value(),
             };
             self.commitment_state
                 .stake_commitments
@@ -665,8 +664,7 @@ impl EpochSnapshot {
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
                 signer: pledge_commitment.signer,
-                // TODO: implement the pledging cost lookups and use that value here
-                amount: 0,
+                amount: pledge_commitment.commitment_value(),
             };
 
             // Add the pledge state to the signer's collection (or create a new collection if first pledge)
@@ -948,6 +946,7 @@ mod tests {
     use super::*;
     use crate::{CommitmentState, PartitionAssignments};
     use irys_database::data_ledger::Ledgers;
+
     use irys_types::{
         Config, ConsensusConfig, ConsensusOptions, DataLedger, IrysBlockHeader, NodeConfig,
     };

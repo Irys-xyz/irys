@@ -1,5 +1,5 @@
 use irys_primitives::CommitmentStatus;
-use irys_types::{Address, IrysTransactionId, H256};
+use irys_types::{Address, IrysTransactionId, H256, U256};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default, Clone)]
@@ -10,8 +10,7 @@ pub struct CommitmentStateEntry {
     pub partition_hash: Option<H256>,
     pub signer: Address,
     /// Irys token amount in atomic units
-    // todo - change this to U256 and keep track of the `value`
-    pub amount: u64,
+    pub amount: U256,
 }
 
 #[derive(Debug, Default, Clone)]

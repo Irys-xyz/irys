@@ -307,7 +307,7 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
             )
-            .instrument(tracing::info_span!("commitment_ordering_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
+            .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await
             .inspect_err(|err| tracing::error!(?err, "commitment ordering validation failed"))
             .map(|()| ValidationResult::Valid)

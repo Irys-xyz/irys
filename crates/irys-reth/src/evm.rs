@@ -658,7 +658,10 @@ where
             );
             return Err(create_invalid_tx_error(
                 *tx_hash,
-                InvalidTransaction::NonceTooHigh { tx: 0, state: 0 }, // Proxy for "account doesn't exist"
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(fee),
+                    balance: Box::new(U256::ZERO),
+                },
             ));
         };
 
