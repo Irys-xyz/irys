@@ -512,6 +512,15 @@ pub async fn shadow_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
+    // ensure the execution payload timestamp matches the block timestamp
+    // truncated to full seconds
+    let payload_timestamp: u128 = payload.timestamp().into();
+    let block_timestamp_sec = block.timestamp / 1000;
+    ensure!(
+            payload_timestamp == block_timestamp_sec,
+            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+        );
+
     let versioned_hashes = sidecar
         .versioned_hashes()
         .ok_or_eyre("version hashes must be present")?
