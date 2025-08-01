@@ -241,16 +241,9 @@ impl CommitmentSnapshot {
             }
         }
 
-        // Sort using PrioritizedCommitment wrapper
-        let mut prioritized: Vec<_> = all_commitments
-            .iter()
-            .map(super::PrioritizedCommitment)
-            .collect();
-
-        prioritized.sort();
-
-        // Convert back to Vec<CommitmentTransaction>
-        prioritized.into_iter().map(|p| p.0.clone()).collect()
+        // Sort commitments directly
+        all_commitments.sort();
+        all_commitments
     }
 }
 

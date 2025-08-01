@@ -8,7 +8,7 @@ use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_domain::{
-    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, PrioritizedCommitment,
+    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus,
     StorageModulesReadGuard,
 };
 use irys_primitives::CommitmentType;
@@ -318,7 +318,7 @@ impl Inner {
                             CommitmentType::Stake | CommitmentType::Pledge { .. }
                         )
                     })
-                    .map(PrioritizedCommitment)
+                    .cloned()
             })
             .collect::<Vec<_>>();
 
@@ -326,8 +326,7 @@ impl Inner {
         sorted_commitments.sort();
 
         // Process sorted commitments
-        for prioritized_tx in sorted_commitments {
-            let tx = prioritized_tx.0;
+        for tx in &sorted_commitments {
 
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
