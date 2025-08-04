@@ -21,6 +21,12 @@ bind_port = 8080
 [storage]
 num_writes_before_sync = 1
 
+[data_sync]
+max_storage_throughput_bps = 1047961600
+bandwidth_adjustment_interval = "1s"
+chunk_request_timeout = "15s"
+
+max_pending_chunk_requests = 100
 [packing]
 cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024

@@ -420,7 +420,15 @@ pub struct StorageSyncConfig {
 pub struct DataSyncServiceConfig {
     pub max_pending_chunk_requests: u64,
     pub max_storage_throughput_bps: u64,
+    #[serde(
+        deserialize_with = "serde_utils::duration_from_string",
+        serialize_with = "serde_utils::serialize_duration_string"
+    )]
     pub bandwidth_adjustment_interval: Duration,
+    #[serde(
+        deserialize_with = "serde_utils::duration_from_string",
+        serialize_with = "serde_utils::serialize_duration_string"
+    )]
     pub chunk_request_timeout: Duration,
 }
 
@@ -1039,6 +1047,8 @@ impl NodeConfig {
 
 pub mod serde_utils {
 
+    use std::time::Duration;
+
     use rust_decimal::Decimal;
     use serde::{Deserialize as _, Deserializer, Serializer};
 
@@ -1141,6 +1151,64 @@ pub mod serde_utils {
             .try_into()
             .expect("decimal to be convertible to a f64");
         serializer.serialize_f64(float)
+    }
+
+    pub fn duration_from_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+
+    pub fn duration_from_millis<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
+
+    pub fn duration_from_string<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        parse_duration_string(&s).map_err(serde::de::Error::custom)
+    }
+
+    fn parse_duration_string(s: &str) -> Result<Duration, String> {
+        if let Some(secs_str) = s.strip_suffix('s') {
+            let secs: u64 = secs_str
+                .parse()
+                .map_err(|_| format!("Invalid duration number: {}", secs_str))?;
+            Ok(Duration::from_secs(secs))
+        } else if let Some(millis_str) = s.strip_suffix("ms") {
+            let millis: u64 = millis_str
+                .parse()
+                .map_err(|_| format!("Invalid duration number: {}", millis_str))?;
+            Ok(Duration::from_millis(millis))
+        } else {
+            Err(format!("Duration must end with 's' or 'ms': {}", s))
+        }
+    }
+
+    pub fn serialize_duration_secs<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn serialize_duration_string<S>(
+        duration: &Duration,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = format!("{}s", duration.as_secs());
+        serializer.serialize_str(&s)
     }
 }
 
@@ -1278,6 +1346,12 @@ mod tests {
         [storage]
         num_writes_before_sync = 1
 
+        [data_sync]
+        max_pending_chunk_requests = 1000
+        max_storage_throughput_bps = 209715200
+        bandwidth_adjustment_interval = "5s"
+        chunk_request_timeout = "10s"
+
         [pricing]
         fee_percentage = 0.01
 
@@ -1343,6 +1417,8 @@ mod tests {
             .join("config")
             .join("templates")
             .join("testnet_config.toml");
+
+        println!("path: {:?}", template_path);
 
         let template_content = std::fs::read_to_string(&template_path)
             .expect("Failed to read testnet_config.toml template");
