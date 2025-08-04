@@ -22,6 +22,7 @@ pub struct PeerStats {
 
     // Simplified tracking
     pub consecutive_failures: u32,
+    pub total_failures: u64,
     pub active_requests: usize,
 
     // Bandwidth tracking for the last 5 min
@@ -61,6 +62,7 @@ impl PeerStats {
             bandwidth_rating: BandwidthRating::Medium,
             timeout,
             consecutive_failures: 0,
+            total_failures: 0,
             active_requests: 0,
             // Use 300-second window (5 minutes) to capture bandwidth throughput
             bandwidth_window: BandwidthWindow::new(Duration::from_secs(300)),
@@ -74,17 +76,18 @@ impl PeerStats {
         let expected_bytes_per_sec = self.expected_bandwidth_bps();
         let observed_bytes_per_sec = self.short_term_bandwidth_bps() as f64;
 
-        // Only add concurrency if we have unused bandwidth
-        let unused_bandwidth = expected_bytes_per_sec - observed_bytes_per_sec;
-        if unused_bandwidth <= 0.0 {
-            return self.baseline_concurrency;
-        }
+        let total_capacity = if observed_bytes_per_sec > 0.0 {
+            // If peer is performing better than expected, allow more concurrency
+            let performance_ratio = observed_bytes_per_sec / expected_bytes_per_sec;
+            let base_capacity = self.baseline_concurrency as f64;
+            (base_capacity * performance_ratio).min(self.max_concurrency as f64) as u32
+        } else {
+            // No observed data yet, use baseline capacity
+            self.baseline_concurrency
+        };
 
-        // Calculate how many additional concurrent streams the unused bandwidth can support
-        let bytes_per_stream = expected_bytes_per_sec;
-        let additional_streams = unused_bandwidth / bytes_per_stream;
-
-        additional_streams as u32
+        // Available = Total capacity - Currently active requests
+        total_capacity.saturating_sub(self.active_requests as u32)
     }
 
     pub fn expected_bandwidth_bps(&self) -> f64 {
@@ -114,6 +117,7 @@ impl PeerStats {
     pub fn record_request_failed(&mut self) {
         self.active_requests = self.active_requests.saturating_sub(1);
         self.consecutive_failures += 1;
+        self.total_failures += 1;
     }
 
     pub fn average_completion_time(&self) -> Duration {

@@ -5,21 +5,25 @@ use crate::{
     DataSyncServiceMessage,
 };
 use irys_domain::{ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
-use irys_types::{Address, LedgerChunkOffset, PartitionChunkOffset};
+use irys_types::{Address, LedgerChunkOffset, NodeConfig, PartitionChunkOffset};
 use std::{
     collections::{hash_map, HashMap},
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
-
-const BYTES_IN_200_MB: u64 = 200 * 1024 * 1024;
-const TARGET_REQUEST_QUEUE_DEPTH: usize = 1000;
-const BANDWIDTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+use tracing::debug;
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
-    Pending,
+    /// Chunk needs to be requested. The optional Address indicates a peer that should be
+    /// excluded from selection (typically because a previous request to that peer failed).
+    Pending(Option<Address>),
+
+    /// Chunk has been requested from the specified peer at the given timestamp.
+    /// Used for tracking timeouts and preventing duplicate requests.
     Requested(Address, Instant),
+
+    /// Chunk has been successfully retrieved and stored.
     Completed,
 }
 
@@ -34,15 +38,15 @@ pub struct ChunkRequest {
 #[derive(Debug)]
 pub struct ChunkOrchestrator {
     storage_module: Arc<StorageModule>,
-    chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
+    pub chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
     recent_chunk_times: CircularBuffer<ChunkTimeRecord>,
-    pub(crate) current_peers: Vec<Address>,
+    pub current_peers: Vec<Address>,
     all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
     slot_index: usize,
-    timeout_duration: Duration,
     last_bandwidth_check: Instant,
     chunk_fetcher: Arc<dyn ChunkFetcher>,
+    config: NodeConfig,
 }
 
 impl ChunkOrchestrator {
@@ -51,6 +55,7 @@ impl ChunkOrchestrator {
         all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
         service_senders: &ServiceSenders,
         chunk_fetcher: Arc<dyn ChunkFetcher>,
+        config: NodeConfig,
     ) -> Self {
         let slot_index = storage_module
             .partition_assignment()
@@ -66,61 +71,45 @@ impl ChunkOrchestrator {
             all_peers,
             service_senders: service_senders.clone(),
             slot_index,
-            timeout_duration: Duration::from_secs(15),
             last_bandwidth_check: Instant::now(),
             chunk_fetcher, // Store the chunk fetcher
+            config,
         }
     }
 
     pub fn tick(&mut self) -> eyre::Result<()> {
-        self.recycle_timed_out_requests();
         self.populate_request_queue();
         self.adjust_peer_concurrency()?;
         self.dispatch_chunk_requests();
         Ok(())
     }
 
-    fn recycle_timed_out_requests(&mut self) {
-        let now = Instant::now();
-
-        for request in self.chunk_requests.values_mut() {
-            if let ChunkRequestState::Requested(peer_addr, start_time) = request.request_state {
-                if now.duration_since(start_time) > self.timeout_duration {
-                    if let Ok(mut peers) = self.all_peers.write() {
-                        if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                            peer_manager.on_chunk_request_failure();
-                        }
-                    }
-                    request.request_state = ChunkRequestState::Pending;
-                }
-            }
-        }
-    }
-
     fn populate_request_queue(&mut self) {
         let pending_count = self
             .chunk_requests
             .values()
-            .filter(|r| r.request_state == ChunkRequestState::Pending)
+            .filter(|r| matches!(r.request_state, ChunkRequestState::Pending(_)))
             .count();
 
-        let mut requests_to_add = TARGET_REQUEST_QUEUE_DEPTH.saturating_sub(pending_count);
+        let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
+        let mut requests_to_add = max_requests.saturating_sub(pending_count);
+
         if requests_to_add == 0 {
             return;
         }
 
         let entropy_intervals = self.storage_module.get_intervals(ChunkType::Entropy);
-
         for interval in entropy_intervals {
             for interval_step in *interval.start()..=*interval.end() {
                 let chunk_offset = PartitionChunkOffset::from(interval_step);
 
                 if let hash_map::Entry::Vacant(e) = self.chunk_requests.entry(chunk_offset) {
+                    // Only executes when the entry in the hashmap is vacant
                     e.insert(ChunkRequest {
                         ledger_id: self.storage_module.id,
                         slot_index: self.slot_index,
                         chunk_offset,
-                        request_state: ChunkRequestState::Pending,
+                        request_state: ChunkRequestState::Pending(None), // First time chunk requests don't have past failed peer addresses
                     });
 
                     requests_to_add -= 1;
@@ -133,16 +122,27 @@ impl ChunkOrchestrator {
     }
 
     fn adjust_peer_concurrency(&mut self) -> eyre::Result<()> {
-        let storage_throughput = self.storage_module.write_throughput();
-        let storage_capacity_remaining = BYTES_IN_200_MB.saturating_sub(storage_throughput);
+        let storage_throughput = self.storage_module.write_throughput_bps();
+        let target_throughput = self.config.data_sync.max_storage_throughput_bps;
+        let storage_capacity_remaining = target_throughput.saturating_sub(storage_throughput);
 
-        if storage_capacity_remaining < (BYTES_IN_200_MB / 10) {
+        debug!(
+            "adjust_peer_concurrency(): Storage: {}/{} ({}% remaining)",
+            storage_throughput,
+            target_throughput,
+            (storage_capacity_remaining * 100) / target_throughput
+        );
+
+        // If we're within 10% of target_throughput, dial back concurrency
+        if storage_capacity_remaining < (target_throughput / 10) {
+            debug!("REDUCING concurrency due to saturating storage write throughput");
             self.reduce_all_peer_concurrency();
             return Ok(());
         }
 
         let now = Instant::now();
-        if now.duration_since(self.last_bandwidth_check) >= BANDWIDTH_CHECK_INTERVAL {
+        let bandwidth_interval = self.config.data_sync.bandwidth_adjustment_interval;
+        if now.duration_since(self.last_bandwidth_check) >= bandwidth_interval {
             self.optimize_peer_concurrency();
             self.last_bandwidth_check = now;
         }
@@ -187,7 +187,7 @@ impl ChunkOrchestrator {
             let peer_scores = self.get_peer_scores(&peers);
 
             for (peer_addr, health_score, available_concurrency) in peer_scores {
-                if health_score > 0.7 && available_concurrency > 0 {
+                if health_score >= 0.7 {
                     if let Some(peer_manager) = peers.get_mut(&peer_addr) {
                         let current_max = peer_manager.max_concurrency();
                         let increase = std::cmp::min(available_concurrency as usize, 5);
@@ -199,19 +199,26 @@ impl ChunkOrchestrator {
     }
 
     fn dispatch_chunk_requests(&mut self) {
-        let pending_offsets: Vec<_> = self
+        let pending_requests: Vec<_> = self
             .chunk_requests
             .iter()
-            .filter(|(_, request)| request.request_state == ChunkRequestState::Pending)
-            .map(|(offset, _)| *offset)
+            .filter(|(_, request)| matches!(request.request_state, ChunkRequestState::Pending(_)))
+            .map(|(offset, request)| {
+                let excluding = if let ChunkRequestState::Pending(addr) = &request.request_state {
+                    *addr
+                } else {
+                    None
+                };
+                (*offset, excluding)
+            })
             .collect();
 
-        if pending_offsets.is_empty() {
+        if pending_requests.is_empty() {
             return;
         }
 
-        for chunk_offset in pending_offsets {
-            if let Some(peer_addr) = self.find_best_peer() {
+        for (chunk_offset, excluding) in pending_requests {
+            if let Some(peer_addr) = self.find_best_peer(excluding) {
                 self.dispatch_chunk_request(chunk_offset, peer_addr);
             } else {
                 break;
@@ -219,16 +226,43 @@ impl ChunkOrchestrator {
         }
     }
 
-    fn find_best_peer(&self) -> Option<Address> {
+    fn find_best_peer(&self, excluding: Option<Address>) -> Option<Address> {
         let peers = self.all_peers.read().ok()?;
-        let peer_scores = self.get_peer_scores(&peers);
 
-        peer_scores
-            .into_iter()
-            .find(|(_, _, available_concurrency)| *available_concurrency > 0)
-            .map(|(addr, _, _)| addr)
+        let mut candidates: Vec<&PeerBandwidthManager> = self
+            .current_peers
+            .iter()
+            .filter_map(|&addr| peers.get(&addr))
+            .filter(|peer_manager| {
+                let available = peer_manager.available_concurrency();
+                available > 0
+            })
+            .filter(|peer_manager| {
+                // Exclude the specified address if provided
+                excluding.map_or(true, |excluded_addr| {
+                    peer_manager.miner_address != excluded_addr
+                })
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Use the same sorting logic as the service
+        // Primary sort: health score (reliability, recent performance)
+        // Secondary sort: available concurrency (current capacity to handle more requests)
+        candidates.sort_by(|a, b| {
+            (b.health_score(), b.available_concurrency())
+                .partial_cmp(&(a.health_score(), a.available_concurrency()))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Return the best peer
+        candidates
+            .first()
+            .map(|peer_manager| peer_manager.miner_address)
     }
-
     fn dispatch_chunk_request(&mut self, chunk_offset: PartitionChunkOffset, peer_addr: Address) {
         let request = match self.chunk_requests.get_mut(&chunk_offset) {
             Some(req) => req,
@@ -250,7 +284,7 @@ impl ChunkOrchestrator {
             peer_manager.peer_address.api
         };
 
-        let start_instant = Instant::now();
+        // Get a ledger chunk offset
         let start_ledger_offset = u64::from(
             self.storage_module
                 .get_storage_module_ledger_range()
@@ -260,15 +294,19 @@ impl ChunkOrchestrator {
         let ledger_chunk_offset =
             LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
 
+        // Change the request_state from Pending -> Requested
+        let start_instant = Instant::now();
         request.request_state = ChunkRequestState::Requested(peer_addr, start_instant);
 
-        // Use the injected chunk fetcher instead of spawning HTTP directly
+        // Get the chunk fetcher
         let chunk_fetcher = self.chunk_fetcher.clone();
         let tx = self.service_senders.data_sync.clone();
         let storage_module_id = self.storage_module.id;
-        let timeout = self.timeout_duration;
+        let timeout = self.config.data_sync.chunk_request_timeout;
 
         tokio::spawn(async move {
+            debug!("Fetching chunk {chunk_offset} from {api_addr}");
+
             let result = chunk_fetcher
                 .fetch_chunk(ledger_chunk_offset, api_addr, timeout)
                 .await;
@@ -364,12 +402,16 @@ impl ChunkOrchestrator {
 
         if expected_peer != peer_addr {
             return Err(eyre::eyre!(
-                "Peer mismatch for chunk failure: {:?}",
-                chunk_offset
+                "Peer mismatch for chunk failure: {:?} expected peer: {} actual: {}",
+                chunk_offset,
+                expected_peer,
+                peer_addr
             ));
         }
 
-        request.request_state = ChunkRequestState::Pending;
+        debug!("resetting failed chunk to Pending {}", chunk_offset);
+        // Record the peer that was expected to provide this chunk but failed
+        request.request_state = ChunkRequestState::Pending(Some(expected_peer));
 
         if let Ok(mut peers) = self.all_peers.write() {
             if let Some(peer_manager) = peers.get_mut(&peer_addr) {
@@ -392,7 +434,7 @@ impl ChunkOrchestrator {
         for request in self.chunk_requests.values_mut() {
             if let ChunkRequestState::Requested(addr, _) = request.request_state {
                 if addr == peer_addr {
-                    request.request_state = ChunkRequestState::Pending;
+                    request.request_state = ChunkRequestState::Pending(Some(addr));
                 }
             }
         }
@@ -404,7 +446,7 @@ impl ChunkOrchestrator {
                 .values()
                 .fold((0, 0, 0), |(p, a, c), request| {
                     match request.request_state {
-                        ChunkRequestState::Pending => (p + 1, a, c),
+                        ChunkRequestState::Pending(_) => (p + 1, a, c),
                         ChunkRequestState::Requested(_, _) => (p, a + 1, c),
                         ChunkRequestState::Completed => (p, a, c + 1),
                     }

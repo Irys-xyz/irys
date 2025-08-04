@@ -59,7 +59,7 @@ use irys_types::{
     PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath,
     UnpackedChunk, H256,
 };
-use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
+use nodit::{interval::ie, interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
 use reth_db::Database as _;
 use serde::{Deserialize, Serialize};
@@ -530,7 +530,7 @@ impl StorageModule {
 
             // Save the updated intervals
             if self.write_intervals_to_submodules().is_err() {
-                error!("Could not update submodule interval files");
+                error!("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign");
             }
         }
 
@@ -1154,7 +1154,7 @@ impl StorageModule {
 
     /// Calculate write throughput in bytes per second based on chunk records
     /// Returns 0 if no records are available
-    pub fn write_throughput(&self) -> u64 {
+    pub fn write_throughput_bps(&self) -> u64 {
         let chunk_size = self.config.consensus.chunk_size;
         let recent_chunk_times = self.recent_chunk_times.read().unwrap();
 

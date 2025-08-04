@@ -55,7 +55,7 @@ pub struct BlockMetadata {
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
-    epoch_snapshot: Arc<EpochSnapshot>,
+    pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,
 }

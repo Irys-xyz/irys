@@ -16,7 +16,8 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::warn;
+use tokio::sync::oneshot;
+use tracing::{debug, warn};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -58,6 +59,7 @@ pub enum DataSyncServiceMessage {
     PeerDisconnected {
         peer_addr: Address,
     },
+    GetAllPeersList(oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>),
 }
 
 impl DataSyncServiceInner {
@@ -106,8 +108,9 @@ impl DataSyncServiceInner {
                 peer_addr,
             } => self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr)?,
             DataSyncServiceMessage::PeerDisconnected { peer_addr } => {
-                self.handle_peer_disconnection(peer_addr);
+                self.handle_peer_disconnection(peer_addr)
             }
+            DataSyncServiceMessage::GetAllPeersList(tx) => self.handle_get_all_peers_list(tx),
         }
         Ok(())
     }
@@ -156,6 +159,7 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: Address,
     ) -> eyre::Result<()> {
+        debug!("chunk failed: {} peer:{}", chunk_offset, peer_addr);
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
         }
@@ -169,6 +173,7 @@ impl DataSyncServiceInner {
         peer_addr: Address,
     ) -> eyre::Result<()> {
         // TODO: Opportunity to do custom timeout tracking/handling here
+        debug!("chunk timed out: {} peer:{}", chunk_offset, peer_addr);
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
         }
@@ -183,6 +188,15 @@ impl DataSyncServiceInner {
 
         // Remove from peer list
         self.all_peers.write().unwrap().remove(&peer_addr);
+    }
+
+    fn handle_get_all_peers_list(
+        &self,
+        tx: oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>,
+    ) {
+        if let Err(e) = tx.send(self.all_peers.clone()) {
+            tracing::error!("handle_get_all_peers_list() tx.send() error: {:?}", e);
+        };
     }
 
     fn initialize_peers_and_orchestrators(&mut self) {
@@ -206,6 +220,7 @@ impl DataSyncServiceInner {
             // Only sync peers for storage modules that need data
             let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
             if entropy_intervals.is_empty() {
+                debug!("StorageModule has no entropy chunks\n{:?}", pa);
                 continue;
             }
 
@@ -285,6 +300,7 @@ impl DataSyncServiceInner {
                 self.all_peers.clone(),
                 &self.service_senders,
                 chunk_fetcher,
+                self.config.node_config.clone(),
             );
 
             self.chunk_orchestrators.insert(sm_id, orchestrator);
@@ -309,7 +325,7 @@ impl DataSyncServiceInner {
             peer_updates.push((sm_id, best_peers));
         }
 
-        // Apply the peer_updates
+        // Add the peers to the orchestrators
         for (sm_id, best_peers) in peer_updates {
             // Skip ff we don't have an orchestrator for this storage_module
             let Some(orchestrator) = self.chunk_orchestrators.get_mut(&sm_id) else {
@@ -317,23 +333,11 @@ impl DataSyncServiceInner {
                 continue;
             };
 
-            // Add new peers
-            // Note: orchestrator.add_peer() filters dupes
-            for peer_addr in &best_peers {
-                orchestrator.add_peer(*peer_addr);
-            }
-
-            // Remove peers that are no longer in the best_peers list
-            let current_peers: Vec<Address> = orchestrator.current_peers.clone();
-            for peer_addr in current_peers {
-                if !best_peers.contains(&peer_addr) {
-                    orchestrator.remove_peer(peer_addr);
-                }
-            }
+            orchestrator.current_peers = best_peers.clone();
         }
     }
 
-    fn get_best_available_peers(
+    pub fn get_best_available_peers(
         &self,
         storage_module: &StorageModule,
         desired_count: usize,

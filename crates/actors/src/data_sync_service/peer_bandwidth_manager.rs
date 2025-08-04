@@ -1,7 +1,6 @@
 use crate::data_sync_service::peer_stats::PeerStats;
 use irys_domain::ChunkTimeRecord;
 use irys_types::{partition::PartitionAssignment, Address, Config, PeerAddress, PeerListItem};
-use std::time::Duration;
 
 #[derive(Debug)]
 pub struct PeerBandwidthManager {
@@ -9,13 +8,13 @@ pub struct PeerBandwidthManager {
     pub peer_address: PeerAddress,
     pub miner_address: Address,
     pub config: Config,
-    peer_stats: PeerStats, // Made private - external access only through wrapper methods
+    peer_stats: PeerStats, // private - external access only through wrapper methods
 }
 
 impl PeerBandwidthManager {
     pub fn new(miner_address: &Address, peer_list_item: &PeerListItem, config: &Config) -> Self {
         let chunk_size = config.consensus.chunk_size;
-        let timeout = Duration::from_secs(15); // Default timeout, adjust as needed
+        let timeout = config.node_config.data_sync.chunk_request_timeout;
         let target_bandwidth_mbps = 100; // Default target, adjust as needed
 
         Self {
@@ -25,6 +24,10 @@ impl PeerBandwidthManager {
             config: config.clone(),
             peer_stats: PeerStats::new(target_bandwidth_mbps, chunk_size, timeout),
         }
+    }
+
+    pub fn active_requests(&self) -> usize {
+        self.peer_stats.active_requests
     }
 
     /// Record when a new request is started
@@ -67,9 +70,33 @@ impl PeerBandwidthManager {
         self.peer_stats.short_term_bandwidth_bps()
     }
 
+    pub fn consecutive_failures(&self) -> u32 {
+        self.peer_stats.consecutive_failures
+    }
+
+    pub fn total_failures(&self) -> u64 {
+        self.peer_stats.total_failures
+    }
+
     /// Get a health score for this peer (0.0 to 1.0)
     /// Higher scores indicate better performing, more reliable peers
     pub fn health_score(&self) -> f64 {
         self.peer_stats.health_score()
+    }
+
+    pub fn short_term_bandwidth_bps(&self) -> u64 {
+        self.peer_stats.short_term_bandwidth_bps()
+    }
+
+    pub fn medium_term_bandwidth_bps(&self) -> u64 {
+        self.peer_stats.medium_term_bandwidth_bps()
+    }
+
+    pub fn is_throughput_stable(&self) -> bool {
+        self.peer_stats.is_throughput_stable()
+    }
+
+    pub fn is_throughput_improving(&self) -> bool {
+        self.peer_stats.is_throughput_improving()
     }
 }

@@ -13,7 +13,7 @@ use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc, time::Duration};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -221,8 +221,11 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
-    /// Data storage configuration
+    /// StorageModule configuration
     pub storage: StorageSyncConfig,
+
+    /// DataSyncService configuration
+    pub data_sync: DataSyncServiceConfig,
 
     /// Data packing and compression settings
     pub packing: PackingConfig,
@@ -411,6 +414,14 @@ pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DataSyncServiceConfig {
+    pub max_pending_chunk_requests: u64,
+    pub max_storage_throughput_bps: u64,
+    pub bandwidth_adjustment_interval: Duration,
+    pub chunk_request_timeout: Duration,
 }
 
 /// # Mempool Configuration
@@ -837,6 +848,12 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
+            data_sync: DataSyncServiceConfig {
+                max_pending_chunk_requests: 1000,
+                max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
+                bandwidth_adjustment_interval: Duration::from_secs(5),
+                chunk_request_timeout: Duration::from_secs(10),
+            },
             trusted_peers: vec![PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
@@ -926,6 +943,12 @@ impl NodeConfig {
             reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+            },
+            data_sync: DataSyncServiceConfig {
+                max_pending_chunk_requests: 1000,
+                max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
+                bandwidth_adjustment_interval: Duration::from_secs(5),
+                chunk_request_timeout: Duration::from_secs(10),
             },
             trusted_peers: vec![],
             // trusted_peers: vec![PeerAddress {
