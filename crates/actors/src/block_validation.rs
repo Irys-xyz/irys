@@ -78,6 +78,13 @@ pub async fn prevalidate_block(
         &config.consensus.difficulty_adjustment,
     )?;
 
+    // Validate the last_diff_timestamp field
+    last_diff_timestamp_is_valid(
+        &block,
+        &previous_block,
+        &config.consensus.difficulty_adjustment,
+    )?;
+
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -193,6 +200,34 @@ pub fn difficulty_is_valid(
             "Invalid difficulty (expected {} got {})",
             &diff,
             &block.diff
+        ))
+    }
+}
+
+/// Validates the `last_diff_timestamp` field in the block.
+///
+/// The value should equal the previous block's `last_diff_timestamp` unless the
+/// current block triggers a difficulty adjustment, in which case it must be set
+/// to the block's own timestamp.
+pub fn last_diff_timestamp_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    difficulty_config: &DifficultyAdjustmentConfig,
+) -> eyre::Result<()> {
+    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval as u64;
+    let expected = if block.height % blocks_between_adjustments == 0 {
+        block.timestamp
+    } else {
+        previous_block.last_diff_timestamp
+    };
+
+    if block.last_diff_timestamp == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid last_diff_timestamp (expected {} got {})",
+            expected,
+            block.last_diff_timestamp
         ))
     }
 }
