@@ -102,7 +102,7 @@ async fn test_data_sync_with_different_peer_performance() {
         )
         .expect("Failed to take final snapshot");
 
-    let data_intervals = storage_module_ref.get_intervals(ChunkType::Data);
+    let _data_intervals = storage_module_ref.get_intervals(ChunkType::Data);
     let entropy_intervals = storage_module_ref.get_intervals(ChunkType::Entropy);
 
     // Storage module should be fully synced
