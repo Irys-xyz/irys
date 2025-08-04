@@ -1,3 +1,6 @@
+use chrono::{SecondsFormat, Utc};
+use color_eyre::eyre;
+use std::panic;
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
 pub use tempfile;
 use tempfile::TempDir;
@@ -25,7 +28,7 @@ pub fn initialize_tracing_with_backtrace() {
         .finish()
         .with(ErrorLayer::default())
         .try_init();
-    let _ = color_eyre::install();
+    let _ = setup_panic_hook();
 }
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.
@@ -68,4 +71,25 @@ pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
 
     debug!("using random path: {:?} ", &temp_dir);
     temp_dir
+}
+
+pub fn setup_panic_hook() -> eyre::Result<()> {
+    color_eyre::install()?;
+
+    // wrap the color_eyre panic hook & log the timestamp before it runs
+    // not perfect, but probably good enough
+    // easier than hook_builder.panic_message
+    let original_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // get current timestamp in RFC3339 format with microseconds and Z suffix to match `tracing`
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+
+        // print timestamp before the panic message
+        eprintln!("\x1b[1;31m[{}] Panic occurred:\x1b[0m", timestamp);
+
+        // call the original panic hook
+        original_hook(panic_info);
+    }));
+
+    Ok(())
 }
