@@ -327,6 +327,14 @@ impl Inner {
         sorted_commitments.sort();
 
         // Process sorted commitments
+        // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+        let mut simulation_commitment_snapshot = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_snapshot()
+            .as_ref()
+            .clone();
+        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
@@ -364,15 +372,6 @@ impl Inner {
             }
             // simulation check
             {
-                //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
-                let mut simulation_commitment_snapshot = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_commitment_snapshot()
-                    .as_ref()
-                    .clone();
-                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
-
                 let simulation = simulation_commitment_snapshot.add_commitment(tx, &epoch_snapshot);
 
                 // skip commitments that would not be accepted
