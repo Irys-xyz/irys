@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 const BLOCK_BATCH_SIZE: usize = 10;
@@ -180,53 +180,59 @@ impl SyncState {
 
     /// Waits for the highest pre-validated block to reach target sync height
     /// This has a progress/time based early out - if we don't make at least a block's worth of progress in `progress_timeout`, we return early
+    #[instrument(skip_all)]
     pub async fn wait_for_processed_block_to_reach_target(&self) {
         // If already synced, return immediately
         if !self.is_syncing() {
+            debug!("Not syncing, skipping wait");
             return;
         }
 
         // Create a future that polls the sync state
         let target = Arc::clone(&self.sync_target_height);
         let highest_processed_block = Arc::clone(&self.highest_processed_block);
-        tokio::spawn(async move {
-            let progress_timeout = Duration::from_secs(60);
-            let mut last_made_progress = Instant::now();
-            let mut prev_hpb = 0;
-            loop {
-                let target = target.load(Ordering::Relaxed);
-                let hpb = highest_processed_block.load(Ordering::Relaxed);
-                let made_progress = hpb > prev_hpb;
+        tokio::spawn(
+            async move {
+                let progress_timeout = Duration::from_secs(60);
+                let mut last_made_progress = Instant::now();
+                let mut prev_hpb = 0;
+                loop {
+                    let target = target.load(Ordering::Relaxed);
+                    let hpb = highest_processed_block.load(Ordering::Relaxed);
+                    let made_progress = hpb > prev_hpb;
 
-                // We need to add 1 to the highest processed block. For the cases when the node
-                // starts fully caught up, no new blocks are added to the index, and the
-                // target is always going to be one more than the highest processed block.
-                // If this function never resolves, no new blocks can arrive over gossip in that case.
+                    // We need to add 1 to the highest processed block. For the cases when the node
+                    // starts fully caught up, no new blocks are added to the index, and the
+                    // target is always going to be one more than the highest processed block.
+                    // If this function never resolves, no new blocks can arrive over gossip in that case.
 
-                if hpb + 1 >= target {
-                    // synchronised
-                    break;
-                } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
-                    // didn't make any progress in the last `progress_timeout` duration
-                    warn!(
-                        "Did not make sync process from {} in {}ms",
-                        &hpb,
-                        &progress_timeout.as_millis()
-                    );
-                    break; // progression timeout
-                } else {
-                    if made_progress {
-                        debug!(
-                            "Progressed: {} -> {} (target: {})",
-                            &prev_hpb, &hpb, &target
+                    if hpb + 1 >= target {
+                        // synchronised
+                        debug!("Synchronised!");
+                        break;
+                    } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
+                        // didn't make any progress in the last `progress_timeout` duration
+                        warn!(
+                            "Did not make sync process from {} in {}ms",
+                            &hpb,
+                            &progress_timeout.as_millis()
                         );
-                        last_made_progress = Instant::now();
-                        prev_hpb = hpb;
-                    };
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                        break; // progression timeout
+                    } else {
+                        if made_progress {
+                            debug!(
+                                "Progressed: {} -> {} (target: {})",
+                                &prev_hpb, &hpb, &target
+                            );
+                            last_made_progress = Instant::now();
+                            prev_hpb = hpb;
+                        };
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
             }
-        })
+            .in_current_span(),
+        )
         .await
         .expect("Sync checking task failed");
     }

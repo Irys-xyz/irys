@@ -7,8 +7,6 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
     let config_path = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
         .parse::<PathBuf>()
-        .expect("file path to be valid")
-        .canonicalize()
         .expect("file path to be valid");
 
     debug!("Loading config from {:?}", &config_path);
@@ -17,15 +15,22 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
     {
         Ok(cfg) => cfg,
         Err(err) => {
+            let generate_config =
+                std::env::var("GENERATE_CONFIG").unwrap_or_else(|_| "false".to_owned()) == "true";
+            if generate_config {
+                let mut config = NodeConfig::testnet();
+                let signer = config.new_random_signer();
+                config.reward_address = signer.address();
+                config.mining_key = signer.signer;
+                let mut file = std::fs::File::create(&config_path)?;
+                std::io::Write::write_all(&mut file, toml::to_string(&config)?.as_bytes())?;
+                eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
+            }
             eyre::bail!(
                 "Unable to load config file at {:?} - {:?}\nHave you followed the setup steps in SETUP.md?",
                 &config_path,
                 &err
             );
-            // let config = NodeConfig::testnet();
-            // let mut file = File::create(&config_path)?;
-            // file.write_all(toml::to_string(&config)?.as_bytes())?;
-            // eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
         }
     };
 
