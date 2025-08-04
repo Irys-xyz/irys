@@ -261,7 +261,7 @@ impl BandwidthWindow {
         }
 
         let now = Instant::now();
-        let cutoff_time = now - window.min(self.window_duration);
+        let cutoff_time = now.checked_sub(window.min(self.window_duration)).unwrap();
 
         // Sum bytes from buckets within the specified window
         let total_bytes: u64 = self

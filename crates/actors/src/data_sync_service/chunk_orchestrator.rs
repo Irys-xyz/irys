@@ -239,9 +239,7 @@ impl ChunkOrchestrator {
             })
             .filter(|peer_manager| {
                 // Exclude the specified address if provided
-                excluding.map_or(true, |excluded_addr| {
-                    peer_manager.miner_address != excluded_addr
-                })
+                excluding != Some(peer_manager.miner_address)
             })
             .collect();
 
