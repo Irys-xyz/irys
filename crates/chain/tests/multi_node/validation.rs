@@ -7,7 +7,7 @@ use irys_actors::{
 };
 use irys_types::{
     storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    NodeConfig,
+    NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 

@@ -441,12 +441,8 @@ impl BlockDiscoveryServiceInner {
                 "incoming block commitment txids, height {}\n{:#?}",
                 new_block_header.height, commitment_ledger
             );
-            match get_commitment_tx_in_parallel(
-                commitment_ledger.tx_ids.0.clone(),
-                &mempool_sender,
-                &db,
-            )
-            .await
+            match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
+                .await
             {
                 Ok(tx) => {
                     commitments = tx;
@@ -694,7 +690,7 @@ impl BlockDiscoveryServiceInner {
 
 /// Get all commitment transactions from the mempool and database
 pub async fn get_commitment_tx_in_parallel(
-    commitment_tx_ids: Vec<IrysTransactionId>,
+    commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
@@ -707,7 +703,7 @@ pub async fn get_commitment_tx_in_parallel(
             let (tx, rx) = oneshot::channel();
 
             match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: tx_ids,
+                commitment_tx_ids: tx_ids.to_vec(),
                 response: tx,
             }) {
                 Ok(()) => {
@@ -734,7 +730,7 @@ pub async fn get_commitment_tx_in_parallel(
         async move {
             let db_tx = db_ref.tx()?;
             let mut results = HashMap::new();
-            for tx_id in &tx_ids {
+            for tx_id in tx_ids {
                 if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
                     results.insert(*tx_id, header);
                 }

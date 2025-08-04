@@ -623,7 +623,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
                     .await?
             }
             [] => {
@@ -729,13 +729,10 @@ pub async fn commitment_txs_are_valid(
         .system_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| &ledger.tx_ids.0)
-        .filter(|ids| !ids.is_empty());
+        .map(|ledger| ledger.tx_ids.0.as_slice())
+        .unwrap_or_else(|| &[]);
 
-    let Some(block_tx_ids) = block_tx_ids else {
-        debug!("No commitment transactions in block");
-        return Ok(());
-    };
+    // let block_tx_ids = block_tx_ids.unwrap_or_default();
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
@@ -765,6 +762,8 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        tracing::error!(?expected_commitments, "validation");
+        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments
