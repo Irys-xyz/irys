@@ -736,7 +736,7 @@ pub async fn commitment_txs_are_valid(
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids.clone(), &service_senders.mempool, db).await?;
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {

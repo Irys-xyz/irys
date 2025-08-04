@@ -197,7 +197,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -489,7 +489,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         },
     };
 
-    let (mut block, _eth_payload) = block_prod_strategy
+    let (block, _eth_payload) = block_prod_strategy
         .fully_produce_new_block(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();

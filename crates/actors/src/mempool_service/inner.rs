@@ -488,12 +488,12 @@ impl Inner {
         let total_fee_collected: U256 = submit_tx
             .iter()
             .map(irys_types::IrysTransactionCommon::user_fee)
-            .fold(U256::zero(), |acc, fee| acc.saturating_add(fee))
+            .fold(U256::zero(), irys_types::U256::saturating_add)
             .saturating_add(
                 commitment_tx
                     .iter()
                     .map(irys_types::IrysTransactionCommon::total_cost)
-                    .fold(U256::zero(), |acc, fee| acc.saturating_add(fee)),
+                    .fold(U256::zero(), irys_types::U256::saturating_add),
             );
 
         info!(

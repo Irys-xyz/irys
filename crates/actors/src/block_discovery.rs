@@ -694,11 +694,11 @@ pub async fn get_commitment_tx_in_parallel(
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let tx_ids_clone = commitment_tx_ids.clone();
+    let tx_ids_clone = commitment_tx_ids;
 
     // Set up a function to query the mempool for commitment transactions
     let mempool_future = {
-        let tx_ids = tx_ids_clone.clone();
+        let tx_ids = tx_ids_clone;
         async move {
             let (tx, rx) = oneshot::channel();
 
@@ -725,7 +725,7 @@ pub async fn get_commitment_tx_in_parallel(
 
     // Set up a function to query the database for commitment transactions
     let db_future = {
-        let tx_ids = commitment_tx_ids.clone();
+        let tx_ids = commitment_tx_ids;
         let db_ref = db.clone();
         async move {
             let db_tx = db_ref.tx()?;
@@ -749,9 +749,9 @@ pub async fn get_commitment_tx_in_parallel(
     let mut missing = Vec::new();
 
     for tx_id in commitment_tx_ids {
-        if let Some(header) = mempool_map.get(&tx_id) {
+        if let Some(header) = mempool_map.get(tx_id) {
             headers.push(header.clone());
-        } else if let Some(header) = db_map.get(&tx_id) {
+        } else if let Some(header) = db_map.get(tx_id) {
             headers.push(header.clone());
         } else {
             missing.push(tx_id);

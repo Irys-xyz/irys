@@ -368,7 +368,13 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block_without_gossip(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>, EthBuiltPayload)>> {
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            EthBuiltPayload,
+        )>,
+    > {
         let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
@@ -413,8 +419,10 @@ pub trait BlockProdStrategy {
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        let result = self.fully_produce_new_block_without_gossip(solution).await?;
-        
+        let result = self
+            .fully_produce_new_block_without_gossip(solution)
+            .await?;
+
         let Some((block, stats, eth_built_payload)) = result else {
             return Ok(None);
         };
