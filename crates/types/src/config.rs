@@ -262,6 +262,10 @@ pub struct NodeConfig {
 
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
+
+    /// Reputation threshold below which peer connections are dropped
+    /// set to none for no threshold and no peer connection is dropped
+    pub reputation_threshold: Option<u16>,
 }
 
 impl From<NodeConfig> for Config {
@@ -911,6 +915,7 @@ impl NodeConfig {
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
+            reputation_threshold: None,
         }
     }
 
@@ -1014,6 +1019,7 @@ impl NodeConfig {
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
+            reputation_threshold: None,
         }
     }
 
@@ -1364,6 +1370,7 @@ mod tests {
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
         genesis_peer_discovery_timeout_millis = 10000
         stake_pledge_drives = false
+        reputation_threshold = 20
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
