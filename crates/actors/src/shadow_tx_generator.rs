@@ -77,9 +77,7 @@ impl<'a> ShadowTxGenerator<'a> {
                         irys_ref: tx.id.into(),
                     },
                 )),
-                // todo: We need to update DataTransactionHeader - separate out the fee that
-                // the miner receiver from the fee that gets burned from users account
-                transaction_fee: 0,
+                transaction_fee: tx.miner_fee as u128,
             })
         })
     }

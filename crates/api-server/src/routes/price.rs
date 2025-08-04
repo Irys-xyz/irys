@@ -20,7 +20,10 @@ use crate::ApiState;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
-    pub cost_in_irys: U256,
+    // Protocol-enforced storage cost
+    pub value: U256,
+    // Miner configurable fee
+    pub fee: U256,
     pub ledger: u32,
     pub bytes: u64,
 }
@@ -29,7 +32,7 @@ pub struct PriceInfo {
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentPriceInfo {
     pub value: U256,
-    pub fee: u64,
+    pub fee: U256,
     pub user_address: Option<Address>,
 }
 
@@ -53,11 +56,12 @@ pub async fn get_price(
     match data_ledger {
         DataLedger::Publish => {
             // If the cost calculation fails, return 400 with the error text
-            let perm_storage_price = cost_of_perm_storage(state, bytes_to_store)
+            let (base_cost, miner_fee) = cost_of_perm_storage(state, bytes_to_store)
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
-                cost_in_irys: perm_storage_price.amount,
+                value: base_cost.amount,
+                fee: miner_fee,
                 ledger,
                 bytes: bytes_to_store,
             }))
@@ -69,7 +73,7 @@ pub async fn get_price(
 fn cost_of_perm_storage(
     state: web::Data<ApiState>,
     bytes_to_store: u64,
-) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+) -> eyre::Result<(Amount<(NetworkFee, Irys)>, U256)> {
     // get the latest EMA to use for pricing
     let tree = state.block_tree.read();
     let tip = tree.tip;
@@ -90,12 +94,15 @@ fn cost_of_perm_storage(
         )?
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
-    // calculate the cost of storing the bytes
-    let price_with_network_reward = cost_per_gb
-        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?
-        .add_multiplier(state.config.node_config.pricing.fee_percentage)?;
+    // calculate the base network fee (protocol cost)
+    let base_network_fee =
+        cost_per_gb.base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
-    Ok(price_with_network_reward)
+    // calculate just the miner fee directly (more efficient)
+    let miner_fee_u256 = base_network_fee
+        .calculate_fee(state.config.node_config.pricing.fee_percentage)?;
+
+    Ok((base_network_fee, miner_fee_u256))
 }
 
 pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
@@ -104,7 +111,7 @@ pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResp
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: stake_value.amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: None,
     }))
 }
@@ -115,7 +122,7 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: stake_value.amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: None,
     }))
 }
@@ -148,7 +155,7 @@ pub async fn get_pledge_price(
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: pledge_value,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
 }
@@ -180,7 +187,7 @@ pub async fn get_unpledge_price(
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: refund_amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
 }

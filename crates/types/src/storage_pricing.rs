@@ -372,6 +372,36 @@ impl Amount<(NetworkFee, Irys)> {
             _t: PhantomData,
         })
     }
+
+    /// Calculate just the fee amount based on the percentage without the base.
+    /// More efficient than add_multiplier + subtraction when only fee is needed.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn calculate_fee(self, percentage: Amount<Percentage>) -> Result<U256> {
+        // fee = base * percentage / BPS_SCALE
+        mul_div(self.amount, percentage.amount, BPS_SCALE)
+    }
+
+    /// Calculate both total (base + fee) and fee separately in one operation.
+    /// Returns (total_with_fee, fee_amount).
+    /// More efficient when both values are needed.
+    /// Percentage must be expressed using BPS_SCALE.
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn split_with_fee(self, percentage: Amount<Percentage>) -> Result<(Self, U256)> {
+        // fee = base * percentage / BPS_SCALE
+        let fee_amount = mul_div(self.amount, percentage.amount, BPS_SCALE)?;
+        // total = base + fee
+        let total_amount = safe_add(self.amount, fee_amount)?;
+        Ok((Self::new(total_amount), fee_amount))
+    }
 }
 
 impl Amount<(IrysPrice, Usd)> {
@@ -925,6 +955,71 @@ mod tests {
             let expected = dec!(110.0); // 100 + 10%
 
             assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_calculate_fee() -> Result<()> {
+            // Base network fee = 100 IRYS
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(100.0))?;
+            // 5% miner fee
+            let five_percent = Amount::<Percentage>::percentage(dec!(0.05))?;
+
+            // Action
+            let fee = base_fee.calculate_fee(five_percent)?;
+
+            // Convert to decimal for comparison
+            let fee_amount = Amount::<(NetworkFee, Irys)>::new(fee);
+            let actual = fee_amount.token_to_decimal()?;
+            let expected = dec!(5.0); // 100 * 0.05 = 5
+
+            assert_eq!(expected, actual, "Expected fee {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_split_with_fee() -> Result<()> {
+            // Base network fee = 200 IRYS
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(200.0))?;
+            // 10% miner fee
+            let ten_percent = Amount::<Percentage>::percentage(dec!(0.10))?;
+
+            // Action
+            let (total, fee) = base_fee.split_with_fee(ten_percent)?;
+
+            // Convert to decimal for comparison
+            let total_actual = total.token_to_decimal()?;
+            let fee_amount = Amount::<(NetworkFee, Irys)>::new(fee);
+            let fee_actual = fee_amount.token_to_decimal()?;
+
+            let expected_total = dec!(220.0); // 200 + 20
+            let expected_fee = dec!(20.0); // 200 * 0.10
+
+            assert_eq!(
+                expected_total, total_actual,
+                "Expected total {}, got {}",
+                expected_total, total_actual
+            );
+            assert_eq!(
+                expected_fee, fee_actual,
+                "Expected fee {}, got {}",
+                expected_fee, fee_actual
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn test_calculate_fee_zero_percent() -> Result<()> {
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(1000.0))?;
+            let zero_percent = Amount::<Percentage>::percentage(dec!(0.0))?;
+
+            let fee = base_fee.calculate_fee(zero_percent)?;
+
+            let fee_amount = Amount::<(NetworkFee, Irys)>::new(fee);
+            let actual = fee_amount.token_to_decimal()?;
+            let expected = dec!(0.0);
+
+            assert_eq!(expected, actual, "Expected fee {}, got {}", expected, actual);
             Ok(())
         }
 

@@ -83,7 +83,7 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub data_size: u64,
 
-    /// Funds the storage of the transaction data during the storage term
+    /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
     #[serde(with = "string_u64")]
     pub term_fee: u64,
 
@@ -94,6 +94,10 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub chain_id: u64,
 
+    /// Miner's configurable fee (separate from protocol storage costs)
+    #[serde(default, with = "string_u64")]
+    pub miner_fee: u64,
+
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -102,7 +106,7 @@ pub struct DataTransactionHeader {
     #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
-    /// Funds the storage of the transaction for the next 200+ years
+    /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
     #[serde(default, with = "optional_string_u64")]
     pub perm_fee: Option<u64>,
 
@@ -191,6 +195,7 @@ impl DataTransactionHeader {
             bundle_format: None,
             version: 0,
             chain_id: config.chain_id,
+            miner_fee: 0,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
         }
@@ -481,7 +486,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee + self.miner_fee)
     }
 
     fn signer(&self) -> Address {
@@ -497,7 +502,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        U256::from(self.miner_fee)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -819,6 +824,33 @@ mod tests {
     }
 
     #[test]
+    fn test_irys_transaction_header_serde_without_miner_fee() {
+        // Test deserialization of old format without miner_fee field
+        let json_without_miner_fee = r#"{
+            "id": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
+            "version": 0,
+            "anchor": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+            "signer": "11111111111111111111",
+            "dataRoot": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8",
+            "dataSize": "1024",
+            "termFee": "100",
+            "ledgerId": 1,
+            "chainId": "1",
+            "signature": "CesTUmRKzSoY1HMj8TsAGDYEEUHEEjL6oqXcZd8XZCS5zJJ9C8HFXCv1KwZKSRscpm4qnu1sLU9Xm3HrDmJFLdBq4",
+            "permFee": "200"
+        }"#;
+
+        // Deserialize should succeed with miner_fee defaulting to 0
+        let deserialized: DataTransactionHeader =
+            serde_json::from_str(json_without_miner_fee).expect("Failed to deserialize");
+
+        // Verify miner_fee defaulted to 0
+        assert_eq!(deserialized.miner_fee, 0);
+        assert_eq!(deserialized.term_fee, 100);
+        assert_eq!(deserialized.perm_fee, Some(200));
+    }
+
+    #[test]
     fn test_commitment_transaction_serde() {
         // Create a sample commitment tx
         let config = ConsensusConfig::testing();
@@ -907,6 +939,7 @@ mod tests {
             bundle_format: None,
             chain_id: config.chain_id,
             version: 0,
+            miner_fee: 50,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),
         }

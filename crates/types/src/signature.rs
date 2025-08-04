@@ -213,6 +213,7 @@ mod tests {
             bundle_format: Some(0),
             chain_id: testing_config.chain_id,
             version: 0,
+            miner_fee: 0,
             ingress_proofs: None,
             signature: Default::default(),
         };
