@@ -214,7 +214,7 @@ pub fn last_diff_timestamp_is_valid(
     previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> eyre::Result<()> {
-    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval as u64;
+    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
     let expected = if block.height % blocks_between_adjustments == 0 {
         block.timestamp
     } else {
