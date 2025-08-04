@@ -18,7 +18,7 @@ use irys_types::{
     UnpackedChunk, H256,
 };
 use nodit::Interval;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::ToPrimitive as _;
 use std::{
     collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -105,8 +105,8 @@ async fn test_data_sync_with_different_peer_performance() {
     let _data_intervals = storage_module_ref.get_intervals(ChunkType::Data);
     let entropy_intervals = storage_module_ref.get_intervals(ChunkType::Entropy);
 
-    // Storage module should be fully synced
-    assert!(entropy_intervals.len() == 0);
+    // Storage module should be fully synced (no entropy)
+    assert!(entropy_intervals.is_empty());
 }
 
 fn format_intervals(intervals: &[Interval<PartitionChunkOffset>]) -> String {
@@ -159,7 +159,7 @@ impl DataSyncServiceTestHarness {
             storage_modules,
             peer_list,
             chunk_fetcher_factory,
-            service_senders.clone(),
+            service_senders,
             config,
         );
 
@@ -359,9 +359,6 @@ struct TestSetup {
     stable_peer_addr: Address,
     fast_peer_addr: Address,
 
-    #[allow(dead_code)]
-    partition_assignments: Vec<PartitionAssignment>,
-
     // Only one real storage module - the one that needs to sync data
     storage_module: Arc<StorageModule>,
 
@@ -405,16 +402,16 @@ impl TestSetup {
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
             },
-            base_directory: base_path.clone(),
+            base_directory: base_path,
             ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
 
         // Create mining addresses for all the mocked up peers
-        let slow_peer_addr = Address::from([1u8; 20]);
-        let stable_peer_addr = Address::from([2u8; 20]);
-        let fast_peer_addr = Address::from([3u8; 20]);
-        let sync_peer_addr = Address::from([4u8; 20]);
+        let slow_peer_addr = Address::from([1_u8; 20]);
+        let stable_peer_addr = Address::from([2_u8; 20]);
+        let fast_peer_addr = Address::from([3_u8; 20]);
+        let sync_peer_addr = Address::from([4_u8; 20]);
 
         // Create partition assignments for each of the peers, assigning them to the same
         // ledger_id(0) and slot_index(0)
@@ -539,7 +536,6 @@ impl TestSetup {
             slow_peer_addr,
             stable_peer_addr,
             fast_peer_addr,
-            partition_assignments: partition_assignments.to_vec(),
             storage_module: Arc::new(storage_module),
             mock_fetchers,
             peer_list,
@@ -558,14 +554,14 @@ impl TestSetup {
         let num_chunks = data_tx.chunks.len() as u64;
         let storage_module_info = StorageModuleInfo {
             id: 0,
-            partition_assignment: Some(pa.clone()),
+            partition_assignment: Some(*pa),
             submodules: vec![(
                 partition_chunk_offset_ie!(0, num_chunks as u32),
                 "chunks".into(),
             )],
         };
         let storage_module =
-            StorageModule::new(&storage_module_info, &config).expect("To create a storage module");
+            StorageModule::new(&storage_module_info, config).expect("To create a storage module");
 
         let chunk_size = 256 * 1024; // 256KiB
 
@@ -587,7 +583,7 @@ impl TestSetup {
         let total_data_size = chunk_size * num_chunks;
 
         let mut data = Vec::with_capacity(total_data_size);
-        for chunk_index in 0u8..=255u8 {
+        for chunk_index in 0_u8..=255_u8 {
             let chunk_data = vec![chunk_index; chunk_size];
             data.extend(chunk_data);
         }
@@ -630,11 +626,11 @@ impl TestSetup {
         let mut block_tree = BlockTree::new(fake_genesis, config.consensus.clone());
         debug!("Block tree instantiated");
         let mut partition_map: BTreeMap<H256, PartitionAssignment> = partition_assignments
-            .into_iter()
+            .iter()
             .map(|assignment| (assignment.partition_hash, *assignment))
             .collect();
         let mut partition_hashes: Vec<H256> = partition_assignments
-            .into_iter()
+            .iter()
             .map(|pa| pa.partition_hash)
             .collect();
 
