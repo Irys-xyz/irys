@@ -73,11 +73,15 @@ impl GossipCache {
                 peer_set.write().unwrap().insert(miner_address);
             }
             GossipCacheKey::Transaction(irys_transaction_hash) => {
-                let peer_set = self.transactions.get(&irys_transaction_hash).unwrap_or_else(|| {
-                    let new_set = Arc::new(RwLock::new(HashSet::new()));
-                    self.transactions.insert(irys_transaction_hash, new_set.clone());
-                    new_set
-                });
+                let peer_set = self
+                    .transactions
+                    .get(&irys_transaction_hash)
+                    .unwrap_or_else(|| {
+                        let new_set = Arc::new(RwLock::new(HashSet::new()));
+                        self.transactions
+                            .insert(irys_transaction_hash, new_set.clone());
+                        new_set
+                    });
                 peer_set.write().unwrap().insert(miner_address);
             }
             GossipCacheKey::Block(irys_block_hash) => {
@@ -105,26 +109,26 @@ impl GossipCache {
         cache_key: &GossipCacheKey,
     ) -> GossipResult<HashSet<Address>> {
         let result = match cache_key {
-            GossipCacheKey::Chunk(chunk_path_hash) => {
-                self.chunks.get(chunk_path_hash)
-                    .map(|arc| arc.read().unwrap().clone())
-                    .unwrap_or_default()
-            }
-            GossipCacheKey::Transaction(transaction_id) => {
-                self.transactions.get(transaction_id)
-                    .map(|arc| arc.read().unwrap().clone())
-                    .unwrap_or_default()
-            }
-            GossipCacheKey::Block(block_hash) => {
-                self.blocks.get(block_hash)
-                    .map(|arc| arc.read().unwrap().clone())
-                    .unwrap_or_default()
-            }
-            GossipCacheKey::ExecutionPayload(evm_block_hash) => {
-                self.payloads.get(evm_block_hash)
-                    .map(|arc| arc.read().unwrap().clone())
-                    .unwrap_or_default()
-            }
+            GossipCacheKey::Chunk(chunk_path_hash) => self
+                .chunks
+                .get(chunk_path_hash)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
+            GossipCacheKey::Transaction(transaction_id) => self
+                .transactions
+                .get(transaction_id)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
+            GossipCacheKey::Block(block_hash) => self
+                .blocks
+                .get(block_hash)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
+            GossipCacheKey::ExecutionPayload(evm_block_hash) => self
+                .payloads
+                .get(evm_block_hash)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
         };
 
         Ok(result)
