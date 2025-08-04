@@ -245,7 +245,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .commitment_state
             .pledge_commitments
             .get(&signer1.address())
-            .expect("commitments for genesis miner")
+            .expect("commitments for signer1 miner")
             .len(),
         2
     );
@@ -256,7 +256,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .commitment_state
             .pledge_commitments
             .get(&signer2.address())
-            .expect("commitments for genesis miner")
+            .expect("commitments for signer2 miner")
             .len(),
         1
     );
@@ -289,7 +289,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
-    // std::env::set_var("RUST_LOG", "debug");
     std::env::set_var(
         "RUST_LOG",
         "irys_actors::epoch_service::epoch_service=debug",

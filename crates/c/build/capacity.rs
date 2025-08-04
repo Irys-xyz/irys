@@ -6,6 +6,7 @@ use std::{
 pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
     cc.flag("-O3");
+    cc.flag("-ffast-math");
     // TODO: enable below for debug
     // cc.flag("-O0 -g")
     cc.flag("-std=c99");
@@ -24,7 +25,6 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
     }
 
     cc.flag("-fPIC");
-    cc.flag("-Ofast");
     cc.flag("-g0");
     cc.flag("-march=native");
     cc.file(c_src.join("capacity_single.c"));
