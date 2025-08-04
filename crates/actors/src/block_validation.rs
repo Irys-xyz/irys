@@ -343,12 +343,14 @@ pub fn poa_is_valid(
             .get_data_partition_assignment(poa.partition_hash)
             .ok_or_else(|| eyre::eyre!("Missing partition assignment for the provided hash"))?;
 
-        let ledger_chunk_offset = partition_assignment.slot_index.ok_or_else(|| {
-            eyre::eyre!("Partition assignment for the provided hash is missing slot index")
-        })? as u64
-            * config.num_partitions_per_slot
-            * config.num_chunks_in_partition
-            + poa.partition_chunk_offset as u64;
+        let ledger_chunk_offset =
+            u64::try_from(partition_assignment.slot_index.ok_or_else(|| {
+                eyre::eyre!("Partition assignment for the provided hash is missing slot index")
+            })?)
+            .expect("Partition assignment slot index should fit into a u64")
+                * config.num_partitions_per_slot
+                * config.num_chunks_in_partition
+                + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)?;
