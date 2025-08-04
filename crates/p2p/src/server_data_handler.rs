@@ -5,7 +5,6 @@ use crate::{
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
-use alloy_core::primitives::keccak256;
 use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{
@@ -280,10 +279,6 @@ where
         let is_block_requested_by_the_pool = self.block_pool.is_block_requested(&block_hash).await;
         let has_block_already_been_received = self.cache.seen_block_from_any_peer(&block_hash)?;
 
-        // Record block in cache
-        self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
-
         // This check must be after we've added the block to the cache, otherwise we won't be
         // able to keep track of which peers seen what
         if has_block_already_been_received && !is_block_requested_by_the_pool {
@@ -295,9 +290,9 @@ where
             return Ok(());
         }
 
-        let expected_block_hash: [u8; 32] = keccak256(block_header.signature.as_bytes()).into();
-        let is_block_hash_is_valid = block_header.block_hash.0 == expected_block_hash;
-        if !is_block_hash_is_valid || !block_header.is_signature_valid() {
+        // This check also validates block hash, thus validating that block's fields hasn't
+        //  been tampered with
+        if !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
                 self.gossip_client.mining_address,
@@ -310,6 +305,10 @@ where
                 InvalidDataError::InvalidBlockSignature,
             ));
         }
+
+        // Record block in cache
+        self.cache
+            .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
 
         let has_block_already_been_processed = self
             .block_pool
