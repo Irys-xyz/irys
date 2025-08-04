@@ -78,6 +78,13 @@ pub async fn prevalidate_block(
         &config.consensus.difficulty_adjustment,
     )?;
 
+    // Validate the last_diff_timestamp field
+    last_diff_timestamp_is_valid(
+        &block,
+        &previous_block,
+        &config.consensus.difficulty_adjustment,
+    )?;
+
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -201,6 +208,34 @@ pub fn difficulty_is_valid(
             "Invalid difficulty (expected {} got {})",
             &diff,
             &block.diff
+        ))
+    }
+}
+
+/// Validates the `last_diff_timestamp` field in the block.
+///
+/// The value should equal the previous block's `last_diff_timestamp` unless the
+/// current block triggers a difficulty adjustment, in which case it must be set
+/// to the block's own timestamp.
+pub fn last_diff_timestamp_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    difficulty_config: &DifficultyAdjustmentConfig,
+) -> eyre::Result<()> {
+    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
+    let expected = if block.height % blocks_between_adjustments == 0 {
+        block.timestamp
+    } else {
+        previous_block.last_diff_timestamp
+    };
+
+    if block.last_diff_timestamp == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid last_diff_timestamp (expected {} got {})",
+            expected,
+            block.last_diff_timestamp
         ))
     }
 }
@@ -1502,5 +1537,62 @@ mod tests {
         );
 
         assert!(poa_valid.is_err(), "PoA should be invalid");
+    }
+
+    #[test]
+    fn last_diff_timestamp_no_adjustment_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 1;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 2;
+        block.timestamp = 1500;
+        block.last_diff_timestamp = prev.last_diff_timestamp;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        );
+    }
+
+    #[test]
+    fn last_diff_timestamp_adjustment_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 9;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 10;
+        block.timestamp = 2000;
+        block.last_diff_timestamp = block.timestamp;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        );
+    }
+
+    #[test]
+    fn last_diff_timestamp_incorrect_fails() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 1;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 2;
+        block.timestamp = 1500;
+        block.last_diff_timestamp = 999;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_err()
+        );
     }
 }
