@@ -9,6 +9,7 @@ use irys_types::{Address, BlockHash, ChunkPathHash, GossipCacheKey, IrysTransact
 use moka::sync::Cache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 /// TTL duration for cache entries
 const GOSSIP_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
@@ -17,10 +18,10 @@ const GOSSIP_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 #[derive(Debug)]
 pub(crate) struct GossipCache {
     /// Maps data identifiers to a set of peer addresses that have seen the data
-    chunks: Cache<ChunkPathHash, HashSet<Address>>,
-    transactions: Cache<IrysTransactionId, HashSet<Address>>,
-    blocks: Cache<BlockHash, HashSet<Address>>,
-    payloads: Cache<B256, HashSet<Address>>,
+    chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<Address>>>>,
+    transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<Address>>>>,
+    blocks: Cache<BlockHash, Arc<RwLock<HashSet<Address>>>>,
+    payloads: Cache<B256, Arc<RwLock<HashSet<Address>>>>,
 }
 
 impl GossipCache {
@@ -64,27 +65,36 @@ impl GossipCache {
     ) -> GossipResult<()> {
         match key {
             GossipCacheKey::Chunk(chunk_path_hash) => {
-                let mut peer_set = self.chunks.get(&chunk_path_hash).unwrap_or_default();
-                peer_set.insert(miner_address);
-                self.chunks.insert(chunk_path_hash, peer_set);
+                let peer_set = self.chunks.get(&chunk_path_hash).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.chunks.insert(chunk_path_hash, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(miner_address);
             }
             GossipCacheKey::Transaction(irys_transaction_hash) => {
-                let mut peer_set = self
-                    .transactions
-                    .get(&irys_transaction_hash)
-                    .unwrap_or_default();
-                peer_set.insert(miner_address);
-                self.transactions.insert(irys_transaction_hash, peer_set);
+                let peer_set = self.transactions.get(&irys_transaction_hash).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.transactions.insert(irys_transaction_hash, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(miner_address);
             }
             GossipCacheKey::Block(irys_block_hash) => {
-                let mut peer_set = self.blocks.get(&irys_block_hash).unwrap_or_default();
-                peer_set.insert(miner_address);
-                self.blocks.insert(irys_block_hash, peer_set);
+                let peer_set = self.blocks.get(&irys_block_hash).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.blocks.insert(irys_block_hash, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(miner_address);
             }
             GossipCacheKey::ExecutionPayload(payload_block_hash) => {
-                let mut peer_set = self.payloads.get(&payload_block_hash).unwrap_or_default();
-                peer_set.insert(miner_address);
-                self.payloads.insert(payload_block_hash, peer_set);
+                let peer_set = self.payloads.get(&payload_block_hash).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.payloads.insert(payload_block_hash, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(miner_address);
             }
         }
         Ok(())
@@ -96,14 +106,24 @@ impl GossipCache {
     ) -> GossipResult<HashSet<Address>> {
         let result = match cache_key {
             GossipCacheKey::Chunk(chunk_path_hash) => {
-                self.chunks.get(chunk_path_hash).unwrap_or_default()
+                self.chunks.get(chunk_path_hash)
+                    .map(|arc| arc.read().unwrap().clone())
+                    .unwrap_or_default()
             }
             GossipCacheKey::Transaction(transaction_id) => {
-                self.transactions.get(transaction_id).unwrap_or_default()
+                self.transactions.get(transaction_id)
+                    .map(|arc| arc.read().unwrap().clone())
+                    .unwrap_or_default()
             }
-            GossipCacheKey::Block(block_hash) => self.blocks.get(block_hash).unwrap_or_default(),
+            GossipCacheKey::Block(block_hash) => {
+                self.blocks.get(block_hash)
+                    .map(|arc| arc.read().unwrap().clone())
+                    .unwrap_or_default()
+            }
             GossipCacheKey::ExecutionPayload(evm_block_hash) => {
-                self.payloads.get(evm_block_hash).unwrap_or_default()
+                self.payloads.get(evm_block_hash)
+                    .map(|arc| arc.read().unwrap().clone())
+                    .unwrap_or_default()
             }
         };
 
