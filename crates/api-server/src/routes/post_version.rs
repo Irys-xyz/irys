@@ -44,7 +44,7 @@ pub async fn post_version(
     if source_addr != version_request.address.gossip.ip() {
         let response = PeerResponse::Rejected(RejectedResponse {
             reason: RejectionReason::InvalidCredentials,
-            message: Some("Source address does not match request address".to_string()),
+            message: Some("The source address does not match the request address".to_string()),
             retry_after: None,
         });
         return Ok(HttpResponse::BadRequest().json(response));
