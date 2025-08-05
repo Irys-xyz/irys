@@ -72,6 +72,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         ),
     ]);
     let node = IrysNodeTest::new_genesis(testing_config).start().await;
+    node.start_public_api().await;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),
@@ -139,8 +140,15 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
     // post a tx, mine a block
+    
+    // Get price from the API
+    let price_info = node
+        .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
+        .await
+        .expect("Failed to get price");
+    
     let tx = account1
-        .create_transaction(data_bytes.clone(), None)
+        .create_publish_transaction(data_bytes.clone(), None, price_info.value, price_info.fee)
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 

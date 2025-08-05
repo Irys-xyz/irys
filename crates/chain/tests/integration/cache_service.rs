@@ -79,8 +79,15 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     // create and sign a data tx
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
+    
+    // Get price from the API
+    let price_info = node
+        .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
+        .await
+        .expect("Failed to get price");
+    
     let tx = account1
-        .create_transaction(data_bytes.clone(), anchor)
+        .create_publish_transaction(data_bytes.clone(), anchor, price_info.value, price_info.fee)
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 

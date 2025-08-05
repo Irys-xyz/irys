@@ -62,7 +62,13 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         data.extend_from_slice(chunk);
     }
 
-    let tx = signer.create_transaction(data, None)?;
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+    
+    let tx = signer.create_publish_transaction(data, None, price_info.value, price_info.fee)?;
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
@@ -1779,10 +1785,12 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
+    genesis_node.start_public_api().await;
 
     // create a signed data transaction
     let valid_tx = genesis_node
         .create_signed_data_tx(&signer, b"hello".to_vec())
+        .await
         .unwrap();
 
     // tamper with the transaction id

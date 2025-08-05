@@ -85,10 +85,12 @@ async fn check_transaction_endpoints(
 
     let tx = ctx
         .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .await
         .unwrap();
     let tx_id = tx.header.id;
     let tx_2 = ctx
         .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![4, 5, 6])
+        .await
         .unwrap();
     let tx_2_id = tx_2.header.id;
 
@@ -162,6 +164,7 @@ async fn check_info_endpoint(
 async fn heavy_api_client_all_endpoints_should_work() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.start_public_api().await;
     ctx.wait_for_packing(20).await;
 
     let api_address = SocketAddr::new(
