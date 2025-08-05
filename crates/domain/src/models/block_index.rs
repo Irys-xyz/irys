@@ -200,11 +200,12 @@ impl BlockIndex {
     ) -> Result<(u64, &BlockIndexItem)> {
         if let Some(last_item) = self.items.last() {
             let last_max = last_item.ledgers[ledger as usize].max_chunk_offset;
-            eyre::ensure!(chunk_offset < last_max, "chunk_offset {} beyond last block's max_chunk_offset {}",
-                    chunk_offset,
-                    last_max
-                );
-            }
+            eyre::ensure!(
+                chunk_offset < last_max,
+                "chunk_offset {} beyond last block's max_chunk_offset {}",
+                chunk_offset,
+                last_max
+            );
         }
 
         let ledger_index = usize::try_from(ledger)?;
