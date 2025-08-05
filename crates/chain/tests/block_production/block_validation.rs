@@ -67,6 +67,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         block_validation_result.is_err(),
         "Expected block to be rejected due to BlockValidationError"
     );
+    // specifically, block should be rejected due to timestamp being too far in the future
+    assert!(format!("{:?}", block_validation_result).contains("too far in the future"));
 
     // 4. Shut down the nodes
     genesis_node.stop().await;
