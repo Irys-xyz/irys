@@ -44,7 +44,7 @@ async fn heavy_test_mine_tx() {
     config.consensus.extend_genesis_accounts(vec![(
         account.address(),
         GenesisAccount {
-            balance: U256::from(1000),
+            balance: U256::from(1_000_000_000_000_000_000_u64),
             ..Default::default()
         },
     )]);

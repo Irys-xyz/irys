@@ -26,14 +26,14 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
             )?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
-        cost_per_gb
-            .base_network_fee(
-                U256::from(data_size_bytes),
-                // node just started up, using genesis ema price
-                ctx.node_ctx.config.consensus.genesis_price,
-            )?
+        cost_per_gb.base_network_fee(
+            U256::from(data_size_bytes),
+            // node just started up, using genesis ema price
+            ctx.node_ctx.config.consensus.genesis_price,
+        )?
     };
-    let expected_miner_fee = expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
+    let expected_miner_fee =
+        expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -81,15 +81,15 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             )?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
-        cost_per_gb
-            .base_network_fee(
-                // the original data_size_bytes is too small to fill up a whole chunk
-                U256::from(ctx.node_ctx.config.consensus.chunk_size),
-                // node just started up, using genesis ema price
-                ctx.node_ctx.config.consensus.genesis_price,
-            )?
+        cost_per_gb.base_network_fee(
+            // the original data_size_bytes is too small to fill up a whole chunk
+            U256::from(ctx.node_ctx.config.consensus.chunk_size),
+            // node just started up, using genesis ema price
+            ctx.node_ctx.config.consensus.genesis_price,
+        )?
     };
-    let expected_miner_fee = expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
+    let expected_miner_fee =
+        expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -137,15 +137,15 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             )?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
-        cost_per_gb
-            .base_network_fee(
-                // round to the chunk size boundary
-                U256::from(ctx.node_ctx.config.consensus.chunk_size * 2),
-                // node just started up, using genesis ema price
-                ctx.node_ctx.config.consensus.genesis_price,
-            )?
+        cost_per_gb.base_network_fee(
+            // round to the chunk size boundary
+            U256::from(ctx.node_ctx.config.consensus.chunk_size * 2),
+            // node just started up, using genesis ema price
+            ctx.node_ctx.config.consensus.genesis_price,
+        )?
     };
-    let expected_miner_fee = expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
+    let expected_miner_fee =
+        expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;

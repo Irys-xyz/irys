@@ -82,7 +82,7 @@ impl IrysSigner {
             .try_into()
             .map_err(|_| eyre::eyre!("term_fee exceeds u64::MAX"))?;
         transaction.header.perm_fee = perm_fee
-            .map(|fee| fee.try_into())
+            .map(std::convert::TryInto::try_into)
             .transpose()
             .map_err(|_| eyre::eyre!("perm_fee exceeds u64::MAX"))?;
         transaction.header.miner_fee = miner_fee
@@ -108,7 +108,7 @@ impl IrysSigner {
             data,
             anchor,
             DataLedger::Publish,
-            U256::zero(), // No term fee for publish
+            U256::zero(),       // No term fee for publish
             Some(protocol_fee), // Permanent storage fee
             miner_fee,
         )
@@ -127,7 +127,7 @@ impl IrysSigner {
             anchor,
             DataLedger::Submit,
             term_fee, // Temporary storage fee
-            None, // No permanent storage fee
+            None,     // No permanent storage fee
             miner_fee,
         )
     }

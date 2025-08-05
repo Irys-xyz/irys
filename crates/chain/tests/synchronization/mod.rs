@@ -72,7 +72,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
         .await
         .expect("Failed to get price");
-    
+
     let tx = account1
         .create_publish_transaction(data_bytes.clone(), None, price_info.value, price_info.fee)
         .unwrap();

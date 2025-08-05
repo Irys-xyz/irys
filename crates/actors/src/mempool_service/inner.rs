@@ -911,14 +911,14 @@ impl Inner {
                 self.config.consensus.safe_minimum_number_of_years,
                 self.config.consensus.decay_rate,
             )
-            .map_err(|e| TxIngressError::other_display(e))?
+            .map_err(TxIngressError::other_display)?
             .replica_count(self.config.consensus.number_of_ingress_proofs)
-            .map_err(|e| TxIngressError::other_display(e))?;
+            .map_err(TxIngressError::other_display)?;
 
         // calculate the base network fee (protocol cost)
         let base_network_fee = cost_per_gb
             .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())
-            .map_err(|e| TxIngressError::other_display(e))?;
+            .map_err(TxIngressError::other_display)?;
 
         Ok(base_network_fee)
     }

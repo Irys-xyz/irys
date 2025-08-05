@@ -1097,7 +1097,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let price_info = self
             .get_data_price(DataLedger::Publish, data_size)
             .await
-            .map_err(|e| AddTxError::CreateTx(e))?;
+            .map_err(AddTxError::CreateTx)?;
 
         // Create transaction with proper fees using the new publish method
         let tx = account
@@ -1143,7 +1143,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let price_info = self
             .get_data_price(DataLedger::Publish, data_size)
             .await
-            .map_err(|e| AddTxError::CreateTx(e))?;
+            .map_err(AddTxError::CreateTx)?;
 
         // Create transaction with proper fees
         let tx = account
@@ -1461,13 +1461,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> DataTransaction {
         // Get data size before moving data
         let data_size = data.len() as u64;
-        
+
         // Query the price endpoint to get required fees
         let price_info = self
             .get_data_price(DataLedger::Publish, data_size)
             .await
             .expect("Failed to get price");
-        
+
         let tx = signer
             .create_publish_transaction(data, Some(anchor), price_info.value, price_info.fee)
             .expect("Expect to create a storage transaction from the data");

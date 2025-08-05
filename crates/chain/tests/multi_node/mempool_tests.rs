@@ -67,7 +67,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
         .await
         .expect("Failed to get price");
-    
+
     let tx = signer.create_publish_transaction(data, None, price_info.value, price_info.fee)?;
     let tx = signer.sign_transaction(tx)?;
 
