@@ -39,7 +39,7 @@ pub struct ChunkRequest {
 pub struct ChunkOrchestrator {
     storage_module: Arc<StorageModule>,
     pub chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
-    recent_chunk_times: CircularBuffer<ChunkTimeRecord>,
+    recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // To support better observability in the future
     pub current_peers: Vec<Address>,
     all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
@@ -168,6 +168,8 @@ impl ChunkOrchestrator {
         &self,
         peers: &HashMap<Address, PeerBandwidthManager>,
     ) -> Vec<(Address, f64, u32)> {
+        // Build a list of peer score tuples (Address, health_score, available_concurrency)
+        // from all the known peers (not just current)
         let mut peer_scores: Vec<_> = self
             .current_peers
             .iter()

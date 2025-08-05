@@ -30,7 +30,7 @@ type StorageModuleId = usize;
 pub struct DataSyncServiceInner {
     pub block_tree: BlockTreeReadGuard,
     pub storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
-    pub all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+    pub active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     pub chunk_orchestrators: HashMap<StorageModuleId, ChunkOrchestrator>,
     pub peer_list: PeerList,
     pub chunk_fetcher_factory: ChunkFetcherFactory,
@@ -59,7 +59,7 @@ pub enum DataSyncServiceMessage {
     PeerDisconnected {
         peer_addr: Address,
     },
-    GetAllPeersList(oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>),
+    GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>),
 }
 
 impl DataSyncServiceInner {
@@ -75,7 +75,7 @@ impl DataSyncServiceInner {
             block_tree,
             storage_modules,
             peer_list,
-            all_peers: Default::default(),
+            active_sync_peers: Default::default(),
             chunk_fetcher_factory,
             chunk_orchestrators: Default::default(),
             service_senders,
@@ -110,7 +110,7 @@ impl DataSyncServiceInner {
             DataSyncServiceMessage::PeerDisconnected { peer_addr } => {
                 self.handle_peer_disconnection(peer_addr)
             }
-            DataSyncServiceMessage::GetAllPeersList(tx) => self.handle_get_all_peers_list(tx),
+            DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
         }
         Ok(())
     }
@@ -187,15 +187,15 @@ impl DataSyncServiceInner {
         }
 
         // Remove from peer list
-        self.all_peers.write().unwrap().remove(&peer_addr);
+        self.active_sync_peers.write().unwrap().remove(&peer_addr);
     }
 
-    fn handle_get_all_peers_list(
+    fn handle_get_active_peers_list(
         &self,
         tx: oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>,
     ) {
-        if let Err(e) = tx.send(self.all_peers.clone()) {
-            tracing::error!("handle_get_all_peers_list() tx.send() error: {:?}", e);
+        if let Err(e) = tx.send(self.active_sync_peers.clone()) {
+            tracing::error!("handle_get_active_peers_list() tx.send() error: {:?}", e);
         };
     }
 
@@ -228,6 +228,8 @@ impl DataSyncServiceInner {
         }
     }
 
+    /// Updates the active_peers list and ensures there are PeerBandwidthManagers for
+    /// any peers assigned to store the same slot data.
     fn sync_peers_for_ledger(&mut self, ledger_id: u32) {
         let epoch_snapshot = self.block_tree.read().canonical_epoch_snapshot();
 
@@ -245,8 +247,8 @@ impl DataSyncServiceInner {
             };
 
             // Get existing peer bandwidth manager or add a new one for the peer
-            let mut all_peers = self.all_peers.write().unwrap();
-            let entry = all_peers
+            let mut active_peers = self.active_sync_peers.write().unwrap();
+            let entry = active_peers
                 .entry(pa.miner_address)
                 .or_insert(PeerBandwidthManager::new(
                     &pa.miner_address,
@@ -297,7 +299,7 @@ impl DataSyncServiceInner {
             // Create orchestrator for storage modules that needs to sync data
             let orchestrator = ChunkOrchestrator::new(
                 sm.clone(),
-                self.all_peers.clone(),
+                self.active_sync_peers.clone(),
                 &self.service_senders,
                 chunk_fetcher,
                 self.config.node_config.clone(),
@@ -333,6 +335,7 @@ impl DataSyncServiceInner {
                 continue;
             };
 
+            // Skip the add_peer() orchestrator fn and update current_peers directly
             orchestrator.current_peers = best_peers.clone();
         }
     }
@@ -354,8 +357,8 @@ impl DataSyncServiceInner {
         let ledger_id = pa.ledger_id.unwrap();
 
         // Find all peers that are assigned to store data for the same ledger slot
-        let all_peers = self.all_peers.read().unwrap();
-        let mut candidates: Vec<&PeerBandwidthManager> = all_peers
+        let active_peers = self.active_sync_peers.read().unwrap();
+        let mut candidates: Vec<&PeerBandwidthManager> = active_peers
             .values()
             .filter(|peer_manager| {
                 peer_manager.partition_assignments.iter().any(|assignment| {

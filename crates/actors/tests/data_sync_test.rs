@@ -246,11 +246,11 @@ impl DataSyncServiceTestHarness {
     }
 
     /// Get peers list
-    fn get_all_peers(
+    fn get_active_peers(
         &mut self,
     ) -> eyre::Result<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>> {
         let (tx, mut rx) = oneshot::channel();
-        self.handle_message(DataSyncServiceMessage::GetAllPeersList(tx))?;
+        self.handle_message(DataSyncServiceMessage::GetActivePeersList(tx))?;
         rx.try_recv()
             .map_err(|e| eyre::eyre!("Failed to receive peers: {}", e))
     }
@@ -265,11 +265,11 @@ impl DataSyncServiceTestHarness {
     ) -> eyre::Result<()> {
         println!("\n=== {} Performance Snapshot ===", label);
 
-        let all_peers = self.get_all_peers()?;
+        let active_peers = self.get_active_peers()?;
         let mut total_requests = 0;
-        let all_peers = all_peers.read().unwrap();
+        let active_peers = active_peers.read().unwrap();
 
-        for (addr, peer_manager) in all_peers.iter() {
+        for (addr, peer_manager) in active_peers.iter() {
             let peer_name = match *addr {
                 addr if addr == peer_addresses.0 => "Slow Peer",
                 addr if addr == peer_addresses.1 => "Stable Peer",
