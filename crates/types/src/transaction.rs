@@ -256,6 +256,42 @@ pub struct CommitmentTransaction {
     pub signature: IrysSignature,
 }
 
+/// Ordering for CommitmentTransaction prioritizes transactions as follows:
+/// 1. Stake commitments (sorted by fee, highest first)
+/// 2. Pledge commitments (sorted by pledge_count_before_executing ascending, then by fee descending)
+/// 3. Other commitment types (sorted by fee)
+impl Ord for CommitmentTransaction {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // First, compare by commitment type (Stake > Pledge/Unpledge)
+        match (&self.commitment_type, &other.commitment_type) {
+            (CommitmentType::Stake, CommitmentType::Stake) => {
+                // Both are stakes, sort by fee (higher first)
+                other.user_fee().cmp(&self.user_fee())
+            }
+            (CommitmentType::Stake, _) => std::cmp::Ordering::Less, // Stake comes first
+            (_, CommitmentType::Stake) => std::cmp::Ordering::Greater, // Stake comes first
+            (
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: count_a,
+                },
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: count_b,
+                },
+            ) => count_a
+                .cmp(count_b)
+                .then_with(|| other.user_fee().cmp(&self.user_fee())),
+            // Handle other cases (Unpledge, Unstake) - sort by fee
+            _ => other.user_fee().cmp(&self.user_fee()),
+        }
+    }
+}
+
+impl PartialOrd for CommitmentTransaction {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl CommitmentTransaction {
     /// Create a new CommitmentTransaction with default values from config
     pub fn new(config: &ConsensusConfig) -> Self {
@@ -1052,5 +1088,147 @@ mod pledge_decay_parametrized_tests {
             actual_amount.round_dp(0),
             expected_unpledge_value.round_dp(0)
         );
+    }
+}
+
+#[cfg(test)]
+mod commitment_ordering_tests {
+    use super::*;
+
+    fn create_test_commitment(
+        id: &str,
+        commitment_type: CommitmentType,
+        fee: u64,
+    ) -> CommitmentTransaction {
+        CommitmentTransaction {
+            id: H256::from_slice(&[id.as_bytes()[0]; 32]),
+            anchor: H256::zero(),
+            signer: Address::default(),
+            signature: IrysSignature::default(),
+            fee,
+            value: U256::zero(),
+            commitment_type,
+            version: 1,
+            chain_id: 1,
+        }
+    }
+
+    #[test]
+    fn test_stake_comes_before_pledge() {
+        let stake = create_test_commitment("stake", CommitmentType::Stake, 100);
+        let pledge = create_test_commitment(
+            "pledge",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 1,
+            },
+            200,
+        );
+
+        assert!(stake < pledge);
+    }
+
+    #[test]
+    fn test_stake_sorted_by_fee() {
+        let stake_low = create_test_commitment("stake1", CommitmentType::Stake, 50);
+        let stake_high = create_test_commitment("stake2", CommitmentType::Stake, 150);
+
+        assert!(stake_high < stake_low);
+    }
+
+    #[test]
+    fn test_pledge_sorted_by_count_then_fee() {
+        let pledge_count2_fee100 = create_test_commitment(
+            "p1",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            100,
+        );
+        let pledge_count2_fee200 = create_test_commitment(
+            "p2",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            200,
+        );
+        let pledge_count5_fee300 = create_test_commitment(
+            "p3",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 5,
+            },
+            300,
+        );
+
+        // Lower count comes first
+        assert!(pledge_count2_fee100 < pledge_count5_fee300);
+        assert!(pledge_count2_fee200 < pledge_count5_fee300);
+
+        // Same count, higher fee comes first
+        assert!(pledge_count2_fee200 < pledge_count2_fee100);
+    }
+
+    #[test]
+    fn test_complete_ordering() {
+        // Create commitments with distinct IDs for easier verification
+        let stake_high = create_test_commitment("stake_high", CommitmentType::Stake, 150);
+        let stake_low = create_test_commitment("stake_low", CommitmentType::Stake, 50);
+        let pledge_2_high = create_test_commitment(
+            "pledge_2_high",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            200,
+        );
+        let pledge_2_low = create_test_commitment(
+            "pledge_2_low",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            50,
+        );
+        let pledge_5 = create_test_commitment(
+            "pledge_5",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 5,
+            },
+            100,
+        );
+        let pledge_10 = create_test_commitment(
+            "pledge_10",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 10,
+            },
+            300,
+        );
+        let unstake = create_test_commitment("unstake", CommitmentType::Unstake, 75);
+
+        let mut commitments = vec![
+            pledge_5.clone(),
+            stake_low.clone(),
+            pledge_2_high.clone(),
+            stake_high.clone(),
+            pledge_2_low.clone(),
+            pledge_10.clone(),
+            unstake.clone(),
+        ];
+
+        commitments.sort();
+
+        // Verify the expected order:
+        // 1. stake_high (Stake, fee=150)
+        // 2. stake_low (Stake, fee=50)
+        // 3. pledge_2_high (Pledge count=2, fee=200)
+        // 4. pledge_2_low (Pledge count=2, fee=50)
+        // 5. pledge_5 (Pledge count=5, fee=100)
+        // 6. pledge_10 (Pledge count=10, fee=300)
+        // 7. unstake (Other type, fee=75)
+
+        assert_eq!(commitments[0].id, stake_high.id);
+        assert_eq!(commitments[1].id, stake_low.id);
+        assert_eq!(commitments[2].id, pledge_2_high.id);
+        assert_eq!(commitments[3].id, pledge_2_low.id);
+        assert_eq!(commitments[4].id, pledge_5.id);
+        assert_eq!(commitments[5].id, pledge_10.id);
+        assert_eq!(commitments[6].id, unstake.id);
     }
 }
