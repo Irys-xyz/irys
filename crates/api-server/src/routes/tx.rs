@@ -79,6 +79,10 @@ pub async fn post_tx(
                     commitment_validation_error
                 )))
             }
+            TxIngressError::InvalidLedger(_) => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .body(format!("Invalid ledger type: {:?}", err))),
+            TxIngressError::IncorrectProtocolFee { .. } => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .body(format!("Incorrect protocol fee: {:?}", err))),
         };
     }
 

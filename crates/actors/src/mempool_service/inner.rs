@@ -19,8 +19,8 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
+    storage_pricing::{phantoms::{Irys, NetworkFee}, Amount}, Address, Base64, CommitmentTransaction, CommitmentValidationError,
+    DataRoot, DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -405,8 +405,27 @@ impl Inner {
         // Prepare data transactions for inclusion after commitments
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
 
-        // Sort data transactions by fee (highest first) to maximize revenue
+        // Filter by minimum fee based on node's fee_percentage
+        let fee_percentage = self.config.node_config.pricing.fee_percentage;
+        submit_ledger_txs.retain(|tx| {
+            let protocol_cost = U256::from(tx.term_fee + tx.perm_fee.unwrap_or(0));
 
+            // Calculate minimum acceptable miner fee
+            let minimum_miner_fee = Amount::new(protocol_cost)
+                .calculate_fee(fee_percentage)
+                .unwrap_or_default();
+
+            let meets_minimum = U256::from(tx.miner_fee) >= minimum_miner_fee;
+            if !meets_minimum {
+                debug!(
+                    "Filtering out tx {} with miner_fee {} (minimum required: {})",
+                    tx.id, tx.miner_fee, minimum_miner_fee
+                );
+            }
+            meets_minimum
+        });
+
+        // Sort data transactions by fee (highest first) to maximize revenue
         submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
@@ -778,6 +797,38 @@ impl Inner {
 
         Ok(latest.height)
     }
+
+    /// Calculate the expected protocol fee for permanent storage
+    /// This is the same calculation used by the pricing API
+    pub fn calculate_perm_storage_fee(&self, bytes_to_store: u64) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
+        // Get the latest EMA to use for pricing
+        let tree = self.block_tree_read_guard.read();
+        let tip = tree.tip;
+        let ema = tree
+            .get_ema_snapshot(&tip)
+            .ok_or_else(|| TxIngressError::Other("tip block should still remain in state".to_string()))?;
+        drop(tree);
+
+        // Calculate the cost per GB (take into account replica count & cost per replica)
+        let cost_per_gb = self
+            .config
+            .consensus
+            .annual_cost_per_gb
+            .cost_per_replica(
+                self.config.consensus.safe_minimum_number_of_years,
+                self.config.consensus.decay_rate,
+            )
+            .map_err(|e| TxIngressError::other_display(e))?
+            .replica_count(self.config.consensus.number_of_ingress_proofs)
+            .map_err(|e| TxIngressError::other_display(e))?;
+
+        // calculate the base network fee (protocol cost)
+        let base_network_fee = cost_per_gb
+            .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())
+            .map_err(|e| TxIngressError::other_display(e))?;
+
+        Ok(base_network_fee)
+    }
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -856,6 +907,12 @@ pub enum TxIngressError {
     /// Invalid anchor value (unknown or too old)
     #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
+    /// Invalid ledger type specified in transaction
+    #[error("Invalid or unsupported ledger type: {0}")]
+    InvalidLedger(u32),
+    /// Protocol fee doesn't match expected calculation
+    #[error("Incorrect protocol fee: expected {expected}, got {actual}")]
+    IncorrectProtocolFee { expected: U256, actual: U256 },
     // /// Unknown anchor value (could be valid)
     // PendingAnchor,
     /// Some database error occurred
