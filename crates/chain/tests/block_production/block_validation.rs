@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
-use irys_actors::block_validation::MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS;
+
 use irys_reward_curve::HalvingCurve;
 use irys_types::NodeConfig;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,7 +36,11 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let future_timestamp = now_ms + MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS + 10_000; // too far into the future
+    let future_timestamp = now_ms
+        + genesis_config
+            .consensus_config()
+            .max_future_timestamp_drift_millis
+        + 10_000; // too far into the future
 
     // creating artificially future-dated block header
     let mut invalid_block = block_1;
