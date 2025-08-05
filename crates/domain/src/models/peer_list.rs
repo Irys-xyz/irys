@@ -7,11 +7,14 @@ use irys_types::{
     BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError,
     PeerNetworkSender,
 };
+use lru::LruCache;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, warn};
+
+const UNSTAKED_PEER_PURGATORY_CAPACITY: usize = 500;
 
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
@@ -36,7 +39,7 @@ pub struct PeerListDataInner {
     persistent_peers_cache: HashMap<Address, PeerListItem>,
     /// Purgatory for unstaked peers that haven't proven themselves yet
     /// These peers are kept in memory only until they reach the persistence threshold
-    unstaked_peer_purgatory: HashMap<Address, PeerListItem>,
+    unstaked_peer_purgatory: LruCache<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_addresses: HashSet<SocketAddr>,
     peer_network_service_sender: PeerNetworkSender,
@@ -76,7 +79,7 @@ impl PeerList {
         inner
             .persistent_peers_cache
             .get(mining_addr)
-            .or_else(|| inner.unstaked_peer_purgatory.get(mining_addr))
+            .or_else(|| inner.unstaked_peer_purgatory.peek(mining_addr))
             .cloned()
     }
 
@@ -118,7 +121,8 @@ impl PeerList {
                     .count();
                 let purgatory_active = bindings
                     .unstaked_peer_purgatory
-                    .values()
+                    .iter()
+                    .map(|(_, v)| v)
                     .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
                     .count();
                 persistent_active + purgatory_active
@@ -249,7 +253,7 @@ impl PeerList {
         binding
             .persistent_peers_cache
             .get(&mining_address)
-            .or_else(|| binding.unstaked_peer_purgatory.get(&mining_address))
+            .or_else(|| binding.unstaked_peer_purgatory.peek(&mining_address))
             .cloned()
     }
 
@@ -258,7 +262,7 @@ impl PeerList {
         binding
             .persistent_peers_cache
             .get(mining_address)
-            .or_else(|| binding.unstaked_peer_purgatory.get(mining_address))
+            .or_else(|| binding.unstaked_peer_purgatory.peek(mining_address))
             .cloned()
     }
 
@@ -269,7 +273,7 @@ impl PeerList {
         let peer = binding
             .persistent_peers_cache
             .get(&miner_address)
-            .or_else(|| binding.unstaked_peer_purgatory.get(&miner_address));
+            .or_else(|| binding.unstaked_peer_purgatory.peek(&miner_address));
 
         let Some(peer) = peer else {
             return false;
@@ -338,7 +342,10 @@ impl PeerListDataInner {
             gossip_addr_to_mining_addr_map: HashMap::new(),
             api_addr_to_mining_addr_map: HashMap::new(),
             persistent_peers_cache: HashMap::new(),
-            unstaked_peer_purgatory: HashMap::new(),
+            unstaked_peer_purgatory: LruCache::new(
+                std::num::NonZeroUsize::new(UNSTAKED_PEER_PURGATORY_CAPACITY)
+                    .expect("Expected to be able to create an LRU cache"),
+            ),
             known_peers_cache: HashSet::new(),
             trusted_peers_api_addresses: config
                 .node_config
@@ -422,7 +429,7 @@ impl PeerListDataInner {
                 );
                 // Move from purgatory to persistent cache
                 let peer_clone = peer.clone();
-                self.unstaked_peer_purgatory.remove(mining_addr);
+                self.unstaked_peer_purgatory.pop(mining_addr);
                 self.persistent_peers_cache
                     .insert(*mining_addr, peer_clone.clone());
                 self.known_peers_cache.insert(peer_clone.address);
@@ -446,7 +453,7 @@ impl PeerListDataInner {
             if !peer_item.reputation_score.is_active() {
                 self.known_peers_cache.remove(&peer_item.address);
             }
-        } else if let Some(peer) = self.unstaked_peer_purgatory.remove(mining_addr) {
+        } else if let Some(peer) = self.unstaked_peer_purgatory.pop(mining_addr) {
             self.gossip_addr_to_mining_addr_map
                 .remove(&peer.address.gossip.ip());
             self.api_addr_to_mining_addr_map.remove(&peer.address.api);
@@ -539,7 +546,7 @@ impl PeerListDataInner {
         if is_persistent {
             self.persistent_peers_cache.insert(mining_addr, peer);
         } else {
-            self.unstaked_peer_purgatory.insert(mining_addr, peer);
+            self.unstaked_peer_purgatory.put(mining_addr, peer);
         }
 
         self.gossip_addr_to_mining_addr_map
@@ -581,7 +588,7 @@ impl PeerListDataInner {
         // Check if peer exists in persistent cache
         let in_persistent = self.persistent_peers_cache.contains_key(&mining_addr);
         // Check if peer exists in purgatory
-        let in_purgatory = self.unstaked_peer_purgatory.contains_key(&mining_addr);
+        let in_purgatory = self.unstaked_peer_purgatory.contains(&mining_addr);
 
         match (is_staked, in_persistent, in_purgatory) {
             // Case 1: Update peer in persistent cache (both staked and unstaked peers)
@@ -628,7 +635,7 @@ impl PeerListDataInner {
                     "Moving staked peer {:?} from purgatory to persistent cache",
                     mining_addr
                 );
-                if let Some(purgatory_peer) = self.unstaked_peer_purgatory.remove(&mining_addr) {
+                if let Some(purgatory_peer) = self.unstaked_peer_purgatory.pop(&mining_addr) {
                     // Update the peer data with new information
                     let mut updated_peer = purgatory_peer;
                     let old_address = updated_peer.address;
@@ -712,7 +719,9 @@ mod tests {
     fn create_test_peer_list() -> PeerList {
         let peer_list_data = PeerListDataInner {
             persistent_peers_cache: HashMap::new(),
-            unstaked_peer_purgatory: HashMap::new(),
+            unstaked_peer_purgatory: LruCache::new(
+                std::num::NonZeroUsize::new(UNSTAKED_PEER_PURGATORY_CAPACITY).unwrap(),
+            ),
             known_peers_cache: HashSet::new(),
             gossip_addr_to_mining_addr_map: HashMap::new(),
             api_addr_to_mining_addr_map: HashMap::new(),
@@ -965,7 +974,8 @@ mod tests {
                 .count();
             let purgatory_active = bindings
                 .unstaked_peer_purgatory
-                .values()
+                .iter()
+                .map(|(_, v)| v)
                 .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
                 .count();
             persistent_active + purgatory_active
@@ -988,7 +998,8 @@ mod tests {
                 .count();
             let purgatory_active = bindings
                 .unstaked_peer_purgatory
-                .values()
+                .iter()
+                .map(|(_, v)| v)
                 .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
                 .count();
             persistent_active + purgatory_active
