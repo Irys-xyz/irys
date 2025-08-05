@@ -41,7 +41,8 @@ pub struct ChunkOrchestrator {
     pub chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
     recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // To support better observability in the future
     pub current_peers: Vec<Address>,
-    all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+    // Keep a reference to the active_sync_peers in DataSyncService where it is maintained
+    active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
     slot_index: usize,
     last_bandwidth_check: Instant,
@@ -52,7 +53,7 @@ pub struct ChunkOrchestrator {
 impl ChunkOrchestrator {
     pub fn new(
         storage_module: Arc<StorageModule>,
-        all_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+        sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
         service_senders: &ServiceSenders,
         chunk_fetcher: Arc<dyn ChunkFetcher>,
         config: NodeConfig,
@@ -68,7 +69,7 @@ impl ChunkOrchestrator {
             chunk_requests: Default::default(),
             recent_chunk_times: CircularBuffer::new(8000),
             current_peers: Default::default(),
-            all_peers,
+            active_sync_peers: sync_peers,
             service_senders: service_senders.clone(),
             slot_index,
             last_bandwidth_check: Instant::now(),
@@ -85,7 +86,7 @@ impl ChunkOrchestrator {
     }
 
     fn populate_request_queue(&mut self) {
-        let pending_count = self
+        let pending_count: usize = self
             .chunk_requests
             .values()
             .filter(|r| matches!(r.request_state, ChunkRequestState::Pending(_)))
@@ -133,13 +134,6 @@ impl ChunkOrchestrator {
             (storage_capacity_remaining * 100) / target_throughput
         );
 
-        // If we're within 10% of target_throughput, dial back concurrency
-        if storage_capacity_remaining < (target_throughput / 10) {
-            debug!("REDUCING concurrency due to saturating storage write throughput");
-            self.reduce_all_peer_concurrency();
-            return Ok(());
-        }
-
         let now = Instant::now();
         let bandwidth_interval = self.config.data_sync.bandwidth_adjustment_interval;
         if now.duration_since(self.last_bandwidth_check) >= bandwidth_interval {
@@ -148,20 +142,6 @@ impl ChunkOrchestrator {
         }
 
         Ok(())
-    }
-
-    /// Reduces chunk request concurrency for peers associated with this Orchestrators storage_module
-    fn reduce_all_peer_concurrency(&mut self) {
-        if let Ok(mut peers) = self.all_peers.write() {
-            for peer_addr in &self.current_peers {
-                if let Some(peer_manager) = peers.get_mut(peer_addr) {
-                    let max_concurrency = peer_manager.max_concurrency();
-                    if max_concurrency > 1 {
-                        peer_manager.set_max_concurrency((max_concurrency * 8) / 10);
-                    }
-                }
-            }
-        }
     }
 
     fn get_peer_scores(
@@ -185,7 +165,7 @@ impl ChunkOrchestrator {
     }
 
     fn optimize_peer_concurrency(&mut self) {
-        if let Ok(mut peers) = self.all_peers.write() {
+        if let Ok(mut peers) = self.active_sync_peers.write() {
             let peer_scores = self.get_peer_scores(&peers);
 
             for (peer_addr, health_score, available_concurrency) in peer_scores {
@@ -201,6 +181,11 @@ impl ChunkOrchestrator {
     }
 
     fn dispatch_chunk_requests(&mut self) {
+        if self.should_throttle_requests() {
+            debug!("Throttling chunk requests due to storage throughput");
+            return; // Don't dispatch any new requests if the storage_module is saturated
+        }
+
         let pending_requests: Vec<_> = self
             .chunk_requests
             .iter()
@@ -228,8 +213,17 @@ impl ChunkOrchestrator {
         }
     }
 
+    fn should_throttle_requests(&self) -> bool {
+        let storage_throughput = self.storage_module.write_throughput_bps();
+        let target_throughput = self.config.data_sync.max_storage_throughput_bps;
+        let storage_capacity_remaining = target_throughput.saturating_sub(storage_throughput);
+
+        // If we're within 10% of target_throughput, throttle this orchestrator
+        storage_capacity_remaining < (target_throughput / 10)
+    }
+
     fn find_best_peer(&self, excluding: Option<Address>) -> Option<Address> {
-        let peers = self.all_peers.read().ok()?;
+        let peers = self.active_sync_peers.read().ok()?;
 
         let mut candidates: Vec<&PeerBandwidthManager> = self
             .current_peers
@@ -270,7 +264,7 @@ impl ChunkOrchestrator {
         };
 
         let api_addr = {
-            let mut peers = match self.all_peers.write() {
+            let mut peers = match self.active_sync_peers.write() {
                 Ok(p) => p,
                 Err(_) => return,
             };
@@ -371,7 +365,7 @@ impl ChunkOrchestrator {
 
         self.recent_chunk_times.push(completion_record.clone());
 
-        if let Ok(mut peers) = self.all_peers.write() {
+        if let Ok(mut peers) = self.active_sync_peers.write() {
             if let Some(peer_manager) = peers.get_mut(&peer_addr) {
                 peer_manager.on_chunk_request_completed(completion_record.clone());
             }
@@ -413,7 +407,7 @@ impl ChunkOrchestrator {
         // Record the peer that was expected to provide this chunk but failed
         request.request_state = ChunkRequestState::Pending(Some(expected_peer));
 
-        if let Ok(mut peers) = self.all_peers.write() {
+        if let Ok(mut peers) = self.active_sync_peers.write() {
             if let Some(peer_manager) = peers.get_mut(&peer_addr) {
                 peer_manager.on_chunk_request_failure();
             }
@@ -452,7 +446,7 @@ impl ChunkOrchestrator {
                     }
                 });
 
-        let total_throughput_bps = if let Ok(peers) = self.all_peers.read() {
+        let total_throughput_bps = if let Ok(peers) = self.active_sync_peers.read() {
             self.current_peers
                 .iter()
                 .filter_map(|addr| peers.get(addr))
