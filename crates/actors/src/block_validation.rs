@@ -791,8 +791,6 @@ pub async fn commitment_txs_are_valid(
         .map(|ledger| ledger.tx_ids.0.as_slice())
         .unwrap_or_else(|| &[]);
 
-    // let block_tx_ids = block_tx_ids.unwrap_or_default();
-
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
         get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;

@@ -511,8 +511,9 @@ impl Inner {
         let total_selected = commitment_tx.len() + submit_tx.len();
 
         if total_available > 0 {
+            const REJECTION_RATE_THRESHOLD: usize = 70;
             let rejection_rate = ((total_available - total_selected) * 100) / total_available;
-            if rejection_rate > 70 {
+            if rejection_rate > REJECTION_RATE_THRESHOLD {
                 warn!(
                     rejection_rate = rejection_rate,
                     total_available,
