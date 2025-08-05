@@ -14,7 +14,6 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
-    PrioritizedCommitment,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -683,7 +682,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
                     .await?
             }
             [] => {
@@ -776,7 +775,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -789,17 +788,12 @@ pub async fn commitment_txs_are_valid(
         .system_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| &ledger.tx_ids.0)
-        .filter(|ids| !ids.is_empty());
-
-    let Some(block_tx_ids) = block_tx_ids else {
-        debug!("No commitment transactions in block");
-        return Ok(());
-    };
+        .map(|ledger| ledger.tx_ids.0.as_slice())
+        .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids.clone(), &service_senders.mempool, db).await?;
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -825,6 +819,8 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        tracing::error!(?expected_commitments, "validation");
+        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments
@@ -878,9 +874,9 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
-    // Sort using PrioritizedCommitment to get expected order
+    // Sort to get expected order
     let mut expected_order = stake_and_pledge_txs.clone();
-    expected_order.sort_by_key(|tx| PrioritizedCommitment(*tx));
+    expected_order.sort();
 
     // Compare actual order vs expected order
     for (idx, pair) in stake_and_pledge_txs

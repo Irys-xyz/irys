@@ -31,9 +31,9 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Base64, CommitmentTransaction, Config,
-    DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
-    IngressProofsList, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
+    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
+    H256List, IngressProofsList, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
     TokioServiceHandle, TxIngressProof, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -218,12 +218,27 @@ impl BlockProducerService {
                 let result = Self::produce_block_inner(inner, solution).await?;
 
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Some((irys_block_header, _eth_built_payload)) = &result {
+                if let Some((irys_block_header, eth_built_payload)) = &result {
                     info!(
                         block_hash = %irys_block_header.block_hash.0.to_base58(),
                         block_height = irys_block_header.height,
                         "Block production completed successfully"
                     );
+
+                    // Broadcast the EVM payload
+                    let execution_payload_gossip_data =
+                        GossipBroadcastMessage::from(eth_built_payload.block().clone());
+                    if let Err(payload_broadcast_error) = self
+                        .inner
+                        .service_senders
+                        .gossip_broadcast
+                        .send(execution_payload_gossip_data)
+                    {
+                        error!(
+                            "Failed to broadcast execution payload: {:?}",
+                            payload_broadcast_error
+                        );
+                    }
 
                     if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
                         *remaining = remaining.saturating_sub(1);
@@ -350,10 +365,16 @@ pub trait BlockProdStrategy {
         Ok((header, ema_snapshot))
     }
 
-    async fn fully_produce_new_block(
+    async fn fully_produce_new_block_without_gossip(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            EthBuiltPayload,
+        )>,
+    > {
         let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
@@ -373,8 +394,8 @@ pub trait BlockProdStrategy {
             .await?;
         let evm_block = eth_built_payload.block();
 
-        let block = self
-            .produce_block(
+        let block_result = self
+            .produce_block_without_broadcasting(
                 solution,
                 &prev_block_header,
                 submit_txs,
@@ -387,6 +408,26 @@ pub trait BlockProdStrategy {
             )
             .await?;
 
+        let Some((block, stats)) = block_result else {
+            return Ok(None);
+        };
+
+        Ok(Some((block, stats, eth_built_payload)))
+    }
+
+    async fn fully_produce_new_block(
+        &self,
+        solution: SolutionContext,
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+        let result = self
+            .fully_produce_new_block_without_gossip(solution)
+            .await?;
+
+        let Some((block, stats, eth_built_payload)) = result else {
+            return Ok(None);
+        };
+
+        let block = self.broadcast_block(block, stats).await?;
         let Some(block) = block else { return Ok(None) };
         Ok(Some((block, eth_built_payload)))
     }
@@ -529,7 +570,7 @@ pub trait BlockProdStrategy {
         Ok(built_payload)
     }
 
-    async fn produce_block(
+    async fn produce_block_without_broadcasting(
         &self,
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
@@ -540,7 +581,7 @@ pub trait BlockProdStrategy {
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
-    ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
@@ -563,7 +604,6 @@ pub trait BlockProdStrategy {
         // Difficulty adjustment logic
         let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
         let current_difficulty = prev_block_header.diff;
-        let mut is_difficulty_updated = false;
         let (diff, stats) = calculate_difficulty(
             block_height,
             last_diff_timestamp,
@@ -573,19 +613,7 @@ pub trait BlockProdStrategy {
         );
 
         // Did an adjustment happen?
-        if let Some(stats) = stats {
-            if stats.is_adjusted {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
-                info!(
-                    " max: {}\nlast: {}\nnext: {}",
-                    U256::MAX,
-                    current_difficulty,
-                    diff
-                );
-                is_difficulty_updated = true;
-            } else {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
-            }
+        if stats.is_some() {
             last_diff_timestamp = current_timestamp;
         }
 
@@ -708,6 +736,30 @@ pub trait BlockProdStrategy {
             .await??;
 
         let block = Arc::new(irys_block);
+        Ok(Some((block, stats)))
+    }
+
+    async fn broadcast_block(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        stats: Option<AdjustmentStats>,
+    ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
+        let mut is_difficulty_updated = false;
+        if let Some(stats) = stats {
+            if stats.is_adjusted {
+                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                info!(
+                    max_difficulty = ?U256::MAX,
+                    previous_cumulative_diff = ?block.previous_cumulative_diff,
+                    current_diff = ?block.diff,
+                    "Difficulty data",
+                );
+                is_difficulty_updated = true;
+            } else {
+                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+            }
+        }
+
         match self
             .inner()
             .block_discovery
@@ -749,24 +801,10 @@ pub trait BlockProdStrategy {
                 .do_send(BroadcastDifficultyUpdate(block.clone()));
         }
 
-        // Broadcast the EVM payload
-        let execution_payload_gossip_data = GossipBroadcastMessage::from(eth_built_payload.clone());
-        if let Err(payload_broadcast_error) = self
-            .inner()
-            .service_senders
-            .gossip_broadcast
-            .send(execution_payload_gossip_data)
-        {
-            error!(
-                "Failed to broadcast execution payload: {:?}",
-                payload_broadcast_error
-            );
-        }
-
         info!(
-            "Finished producing block {}, ({})",
-            &block.block_hash.0.to_base58(),
-            &block_height
+            block_height = ?block.height,
+            hash = ?block.block_hash,
+            "Finished producing block",
         );
 
         Ok(Some(block.clone()))

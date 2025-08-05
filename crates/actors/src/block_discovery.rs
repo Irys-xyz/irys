@@ -441,12 +441,8 @@ impl BlockDiscoveryServiceInner {
                 "incoming block commitment txids, height {}\n{:#?}",
                 new_block_header.height, commitment_ledger
             );
-            match get_commitment_tx_in_parallel(
-                commitment_ledger.tx_ids.0.clone(),
-                &mempool_sender,
-                &db,
-            )
-            .await
+            match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
+                .await
             {
                 Ok(tx) => {
                     commitments = tx;
@@ -694,20 +690,20 @@ impl BlockDiscoveryServiceInner {
 
 /// Get all commitment transactions from the mempool and database
 pub async fn get_commitment_tx_in_parallel(
-    commitment_tx_ids: Vec<IrysTransactionId>,
+    commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let tx_ids_clone = commitment_tx_ids.clone();
+    let tx_ids_clone = commitment_tx_ids;
 
     // Set up a function to query the mempool for commitment transactions
     let mempool_future = {
-        let tx_ids = tx_ids_clone.clone();
+        let tx_ids = tx_ids_clone;
         async move {
             let (tx, rx) = oneshot::channel();
 
             match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: tx_ids,
+                commitment_tx_ids: tx_ids.to_vec(),
                 response: tx,
             }) {
                 Ok(()) => {
@@ -729,12 +725,12 @@ pub async fn get_commitment_tx_in_parallel(
 
     // Set up a function to query the database for commitment transactions
     let db_future = {
-        let tx_ids = commitment_tx_ids.clone();
+        let tx_ids = commitment_tx_ids;
         let db_ref = db.clone();
         async move {
             let db_tx = db_ref.tx()?;
             let mut results = HashMap::new();
-            for tx_id in &tx_ids {
+            for tx_id in tx_ids {
                 if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
                     results.insert(*tx_id, header);
                 }
@@ -753,9 +749,9 @@ pub async fn get_commitment_tx_in_parallel(
     let mut missing = Vec::new();
 
     for tx_id in commitment_tx_ids {
-        if let Some(header) = mempool_map.get(&tx_id) {
+        if let Some(header) = mempool_map.get(tx_id) {
             headers.push(header.clone());
-        } else if let Some(header) = db_map.get(&tx_id) {
+        } else if let Some(header) = db_map.get(tx_id) {
             headers.push(header.clone());
         } else {
             missing.push(tx_id);
