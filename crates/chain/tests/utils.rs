@@ -1054,6 +1054,37 @@ impl IrysNodeTest<IrysNodeCtx> {
             .get_balance_irys(address, block)
     }
 
+    /// Get the price for storing data via the price API endpoint
+    pub async fn get_data_price(
+        &self,
+        ledger: DataLedger,
+        data_size: u64,
+    ) -> eyre::Result<PriceInfo> {
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!("{}/v1/price/{}/{}", api_uri, ledger as u32, data_size);
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get price: {}", e))?;
+
+        if response.status() != awc::http::StatusCode::OK {
+            return Err(eyre::eyre!(
+                "Price endpoint returned status: {}",
+                response.status()
+            ));
+        }
+
+        let price_info: PriceInfo = response
+            .json()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to parse price response: {}", e))?;
+
+        Ok(price_info)
+    }
+
     pub async fn create_publish_data_tx(
         &self,
         account: &IrysSigner,
@@ -1063,31 +1094,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         let data_size = data.len() as u64;
 
         // Query the price endpoint to get required fees for Publish ledger
-        let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
-        let url = format!(
-            "{}/v1/price/{}/{}",
-            api_uri,
-            DataLedger::Publish as u32,
-            data_size
-        );
-
-        let mut response = client
-            .get(url)
-            .send()
+        let price_info = self
+            .get_data_price(DataLedger::Publish, data_size)
             .await
-            .map_err(|e| AddTxError::CreateTx(eyre::eyre!("Failed to get price: {}", e)))?;
-
-        if response.status() != awc::http::StatusCode::OK {
-            return Err(AddTxError::CreateTx(eyre::eyre!(
-                "Price endpoint returned status: {}",
-                response.status()
-            )));
-        }
-
-        let price_info: PriceInfo = response.json().await.map_err(|e| {
-            AddTxError::CreateTx(eyre::eyre!("Failed to parse price response: {}", e))
-        })?;
+            .map_err(|e| AddTxError::CreateTx(e))?;
 
         // Create transaction with proper fees using the new publish method
         let tx = account
