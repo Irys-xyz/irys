@@ -1,6 +1,7 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
 use irys_actors::block_validation::MAX_FUTURE_TIMESTAMP_DRIFT_MILLISECONDS;
+use irys_reward_curve::HalvingCurve;
 use irys_types::NodeConfig;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,21 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // creating artificially future-dated block header
     let mut invalid_block = block_1;
     invalid_block.timestamp = future_timestamp;
+
+    // manually adjust reward to match new timestamp so only timestamp validation fails
+    let previous_block = genesis_node.get_block_by_height(0).await?;
+    let consensus_config = genesis_config.consensus_config();
+    let reward_curve = HalvingCurve {
+        inflation_cap: consensus_config.block_reward_config.inflation_cap,
+        half_life_secs: consensus_config.block_reward_config.half_life_secs.into(),
+    };
+    let reward =
+        reward_curve.reward_between(previous_block.timestamp / 1000, future_timestamp / 1000)?;
+    invalid_block.reward_amount = reward.amount;
+
+    // resign block so that signature remains valid after tampering
+    let signer = genesis_config.signer();
+    signer.sign_block_header(&mut invalid_block)?;
 
     // 3. ask node to accept and validate block
     let block_validation_result = genesis_node
