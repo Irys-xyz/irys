@@ -455,6 +455,38 @@ impl PeerListDataInner {
         }
     }
 
+    /// Helper method to update a peer in the persistent cache
+    fn update_peer_in_persistent_cache(
+        &mut self,
+        mining_addr: Address,
+        peer: PeerListItem,
+        peer_address: PeerAddress,
+    ) -> bool {
+        if let Some(existing_peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
+            let handshake_cooldown_expired =
+                existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
+            existing_peer.last_seen = peer.last_seen;
+            existing_peer.reputation_score = peer.reputation_score;
+            if existing_peer.address != peer_address {
+                debug!("Peer address mismatch, updating to new address");
+                self.update_peer_address(mining_addr, peer_address);
+                true
+            } else if handshake_cooldown_expired {
+                debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
+                true
+            } else {
+                debug!("Peer address is the same, no update needed");
+                false
+            }
+        } else {
+            warn!(
+                "Peer {:?} is not found in the persistent cache, which shouldn't happen",
+                mining_addr
+            );
+            false
+        }
+    }
+
     /// Add or update a peer in the appropriate cache based on staking status and current location.
     /// Returns true if the peer was added or needs re-handshaking, false if no update needed.
     fn add_or_update_peer_internal(
@@ -472,35 +504,11 @@ impl PeerListDataInner {
         let in_purgatory = self.unstaked_peer_purgatory.contains_key(&mining_addr);
 
         match (is_staked, in_persistent, in_purgatory) {
-            // Case 1: is_staked is false and peer is in persistent cache - update persistent cache
-            (false, true, _) => {
-                debug!(
-                    "Updating unstaked peer {:?} in persistent cache",
-                    mining_addr
-                );
-                if let Some(existing_peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
-                    let handshake_cooldown_expired =
-                        existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
-                    existing_peer.last_seen = peer.last_seen;
-                    existing_peer.reputation_score = peer.reputation_score;
-                    if existing_peer.address != peer_address {
-                        debug!("Peer address mismatch, updating to new address");
-                        self.update_peer_address(mining_addr, peer_address);
-                        true
-                    } else if handshake_cooldown_expired {
-                        debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
-                        true
-                    } else {
-                        debug!("Peer address is the same, no update needed");
-                        false
-                    }
-                } else {
-                    warn!(
-                        "Peer {:?} is not found in the persistent cache, which shouldn't happen",
-                        mining_addr
-                    );
-                    false
-                }
+            // Case 1: Update peer in persistent cache (both staked and unstaked peers)
+            (_, true, _) => {
+                let peer_type = if is_staked { "staked" } else { "unstaked" };
+                debug!("Updating {} peer {:?} in persistent cache", peer_type, mining_addr);
+                self.update_peer_in_persistent_cache(mining_addr, peer, peer_address)
             }
 
             // Case 2: is_staked is false and peer is in purgatory - update purgatory
@@ -544,7 +552,7 @@ impl PeerListDataInner {
                 true
             }
 
-            // Case 4: is_staked is false and peer is not in both caches - add to purgatory
+            // Case 4: is_staked is false, and peer is not in both caches - add to purgatory
             (false, false, false) => {
                 debug!("Adding unstaked peer {:?} to purgatory", mining_addr);
                 self.unstaked_peer_purgatory.insert(mining_addr, peer);
@@ -560,35 +568,7 @@ impl PeerListDataInner {
                 true
             }
 
-            // Case 5: is_staked is true and peer exists in persistent cache - update persistent cache
-            (true, true, _) => {
-                debug!("Updating staked peer {:?} in persistent cache", mining_addr);
-                if let Some(existing_peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
-                    let handshake_cooldown_expired =
-                        existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
-                    existing_peer.last_seen = peer.last_seen;
-                    existing_peer.reputation_score = peer.reputation_score;
-                    if existing_peer.address != peer_address {
-                        debug!("Peer address mismatch, updating to new address");
-                        self.update_peer_address(mining_addr, peer_address);
-                        true
-                    } else if handshake_cooldown_expired {
-                        debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
-                        true
-                    } else {
-                        debug!("Peer address is the same, no update needed");
-                        false
-                    }
-                } else {
-                    warn!(
-                        "Peer {:?} is not found in the persistent cache, which shouldn't happen",
-                        mining_addr
-                    );
-                    false
-                }
-            }
-
-            // Case 6: is_staked is true and peer exists in purgatory - move from purgatory to persistent cache
+            // Case 5: is_staked is true and peer exists in purgatory - move from purgatory to persistent cache
             (true, false, true) => {
                 debug!(
                     "Moving staked peer {:?} from purgatory to persistent cache",
