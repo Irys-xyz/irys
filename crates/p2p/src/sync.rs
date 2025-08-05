@@ -501,7 +501,7 @@ async fn get_block_index(
     retries: usize,
     fetch_from_the_trusted_peer: bool,
 ) -> GossipResult<Vec<BlockIndexItem>> {
-    let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
+    let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         peer_list.trusted_peers()
     } else {
         peer_list.top_active_peers(Some(5), None)
@@ -511,11 +511,52 @@ async fn get_block_index(
         return Err(GossipError::Network("No peers available".to_string()));
     }
 
+    // the peer to remove from the candidate list of peers
+    // this is so we don't have conflicting mutable and immutable borrows
+    let mut to_remove = None;
+
+    let mut rng = rand::thread_rng();
+
     for _ in 0..retries {
-        let (miner_address, top_peer) =
-            peers_to_fetch_index_from
-                .choose(&mut rand::thread_rng())
-                .ok_or(GossipError::Network("No peers available".to_string()))?;
+        if let Some(to_remove) = to_remove {
+            peers_to_fetch_index_from.retain(|peer| peer.0 != to_remove);
+        };
+
+        let (miner_address, top_peer) = peers_to_fetch_index_from
+            .choose(&mut rng)
+            .ok_or(GossipError::Network("No peers available".to_string()))?;
+
+        let should_remove = match api_client
+            .node_info(top_peer.address.api)
+            .await
+            .map_err(|network_error| GossipError::Network(network_error.to_string()))
+        {
+            Ok(info) => {
+                if info.is_syncing {
+                    info!(
+                        "Peer {} is syncing, skipping for block index fetch",
+                        &miner_address
+                    );
+
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(error) => {
+                error!(
+                    "Failed to fetch node info from peer {:?}: {:?}",
+                    miner_address, error
+                );
+                true
+            }
+        };
+
+        if should_remove {
+            // this is so we don't have conflicting mutable and immutable borrows
+            to_remove = Some(*miner_address);
+        }
+
         match api_client
             .get_block_index(
                 top_peer.address.api,
