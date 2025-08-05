@@ -9,7 +9,7 @@ use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256,
+    IrysTransactionId, H256, U256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;
@@ -83,6 +83,41 @@ impl Inner {
 
         // Validate anchor
         let anchor_height = self.validate_anchor(&tx).await?;
+
+        // Validate ledger type and protocol fees
+        match tx.ledger_id {
+            0 => {
+                // Publish ledger - permanent storage
+                // Calculate expected perm_fee based on data size
+                let expected_fee = self.calculate_perm_storage_fee(tx.data_size)?;
+                let expected_perm_fee = expected_fee.amount;
+                
+                // Validate perm_fee matches expected calculation
+                let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
+                if actual_perm_fee != expected_perm_fee {
+                    return Err(TxIngressError::IncorrectProtocolFee {
+                        expected: expected_perm_fee,
+                        actual: actual_perm_fee,
+                    });
+                }
+                
+                // For publish ledger, term_fee should be 0
+                if tx.term_fee != 0 {
+                    return Err(TxIngressError::IncorrectProtocolFee {
+                        expected: U256::zero(),
+                        actual: U256::from(tx.term_fee),
+                    });
+                }
+            }
+            1 => {
+                // Submit ledger - currently not supported
+                return Err(TxIngressError::InvalidLedger(1));
+            }
+            _ => {
+                // Invalid ledger type
+                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+            }
+        }
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
