@@ -118,7 +118,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             ));
             assert_eq!(
                 response.message,
-                Some("Source address does not match request address".to_string())
+                Some("The source address does not match the request address".to_string())
             );
             assert!(response.retry_after.is_none(), "Expected no retry after");
         }

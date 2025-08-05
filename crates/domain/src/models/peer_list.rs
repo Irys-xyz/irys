@@ -450,6 +450,7 @@ impl PeerListDataInner {
             self.gossip_addr_to_mining_addr_map
                 .remove(&peer.address.gossip.ip());
             self.api_addr_to_mining_addr_map.remove(&peer.address.api);
+            self.known_peers_cache.remove(&peer.address);
             debug!("Removed unstaked peer {:?} from all caches", mining_addr);
         }
     }
@@ -551,7 +552,7 @@ impl PeerListDataInner {
                     .insert(gossip_addr.ip(), mining_addr);
                 self.api_addr_to_mining_addr_map
                     .insert(peer_address.api, mining_addr);
-                // Don't add to known_peers_cache for purgatory peers - they need to prove themselves first
+                self.known_peers_cache.insert(peer_address);
                 debug!(
                     "Unstaked peer {:?} added to purgatory with address {:?}",
                     mining_addr, peer_address
@@ -641,6 +642,8 @@ impl PeerListDataInner {
             self.api_addr_to_mining_addr_map.remove(&old_address.api);
             self.api_addr_to_mining_addr_map
                 .insert(new_address.api, mining_addr);
+            self.known_peers_cache.remove(&old_address);
+            self.known_peers_cache.insert(new_address);
         }
     }
 
@@ -653,7 +656,7 @@ impl PeerListDataInner {
             self.gossip_addr_to_mining_addr_map
                 .insert(new_address.gossip.ip(), mining_addr);
             self.known_peers_cache.remove(&old_address);
-            self.known_peers_cache.insert(old_address);
+            self.known_peers_cache.insert(new_address);
             self.api_addr_to_mining_addr_map.remove(&old_address.api);
             self.api_addr_to_mining_addr_map
                 .insert(new_address.api, mining_addr);
@@ -888,10 +891,14 @@ mod tests {
         // Test 13: all_known_peers should include both staked and unstaked peers
         let known_peers = peer_list.all_known_peers();
         let known_contains_staked = known_peers.iter().any(|addr| addr == &staked_peer.address);
-        // Note: unstaked peers are not added to known_peers_cache until they prove themselves
+        let known_contains_unstaked = known_peers.iter().any(|addr| addr == &unstaked_peer.address);
         assert!(
             known_contains_staked,
             "all_known_peers should include staked peer address"
+        );
+        assert!(
+            known_contains_unstaked,
+            "all_known_peers should include unstaked peer address (after fix)"
         );
 
         // Test 14: request_block_from_the_network should work (async method)
