@@ -6,7 +6,7 @@ module.exports =     // ecosystem.js
       "script": "./target/release/irys",
       "exec": "none",
       "exec_mode": "fork",
-      "cron_restart": '*/45 * * * *',
+      // "cron_restart": '*/45 * * * *',
       // "cron_restart": 0,
       "env": {
         "kill_timeout": 5_000,
@@ -14,5 +14,5 @@ module.exports =     // ecosystem.js
         "RUST_BACKTRACE": "full"
       }
     }
-    ]
+  ]
 };
