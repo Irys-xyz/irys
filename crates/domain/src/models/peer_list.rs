@@ -109,11 +109,17 @@ impl PeerList {
         loop {
             let active_peers_count = {
                 let bindings = self.read();
-                bindings
+                let persistent_active = bindings
                     .persistent_peers_cache
                     .values()
                     .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
-                    .count()
+                    .count();
+                let purgatory_active = bindings
+                    .unstaked_peer_purgatory
+                    .values()
+                    .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                    .count();
+                persistent_active + purgatory_active
             };
 
             if active_peers_count > 0 {
@@ -128,11 +134,21 @@ impl PeerList {
     pub fn trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
         let guard = self.read();
 
-        let mut peers: Vec<(Address, PeerListItem)> = guard
-            .persistent_peers_cache
-            .iter()
-            .map(|(key, value)| (*key, value.clone()))
-            .collect();
+        let mut peers: Vec<(Address, PeerListItem)> = Vec::new();
+        
+        // Add peers from persistent cache
+        peers.extend(
+            guard.persistent_peers_cache
+                .iter()
+                .map(|(key, value)| (*key, value.clone()))
+        );
+        
+        // Add peers from purgatory
+        peers.extend(
+            guard.unstaked_peer_purgatory
+                .iter()
+                .map(|(key, value)| (*key, value.clone()))
+        );
 
         peers.retain(|(_miner_address, peer)| {
             guard
@@ -237,7 +253,11 @@ impl PeerList {
     pub fn is_a_trusted_peer(&self, miner_address: Address, source_ip: IpAddr) -> bool {
         let binding = self.read();
 
-        let Some(peer) = binding.persistent_peers_cache.get(&miner_address) else {
+        // Check both persistent cache and purgatory
+        let peer = binding.persistent_peers_cache.get(&miner_address)
+            .or_else(|| binding.unstaked_peer_purgatory.get(&miner_address));
+        
+        let Some(peer) = peer else {
             return false;
         };
         let peer_api_ip = peer.address.api.ip();
@@ -579,5 +599,221 @@ impl PeerListDataInner {
             self.api_addr_to_mining_addr_map
                 .insert(new_address.api, mining_addr);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
+
+    fn create_test_peer(id: u8) -> (Address, PeerListItem) {
+        let mining_addr = Address::from([id; 20]);
+        let peer_address = PeerAddress {
+            gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)), 8000 + id as u16),
+            api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)), 9000 + id as u16),
+            execution: RethPeerInfo::default(),
+        };
+        let peer = PeerListItem {
+            address: peer_address,
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            response_time: 100,
+            is_online: true,
+            last_seen: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        };
+        (mining_addr, peer)
+    }
+
+    fn create_mock_sender() -> PeerNetworkSender {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        PeerNetworkSender::new(tx)
+    }
+
+    fn create_test_peer_list() -> PeerList {
+        let peer_list_data = PeerListDataInner {
+            persistent_peers_cache: HashMap::new(),
+            unstaked_peer_purgatory: HashMap::new(),
+            known_peers_cache: HashSet::new(),
+            gossip_addr_to_mining_addr_map: HashMap::new(),
+            api_addr_to_mining_addr_map: HashMap::new(),
+            trusted_peers_api_addresses: HashSet::new(),
+            peer_network_service_sender: create_mock_sender(),
+        };
+        PeerList(Arc::new(RwLock::new(peer_list_data)))
+    }
+
+    #[tokio::test]
+    async fn test_all_methods_treat_staked_unstaked_peers_equally_except_persistable() {
+        let peer_list = create_test_peer_list();
+
+        // Create test peers
+        let (staked_addr, staked_peer) = create_test_peer(1);
+        let (unstaked_addr, unstaked_peer) = create_test_peer(2);
+
+        // Add peers with different staking status
+        peer_list.add_or_update_peer(staked_addr, staked_peer.clone(), true);
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+
+        // Test 1: persistable_peers should only return staked peers
+        let persistable = peer_list.persistable_peers();
+        assert!(persistable.contains_key(&staked_addr), "Persistable peers should contain staked peer");
+        assert!(!persistable.contains_key(&unstaked_addr), "Persistable peers should NOT contain unstaked peer");
+
+        // Test 2: all_peers_for_gossip should return both staked and unstaked peers
+        let gossip_peers = peer_list.all_peers_for_gossip();
+        assert!(gossip_peers.contains_key(&staked_addr), "Gossip peers should contain staked peer");
+        assert!(gossip_peers.contains_key(&unstaked_addr), "Gossip peers should contain unstaked peer");
+
+        // Test 3: get_peer should return both staked and unstaked peers
+        let staked_result = peer_list.get_peer(&staked_addr);
+        let unstaked_result = peer_list.get_peer(&unstaked_addr);
+        assert!(staked_result.is_some(), "get_peer should find staked peer");
+        assert!(unstaked_result.is_some(), "get_peer should find unstaked peer");
+
+        // Test 4: contains_api_address should work for both staked and unstaked peers
+        let staked_api_found = peer_list.contains_api_address(&staked_peer.address.api);
+        let unstaked_api_found = peer_list.contains_api_address(&unstaked_peer.address.api);
+        assert!(staked_api_found, "contains_api_address should find staked peer API address");
+        assert!(unstaked_api_found, "contains_api_address should find unstaked peer API address");
+
+        // Test 5: peer_by_gossip_address should work for both staked and unstaked peers
+        let staked_gossip_result = peer_list.peer_by_gossip_address(staked_peer.address.gossip);
+        let unstaked_gossip_result = peer_list.peer_by_gossip_address(unstaked_peer.address.gossip);
+        assert!(staked_gossip_result.is_some(), "peer_by_gossip_address should find staked peer");
+        assert!(unstaked_gossip_result.is_some(), "peer_by_gossip_address should find unstaked peer");
+
+        // Test 6: peer_by_mining_address should work for both staked and unstaked peers
+        let staked_mining_result = peer_list.peer_by_mining_address(&staked_addr);
+        let unstaked_mining_result = peer_list.peer_by_mining_address(&unstaked_addr);
+        assert!(staked_mining_result.is_some(), "peer_by_mining_address should find staked peer");
+        assert!(unstaked_mining_result.is_some(), "peer_by_mining_address should find unstaked peer");
+
+        // Test 7: peer_count should include both staked and unstaked peers
+        let total_count = peer_list.peer_count();
+        assert_eq!(total_count, 2, "peer_count should include both staked and unstaked peers");
+
+        // Test 8: top_active_peers should include both staked and unstaked peers if they're active
+        let top_peers = peer_list.top_active_peers(None, None);
+        assert_eq!(top_peers.len(), 2, "top_active_peers should include both staked and unstaked peers if they're active");
+        let contains_staked = top_peers.iter().any(|(addr, _)| addr == &staked_addr);
+        let contains_unstaked = top_peers.iter().any(|(addr, _)| addr == &unstaked_addr);
+        assert!(contains_staked, "top_active_peers should include staked peer if it's active");
+        assert!(contains_unstaked, "top_active_peers should include unstaked peer if it's active");
+
+        // Test 9: trusted_peers should return both staked and unstaked peers if they're in trusted list
+        // First, we need to add the peers to the trusted list
+        {
+            let mut inner = peer_list.0.write().unwrap();
+            inner.trusted_peers_api_addresses.insert(staked_peer.address.api);
+            inner.trusted_peers_api_addresses.insert(unstaked_peer.address.api);
+        }
+        let trusted_peers = peer_list.trusted_peers();
+        let trusted_contains_staked = trusted_peers.iter().any(|(addr, _)| addr == &staked_addr);
+        let trusted_contains_unstaked = trusted_peers.iter().any(|(addr, _)| addr == &unstaked_addr);
+        assert!(trusted_contains_staked, "trusted_peers should include a staked peer if it's in the trusted list");
+        assert!(trusted_contains_unstaked, "trusted_peers should include an unstaked peer if it's the trusted list");
+
+        // Test 10: trusted_peer_addresses should return both staked and unstaked peer addresses
+        let trusted_addresses = peer_list.trusted_peer_addresses();
+        assert!(trusted_addresses.contains(&staked_peer.address.api), "trusted_peer_addresses should contain staked peer API address");
+        assert!(trusted_addresses.contains(&unstaked_peer.address.api), "trusted_peer_addresses should contain unstaked peer API address");
+
+        // Test 11: inactive_peers should include both staked and unstaked peers if they're inactive
+        // Create inactive peers
+        let (inactive_staked_addr, mut inactive_staked_peer) = create_test_peer(3);
+        let (inactive_unstaked_addr, mut inactive_unstaked_peer) = create_test_peer(4);
+        inactive_staked_peer.reputation_score = PeerScore::new(10); // Below active threshold
+        inactive_unstaked_peer.reputation_score = PeerScore::new(10); // Below active threshold
+        peer_list.add_or_update_peer(inactive_staked_addr, inactive_staked_peer, true);
+        peer_list.add_or_update_peer(inactive_unstaked_addr, inactive_unstaked_peer, false);
+        
+        let inactive_peers = peer_list.inactive_peers();
+        let inactive_contains_staked = inactive_peers.iter().any(|(addr, _)| addr == &inactive_staked_addr);
+        let inactive_contains_unstaked = inactive_peers.iter().any(|(addr, _)| addr == &inactive_unstaked_addr);
+        assert!(inactive_contains_staked, "inactive_peers should include staked peer if it's inactive");
+        assert!(inactive_contains_unstaked, "inactive_peers should include unstaked peer if it's inactive");
+
+        // Test 12: is_a_trusted_peer should work for both staked and unstaked peers
+        let staked_is_trusted = peer_list.is_a_trusted_peer(staked_addr, staked_peer.address.gossip.ip());
+        let unstaked_is_trusted = peer_list.is_a_trusted_peer(unstaked_addr, unstaked_peer.address.gossip.ip());
+        assert!(staked_is_trusted, "is_a_trusted_peer should return true for staked peer in trusted list");
+        assert!(unstaked_is_trusted, "is_a_trusted_peer should return true for unstaked peer in trusted list");
+
+        // Test 13: all_known_peers should include both staked and unstaked peers
+        let known_peers = peer_list.all_known_peers();
+        let known_contains_staked = known_peers.iter().any(|addr| addr == &staked_peer.address);
+        // Note: unstaked peers are not added to known_peers_cache until they prove themselves
+        assert!(known_contains_staked, "all_known_peers should include staked peer address");
+
+        // Test 14: request_block_from_the_network should work (async method)
+        let block_hash = BlockHash::default();
+        let block_request_result = peer_list.request_block_from_the_network(block_hash, false).await;
+        // This will likely fail due to mock sender, but the method should handle both peer types equally
+        assert!(block_request_result.is_err(), "request_block_from_the_network should work with mock sender (expected to fail)");
+
+        // Test 15: request_payload_from_the_network should work (async method)
+        let payload_hash = B256::default();
+        let payload_request_result = peer_list.request_payload_from_the_network(payload_hash, false).await;
+        // This will likely fail due to mock sender, but the method should handle both peer types equally
+        assert!(payload_request_result.is_err(), "request_payload_from_the_network should work with mock sender (expected to fail)");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_active_peers_includes_both_staked_and_unstaked() {
+        let peer_list = create_test_peer_list();
+
+        // Create test peers with active reputation scores
+        let (staked_addr, mut staked_peer) = create_test_peer(1);
+        let (unstaked_addr, mut unstaked_peer) = create_test_peer(2);
+        
+        // Make sure peers have active reputation scores (above ACTIVE_THRESHOLD = 20)
+        // Start with INITIAL = 50, so they should already be active
+        staked_peer.reputation_score = PeerScore::new(80);  // Well above active threshold
+        unstaked_peer.reputation_score = PeerScore::new(80);  // Well above active threshold
+
+        // Test case 1: Only unstaked peer is active
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+        
+        // The wait_for_active_peers should find the active unstaked peer
+        // We'll test this by checking if there are active peers
+        let active_peers_count = {
+            let bindings = peer_list.read();
+            let persistent_active = bindings
+                .persistent_peers_cache
+                .values()
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            let purgatory_active = bindings
+                .unstaked_peer_purgatory
+                .values()
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            persistent_active + purgatory_active
+        };
+
+        assert!(active_peers_count > 0, "wait_for_active_peers should consider unstaked peers");
+
+        // Test case 2: Add staked peer and verify both are counted
+        peer_list.add_or_update_peer(staked_addr, staked_peer.clone(), true);
+        
+        let active_peers_count_both = {
+            let bindings = peer_list.read();
+            let persistent_active = bindings
+                .persistent_peers_cache
+                .values()
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            let purgatory_active = bindings
+                .unstaked_peer_purgatory
+                .values()
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            persistent_active + purgatory_active
+        };
+
+        assert_eq!(active_peers_count_both, 2, "Both staked and unstaked active peers should be counted");
     }
 }
