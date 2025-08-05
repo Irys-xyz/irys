@@ -283,6 +283,10 @@ impl DataSyncServiceInner {
                 continue;
             };
 
+            let Some(slot_index) = pa.slot_index else {
+                continue;
+            };
+
             // Only sync peers for storage modules that need data
             let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
             if entropy_intervals.is_empty() {
@@ -290,20 +294,20 @@ impl DataSyncServiceInner {
                 continue;
             }
 
-            self.sync_peers_for_ledger(ledger_id);
+            self.ensure_bandwidth_managers_for_peers(ledger_id, slot_index);
         }
     }
 
     /// Updates the active_peers list and ensures there are PeerBandwidthManagers for
     /// any peers assigned to store the same slot data.
-    fn sync_peers_for_ledger(&mut self, ledger_id: u32) {
+    fn ensure_bandwidth_managers_for_peers(&mut self, ledger_id: u32, slot_index: usize) {
         let epoch_snapshot = self.block_tree.read().canonical_epoch_snapshot();
 
         let slot_assignments: Vec<_> = epoch_snapshot
             .partition_assignments
             .data_partitions
             .values()
-            .filter(|a| a.ledger_id == Some(ledger_id))
+            .filter(|a| a.ledger_id == Some(ledger_id) && a.slot_index == Some(slot_index))
             .copied()
             .collect();
 
