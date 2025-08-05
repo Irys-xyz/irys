@@ -2,14 +2,13 @@ use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
-use eyre::eyre;
+use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_domain::{
-    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, PrioritizedCommitment,
-    StorageModulesReadGuard,
+    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
 };
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
@@ -37,7 +36,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 #[derive(Debug)]
 pub struct Inner {
@@ -216,6 +215,7 @@ impl Inner {
         })
     }
 
+    #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
         &self,
         parent_evm_block_id: Option<BlockId>,
@@ -271,6 +271,11 @@ impl Inner {
             // Since stakes are processed before pledges, this prevents inclusion of
             // pledge commitments when their associated stake commitment is unfunded
             if !has_funds {
+                debug!(
+                    signer = ?signer,
+                    balance = ?balance,
+                    "Transaction funding check failed"
+                );
                 unfunded_address.insert(signer);
                 return false;
             }
@@ -280,10 +285,14 @@ impl Inner {
 
         // Get a list of all recently confirmed commitment txids in the canonical chain
         let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
-        let last_block = canonical.last().unwrap();
-        debug!(
-            "best_mempool_txs: current head height {}",
-            last_block.height
+
+        let last_block = canonical.last().ok_or_eyre("Empty canonical chain")?;
+
+        info!(
+            head_height = last_block.height,
+            block_hash = ?last_block.block_hash,
+            chain_length = canonical.len(),
+            "Starting mempool transaction selection"
         );
 
         for entry in canonical.iter() {
@@ -294,14 +303,6 @@ impl Inner {
                 }
             }
         }
-
-        //create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
-        let mut simulation_commitment_snapshot = self
-            .block_tree_read_guard
-            .read()
-            .canonical_commitment_snapshot()
-            .as_ref()
-            .clone();
 
         // Process commitments in the mempool in priority order
         let mempool_state_guard = mempool_state.read().await;
@@ -318,21 +319,29 @@ impl Inner {
                             CommitmentType::Stake | CommitmentType::Pledge { .. }
                         )
                     })
-                    .map(PrioritizedCommitment)
+                    .cloned()
             })
             .collect::<Vec<_>>();
 
-        // Sort all commitments according to our priority rules in a single pass
+        // Sort all commitments according to our priority rules
         sorted_commitments.sort();
 
         // Process sorted commitments
-        for prioritized_tx in sorted_commitments {
-            let tx = prioritized_tx.0;
-
+        // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+        let mut simulation_commitment_snapshot = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_snapshot()
+            .as_ref()
+            .clone();
+        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+        for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
-                    "best_mempool_txs: skipping already confirmed commitment tx {}",
-                    tx.id
+                    tx_id = ?tx.id,
+                    commitment_type = ?tx.commitment_type,
+                    signer = ?tx.signer,
+                    "Skipping already confirmed commitment transaction"
                 );
                 continue;
             }
@@ -350,11 +359,11 @@ impl Inner {
                     .get_epoch_snapshot(&last_block.block_hash)
                     .expect("parent blocks epoch_snapshot should be retrievable");
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
-                tracing::error!(
-                    "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
-                    tx.id,
-                    tx.signer,
-                    is_staked
+                debug!(
+                    tx_id = ?tx.id,
+                    signer = ?tx.signer,
+                    is_staked = is_staked,
+                    "Checking stake status for commitment tx"
                 );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
@@ -363,23 +372,29 @@ impl Inner {
             }
             // simulation check
             {
-                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
-
                 let simulation = simulation_commitment_snapshot.add_commitment(tx, &epoch_snapshot);
 
                 // skip commitments that would not be accepted
                 if simulation != CommitmentSnapshotStatus::Accepted {
-                    tracing::error!(
-                        "tx {:?}:{:?} skipped: {:?}",
-                        tx.commitment_type,
-                        tx.id,
-                        simulation
+                    warn!(
+                        commitment_type = ?tx.commitment_type,
+                        tx_id = ?tx.id,
+                        simulation_status = ?simulation,
+                        "Commitment tx rejected by simulation"
                     );
                     continue;
                 }
             }
 
-            debug!("best_mempool_txs: adding commitment tx {}", tx.id);
+            debug!(
+                tx_id = ?tx.id,
+                commitment_type = ?tx.commitment_type,
+                signer = ?tx.signer,
+                fee = ?tx.total_cost(),
+                selected_count = commitment_tx.len() + 1,
+                max_commitments,
+                "Adding commitment transaction to block"
+            );
             commitment_tx.push(tx.clone());
 
             // if we have reached the maximum allowed number of commitment txs per block
@@ -390,22 +405,32 @@ impl Inner {
         }
         drop(mempool_state_guard);
 
-        debug!(
-            "best_mempool_txs: confirmed_commitments\n {:#?}",
-            confirmed_commitments
-        );
-        debug!(
-            "best_mempool_txs: best commitments \n {:#?}",
-            commitment_tx
-                .iter()
-                .map(|t| (t.id, t.commitment_type))
-                .collect::<Vec<_>>()
-        );
+        // Log commitment selection summary
+        if !commitment_tx.is_empty() {
+            let commitment_summary =
+                commitment_tx
+                    .iter()
+                    .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
+                        match tx.commitment_type {
+                            CommitmentType::Stake => (stakes + 1, pledges),
+                            CommitmentType::Pledge { .. } => (stakes, pledges + 1),
+                            _ => (stakes, pledges),
+                        }
+                    });
+            info!(
+                selected_commitments = commitment_tx.len(),
+                stake_txs = commitment_summary.0,
+                pledge_txs = commitment_summary.1,
+                max_allowed = max_commitments,
+                "Completed commitment transaction selection"
+            );
+        }
 
         // Prepare data transactions for inclusion after commitments
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
 
         // Sort data transactions by fee (highest first) to maximize revenue
+        let total_data_available = submit_ledger_txs.len();
 
         submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
@@ -426,20 +451,82 @@ impl Inner {
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
-            debug!("Checking funding for {}", &tx.id);
+            trace!(
+                tx_id = ?tx.id,
+                signer = ?tx.signer(),
+                fee = ?tx.total_cost(),
+                "Checking funding for data transaction"
+            );
             if check_funding(&tx) {
-                debug!("Submit tx {} passed the funding check", &tx.id);
+                trace!(
+                    tx_id = ?tx.id,
+                    signer = ?tx.signer(),
+                    fee = ?tx.total_cost(),
+                    selected_count = submit_tx.len() + 1,
+                    max_data_txs,
+                    "Data transaction passed funding check"
+                );
                 submit_tx.push(tx);
                 if submit_tx.len() >= max_data_txs {
                     break;
                 }
             } else {
-                debug!("Submit tx {} failed the funding check", &tx.id)
+                trace!(
+                    tx_id = ?tx.id,
+                    signer = ?tx.signer(),
+                    fee = ?tx.total_cost(),
+                    reason = "insufficient_funds",
+                    "Data transaction failed funding check"
+                );
             }
         }
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
         let publish_txs_and_proofs = self.get_publish_txs_and_proofs().await?;
+
+        // Calculate total fees and log final summary
+        let total_fee_collected: U256 = submit_tx
+            .iter()
+            .map(irys_types::IrysTransactionCommon::user_fee)
+            .fold(U256::zero(), irys_types::U256::saturating_add)
+            .saturating_add(
+                commitment_tx
+                    .iter()
+                    .map(irys_types::IrysTransactionCommon::total_cost)
+                    .fold(U256::zero(), irys_types::U256::saturating_add),
+            );
+
+        info!(
+            commitment_txs = commitment_tx.len(),
+            data_txs = submit_tx.len(),
+            publish_txs = publish_txs_and_proofs.0.len(),
+            total_fee_collected = ?total_fee_collected,
+            unfunded_addresses = unfunded_address.len(),
+            "Mempool transaction selection completed"
+        );
+
+        // Check for high rejection rate
+        let total_commitments_available = sorted_commitments.len();
+        let total_available = total_commitments_available + total_data_available;
+        let total_selected = commitment_tx.len() + submit_tx.len();
+
+        if total_available > 0 {
+            const REJECTION_RATE_THRESHOLD: usize = 70;
+            let rejection_rate = ((total_available - total_selected) * 100) / total_available;
+            if rejection_rate > REJECTION_RATE_THRESHOLD {
+                warn!(
+                    rejection_rate = rejection_rate,
+                    total_available,
+                    total_selected,
+                    commitments_available = total_commitments_available,
+                    commitments_selected = commitment_tx.len(),
+                    data_available = total_data_available,
+                    data_selected = submit_tx.len(),
+                    unfunded_addresses = unfunded_address.len(),
+                    "High transaction rejection rate detected"
+                );
+            }
+        }
 
         // Return selected transactions grouped by type
         Ok(MempoolTxs {

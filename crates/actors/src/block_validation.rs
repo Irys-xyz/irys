@@ -14,7 +14,6 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
-    PrioritizedCommitment,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -400,19 +399,23 @@ pub fn poa_is_valid(
         // partition data -> ledger data
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(poa.partition_hash)
-            .unwrap();
+            .ok_or_else(|| eyre::eyre!("Missing partition assignment for the provided hash"))?;
 
-        let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
-            * config.num_partitions_per_slot
-            * config.num_chunks_in_partition
-            + poa.partition_chunk_offset as u64;
+        let ledger_chunk_offset =
+            u64::try_from(partition_assignment.slot_index.ok_or_else(|| {
+                eyre::eyre!("Partition assignment for the provided hash is missing slot index")
+            })?)
+            .expect("Partition assignment slot index should fit into a u64")
+                * config.num_partitions_per_slot
+                * config.num_chunks_in_partition
+                + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
-        let ledger = DataLedger::try_from(ledger_id).unwrap();
+        let ledger = DataLedger::try_from(ledger_id)?;
 
         let bb = block_index_guard
             .read()
-            .get_block_bounds(ledger, ledger_chunk_offset);
+            .get_block_bounds(ledger, ledger_chunk_offset)?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
         };
@@ -683,7 +686,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
                     .await?
             }
             [] => {
@@ -776,7 +779,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -789,17 +792,12 @@ pub async fn commitment_txs_are_valid(
         .system_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| &ledger.tx_ids.0)
-        .filter(|ids| !ids.is_empty());
-
-    let Some(block_tx_ids) = block_tx_ids else {
-        debug!("No commitment transactions in block");
-        return Ok(());
-    };
+        .map(|ledger| ledger.tx_ids.0.as_slice())
+        .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids.clone(), &service_senders.mempool, db).await?;
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -825,6 +823,8 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        tracing::error!(?expected_commitments, "validation");
+        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments
@@ -878,9 +878,9 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
-    // Sort using PrioritizedCommitment to get expected order
+    // Sort to get expected order
     let mut expected_order = stake_and_pledge_txs.clone();
-    expected_order.sort_by_key(|tx| PrioritizedCommitment(*tx));
+    expected_order.sort();
 
     // Compare actual order vs expected order
     for (idx, pair) in stake_and_pledge_txs
@@ -978,14 +978,19 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let block_index = Arc::new(RwLock::new(BlockIndex::new(&node_config).await.unwrap()));
+        let block_index = Arc::new(RwLock::new(
+            BlockIndex::new(&node_config)
+                .await
+                .expect("Expected to create block index"),
+        ));
 
         let block_index_actor =
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
         let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
+                .expect("Expected to load storage submodules config");
 
         // Create an epoch snapshot for the genesis block
         let epoch_snapshot = EpochSnapshot::new(
@@ -1011,7 +1016,7 @@ mod tests {
 
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(partition_hash)
-            .unwrap();
+            .expect("Expected to get partition assignment");
 
         debug!("Partition assignment {:?}", partition_assignment);
 
@@ -1050,8 +1055,12 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
+            let tx = signer
+                .create_transaction(data, None)
+                .expect("Expected to create a transaction");
+            let tx = signer
+                .sign_transaction(tx)
+                .expect("Expected to sign the transaction");
             txs.push(tx);
         }
 
@@ -1081,8 +1090,12 @@ mod tests {
         let mut txs: Vec<DataTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
-        let tx = signer.create_transaction(data.clone(), None).unwrap();
-        let tx = signer.sign_transaction(tx).unwrap();
+        let tx = signer
+            .create_transaction(data.clone(), None)
+            .expect("Expected to create a transaction");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("Expected to sign the transaction");
         txs.push(tx);
 
         let poa_tx_num = 0;
@@ -1171,7 +1184,11 @@ mod tests {
         // Initialize genesis block at height 0
         let height: u64;
         {
-            height = context.block_index.read().unwrap().num_blocks();
+            height = context
+                .block_index
+                .read()
+                .expect("Expected to be able to read block index")
+                .num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -1262,9 +1279,13 @@ mod tests {
             .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
-            .unwrap();
+            .expect("Failed to get block index guard");
 
-        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = context
+            .partition_assignment
+            .slot_index
+            .expect("Expected to have a slot index in the assignment")
+            as u64
             * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
@@ -1278,7 +1299,8 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
@@ -1319,8 +1341,12 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
+            let tx = signer
+                .create_transaction(data, None)
+                .expect("Expected to create a transaction");
+            let tx = signer
+                .sign_transaction(tx)
+                .expect("Expected to sign the transaction");
             txs.push(tx);
         }
 
@@ -1357,7 +1383,11 @@ mod tests {
         // Initialize genesis block at height 0
         let height: u64;
         {
-            height = context.block_index.read().unwrap().num_blocks();
+            height = context
+                .block_index
+                .read()
+                .expect("To read block index")
+                .num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -1403,7 +1433,7 @@ mod tests {
 
         // Trim to actual data size for hash calculation (chunk_size might be larger)
         let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
-        let entropy_packed_hash = hash_sha256(trimmed_hacked).unwrap();
+        let entropy_packed_hash = hash_sha256(trimmed_hacked).expect("Expected to hash data");
 
         // Calculate the correct offset for this chunk position
         let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
@@ -1503,9 +1533,12 @@ mod tests {
             .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
-            .unwrap();
+            .expect("Expected to get block index guard");
 
-        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = context
+            .partition_assignment
+            .slot_index
+            .expect("Expected to get slot index") as u64
             * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
@@ -1519,7 +1552,8 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
