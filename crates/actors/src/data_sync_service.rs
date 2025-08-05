@@ -370,6 +370,7 @@ impl DataSyncServiceInner {
             let orchestrator = ChunkOrchestrator::new(
                 sm.clone(),
                 self.active_sync_peers.clone(),
+                self.block_tree.clone(),
                 &self.service_senders,
                 chunk_fetcher,
                 self.config.node_config.clone(),

@@ -4,7 +4,7 @@ use crate::{
     services::ServiceSenders,
     DataSyncServiceMessage,
 };
-use irys_domain::{ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
+use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
 use irys_types::{Address, LedgerChunkOffset, NodeConfig, PartitionChunkOffset};
 use std::{
     collections::{hash_map, HashMap},
@@ -37,14 +37,16 @@ pub struct ChunkRequest {
 
 #[derive(Debug)]
 pub struct ChunkOrchestrator {
-    storage_module: Arc<StorageModule>,
     pub chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
-    recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // To support better observability in the future
     pub current_peers: Vec<Address>,
+    block_tree: BlockTreeReadGuard,
+    storage_module: Arc<StorageModule>,
+    recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // To support better observability in the future
     // Keep a reference to the active_sync_peers in DataSyncService where it is maintained
     active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
     slot_index: usize,
+    ledger_id: u32,
     chunk_fetcher: Arc<dyn ChunkFetcher>,
     config: NodeConfig,
 }
@@ -53,6 +55,7 @@ impl ChunkOrchestrator {
     pub fn new(
         storage_module: Arc<StorageModule>,
         sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+        block_tree: BlockTreeReadGuard,
         service_senders: &ServiceSenders,
         chunk_fetcher: Arc<dyn ChunkFetcher>,
         config: NodeConfig,
@@ -63,13 +66,21 @@ impl ChunkOrchestrator {
             .slot_index
             .expect("storage_module should be assigned to a ledger slot");
 
+        let ledger_id = storage_module
+            .partition_assignment()
+            .unwrap()
+            .ledger_id
+            .unwrap();
+
         Self {
             storage_module,
             chunk_requests: Default::default(),
             recent_chunk_times: CircularBuffer::new(8000),
             current_peers: Default::default(),
+            block_tree,
             active_sync_peers: sync_peers,
             service_senders: service_senders.clone(),
+            ledger_id,
             slot_index,
             chunk_fetcher, // Store the chunk fetcher
             config,
@@ -89,6 +100,8 @@ impl ChunkOrchestrator {
             .filter(|r| matches!(r.request_state, ChunkRequestState::Pending(_)))
             .count();
 
+        let max_chunk_offset = self.get_max_chunk_offset();
+
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(pending_count);
 
@@ -100,6 +113,11 @@ impl ChunkOrchestrator {
         for interval in entropy_intervals {
             for interval_step in *interval.start()..=*interval.end() {
                 let chunk_offset = PartitionChunkOffset::from(interval_step);
+
+                // Don't try to sync above the maximum amount of data stored in the partition
+                if chunk_offset > max_chunk_offset {
+                    return;
+                }
 
                 if let hash_map::Entry::Vacant(e) = self.chunk_requests.entry(chunk_offset) {
                     // Only executes when the entry in the hashmap is vacant
@@ -161,11 +179,43 @@ impl ChunkOrchestrator {
         storage_capacity_remaining < (target_throughput / 10)
     }
 
-    /// Check if this orchestrator has pending requests that could benefit from more concurrency
-    pub fn has_pending_requests(&self) -> bool {
-        self.chunk_requests
-            .values()
-            .any(|request| matches!(request.request_state, ChunkRequestState::Pending(_)))
+    pub fn get_max_chunk_offset(&self) -> PartitionChunkOffset {
+        // Find the maximum LedgerRelativeOffset of this storage module
+        let ledger_range = self
+            .storage_module
+            .get_storage_module_ledger_range()
+            .expect("storage module should be assigned to a ledger");
+
+        // See if it is higher than th max_chunk_offset of the ledger
+        let canonical = self.block_tree.read().get_canonical_chain();
+        let head_block = canonical.0.last().unwrap();
+        let block_hash = head_block.block_hash;
+        let binding = self.block_tree.read();
+        let data_ledger = binding
+            .get_block(&block_hash)
+            .expect("Block to be in block tree")
+            .data_ledgers
+            .iter()
+            .find(|dl| dl.ledger_id == self.ledger_id)
+            .expect("should be able to look up data_ledger by id");
+
+        // is the max chunk offset before the start of this storage module (can happen at head of chain)
+        if ledger_range.start() > data_ledger.max_chunk_offset.into() {
+            // The maximum chunk offset for this partition to sync is zero, meaning don't attempt to sync anything
+            return PartitionChunkOffset::from(0);
+        }
+
+        if ledger_range.end() > data_ledger.max_chunk_offset.into() {
+            // If it is convert the max_chunk_offset from ledger_relative (u64) to partition relative
+            let part_relative: u64 = data_ledger
+                .max_chunk_offset
+                .saturating_sub(ledger_range.start().into());
+            PartitionChunkOffset::from(part_relative as u32)
+        } else {
+            // Otherwise just return the maximum PartitionChunkOffset
+            let max = ledger_range.end() - ledger_range.start();
+            PartitionChunkOffset::from(max)
+        }
     }
 
     fn find_best_peer(&self, excluding: Option<Address>) -> Option<Address> {

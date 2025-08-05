@@ -12,10 +12,10 @@ use irys_storage::ie;
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
-    partition_chunk_offset_ie, Address, Base64, Config, ConsensusConfig, DataSyncServiceConfig,
-    DataTransaction, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PackedChunk,
-    PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig, TxChunkOffset,
-    UnpackedChunk, H256,
+    partition_chunk_offset_ie, Address, Base64, Config, ConsensusConfig, DataLedger,
+    DataSyncServiceConfig, DataTransaction, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
+    NodeConfig, PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig,
+    TxChunkOffset, UnpackedChunk, H256,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -504,7 +504,11 @@ impl TestSetup {
         // Use a data transaction to create well formed UnpackedChunks for the partition
         debug!("Initializing partition data...");
         let signer = IrysSigner::random_signer(&config.consensus);
-        let fake_genesis = IrysBlockHeader::new_mock_header();
+
+        // Make sure the genesis block track the ledger size
+        let mut fake_genesis = IrysBlockHeader::new_mock_header();
+        fake_genesis.data_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks;
+
         let data_tx = signer
             .create_transaction(data, Some(fake_genesis.block_hash))
             .expect("To make a data transaction");
@@ -554,7 +558,7 @@ impl TestSetup {
     ) -> StorageModule {
         let num_chunks = data_tx.chunks.len() as u64;
         let storage_module_info = StorageModuleInfo {
-            id: 0,
+            id: DataLedger::Publish as usize,
             partition_assignment: Some(*pa),
             submodules: vec![(
                 partition_chunk_offset_ie!(0, num_chunks as u32),
