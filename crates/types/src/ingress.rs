@@ -1,4 +1,4 @@
-use alloy_primitives::Address;
+use alloy_primitives::{Address, ChainId};
 use alloy_signer::Signature;
 use eyre::OptionExt as _;
 use openssl::sha;
@@ -18,6 +18,7 @@ pub struct IngressProof {
     pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
+    pub chain_id: ChainId,
 }
 
 impl Compress for IngressProof {
@@ -51,14 +52,16 @@ pub fn generate_ingress_proof(
     signer: IrysSigner,
     data_root: DataRoot,
     chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    chain_id: u64,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof: [u8; 32] = root.id;
 
-    // Combine proof and data_root into a single digest to sign
+    // Combine proof, data_root, and chain_id into a single digest to sign
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof);
     hasher.update(&data_root.0);
+    hasher.update(&chain_id.to_be_bytes());
     let prehash = hasher.finish();
 
     let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
@@ -67,16 +70,23 @@ pub fn generate_ingress_proof(
         signature: signature.into(),
         data_root,
         proof: H256(root.id),
+        chain_id,
     })
 }
 
 pub fn verify_ingress_proof(
     proof: IngressProof,
     chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    chain_id: ChainId,
 ) -> eyre::Result<bool> {
+    if chain_id != proof.chain_id {
+        return Ok(false); // Chain ID mismatch
+    }
+
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof.proof.0);
     hasher.update(&proof.data_root.0);
+    hasher.update(&proof.chain_id.to_be_bytes());
     let prehash = hasher.finish();
 
     let sig = proof.signature.as_bytes();
@@ -92,10 +102,11 @@ pub fn verify_ingress_proof(
             .id,
     );
 
-    // re-compute the prehash (combining data_root and proof)
+    // re-compute the prehash (combining data_root, proof, and chain_id)
     let mut hasher = sha::Sha256::new();
     hasher.update(&proof_root.id);
     hasher.update(&data_root.0);
+    hasher.update(&proof.chain_id.to_be_bytes());
     let new_prehash = hasher.finish();
 
     // make sure they match
@@ -156,22 +167,111 @@ mod tests {
         let root = generate_data_root(leaves)?;
         let data_root = H256(root.id);
 
-        // Generate an ingress proof
+        // Generate an ingress proof with chain_id
         let signer = IrysSigner::random_signer(&testing_config);
         let chunks: Vec<Vec<u8>> = data_bytes
             .chunks(testing_config.chunk_size as usize)
             .map(Vec::from)
             .collect();
-        let proof = generate_ingress_proof(signer, data_root, chunks.clone().into_iter().map(Ok))?;
+        let chain_id = 1; // Example chain_id for testing
+        let proof = generate_ingress_proof(
+            signer,
+            data_root,
+            chunks.clone().into_iter().map(Ok),
+            chain_id,
+        )?;
 
         // Verify the ingress proof
         assert!(verify_ingress_proof(
             proof.clone(),
-            chunks.clone().into_iter().map(Ok)
+            chunks.clone().into_iter().map(Ok),
+            chain_id
         )?);
         let mut reversed = chunks;
         reversed.reverse();
-        assert!(!verify_ingress_proof(proof, reversed.into_iter().map(Ok))?);
+        assert!(!verify_ingress_proof(
+            proof,
+            reversed.into_iter().map(Ok),
+            chain_id
+        )?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_chain_id_prevents_replay_attack() -> eyre::Result<()> {
+        // Create some random data
+        let testing_config = ConsensusConfig::testing();
+        let data_size = (testing_config.chunk_size as f64 * 2.5).round() as usize;
+        let mut data_bytes = vec![0_u8; data_size];
+        rand::thread_rng().fill(&mut data_bytes[..]);
+
+        // Build a merkle tree and data_root from the chunks
+        let leaves = generate_leaves(
+            vec![data_bytes.clone()].into_iter().map(Ok),
+            testing_config.chunk_size as usize,
+        )
+        .unwrap();
+        let root = generate_data_root(leaves)?;
+        let data_root = H256(root.id);
+
+        let signer = IrysSigner::random_signer(&testing_config);
+        let chunks: Vec<Vec<u8>> = data_bytes
+            .chunks(testing_config.chunk_size as usize)
+            .map(Vec::from)
+            .collect();
+
+        // Generate proof for testnet (chain_id = 1)
+        let testnet_chain_id = 1;
+        let testnet_proof = generate_ingress_proof(
+            signer.clone(),
+            data_root,
+            chunks.clone().into_iter().map(Ok),
+            testnet_chain_id,
+        )?;
+
+        // Generate proof for mainnet (chain_id = 2)
+        let mainnet_chain_id = 2;
+        let mainnet_proof = generate_ingress_proof(
+            signer,
+            data_root,
+            chunks.clone().into_iter().map(Ok),
+            mainnet_chain_id,
+        )?;
+
+        // Verify that testnet proof is valid for testnet
+        assert!(verify_ingress_proof(
+            testnet_proof.clone(),
+            chunks.clone().into_iter().map(Ok),
+            testnet_chain_id
+        )?);
+
+        // Verify that mainnet proof is valid for mainnet
+        assert!(verify_ingress_proof(
+            mainnet_proof,
+            chunks.clone().into_iter().map(Ok),
+            mainnet_chain_id
+        )?);
+
+        // Create a modified proof where we try to use testnet proof with mainnet chain_id
+        let mut replay_attack_proof = testnet_proof;
+        replay_attack_proof.chain_id = mainnet_chain_id;
+
+        // This should fail verification because the signature was created with testnet chain_id
+        // but we're trying to verify it with mainnet chain_id
+        assert!(!verify_ingress_proof(
+            replay_attack_proof.clone(),
+            chunks.clone().into_iter().map(Ok),
+            mainnet_chain_id
+        )?);
+
+        // This should fail verification because there's going to be a mismatch in chain_id
+        // even if the proof is valid for testnet
+        assert!(!verify_ingress_proof(
+            replay_attack_proof,
+            chunks.into_iter().map(Ok),
+            testnet_chain_id
+        )?);
 
         Ok(())
     }

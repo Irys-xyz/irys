@@ -3015,6 +3015,12 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "irys-database",
+ "irys-types",
+ "reth-node-core",
+ "toml",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber 0.3.19",
 ]
 
 [[package]]
@@ -4907,7 +4913,6 @@ dependencies = [
  "assert_matches",
  "awc",
  "base58",
- "color-eyre",
  "core_affinity",
  "eyre",
  "futures",
@@ -5077,7 +5082,6 @@ dependencies = [
  "actix",
  "actix-rt",
  "actix-web",
- "alloy-core",
  "async-trait",
  "base58",
  "eyre",
@@ -5092,6 +5096,7 @@ dependencies = [
  "irys-types",
  "irys-vdf",
  "lru 0.14.0",
+ "moka",
  "rand 0.8.5",
  "reqwest 0.11.27",
  "reth",
@@ -5136,6 +5141,7 @@ dependencies = [
  "eyre",
  "modular-bitfield",
  "reth-codecs",
+ "rstest",
  "ruint",
  "serde",
  "test-fuzz",
@@ -5153,12 +5159,12 @@ dependencies = [
  "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
- "alloy-rlp",
  "alloy-rpc-types",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "arbitrary",
+ "borsh",
  "bytes",
  "eyre",
  "futures",
@@ -5257,9 +5263,11 @@ dependencies = [
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "color-eyre",
  "tempfile",
  "tracing",
+ "tracing-error",
  "tracing-subscriber 0.3.19",
 ]
 
@@ -5277,6 +5285,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "arbitrary",
+ "async-trait",
  "base58",
  "base64-url",
  "borsh",

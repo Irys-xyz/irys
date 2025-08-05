@@ -1,5 +1,6 @@
 use crate::block_pool::BlockPoolError;
 use irys_actors::mempool_service::TxIngressError;
+use irys_types::CommitmentValidationError;
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -19,6 +20,8 @@ pub enum GossipError {
     BlockPool(BlockPoolError),
     #[error("Transaction has already been handled")]
     TransactionIsAlreadyHandled,
+    #[error("Commitment validation error: {0}")]
+    CommitmentValidation(#[from] CommitmentValidationError),
 }
 
 impl From<InternalGossipError> for GossipError {
@@ -54,6 +57,9 @@ impl From<TxIngressError> for GossipError {
                 Self::Internal(InternalGossipError::ServiceUninitialized)
             }
             TxIngressError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            TxIngressError::CommitmentValidationError(commitment_validation_error) => {
+                Self::CommitmentValidation(commitment_validation_error)
+            }
         }
     }
 }

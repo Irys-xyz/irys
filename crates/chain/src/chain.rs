@@ -2,10 +2,12 @@ use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
+use irys_actors::block_discovery::{
+    BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
+};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::{
-    block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerCommand,
@@ -72,9 +74,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{self};
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
@@ -105,6 +107,7 @@ pub struct IrysNodeCtx {
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
+    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
 impl IrysNodeCtx {
@@ -120,6 +123,7 @@ impl IrysNodeCtx {
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
             sync_state: self.sync_state.clone(),
+            mempool_pledge_provider: self.mempool_pledge_provider.clone(),
         }
     }
 
@@ -344,7 +348,7 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                self.create_new_genesis_block(genesis_block.clone())
+                self.create_new_genesis_block(genesis_block.clone()).await
             }
             NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
                 // Fetch genesis data from trusted peer when joining network
@@ -392,12 +396,12 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
-    fn create_new_genesis_block(
+    async fn create_new_genesis_block(
         &self,
         mut genesis_block: IrysBlockHeader,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
         // Generate genesis commitments from configuration
-        let commitments = get_genesis_commitments(&self.config);
+        let commitments = get_genesis_commitments(&self.config).await;
 
         // Calculate initial difficulty based on number of storage modules
         let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
@@ -412,7 +416,7 @@ impl IrysNode {
         genesis_block.last_diff_timestamp = timestamp;
 
         // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config);
+        add_genesis_commitments(&mut genesis_block, &self.config).await;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
@@ -612,7 +616,8 @@ impl IrysNode {
         )
         .await?;
 
-        if config.node_config.stake_pledge_drives {
+        // Call stake_and_pledge after mempool service is initialized
+        if ctx.config.node_config.stake_pledge_drives {
             const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
             let mut validation_tracker = BlockValidationTracker::new(
                 ctx.block_tree_guard.clone(),
@@ -633,10 +638,11 @@ impl IrysNode {
             // TODO: add code to proactively grab the latest head block from peers
             // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
             stake_and_pledge(
-                config,
+                &ctx.config,
                 ctx.block_tree_guard.clone(),
                 ctx.storage_modules_guard.clone(),
                 latest_hash,
+                ctx.mempool_pledge_provider.clone(),
             )
             .await?;
         }
@@ -951,6 +957,24 @@ impl IrysNode {
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
+        // Get the mempool state to create the pledge provider
+        let (tx, rx) = oneshot::channel();
+        service_senders
+            .mempool
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
+
+        let mempool_state = rx
+            .await
+            .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
+
+        // Create the MempoolPledgeProvider
+        let mempool_pledge_provider =
+            Arc::new(irys_actors::mempool_service::MempoolPledgeProvider::new(
+                mempool_state,
+                block_tree_guard.clone(),
+            ));
+
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
             &config,
@@ -991,7 +1015,7 @@ impl IrysNode {
         let reward_curve = Arc::new(reward_curve);
 
         // spawn block discovery
-        let (block_discovery, block_discovery_arbiter) = Self::init_block_discovery_service(
+        let block_discovery_handle = Self::init_block_discovery_service(
             &config,
             &irys_db,
             &service_senders,
@@ -999,15 +1023,19 @@ impl IrysNode {
             &block_tree_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
+            receivers.block_discovery,
+            runtime_handle.clone(),
         );
-        let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
+
+        let block_discovery_facade =
+            BlockDiscoveryFacadeImpl::new(service_senders.block_discovery.clone());
 
         let block_status_provider =
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
 
         let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
-            block_discovery_facade,
+            block_discovery_facade.clone(),
             irys_api_client::IrysApiClient::new(),
             task_exec,
             peer_list_guard.clone(),
@@ -1046,7 +1074,7 @@ impl IrysNode {
             &service_senders,
             &block_tree_guard,
             &vdf_state_readonly,
-            block_discovery.clone(),
+            block_discovery_facade.clone(),
             broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
@@ -1103,7 +1131,6 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                block_discovery_addr: block_discovery,
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
                 reth: reth_service_actor,
@@ -1129,6 +1156,7 @@ impl IrysNode {
             block_pool,
             validation_enabled,
             storage_modules_guard,
+            mempool_pledge_provider: mempool_pledge_provider.clone(),
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1179,12 +1207,7 @@ impl IrysNode {
 
             // 2. Block production flow
             services.push(ArbiterEnum::TokioService(block_producer_handle));
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(
-                    block_discovery_arbiter,
-                    "block_discovery_arbiter".to_string(),
-                ),
-            });
+            services.push(ArbiterEnum::TokioService(block_discovery_handle));
 
             // 3. Validation
             services.push(ArbiterEnum::TokioService(validation_handle));
@@ -1216,7 +1239,7 @@ impl IrysNode {
                 peer_list: peer_list_guard,
                 db: irys_db,
                 reth_provider: reth_node.clone(),
-                block_tree: block_tree_guard,
+                block_tree: block_tree_guard.clone(),
                 block_index: block_index_guard.clone(),
                 config: config.clone(),
                 reth_http_url: reth_node
@@ -1224,6 +1247,7 @@ impl IrysNode {
                     .http_url()
                     .expect("Missing reth rpc url!"),
                 sync_state,
+                mempool_pledge_provider: mempool_pledge_provider.clone(),
             },
             http_listener,
         );
@@ -1399,7 +1423,7 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
-        block_discovery: actix::Addr<BlockDiscoveryActor>,
+        block_discovery: BlockDiscoveryFacadeImpl,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
@@ -1414,7 +1438,7 @@ impl IrysNode {
             config: config.clone(),
             reward_curve,
             mining_broadcaster: broadcast_mining_actor,
-            block_discovery_addr: block_discovery,
+            block_discovery,
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
@@ -1462,8 +1486,10 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
-    ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
-        let block_discovery_actor = BlockDiscoveryActor {
+        block_discovery_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+        runtime_handle: Handle,
+    ) -> TokioServiceHandle {
+        let block_discovery_inner = BlockDiscoveryServiceInner {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
             db: irys_db.clone(),
@@ -1471,14 +1497,12 @@ impl IrysNode {
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,
-            span: Span::current(),
         };
-        let block_discovery_arbiter = Arbiter::new();
-        let block_discovery =
-            BlockDiscoveryActor::start_in_arbiter(&block_discovery_arbiter.handle(), |_| {
-                block_discovery_actor
-            });
-        (block_discovery, block_discovery_arbiter)
+        BlockDiscoveryService::spawn_service(
+            Arc::new(block_discovery_inner),
+            block_discovery_rx,
+            runtime_handle,
+        )
     }
 
     fn init_chunk_migration_service(
@@ -1626,7 +1650,8 @@ async fn stake_and_pledge(
     config: &Config,
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
-    latest_hash: BlockHash,
+    latest_block_hash: BlockHash,
+    mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
@@ -1640,6 +1665,7 @@ async fn stake_and_pledge(
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
+
         client.post(url).send_json(commitment_tx).await
     };
 
@@ -1649,7 +1675,7 @@ async fn stake_and_pledge(
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);
-        let commitment_snapshot = block_tree_guard.canonical_commitment_snapshot();
+        let commitment_snapshot = (*block_tree_guard.canonical_commitment_snapshot()).clone();
         (is_historically_staked, commitment_snapshot)
     };
 
@@ -1662,15 +1688,14 @@ async fn stake_and_pledge(
 
     // if we have a historic or pending stake, don't send another
     let is_staked = is_historically_staked || has_pending_stake;
-
-    let mut last_tx_id = if !is_staked {
+    if !is_staked {
         debug!(
             "Local mining address {:?} is not staked, staking...",
             &address
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_hash, 1);
+        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         let stake_tx = signer.sign_commitment(stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
@@ -1679,7 +1704,7 @@ async fn stake_and_pledge(
     } else {
         debug!("Local mining address {:?} is staked", &address);
         // latest_block.previous_block_hash
-        latest_hash
+        latest_block_hash
     };
 
     // get all SMs without a partition assignment
@@ -1704,11 +1729,12 @@ async fn stake_and_pledge(
         // post a pledge tx
         let pledge_tx = CommitmentTransaction::new_pledge(
             &config.consensus,
-            last_tx_id,
-            1,
-            commitment_snapshot.as_ref(),
+            latest_block_hash,
+            mempool_pledge_provider.as_ref(),
             address,
-        );
+        )
+        .await;
+
         let pledge_tx = signer.sign_commitment(pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
@@ -1718,7 +1744,6 @@ async fn stake_and_pledge(
             to_pledge_count,
             &pledge_tx.id
         );
-        last_tx_id = pledge_tx.id
     }
     debug!("Stake & Pledge check complete");
 

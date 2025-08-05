@@ -1,5 +1,5 @@
 use crate::{
-    block_discovery::{BlockDiscoveredMessage, BlockDiscoveryActor},
+    block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
@@ -90,7 +90,7 @@ pub struct BlockProducerInner {
     /// Reference to the global database
     pub db: DatabaseProvider,
     /// Message the block discovery actor when a block is produced locally
-    pub block_discovery_addr: Addr<BlockDiscoveryActor>,
+    pub block_discovery: BlockDiscoveryFacadeImpl,
     /// Mining broadcast service
     pub mining_broadcaster: Addr<BroadcastMiningService>,
     /// Reference to all the services we can send messages to
@@ -164,7 +164,7 @@ impl BlockProducerService {
         );
         loop {
             tokio::select! {
-                biased;
+                biased; // enable bias so polling happens in definition order
 
                 // Check for shutdown signal
                 _ = &mut self.shutdown => {
@@ -413,12 +413,16 @@ pub trait BlockProdStrategy {
         let shadow_txs = shadow_txs
             .generate_all(commitment_txs_to_bill, submit_txs)
             .map(|tx_result| {
-                let tx = tx_result?;
-                let mut tx_raw = compose_shadow_tx(self.inner().config.consensus.chain_id, &tx);
+                let metadata = tx_result?;
+                let mut tx_raw = compose_shadow_tx(
+                    self.inner().config.consensus.chain_id,
+                    &metadata.shadow_tx,
+                    metadata.transaction_fee,
+                );
                 let signature = local_signer
                     .sign_transaction_sync(&mut tx_raw)
                     .expect("shadow tx must always be signable");
-                let tx = EthereumTxEnvelope::<TxEip4844>::Legacy(tx_raw.into_signed(signature))
+                let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
                     .try_into_recovered()
                     .expect("shadow tx must always be signable");
 
@@ -706,33 +710,33 @@ pub trait BlockProdStrategy {
         let block = Arc::new(irys_block);
         match self
             .inner()
-            .block_discovery_addr
-            .send(BlockDiscoveredMessage(block.clone()))
+            .block_discovery
+            .handle_block(Arc::clone(&block))
             .await
         {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(res)) => {
+            Ok(()) => Ok(()),
+            e @ Err(BlockDiscoveryError::InternalError(_)) => {
                 error!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block.block_hash.0, &block.height, res
-                );
-                Err(eyre!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block.block_hash.0,
-                    &block.height,
-                    res
-                ))
-            }
-            Err(e) => {
-                error!(
-                    "Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}",
+                    "Internal Block discovery error for block {} ({}) : {:?}",
                     &block.block_hash.0.to_base58(),
                     &block.height,
                     e
                 );
                 Err(eyre!(
-                    "Could not deliver BlockDiscoveredMessage for block {} ({}) : {:?}",
+                    "Internal Block discovery error for block {} ({}) : {:?}",
                     &block.block_hash.0.to_base58(),
+                    &block.height,
+                    e
+                ))
+            }
+            Err(e) => {
+                error!(
+                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
+                    &block.block_hash.0, &block.height, e
+                );
+                Err(eyre!(
+                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
+                    &block.block_hash.0,
                     &block.height,
                     e
                 ))
@@ -931,7 +935,12 @@ pub trait BlockProdStrategy {
                 }
             }
         }
-        .expect("Should be able to get the parent EVM block");
+        .unwrap_or_else(|| {
+            panic!(
+                "Should be able to get the parent EVM block {} {}",
+                &prev_block_header.evm_block_hash, &prev_block_header.height
+            )
+        });
         // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
         // for now we just skip the check for the genesis block
         if prev_block_header.height > 0 {
