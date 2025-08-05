@@ -1068,7 +1068,9 @@ mod tests {
         service
             .peer_list
             .add_or_update_peer(mining_addr2, peer2.clone(), true);
-        service.peer_list.add_or_update_peer(mining_addr3, peer3, true);
+        service
+            .peer_list
+            .add_or_update_peer(mining_addr3, peer3, true);
 
         // Test active peers request using message handler
         let exclude_peers = HashSet::new();
@@ -1114,7 +1116,9 @@ mod tests {
         service
             .peer_list
             .add_or_update_peer(mining_addr, peer.clone(), true);
-        service.peer_list.add_or_update_peer(mining_addr, peer, true);
+        service
+            .peer_list
+            .add_or_update_peer(mining_addr, peer, true);
 
         // Verify only one entry exists using KnownPeersRequest
         let known_peers = service.peer_list.all_known_peers();
@@ -1978,7 +1982,7 @@ mod tests {
         // Add second peer with is_staked: false
         service
             .peer_list
-            .add_or_update_peer(unstaked_mining_addr, unstaked_peer.clone(), false);
+            .add_or_update_peer(unstaked_mining_addr, unstaked_peer, false);
 
         // Flush and check that only the first peer (staked) has been flushed
         service.flush().expect("flush should succeed");
@@ -2007,8 +2011,14 @@ mod tests {
         // Only the staked peer should be in the database at this point
         assert_eq!(items.len(), 1, "Only staked peer should be in the database");
         let (stored_addr, stored_peer) = items.into_iter().next().expect("no peers");
-        assert_eq!(stored_addr, staked_mining_addr, "Stored peer should be the staked peer");
-        assert_eq!(stored_peer.0.address, staked_peer.address, "Stored peer address should match");
+        assert_eq!(
+            stored_addr, staked_mining_addr,
+            "Stored peer should be the staked peer"
+        );
+        assert_eq!(
+            stored_peer.0.address, staked_peer.address,
+            "Stored peer address should match"
+        );
 
         // Increase the second peer's score until it reaches 81 or more
         // Starting score is 50 (INITIAL), need to reach 81 (PERSISTENCE_THRESHOLD + 1)
@@ -2055,10 +2065,21 @@ mod tests {
             .expect("failed to walk all items after the second flush");
 
         // Both peers should now be in the database
-        assert_eq!(items_after.len(), 2, "Both peers should be in the database after the second flush");
-        
-        let stored_addrs: std::collections::HashSet<_> = items_after.iter().map(|(addr, _)| *addr).collect();
-        assert!(stored_addrs.contains(&staked_mining_addr), "Staked peer should be in the database");
-        assert!(stored_addrs.contains(&unstaked_mining_addr), "Unstaked peer should now be in the database");
+        assert_eq!(
+            items_after.len(),
+            2,
+            "Both peers should be in the database after the second flush"
+        );
+
+        let stored_addrs: std::collections::HashSet<_> =
+            items_after.iter().map(|(addr, _)| *addr).collect();
+        assert!(
+            stored_addrs.contains(&staked_mining_addr),
+            "Staked peer should be in the database"
+        );
+        assert!(
+            stored_addrs.contains(&unstaked_mining_addr),
+            "Unstaked peer should now be in the database"
+        );
     }
 }
