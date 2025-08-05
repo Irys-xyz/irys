@@ -185,6 +185,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
+    ctx_genesis_node.start_public_api().await;
 
     // retrieve block_migration_depth for use later
     let mut consensus = ctx_genesis_node.cfg.consensus.clone();
@@ -510,7 +511,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
-    match node.create_submit_data_tx(account, data_bytes).await {
+    match node.create_publish_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);
         }

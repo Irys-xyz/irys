@@ -21,7 +21,7 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
-use irys_api_server::routes::price::CommitmentPriceInfo;
+use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::{
@@ -1054,14 +1054,51 @@ impl IrysNodeTest<IrysNodeCtx> {
             .get_balance_irys(address, block)
     }
 
-    pub async fn create_submit_data_tx(
+    pub async fn create_publish_data_tx(
         &self,
         account: &IrysSigner,
         data: Vec<u8>,
     ) -> Result<DataTransaction, AddTxError> {
+        // Get data size before moving data
+        let data_size = data.len() as u64;
+
+        // Query the price endpoint to get required fees for Publish ledger
+        let client = awc::Client::default();
+        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let url = format!(
+            "{}/v1/price/{}/{}",
+            api_uri,
+            DataLedger::Publish as u32,
+            data_size
+        );
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AddTxError::CreateTx(eyre::eyre!("Failed to get price: {}", e)))?;
+
+        if response.status() != awc::http::StatusCode::OK {
+            return Err(AddTxError::CreateTx(eyre::eyre!(
+                "Price endpoint returned status: {}",
+                response.status()
+            )));
+        }
+
+        let price_info: PriceInfo = response.json().await.map_err(|e| {
+            AddTxError::CreateTx(eyre::eyre!("Failed to parse price response: {}", e))
+        })?;
+
+        // Create transaction with proper fees using the new publish method
         let tx = account
-            .create_transaction(data, None)
+            .create_publish_transaction(
+                data,
+                None, // anchor
+                price_info.value,
+                price_info.fee,
+            )
             .map_err(AddTxError::CreateTx)?;
+
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();

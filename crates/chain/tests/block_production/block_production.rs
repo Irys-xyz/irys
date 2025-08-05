@@ -70,7 +70,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let node = node.start().await;
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx = node
-        .create_submit_data_tx(&user_account, data_bytes.clone())
+        .create_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
@@ -331,7 +331,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .expect("tx should be accepted");
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let irys_tx = node
-        .create_submit_data_tx(&account1, data_bytes.clone())
+        .create_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
@@ -455,7 +455,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     // Attempt to create and submit a transaction from the unfunded user
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx_result = node
-        .create_submit_data_tx(&unfunded_user, data_bytes.clone())
+        .create_publish_data_tx(&unfunded_user, data_bytes.clone())
         .await;
 
     // Verify that the transaction was rejected due to insufficient funds
@@ -535,7 +535,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     // Attempt to create and submit a transaction from the nonexistent user
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx_result = node
-        .create_submit_data_tx(&nonexistent_user, data_bytes.clone())
+        .create_publish_data_tx(&nonexistent_user, data_bytes.clone())
         .await;
 
     // Verify that the transaction was rejected due to insufficient funds
@@ -622,7 +622,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     // Create and submit a transaction from the user
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx = node
-        .create_submit_data_tx(&user, data_bytes.clone())
+        .create_publish_data_tx(&user, data_bytes.clone())
         .await?;
 
     // Verify the transaction was accepted (fee is 2: perm_fee=1 + term_fee=1)
