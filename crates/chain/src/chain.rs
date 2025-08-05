@@ -2,11 +2,13 @@ use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
+use irys_actors::block_discovery::{
+    BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
+};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
 use irys_actors::{
-    block_discovery::BlockDiscoveryActor,
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerCommand,
@@ -73,9 +75,9 @@ use std::{
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{self};
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
@@ -1014,7 +1016,7 @@ impl IrysNode {
         let reward_curve = Arc::new(reward_curve);
 
         // spawn block discovery
-        let (block_discovery, block_discovery_arbiter) = Self::init_block_discovery_service(
+        let block_discovery_handle = Self::init_block_discovery_service(
             &config,
             &irys_db,
             &service_senders,
@@ -1022,15 +1024,19 @@ impl IrysNode {
             &block_tree_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
+            receivers.block_discovery,
+            runtime_handle.clone(),
         );
-        let block_discovery_facade = BlockDiscoveryFacadeImpl::new(block_discovery.clone());
+
+        let block_discovery_facade =
+            BlockDiscoveryFacadeImpl::new(service_senders.block_discovery.clone());
 
         let block_status_provider =
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
 
         let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
-            block_discovery_facade,
+            block_discovery_facade.clone(),
             irys_api_client::IrysApiClient::new(),
             task_exec,
             peer_list_guard.clone(),
@@ -1069,7 +1075,7 @@ impl IrysNode {
             &service_senders,
             &block_tree_guard,
             &vdf_state_readonly,
-            block_discovery.clone(),
+            block_discovery_facade.clone(),
             broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
@@ -1126,7 +1132,6 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                block_discovery_addr: block_discovery,
                 packing: packing_actor_addr,
                 block_index: block_index_service_actor,
                 reth: reth_service_actor,
@@ -1209,12 +1214,7 @@ impl IrysNode {
 
             // 2. Block production flow
             services.push(ArbiterEnum::TokioService(block_producer_handle));
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(
-                    block_discovery_arbiter,
-                    "block_discovery_arbiter".to_string(),
-                ),
-            });
+            services.push(ArbiterEnum::TokioService(block_discovery_handle));
 
             // 3. Validation
             services.push(ArbiterEnum::TokioService(validation_handle));
@@ -1430,7 +1430,7 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
-        block_discovery: actix::Addr<BlockDiscoveryActor>,
+        block_discovery: BlockDiscoveryFacadeImpl,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
@@ -1445,7 +1445,7 @@ impl IrysNode {
             config: config.clone(),
             reward_curve,
             mining_broadcaster: broadcast_mining_actor,
-            block_discovery_addr: block_discovery,
+            block_discovery,
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
             price_oracle,
@@ -1493,8 +1493,10 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
-    ) -> (actix::Addr<BlockDiscoveryActor>, Arbiter) {
-        let block_discovery_actor = BlockDiscoveryActor {
+        block_discovery_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+        runtime_handle: Handle,
+    ) -> TokioServiceHandle {
+        let block_discovery_inner = BlockDiscoveryServiceInner {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
             db: irys_db.clone(),
@@ -1502,14 +1504,12 @@ impl IrysNode {
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,
-            span: Span::current(),
         };
-        let block_discovery_arbiter = Arbiter::new();
-        let block_discovery =
-            BlockDiscoveryActor::start_in_arbiter(&block_discovery_arbiter.handle(), |_| {
-                block_discovery_actor
-            });
-        (block_discovery, block_discovery_arbiter)
+        BlockDiscoveryService::spawn_service(
+            Arc::new(block_discovery_inner),
+            block_discovery_rx,
+            runtime_handle,
+        )
     }
 
     fn init_chunk_migration_service(
@@ -1702,7 +1702,7 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash, 1);
+        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         let stake_tx = signer.sign_commitment(stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
@@ -1737,7 +1737,6 @@ async fn stake_and_pledge(
         let pledge_tx = CommitmentTransaction::new_pledge(
             &config.consensus,
             latest_block_hash,
-            1,
             mempool_pledge_provider.as_ref(),
             address,
         )

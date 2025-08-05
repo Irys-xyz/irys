@@ -1,5 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::mempool_service::ChunkIngressError;
+use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
 use eyre::eyre;
@@ -8,7 +8,8 @@ use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{cached_data_root_by_data_root, SystemLedger};
 use irys_domain::{
-    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
+    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, PrioritizedCommitment,
+    StorageModulesReadGuard,
 };
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
@@ -18,8 +19,8 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    Address, Base64, CommitmentTransaction, DataRoot, DataTransactionHeader, MempoolConfig,
-    TxChunkOffset, TxIngressProof, UnpackedChunk,
+    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -51,6 +52,8 @@ pub struct Inner {
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Pledge provider for commitment transaction validation
+    pub pledge_provider: MempoolPledgeProvider,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -300,89 +303,89 @@ impl Inner {
             .as_ref()
             .clone();
 
-        // Process commitments in the mempool in priority order (stakes then pledges)
-        // This order ensures stake transactions are processed before pledges
+        // Process commitments in the mempool in priority order
         let mempool_state_guard = mempool_state.read().await;
 
-        'outer: for commitment_type in &[CommitmentType::Stake, CommitmentType::Pledge] {
-            // Gather all commitments of current type from all addresses
-            let mut sorted_commitments: Vec<_> = mempool_state_guard
-                .valid_commitment_tx
-                .values()
-                .flat_map(|txs| {
-                    txs.iter()
-                        .filter(|tx| tx.commitment_type == *commitment_type)
-                        .cloned()
-                })
-                .collect();
+        // Collect all stake and pledge commitments from mempool
+        let mut sorted_commitments = mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| {
+                txs.iter()
+                    .filter(|tx| {
+                        matches!(
+                            tx.commitment_type,
+                            CommitmentType::Stake | CommitmentType::Pledge { .. }
+                        )
+                    })
+                    .map(PrioritizedCommitment)
+            })
+            .collect::<Vec<_>>();
 
-            // Sort commitments by fee (highest first) to maximize network revenue
-            sorted_commitments.sort_by_key(|b| std::cmp::Reverse(b.user_fee()));
+        // Sort all commitments according to our priority rules in a single pass
+        sorted_commitments.sort();
 
-            // Select fundable commitments in fee-priority order
-            for tx in sorted_commitments {
-                if confirmed_commitments.contains(&tx.id) {
-                    debug!(
-                        "best_mempool_txs: skipping already confirmed commitment tx {}",
-                        tx.id
-                    );
-                    continue; // Skip tx already confirmed in the canonical chain
-                }
+        // Process sorted commitments
+        for prioritized_tx in sorted_commitments {
+            let tx = prioritized_tx.0;
 
-                // Check funding before simulation so we don't mutate the snapshot unnecessarily
-                if !check_funding(&tx) {
+            if confirmed_commitments.contains(&tx.id) {
+                debug!(
+                    "best_mempool_txs: skipping already confirmed commitment tx {}",
+                    tx.id
+                );
+                continue;
+            }
+
+            // Check funding before simulation
+            if !check_funding(tx) {
+                continue;
+            }
+
+            // signer stake status check
+            if matches!(tx.commitment_type, CommitmentType::Stake) {
+                let epoch_snapshot = self
+                    .block_tree_read_guard
+                    .read()
+                    .get_epoch_snapshot(&last_block.block_hash)
+                    .expect("parent blocks epoch_snapshot should be retrievable");
+                let is_staked = epoch_snapshot.is_staked(tx.signer);
+                tracing::error!(
+                    "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                    tx.id,
+                    tx.signer,
+                    is_staked
+                );
+                if is_staked {
+                    // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
                     continue;
                 }
+            }
+            // simulation check
+            {
+                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
 
-                // signer stake status check
-                if tx.commitment_type == CommitmentType::Stake {
-                    let epoch_snapshot = self
-                        .block_tree_read_guard
-                        .read()
-                        .get_epoch_snapshot(&last_block.block_hash)
-                        .expect("parent blocks epoch_snapshot should be retrievable");
-                    let is_staked = epoch_snapshot.is_staked(tx.signer);
+                let simulation = simulation_commitment_snapshot.add_commitment(tx, &epoch_snapshot);
+
+                // skip commitments that would not be accepted
+                if simulation != CommitmentSnapshotStatus::Accepted {
                     tracing::error!(
-                        "tx.id: {:?} tx.signer {:?} is_staked: {:?}",
+                        "tx {:?}:{:?} skipped: {:?}",
+                        tx.commitment_type,
                         tx.id,
-                        tx.signer,
-                        is_staked
+                        simulation
                     );
-                    if is_staked {
-                        // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
-                        continue;
-                    }
+                    continue;
                 }
-                // simulation check
-                {
-                    let is_staked = self
-                        .block_tree_read_guard
-                        .read()
-                        .canonical_epoch_snapshot()
-                        .is_staked(tx.signer);
+            }
 
-                    let simulation = simulation_commitment_snapshot.add_commitment(&tx, is_staked);
+            debug!("best_mempool_txs: adding commitment tx {}", tx.id);
+            commitment_tx.push(tx.clone());
 
-                    // skip commitments that would not be accepted
-                    if simulation != CommitmentSnapshotStatus::Accepted {
-                        tracing::error!(
-                            "tx {:?}:{:?} skipped: {:?}",
-                            tx.commitment_type,
-                            tx.id,
-                            simulation
-                        );
-                        continue;
-                    }
-                }
-
-                debug!("best_mempool_txs: adding commitment tx {}", tx.id);
-                commitment_tx.push(tx);
-
-                // if we have reached the maximum allowed number of commitment txs per block
-                // do not push anymore
-                if commitment_tx.len() >= max_commitments {
-                    break 'outer;
-                }
+            // if we have reached the maximum allowed number of commitment txs per block
+            // do not push anymore
+            if commitment_tx.len() >= max_commitments {
+                break;
             }
         }
         drop(mempool_state_guard);
@@ -839,24 +842,34 @@ impl TxReadError {
 }
 
 /// Reasons why Transaction Ingress might fail
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
+    #[error("Transaction signature is invalid")]
     InvalidSignature,
     /// The account does not have enough tokens to fund this transaction
+    #[error("Account has insufficient funds for this transaction")]
     Unfunded,
     /// This transaction id is already in the cache
+    #[error("Transaction already exists in cache")]
     Skipped,
     /// Invalid anchor value (unknown or too old)
+    #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
     // /// Unknown anchor value (could be valid)
     // PendingAnchor,
     /// Some database error occurred
+    #[error("Database operation failed")]
     DatabaseError,
     /// The service is uninitialized
+    #[error("Mempool service is not initialized")]
     ServiceUninitialized,
     /// Catch-all variant for other errors.
+    #[error("Transaction ingress error: {0}")]
     Other(String),
+    /// Commitment transaction validation error
+    #[error("Commitment validation failed: {0}")]
+    CommitmentValidationError(#[from] CommitmentValidationError),
 }
 
 impl TxIngressError {

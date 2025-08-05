@@ -7,9 +7,9 @@ use rand::prelude::SliceRandom as _;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 const BLOCK_BATCH_SIZE: usize = 10;
@@ -179,6 +179,7 @@ impl SyncState {
     }
 
     /// Waits for the highest pre-validated block to reach target sync height
+    /// This has a progress/time based early out - if we don't make at least a block's worth of progress in `progress_timeout`, we return early
     pub async fn wait_for_processed_block_to_reach_target(&self) {
         // If already synced, return immediately
         if !self.is_syncing() {
@@ -189,14 +190,41 @@ impl SyncState {
         let target = Arc::clone(&self.sync_target_height);
         let highest_processed_block = Arc::clone(&self.highest_processed_block);
         tokio::spawn(async move {
-            // We need to add 1 to the highest processed block. For the cases when the node
-            // starts fully caught up, no new blocks are added to the index, and the
-            // target is always going to be one more than the highest processed block.
-            // If this function never resolves, no new blocks can arrive over gossip in that case.
-            while target.load(Ordering::Relaxed)
-                > highest_processed_block.load(Ordering::Relaxed) + 1
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            let progress_timeout = Duration::from_secs(60);
+            let mut last_made_progress = Instant::now();
+            let mut prev_hpb = 0;
+            loop {
+                let target = target.load(Ordering::Relaxed);
+                let hpb = highest_processed_block.load(Ordering::Relaxed);
+                let made_progress = hpb > prev_hpb;
+
+                // We need to add 1 to the highest processed block. For the cases when the node
+                // starts fully caught up, no new blocks are added to the index, and the
+                // target is always going to be one more than the highest processed block.
+                // If this function never resolves, no new blocks can arrive over gossip in that case.
+
+                if hpb + 1 >= target {
+                    // synchronised
+                    break;
+                } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
+                    // didn't make any progress in the last `progress_timeout` duration
+                    warn!(
+                        "Did not make sync process from {} in {}ms",
+                        &hpb,
+                        &progress_timeout.as_millis()
+                    );
+                    break; // progression timeout
+                } else {
+                    if made_progress {
+                        debug!(
+                            "Progressed: {} -> {} (target: {})",
+                            &prev_hpb, &hpb, &target
+                        );
+                        last_made_progress = Instant::now();
+                        prev_hpb = hpb;
+                    };
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         })
         .await
@@ -216,6 +244,7 @@ impl SyncState {
     }
 }
 
+#[instrument(skip_all, err)]
 pub async fn sync_chain(
     sync_state: SyncState,
     api_client: impl ApiClient,
@@ -285,28 +314,65 @@ pub async fn sync_chain(
         // We should enable full validation when the index nears the (tip - migration depth)
         let migration_depth = config.consensus.block_migration_depth as usize;
         let trusted_peers = peer_list.trusted_peers();
-        if let Some((_, peer)) = trusted_peers.first() {
-            let node_info = api_client
-                .node_info(peer.address.api)
-                .await
-                .map_err(|e| GossipError::Network(e.to_string()))?;
-            let index_tip = node_info.block_index_height;
-            if index_tip > migration_depth as u64 {
-                let switch_height = index_tip as usize - migration_depth;
-                sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
-                debug!(
-                    "Sync task: Setting switch to full validation at height {}",
-                    switch_height
-                );
-            } else {
-                warn!(
-                    "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
-                    index_tip, migration_depth
-                );
-            }
-        } else {
+        if trusted_peers.is_empty() {
             return Err(GossipError::Network(
                 "No trusted peers available".to_string(),
+            ));
+        }
+
+        let mut switch_height_set = false;
+        let max_retries = 5;
+
+        for retry_attempt in 0..max_retries {
+            if retry_attempt > 0 {
+                debug!(
+                    "Sync task: Retry attempt {} for fetching node info from trusted peers",
+                    retry_attempt + 1
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            for (_, peer) in trusted_peers.iter() {
+                debug!("Sync task: Trusted peer: {:?}", peer);
+                let node_info = match api_client.node_info(peer.address.api).await {
+                    Ok(info) => info,
+                    Err(err) => {
+                        warn!(
+                            "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                            peer.address.api, err
+                        );
+                        continue;
+                    }
+                };
+
+                let index_tip = node_info.block_index_height;
+                if index_tip > migration_depth as u64 {
+                    let switch_height = index_tip as usize - migration_depth;
+                    sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
+                    debug!(
+                        "Sync task: Setting switch to full validation at height {}",
+                        switch_height
+                    );
+                    switch_height_set = true;
+                    break; // Exit the inner loop as soon as we successfully get data from a peer
+                } else {
+                    warn!(
+                        "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
+                        index_tip, migration_depth
+                    );
+                    switch_height_set = true;
+                    break; // Exit the inner loop as we got valid data, even if we can't set switch height
+                }
+            }
+
+            if switch_height_set {
+                break; // Exit the outer retry loop if we successfully got data
+            }
+        }
+
+        if !switch_height_set {
+            return Err(GossipError::Network(
+                "Failed to get node info from any trusted peer after 5 retry attempts".to_string(),
             ));
         }
     }
