@@ -99,8 +99,8 @@ fn cost_of_perm_storage(
         cost_per_gb.base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
     // calculate just the miner fee directly (more efficient)
-    let miner_fee_u256 = base_network_fee
-        .calculate_fee(state.config.node_config.pricing.fee_percentage)?;
+    let miner_fee_u256 =
+        base_network_fee.calculate_fee(state.config.node_config.pricing.fee_percentage)?;
 
     Ok((base_network_fee, miner_fee_u256))
 }

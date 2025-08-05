@@ -973,7 +973,11 @@ mod tests {
             let actual = fee_amount.token_to_decimal()?;
             let expected = dec!(5.0); // 100 * 0.05 = 5
 
-            assert_eq!(expected, actual, "Expected fee {}, got {}", expected, actual);
+            assert_eq!(
+                expected, actual,
+                "Expected fee {}, got {}",
+                expected, actual
+            );
             Ok(())
         }
 
@@ -1019,7 +1023,11 @@ mod tests {
             let actual = fee_amount.token_to_decimal()?;
             let expected = dec!(0.0);
 
-            assert_eq!(expected, actual, "Expected fee {}, got {}", expected, actual);
+            assert_eq!(
+                expected, actual,
+                "Expected fee {}, got {}",
+                expected, actual
+            );
             Ok(())
         }
 

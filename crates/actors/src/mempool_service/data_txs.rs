@@ -91,16 +91,16 @@ impl Inner {
                 // Calculate expected perm_fee based on data size
                 let expected_fee = self.calculate_perm_storage_fee(tx.data_size)?;
                 let expected_perm_fee = expected_fee.amount;
-                
-                // Validate perm_fee matches expected calculation
+
+                // Validate perm_fee is at least the expected amount
                 let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
-                if actual_perm_fee != expected_perm_fee {
+                if actual_perm_fee < expected_perm_fee {
                     return Err(TxIngressError::IncorrectProtocolFee {
                         expected: expected_perm_fee,
                         actual: actual_perm_fee,
                     });
                 }
-                
+
                 // For publish ledger, term_fee should be 0
                 if tx.term_fee != 0 {
                     return Err(TxIngressError::IncorrectProtocolFee {

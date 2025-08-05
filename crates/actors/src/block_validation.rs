@@ -25,7 +25,7 @@ use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256, U256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -847,6 +847,141 @@ pub async fn commitment_txs_are_valid(
     }
 
     debug!("Commitment transaction ordering is valid");
+    Ok(())
+}
+
+/// Helper function to calculate permanent storage fee using a specific EMA snapshot
+fn calculate_perm_storage_fee_with_ema(
+    bytes_to_store: u64,
+    ema_snapshot: &EmaSnapshot,
+    config: &Config,
+) -> eyre::Result<U256> {
+    // Calculate the cost per GB (take into account replica count & cost per replica)
+    let cost_per_gb = config
+        .consensus
+        .annual_cost_per_gb
+        .cost_per_replica(
+            config.consensus.safe_minimum_number_of_years,
+            config.consensus.decay_rate,
+        )?
+        .replica_count(config.consensus.number_of_ingress_proofs)?;
+
+    // Calculate the base network fee (protocol cost) using the provided EMA snapshot
+    let base_network_fee = cost_per_gb.base_network_fee(
+        U256::from(bytes_to_store),
+        ema_snapshot.ema_for_public_pricing(),
+    )?;
+
+    Ok(base_network_fee.amount)
+}
+
+/// Validates that data transactions in a block have correct fee values
+/// based on the block's EMA pricing data
+#[tracing::instrument(skip_all, err)]
+pub async fn data_txs_are_valid(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+    block_tree_guard: &BlockTreeReadGuard,
+) -> eyre::Result<()> {
+    // Get the block's EMA snapshot for fee calculations
+    let block_ema = block_tree_guard
+        .read()
+        .get_ema_snapshot(&block.block_hash)
+        .ok_or_eyre("Block EMA snapshot not found")?;
+
+    // Extract all data transactions from both ledgers
+    let mut all_data_txs = Vec::new();
+
+    match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+
+            // Get transactions from both ledgers
+            let publish_txs = get_data_tx_in_parallel(
+                publish_ledger.tx_ids.0.clone(),
+                &service_senders.mempool,
+                db,
+            )
+            .await?;
+
+            let submit_txs = get_data_tx_in_parallel(
+                submit_ledger.tx_ids.0.clone(),
+                &service_senders.mempool,
+                db,
+            )
+            .await?;
+
+            all_data_txs.extend(publish_txs);
+            all_data_txs.extend(submit_txs);
+        }
+        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+    }
+
+    // Validate each data transaction's fees
+    for tx in all_data_txs {
+        match tx.ledger_id {
+            0 => {
+                // Publish ledger - permanent storage
+                // Calculate expected perm_fee based on data size using block's EMA
+                let expected_perm_fee =
+                    calculate_perm_storage_fee_with_ema(tx.data_size, &block_ema, config)?;
+
+                // Validate perm_fee is at least the expected amount
+                let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
+                ensure!(
+                    actual_perm_fee >= expected_perm_fee,
+                    "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
+                    tx.id,
+                    expected_perm_fee,
+                    actual_perm_fee
+                );
+
+                // For publish ledger, term_fee should be 0
+                ensure!(
+                    tx.term_fee == 0,
+                    "Transaction {} in Publish ledger should have term_fee = 0, got {}",
+                    tx.id,
+                    tx.term_fee
+                );
+            }
+            1 => {
+                // Submit ledger - term storage
+                // For now, we just ensure perm_fee is not set for Submit ledger
+                // Term fee validation would go here once term fee calculation is implemented
+                ensure!(
+                    tx.perm_fee.is_none() || tx.perm_fee == Some(0),
+                    "Transaction {} in Submit ledger should not have perm_fee set",
+                    tx.id
+                );
+
+                // TODO: Validate term_fee once calculate_term_storage_fee is implemented
+                // For now, just ensure term_fee is non-zero
+                ensure!(
+                    tx.term_fee > 0,
+                    "Transaction {} in Submit ledger should have term_fee > 0",
+                    tx.id
+                );
+            }
+            _ => {
+                eyre::bail!(
+                    "Transaction {} has invalid ledger_id: {}",
+                    tx.id,
+                    tx.ledger_id
+                );
+            }
+        }
+    }
+
+    debug!("Data transaction fee validation successful");
     Ok(())
 }
 

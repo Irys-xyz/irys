@@ -19,8 +19,12 @@ use irys_types::{
     H256, U256,
 };
 use irys_types::{
-    storage_pricing::{phantoms::{Irys, NetworkFee}, Amount}, Address, Base64, CommitmentTransaction, CommitmentValidationError,
-    DataRoot, DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
+    storage_pricing::{
+        phantoms::{Irys, NetworkFee},
+        Amount,
+    },
+    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -800,13 +804,16 @@ impl Inner {
 
     /// Calculate the expected protocol fee for permanent storage
     /// This is the same calculation used by the pricing API
-    pub fn calculate_perm_storage_fee(&self, bytes_to_store: u64) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
+    pub fn calculate_perm_storage_fee(
+        &self,
+        bytes_to_store: u64,
+    ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Get the latest EMA to use for pricing
         let tree = self.block_tree_read_guard.read();
         let tip = tree.tip;
-        let ema = tree
-            .get_ema_snapshot(&tip)
-            .ok_or_else(|| TxIngressError::Other("tip block should still remain in state".to_string()))?;
+        let ema = tree.get_ema_snapshot(&tip).ok_or_else(|| {
+            TxIngressError::Other("tip block should still remain in state".to_string())
+        })?;
         drop(tree);
 
         // Calculate the cost per GB (take into account replica count & cost per replica)
