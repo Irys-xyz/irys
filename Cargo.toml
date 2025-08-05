@@ -365,6 +365,11 @@ reth-cli-util = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0
 # # reth-ress-provider = { path = "./ext/reth/crates/ress/provider" }
 # # reth-stateless = { path = "./ext/reth/crates/stateless" }
 
+[profile.debug-release]
+inherits = "release"
+debug = true
+
+
 [profile.dev]
 panic = "unwind"
 
