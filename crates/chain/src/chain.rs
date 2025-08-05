@@ -1171,6 +1171,7 @@ impl IrysNode {
             receivers.storage_modules,
             storage_modules.clone(),
             &irys_node_ctx.actor_addresses,
+            service_senders.clone(),
             &config,
             runtime_handle.clone(),
         );
