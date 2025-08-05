@@ -100,7 +100,7 @@ fn _check_db_for_commitments() -> eyre::Result<()> {
 
         if !ledger.tx_ids.is_empty() {
             tracing::debug!(
-                "JESSEDEBUG2 block {} {} as commitment txs {:?}",
+                "block {} {} has commitment txs {:?}",
                 &header.height,
                 &hash,
                 &ledger.tx_ids

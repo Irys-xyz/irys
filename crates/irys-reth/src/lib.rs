@@ -15,9 +15,8 @@ use std::{sync::Arc, time::SystemTime};
 
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
-use alloy_primitives::{Address, TxKind, U256};
-pub use alloy_rlp;
-use alloy_rlp::{Decodable as _, Encodable as _};
+use alloy_primitives::{TxKind, U256};
+use borsh::BorshSerialize as _;
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -69,6 +68,7 @@ pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod shadow_tx;
+pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
 #[must_use]
 pub fn compose_shadow_tx(
@@ -76,23 +76,26 @@ pub fn compose_shadow_tx(
     shadow_tx: &ShadowTransaction,
     max_priority_fee_per_gas: u128,
 ) -> TxEip1559 {
-    // allocate 512 bytes for the shadow tx rlp, misc optimisation
-    let mut shadow_tx_rlp = Vec::with_capacity(512);
-    shadow_tx.encode(&mut shadow_tx_rlp);
+    // allocating additional 512 bytes for the shadow tx borsh buffer, misc optimisation
+    let mut shadow_tx_buf = Vec::with_capacity(IRYS_SHADOW_EXEC.len() + 512);
+    shadow_tx_buf.extend_from_slice(IRYS_SHADOW_EXEC);
+    shadow_tx
+        .serialize(&mut shadow_tx_buf)
+        .expect("borsh serialization should not fail");
     TxEip1559 {
+        access_list: AccessList::default(),
         chain_id,
-        // nonce is always 0 for shadow txs
-        nonce: 0_u64,
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
+        input: shadow_tx_buf.into(),
         // large enough to not be rejected by the payload builder
         max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
         // Use the provided priority fee
         max_priority_fee_per_gas,
-        to: TxKind::Call(Address::ZERO),
+        // nonce is always 0 for shadow txs
+        nonce: 0_u64,
+        to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
         value: U256::ZERO,
-        access_list: AccessList::default(),
-        input: shadow_tx_rlp.into(),
     }
 }
 
@@ -347,14 +350,15 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        // Try to decode as a shadow transaction
         let input = transaction.input();
-        let Ok(_shadow_tx) = ShadowTransaction::decode(&mut &input[..]) else {
+        if !input.starts_with(IRYS_SHADOW_EXEC) {
             tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
             return self.eth_tx_validator.validate_one(origin, transaction);
-        };
+        }
 
         tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
+        // Even though we reject shadow txs from the pool, attempt to decode to verify structure
+        let _ = ShadowTransaction::decode(&mut &input[..]);
         TransactionValidationOutcome::Invalid(
             transaction,
             reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(

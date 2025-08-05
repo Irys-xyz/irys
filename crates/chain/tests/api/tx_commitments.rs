@@ -245,7 +245,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .commitment_state
             .pledge_commitments
             .get(&signer1.address())
-            .expect("commitments for genesis miner")
+            .expect("commitments for signer1 miner")
             .len(),
         2
     );
@@ -256,7 +256,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .commitment_state
             .pledge_commitments
             .get(&signer2.address())
-            .expect("commitments for genesis miner")
+            .expect("commitments for signer2 miner")
             .len(),
         1
     );
@@ -289,7 +289,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
-    // std::env::set_var("RUST_LOG", "debug");
     std::env::set_var(
         "RUST_LOG",
         "irys_actors::epoch_service::epoch_service=debug",
@@ -361,7 +360,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
     let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default(), 1);
+    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default());
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
 
     info!("Generated stake_tx.id: {}", stake_tx.id);
@@ -385,7 +384,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
-        1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
     )
@@ -433,7 +431,6 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
-        1,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
     )
@@ -501,7 +498,9 @@ async fn post_pledge_commitment(
 
     let consensus = &node.node_ctx.config.consensus;
     let pledge_tx = CommitmentTransaction {
-        commitment_type: CommitmentType::Pledge,
+        commitment_type: CommitmentType::Pledge {
+            pledge_count_before_executing: 0, // First pledge
+        },
         anchor,
         fee: price_info.fee,
         value: price_info.value,

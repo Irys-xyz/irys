@@ -73,6 +73,12 @@ pub async fn post_tx(
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Internal service error: {:?}", err)))
             }
+            TxIngressError::CommitmentValidationError(commitment_validation_error) => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
+                    "Commitment validation error: {:?}",
+                    commitment_validation_error
+                )))
+            }
         };
     }
 
@@ -131,7 +137,7 @@ pub async fn get_transaction(
 ) -> Result<IrysTransactionResponse, ApiError> {
     let vec = vec![tx_id];
     if let Ok(mut result) =
-        get_commitment_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+        get_commitment_tx_in_parallel(&vec, &state.mempool_service, &state.db).await
     {
         if let Some(tx) = result.pop() {
             return Ok(IrysTransactionResponse::Commitment(tx));

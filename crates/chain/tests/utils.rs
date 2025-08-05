@@ -13,8 +13,8 @@ use awc::{body::MessageBody, http::StatusCode};
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
+use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::{
-    block_discovery::BlockDiscoveredMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
     block_validation,
@@ -1271,11 +1271,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
     ) -> eyre::Result<()> {
-        match peer
-            .node_ctx
-            .actor_addresses
-            .block_discovery_addr
-            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+        match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
+            .handle_block(Arc::new(irys_block_header.clone()))
             .await
         {
             Ok(_) => Ok(()),
@@ -1359,12 +1356,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         // Deliver block header
-        peer.node_ctx
-            .actor_addresses
-            .block_discovery_addr
-            .send(BlockDiscoveredMessage(Arc::new(irys_block_header.clone())))
+        BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
+            .handle_block(Arc::new(irys_block_header.clone()))
             .await
-            .map_err(|e| eyre::eyre!("{e:?}"))??;
+            .map_err(|e| eyre::eyre!("{e:?}"))?;
 
         // Send execution payload if available
         if let Some(evm_block) = self
@@ -1629,7 +1624,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
-            1,
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
@@ -1656,7 +1650,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
             anchor,
-            1,
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
@@ -1682,7 +1675,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
         let config = &self.node_ctx.config.consensus;
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor, 1);
+        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
@@ -2150,7 +2143,7 @@ pub fn new_stake_tx(
     signer: &IrysSigner,
     config: &ConsensusConfig,
 ) -> CommitmentTransaction {
-    let stake_tx = CommitmentTransaction::new_stake(config, *anchor, 1);
+    let stake_tx = CommitmentTransaction::new_stake(config, *anchor);
     signer.sign_commitment(stake_tx).unwrap()
 }
 
@@ -2161,8 +2154,7 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     pledge_provider: &P,
 ) -> CommitmentTransaction {
     let pledge_tx =
-        CommitmentTransaction::new_pledge(config, *anchor, 1, pledge_provider, signer.address())
-            .await;
+        CommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
     signer.sign_commitment(pledge_tx).unwrap()
 }
 

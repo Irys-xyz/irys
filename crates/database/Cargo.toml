@@ -26,7 +26,6 @@ reth-node-metrics.workspace = true
 reth-codecs.workspace = true
 paste.workspace = true
 strum.workspace = true
-async-trait.workspace = true
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
