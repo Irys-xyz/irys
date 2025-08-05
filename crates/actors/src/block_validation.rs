@@ -14,7 +14,6 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
-    PrioritizedCommitment,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -78,6 +77,13 @@ pub async fn prevalidate_block(
         &config.consensus.difficulty_adjustment,
     )?;
 
+    // Validate the last_diff_timestamp field
+    last_diff_timestamp_is_valid(
+        &block,
+        &previous_block,
+        &config.consensus.difficulty_adjustment,
+    )?;
+
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -101,6 +107,14 @@ pub async fn prevalidate_block(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
         "solution_hash_is_valid",
+    );
+
+    // Check the previous solution hash references the parent correctly
+    previous_solution_hash_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "previous_solution_hash_is_valid",
     );
 
     // We only check last_step_checkpoints during pre-validation
@@ -197,6 +211,34 @@ pub fn difficulty_is_valid(
     }
 }
 
+/// Validates the `last_diff_timestamp` field in the block.
+///
+/// The value should equal the previous block's `last_diff_timestamp` unless the
+/// current block triggers a difficulty adjustment, in which case it must be set
+/// to the block's own timestamp.
+pub fn last_diff_timestamp_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    difficulty_config: &DifficultyAdjustmentConfig,
+) -> eyre::Result<()> {
+    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
+    let expected = if block.height % blocks_between_adjustments == 0 {
+        block.timestamp
+    } else {
+        previous_block.last_diff_timestamp
+    };
+
+    if block.last_diff_timestamp == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid last_diff_timestamp (expected {} got {})",
+            expected,
+            block.last_diff_timestamp
+        ))
+    }
+}
+
 /// Checks PoA data chunk data solution partitions has not expired
 pub fn check_poa_data_expiration(
     poa: &PoaData,
@@ -262,6 +304,22 @@ pub fn solution_hash_is_valid(
             &previous_block.diff,
             &solution_diff,
             &previous_block.diff.abs_diff(solution_diff)
+        ))
+    }
+}
+
+/// Checks if the `previous_solution_hash` equals the previous block's `solution_hash`
+pub fn previous_solution_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    if block.previous_solution_hash == previous_block.solution_hash {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid previous_solution_hash - expected {} got {}",
+            previous_block.solution_hash,
+            block.previous_solution_hash
         ))
     }
 }
@@ -624,7 +682,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
                     .await?
             }
             [] => {
@@ -717,7 +775,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -730,17 +788,12 @@ pub async fn commitment_txs_are_valid(
         .system_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| &ledger.tx_ids.0)
-        .filter(|ids| !ids.is_empty());
-
-    let Some(block_tx_ids) = block_tx_ids else {
-        debug!("No commitment transactions in block");
-        return Ok(());
-    };
+        .map(|ledger| ledger.tx_ids.0.as_slice())
+        .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids.clone(), &service_senders.mempool, db).await?;
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -766,6 +819,8 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        tracing::error!(?expected_commitments, "validation");
+        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments
@@ -819,9 +874,9 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
-    // Sort using PrioritizedCommitment to get expected order
+    // Sort to get expected order
     let mut expected_order = stake_and_pledge_txs.clone();
-    expected_order.sort_by_key(|tx| PrioritizedCommitment(*tx));
+    expected_order.sort();
 
     // Compare actual order vs expected order
     for (idx, pair) in stake_and_pledge_txs
@@ -1613,5 +1668,62 @@ mod tests {
         );
 
         assert!(poa_valid.is_err(), "PoA should be invalid");
+    }
+
+    #[test]
+    fn last_diff_timestamp_no_adjustment_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 1;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 2;
+        block.timestamp = 1500;
+        block.last_diff_timestamp = prev.last_diff_timestamp;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        );
+    }
+
+    #[test]
+    fn last_diff_timestamp_adjustment_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 9;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 10;
+        block.timestamp = 2000;
+        block.last_diff_timestamp = block.timestamp;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        );
+    }
+
+    #[test]
+    fn last_diff_timestamp_incorrect_fails() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 1;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 2;
+        block.timestamp = 1500;
+        block.last_diff_timestamp = 999;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_err()
+        );
     }
 }
