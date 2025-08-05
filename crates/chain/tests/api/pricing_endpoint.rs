@@ -14,7 +14,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
-    let expected_price = {
+    let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
             .config
@@ -32,8 +32,8 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
                 // node just started up, using genesis ema price
                 ctx.node_ctx.config.consensus.genesis_price,
             )?
-            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
     };
+    let expected_miner_fee = expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -45,7 +45,8 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     assert_eq!(
         price_info,
         PriceInfo {
-            cost_in_irys: expected_price.amount,
+            value: expected_base_fee.amount,
+            fee: expected_miner_fee,
             ledger: 0,
             bytes: data_size_bytes,
         }
@@ -68,7 +69,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = 4_u64;
-    let expected_price = {
+    let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
             .config
@@ -87,8 +88,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
                 // node just started up, using genesis ema price
                 ctx.node_ctx.config.consensus.genesis_price,
             )?
-            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
     };
+    let expected_miner_fee = expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -100,7 +101,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     assert_eq!(
         price_info,
         PriceInfo {
-            cost_in_irys: expected_price.amount,
+            value: expected_base_fee.amount,
+            fee: expected_miner_fee,
             ledger: 0,
             bytes: ctx.node_ctx.config.consensus.chunk_size,
         }
@@ -123,7 +125,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size + 1;
-    let expected_price = {
+    let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
             .config
@@ -142,8 +144,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
                 // node just started up, using genesis ema price
                 ctx.node_ctx.config.consensus.genesis_price,
             )?
-            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
     };
+    let expected_miner_fee = expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -155,7 +157,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     assert_eq!(
         price_info,
         PriceInfo {
-            cost_in_irys: expected_price.amount,
+            value: expected_base_fee.amount,
+            fee: expected_miner_fee,
             ledger: 0,
             bytes: ctx.node_ctx.config.consensus.chunk_size * 2,
         }
