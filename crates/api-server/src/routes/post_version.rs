@@ -79,9 +79,11 @@ pub async fn post_version(
         ..Default::default()
     };
 
+    // TODO: add a check to see if the mining address is staked
+    let is_staked = false;
     state
         .peer_list
-        .add_or_update_peer(mining_addr, peer_list_entry);
+        .add_or_update_peer(mining_addr, peer_list_entry, is_staked);
 
     let node_name = version_request
         .user_agent

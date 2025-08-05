@@ -548,7 +548,7 @@ impl GossipServiceTestFixture {
             .expect("to get peer list guard")
             .expect("to get peer list guard");
 
-        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
     }
 
     /// # Panics
@@ -570,7 +570,7 @@ impl GossipServiceTestFixture {
             .await
             .expect("Failed to get peer list guard")
             .expect("Failed to get peer list guard");
-        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone());
+        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
     }
 }
 

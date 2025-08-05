@@ -285,7 +285,7 @@ where
         ctx.spawn(trusted_peers_handshake_task);
 
         // Announce yourself to the network
-        let peers_cache = self.peer_list.all_know_peers_with_mining_address();
+        let peers_cache = self.peer_list.all_peers_for_gossip();
         let announce_fut = Self::announce_yourself_to_all_peers(peers_cache, peer_service_address)
             .into_actor(self);
         ctx.spawn(announce_fut);
@@ -329,7 +329,8 @@ where
     fn flush(&self) -> Result<(), PeerListServiceError> {
         self.db
             .update(|tx| {
-                for (addr, peer) in self.peer_list.all_know_peers_with_mining_address().iter() {
+                // Only persist peers that are staked or have reached the persistence threshold
+                for (addr, peer) in self.peer_list.persistable_peers().iter() {
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
                 }
                 Ok(())
@@ -941,7 +942,7 @@ mod tests {
         // Add peer using guard
         service
             .peer_list
-            .add_or_update_peer(mining_addr, peer.clone());
+            .add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Verify peer was added correctly
         let result = service
@@ -987,7 +988,7 @@ mod tests {
 
         service
             .peer_list
-            .add_or_update_peer(mining_addr, peer.clone());
+            .add_or_update_peer(mining_addr, peer.clone(), true);
         // Test increasing score
         service
             .peer_list
@@ -1063,11 +1064,11 @@ mod tests {
         // Add peers
         service
             .peer_list
-            .add_or_update_peer(mining_addr1, peer1.clone());
+            .add_or_update_peer(mining_addr1, peer1.clone(), true);
         service
             .peer_list
-            .add_or_update_peer(mining_addr2, peer2.clone());
-        service.peer_list.add_or_update_peer(mining_addr3, peer3);
+            .add_or_update_peer(mining_addr2, peer2.clone(), true);
+        service.peer_list.add_or_update_peer(mining_addr3, peer3, true);
 
         // Test active peers request using message handler
         let exclude_peers = HashSet::new();
@@ -1112,8 +1113,8 @@ mod tests {
         // Add same peer twice
         service
             .peer_list
-            .add_or_update_peer(mining_addr, peer.clone());
-        service.peer_list.add_or_update_peer(mining_addr, peer);
+            .add_or_update_peer(mining_addr, peer.clone(), true);
+        service.peer_list.add_or_update_peer(mining_addr, peer, true);
 
         // Verify only one entry exists using KnownPeersRequest
         let known_peers = service.peer_list.all_known_peers();
@@ -1198,7 +1199,7 @@ mod tests {
             true,
             None,
         );
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Wait for more than the flush interval to ensure a flush has occurred
         tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
@@ -1264,8 +1265,8 @@ mod tests {
             Some(IpAddr::from_str("127.0.0.3").expect("Invalid IP")),
         );
 
-        peer_list_data_guard.add_or_update_peer(mining_addr1, peer1.clone());
-        peer_list_data_guard.add_or_update_peer(mining_addr2, peer2.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr1, peer1.clone(), true);
+        peer_list_data_guard.add_or_update_peer(mining_addr2, peer2.clone(), true);
 
         // Wait for the data to be flushed to the database
         tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
@@ -1425,7 +1426,7 @@ mod tests {
         // Add the initial peer
         service
             .peer_list
-            .add_or_update_peer(mining_addr, initial_peer);
+            .add_or_update_peer(mining_addr, initial_peer, true);
 
         // Verify the peer was added
         let initial_result = service
@@ -1456,7 +1457,7 @@ mod tests {
         // Update the peer with new address
         service
             .peer_list
-            .add_or_update_peer(mining_addr, updated_peer);
+            .add_or_update_peer(mining_addr, updated_peer, true);
 
         // Verify the peer address was updated
         let updated_result = service.peer_list.peer_by_gossip_address(new_gossip_addr);
@@ -1534,7 +1535,7 @@ mod tests {
         };
 
         // Add the peer to the service
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Give some time for async processing
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1603,7 +1604,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Add the peer which should trigger announce_yourself_to_address_task
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -1662,7 +1663,7 @@ mod tests {
         );
 
         // Add the peer which should trigger announce_yourself_to_address_task
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Send a NewPotentialPeer message for the same peer while an announcement is already running
         service_addr
@@ -1780,7 +1781,7 @@ mod tests {
                 // Wait a bit to ensure the other task is waiting
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 debug!("Adding peer");
-                peer_list_data_guard.add_or_update_peer(mining_addr, peer);
+                peer_list_data_guard.add_or_update_peer(mining_addr, peer, true);
             }
         });
 
