@@ -45,7 +45,6 @@ pub struct ChunkOrchestrator {
     active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
     slot_index: usize,
-    last_bandwidth_check: Instant,
     chunk_fetcher: Arc<dyn ChunkFetcher>,
     config: NodeConfig,
 }
@@ -72,7 +71,6 @@ impl ChunkOrchestrator {
             active_sync_peers: sync_peers,
             service_senders: service_senders.clone(),
             slot_index,
-            last_bandwidth_check: Instant::now(),
             chunk_fetcher, // Store the chunk fetcher
             config,
         }
@@ -80,7 +78,6 @@ impl ChunkOrchestrator {
 
     pub fn tick(&mut self) -> eyre::Result<()> {
         self.populate_request_queue();
-        self.adjust_peer_concurrency()?;
         self.dispatch_chunk_requests();
         Ok(())
     }
@@ -116,64 +113,6 @@ impl ChunkOrchestrator {
                     requests_to_add -= 1;
                     if requests_to_add == 0 {
                         return;
-                    }
-                }
-            }
-        }
-    }
-
-    fn adjust_peer_concurrency(&mut self) -> eyre::Result<()> {
-        let storage_throughput = self.storage_module.write_throughput_bps();
-        let target_throughput = self.config.data_sync.max_storage_throughput_bps;
-        let storage_capacity_remaining = target_throughput.saturating_sub(storage_throughput);
-
-        debug!(
-            "adjust_peer_concurrency(): Storage: {}/{} ({}% remaining)",
-            storage_throughput,
-            target_throughput,
-            (storage_capacity_remaining * 100) / target_throughput
-        );
-
-        let now = Instant::now();
-        let bandwidth_interval = self.config.data_sync.bandwidth_adjustment_interval;
-        if now.duration_since(self.last_bandwidth_check) >= bandwidth_interval {
-            self.optimize_peer_concurrency();
-            self.last_bandwidth_check = now;
-        }
-
-        Ok(())
-    }
-
-    fn get_peer_scores(
-        &self,
-        peers: &HashMap<Address, PeerBandwidthManager>,
-    ) -> Vec<(Address, f64, u32)> {
-        // Build a list of peer score tuples (Address, health_score, available_concurrency)
-        // from all the known peers (not just current)
-        let mut peer_scores: Vec<_> = self
-            .current_peers
-            .iter()
-            .filter_map(|&addr| {
-                peers
-                    .get(&addr)
-                    .map(|pm| (addr, pm.health_score(), pm.available_concurrency()))
-            })
-            .collect();
-
-        peer_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        peer_scores
-    }
-
-    fn optimize_peer_concurrency(&mut self) {
-        if let Ok(mut peers) = self.active_sync_peers.write() {
-            let peer_scores = self.get_peer_scores(&peers);
-
-            for (peer_addr, health_score, available_concurrency) in peer_scores {
-                if health_score >= 0.7 {
-                    if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                        let current_max = peer_manager.max_concurrency();
-                        let increase = std::cmp::min(available_concurrency as usize, 5);
-                        peer_manager.set_max_concurrency(current_max + increase);
                     }
                 }
             }
@@ -220,6 +159,13 @@ impl ChunkOrchestrator {
 
         // If we're within 10% of target_throughput, throttle this orchestrator
         storage_capacity_remaining < (target_throughput / 10)
+    }
+
+    /// Check if this orchestrator has pending requests that could benefit from more concurrency
+    pub fn has_pending_requests(&self) -> bool {
+        self.chunk_requests
+            .values()
+            .any(|request| matches!(request.request_state, ChunkRequestState::Pending(_)))
     }
 
     fn find_best_peer(&self, excluding: Option<Address>) -> Option<Address> {

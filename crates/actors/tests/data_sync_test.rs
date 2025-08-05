@@ -73,7 +73,7 @@ async fn test_data_sync_with_different_peer_performance() {
             &peer_addresses,
             &mock_fetchers,
             &storage_module_ref,
-            vec![30], // Take snapshot at tick 30
+            vec![34], // Take snapshot at tick 34
         )
         .await
         .expect("Failed during sync execution");
@@ -282,7 +282,7 @@ impl DataSyncServiceTestHarness {
             let request_count = peer_fetcher.request_log.read().unwrap().len();
             total_requests += request_count;
 
-            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={}", 
+            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}", 
                 peer_name,
                 peer_manager.health_score(),
                 request_count,
@@ -290,7 +290,8 @@ impl DataSyncServiceTestHarness {
                 peer_manager.short_term_bandwidth_bps(),
                 peer_manager.medium_term_bandwidth_bps(),
                 peer_manager.is_throughput_stable(),
-                peer_manager.is_throughput_improving()
+                peer_manager.is_throughput_improving(),
+                peer_manager.max_concurrency()
             );
         }
 
@@ -845,7 +846,7 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
         let (_name, delay) = match api_addr.port() {
             8001 => ("slow", Duration::from_millis(500)),
             8002 => ("stable", Duration::from_millis(250)),
-            8003 => ("fast", Duration::from_millis(200)),
+            8003 => ("fast", Duration::from_millis(150)),
             _ => ("default", Duration::from_millis(250)),
         };
 

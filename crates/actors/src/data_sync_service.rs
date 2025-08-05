@@ -119,7 +119,73 @@ impl DataSyncServiceInner {
         for orchestrator in self.chunk_orchestrators.values_mut() {
             orchestrator.tick()?;
         }
+        self.optimize_peer_concurrency();
         Ok(())
+    }
+
+    fn optimize_peer_concurrency(&mut self) {
+        let Ok(mut peers) = self.active_sync_peers.write() else {
+            return;
+        };
+
+        // Build a list of peer score tuples (Address, health_score, active_requests, max_concurrency)
+        let mut peer_scores: Vec<_> = peers
+            .iter()
+            .map(|(&addr, pm)| {
+                (
+                    addr,
+                    pm.health_score(),
+                    pm.active_requests(),
+                    pm.max_concurrency(),
+                )
+            })
+            .collect();
+
+        peer_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (peer_addr, health_score, active_requests, current_max) in peer_scores {
+            // Only optimize healthy peers
+            if health_score < 0.7 {
+                continue;
+            }
+
+            // Calculate utilization ratio of max concurrency and active requests for the peer
+            let utilization_ratio = if current_max > 0 {
+                active_requests as f32 / current_max as f32
+            } else {
+                0.0
+            };
+
+            // Only increase concurrency if peer is highly utilized
+            if utilization_ratio >= 0.8 {
+                if let Some(peer_manager) = peers.get_mut(&peer_addr) {
+                    // Better performing peers get bigger increases
+                    let increase = if health_score >= 0.9 {
+                        5 // Excellent peer, trust it with more
+                    } else if health_score >= 0.7 {
+                        3 // Good peer, moderate increase
+                    } else {
+                        1 // Decent peer, conservative increase
+                    };
+                    debug!(
+                    "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
+                    current_max,
+                    current_max + increase,
+                    peer_addr,
+                    utilization_ratio * 100.0,
+                    health_score
+                );
+                    peer_manager.set_max_concurrency(current_max + increase);
+                }
+            } else {
+                debug!(
+                "Not increasing concurrency for peer {} (concurrent utilization: {:.1}%, health: {:.2})",
+                peer_addr,
+                utilization_ratio * 100.0,
+                health_score
+            );
+            }
+        }
     }
 
     fn on_chunk_completed(

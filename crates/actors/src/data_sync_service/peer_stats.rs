@@ -145,17 +145,16 @@ impl PeerStats {
             score -= (self.consecutive_failures as f64 * 0.15).min(0.5);
         }
 
-        // Throughput trend impact (-0.3 to +0.3) - performance trajectory
-        if self.is_throughput_improving() {
+        // Latency-based scoring
+        let avg_latency = self.average_completion_time();
+
+        // Better latency = higher score
+        if avg_latency < Duration::from_millis(250) {
             score += 0.3;
-        } else if !self.is_throughput_stable() {
-            let short = self.short_term_bandwidth_bps();
-            let medium = self.medium_term_bandwidth_bps();
-            if short < medium && medium > 0 {
-                score -= 0.3; // Declining performance is serious
-            } else {
-                score -= 0.1; // General instability
-            }
+        } else if avg_latency < Duration::from_millis(500) {
+            score += 0.15;
+        } else if avg_latency > Duration::from_secs(1) {
+            score -= 0.2;
         }
 
         score.clamp(0.0, 1.0)
