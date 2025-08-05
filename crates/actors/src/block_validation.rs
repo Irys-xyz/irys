@@ -451,7 +451,7 @@ pub fn poa_is_valid(
 
         let bb = block_index_guard
             .read()
-            .get_block_bounds(ledger, ledger_chunk_offset);
+            .get_block_bounds(ledger, ledger_chunk_offset)?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
         };
@@ -1323,7 +1323,8 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
@@ -1564,7 +1565,8 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
