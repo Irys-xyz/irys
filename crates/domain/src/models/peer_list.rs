@@ -891,7 +891,9 @@ mod tests {
         // Test 13: all_known_peers should include both staked and unstaked peers
         let known_peers = peer_list.all_known_peers();
         let known_contains_staked = known_peers.iter().any(|addr| addr == &staked_peer.address);
-        let known_contains_unstaked = known_peers.iter().any(|addr| addr == &unstaked_peer.address);
+        let known_contains_unstaked = known_peers
+            .iter()
+            .any(|addr| addr == &unstaked_peer.address);
         assert!(
             known_contains_staked,
             "all_known_peers should include staked peer address"
