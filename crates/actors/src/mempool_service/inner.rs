@@ -6,7 +6,7 @@ use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
-use irys_database::{cached_data_root_by_data_root, SystemLedger};
+use irys_database::{cached_data_root_by_data_root, ingress_proofs_by_data_root, SystemLedger};
 use irys_domain::{
     get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
 };
@@ -540,7 +540,7 @@ impl Inner {
         &self,
     ) -> Result<(Vec<DataTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
-        let mut proofs: Vec<TxIngressProof> = Vec::new();
+        let mut publish_proofs: Vec<TxIngressProof> = Vec::new();
 
         {
             let read_tx = self
@@ -599,21 +599,23 @@ impl Inner {
                 );
                 // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
                 if !has_ingress_proof {
-                    // Get the proof
-                    match ingress_proofs.get(&tx_header.data_root) {
-                        Some(proof) => {
+                    // Get the proofs for this tx
+                    let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+                    // TODO: replace this section to properly handle multiple ingress proofs
+                    match proofs.first() {
+                        Some((_data_root, proof)) => {
                             let mut tx_header = tx_header.clone();
-                            let proof: TxIngressProof = TxIngressProof {
-                                proof: proof.proof,
-                                signature: proof.signature,
+                            let proof = TxIngressProof {
+                                proof: proof.proof.proof,
+                                signature: proof.proof.signature,
                             };
                             debug!(
                                 "Got ingress proof {} for publish candidate {}",
                                 &tx_header.data_root, &tx_header.id
                             );
-                            proofs.push(proof.clone());
+                            publish_proofs.push(proof.clone());
                             tx_header.ingress_proofs = Some(proof);
-                            publish_txs.push(tx_header);
+                            publish_txs.push(tx_header)
                         }
                         None => {
                             error!(
@@ -632,7 +634,7 @@ impl Inner {
             .map(|h| h.id.0.to_base58())
             .collect::<Vec<_>>();
         debug!(?txs, "Publish transactions");
-        Ok((publish_txs, proofs))
+        Ok((publish_txs, publish_proofs))
     }
 
     /// return block header from mempool, if found
