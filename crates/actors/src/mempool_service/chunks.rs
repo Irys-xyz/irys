@@ -4,11 +4,13 @@ use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
     submodule::get_data_size_by_data_root,
-    tables::{CachedChunks, CachedChunksIndex, DataRootLRU, IngressProofs},
+    tables::{
+        CachedChunks, CachedChunksIndex, CompactCachedIngressProof, DataRootLRU, IngressProofs,
+    },
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataRoot, DatabaseProvider,
-    GossipBroadcastMessage, H256,
+    chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
+    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::alloy_primitives::ChainId;
@@ -399,7 +401,7 @@ pub fn generate_ingress_proof(
     });
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(signer, data_root, iter, chain_id)?;
+    let proof = irys_types::ingress::generate_ingress_proof(&signer, data_root, iter, chain_id)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
@@ -409,7 +411,15 @@ pub fn generate_ingress_proof(
 
     ro_tx.commit()?;
 
-    db.update(|rw_tx| rw_tx.put::<IngressProofs>(data_root, proof))??;
+    db.update(|rw_tx| {
+        rw_tx.put::<IngressProofs>(
+            data_root,
+            CompactCachedIngressProof(CachedIngressProof {
+                address: signer.address(),
+                proof,
+            }),
+        )
+    })??;
 
     Ok(())
 }
