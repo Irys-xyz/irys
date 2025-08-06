@@ -9,6 +9,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// too far in the future, the node rejects it.
 #[actix_web::test]
 async fn heavy_test_future_block_rejection() -> Result<()> {
+    // 0. Create an evil block producer
+    use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome};
+    use crate::validation::send_block_to_block_tree;
+    use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+    use irys_database::SystemLedger;
+    use irys_primitives::CommitmentType;
+    use irys_types::{
+        CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader,
+        SystemTransactionLedger, TxIngressProof, U256,
+    };
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub invalid_timestamp: u128,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+    }
+
     // 1. Start a node to create a block, and the na second node to consume that block,
     //    both with with default config
     let genesis_config = NodeConfig::testing();
@@ -27,8 +50,37 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         .await;
     peer1_node.start_public_api().await;
 
-    // mine a block
+    // mine a genuine and valid block
     let block_1 = genesis_node.mine_block().await?;
+
+    // create a timestamp too far in the future
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let future_timestamp = now_ms
+        + genesis_config
+            .consensus_config()
+            .max_future_timestamp_drift_millis
+        + 10_000; // too far into the future
+
+    // Create block with evil strategy and invalid timestamp
+    let block_prod_strategy = EvilBlockProdStrategy {
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+        invalid_timestamp: future_timestamp,
+    };
+
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Send block directly to block tree service for validation
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert_eq!(outcome, BlockValidationOutcome::Discarded);
 
     // 2. Modify block with a timestamp too far in the future
     //    i.e. just outside the exceptable drift
