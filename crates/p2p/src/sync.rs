@@ -659,6 +659,7 @@ mod tests {
                     last_seen: 0,
                     is_online: true,
                 },
+                true,
             );
 
             // Check that the sync status is syncing
@@ -772,6 +773,7 @@ mod tests {
                     last_seen: 0,
                     is_online: true,
                 },
+                true,
             );
 
             // Check that the sync status is syncing
