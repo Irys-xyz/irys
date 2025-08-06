@@ -24,7 +24,7 @@ use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256, U256,
+    DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256, U256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -33,7 +33,7 @@ use openssl::sha;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, error, info};
 
 /// Full pre-validation steps for a block
@@ -930,8 +930,8 @@ fn calculate_perm_storage_fee_with_ema(
     Ok(base_network_fee.amount)
 }
 
-/// Validates that data transactions in a block have correct fee values
-/// based on the block's EMA pricing data
+/// Validates that data transactions in a block are correctly placed and have valid properties
+/// based on their ledger placement (Submit or Publish) and ingress proof availability
 #[tracing::instrument(skip_all, err)]
 pub async fn data_txs_are_valid(
     config: &Config,
@@ -946,10 +946,8 @@ pub async fn data_txs_are_valid(
         .get_ema_snapshot(&block.block_hash)
         .ok_or_eyre("Block EMA snapshot not found")?;
 
-    // Extract all data transactions from both ledgers
-    let mut all_data_txs = Vec::new();
-
-    match &block.data_ledgers[..] {
+    // Extract data transactions from both ledgers
+    let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
         [publish_ledger, submit_ledger] => {
             ensure!(
                 publish_ledger.ledger_id == DataLedger::Publish,
@@ -959,84 +957,243 @@ pub async fn data_txs_are_valid(
                 submit_ledger.ledger_id == DataLedger::Submit,
                 "Submit ledger must be the second ledger in the data ledgers"
             );
-
-            // Get transactions from both ledgers
-            let publish_txs = get_data_tx_in_parallel(
-                publish_ledger.tx_ids.0.clone(),
-                &service_senders.mempool,
-                db,
-            )
-            .await?;
-
-            let submit_txs = get_data_tx_in_parallel(
-                submit_ledger.tx_ids.0.clone(),
-                &service_senders.mempool,
-                db,
-            )
-            .await?;
-
-            all_data_txs.extend(publish_txs);
-            all_data_txs.extend(submit_txs);
+            (publish_ledger, submit_ledger)
         }
         [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
-    }
+    };
 
-    // Validate each data transaction's fees
-    for tx in all_data_txs {
-        match tx.ledger_id {
-            0 => {
-                // Publish ledger - permanent storage
-                // Calculate expected perm_fee based on data size using block's EMA
-                let expected_perm_fee =
-                    calculate_perm_storage_fee_with_ema(tx.data_size, &block_ema, config)?;
+    // Get transactions from both ledgers
+    let publish_txs = get_data_tx_in_parallel(
+        publish_ledger.tx_ids.0.clone(),
+        &service_senders.mempool,
+        db,
+    )
+    .await?;
 
-                // Validate perm_fee is at least the expected amount
-                let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
-                ensure!(
-                    actual_perm_fee >= expected_perm_fee,
-                    "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
-                    tx.id,
-                    expected_perm_fee,
-                    actual_perm_fee
-                );
+    let submit_txs =
+        get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+            .await?;
 
-                // For publish ledger, term_fee should be 0
-                ensure!(
-                    tx.term_fee == 0,
-                    "Transaction {} in Publish ledger should have term_fee = 0, got {}",
-                    tx.id,
-                    tx.term_fee
-                );
+    // Collect all tx_ids we need to check for previous inclusions
+    let mut all_txs = publish_txs
+        .iter()
+        .map(|x| (x, DataLedger::Publish))
+        .chain(submit_txs.iter().map(|x| (x, DataLedger::Submit)))
+        .map(|(tx, current_ledger)| (tx.id, (tx, TxInclusionState::Searching { current_ledger })))
+        .collect::<HashMap<_, _>>();
+
+    // Get previous inclusions as a vector indexed by position
+    get_previous_tx_inclusions(
+        &mut all_txs,
+        block,
+        config.consensus.mempool.anchor_expiry_depth as u64,
+        service_senders,
+    )
+    .await?;
+
+    for (_tx_hash, (tx, past_inclusion)) in all_txs {
+        let current_ledger = match past_inclusion {
+            TxInclusionState::Searching { current_ledger } => {
+                // Transaction is unique and not included in a past block; accept it
+                current_ledger
             }
-            1 => {
-                // Submit ledger - term storage
-                // For now, we just ensure perm_fee is not set for Submit ledger
-                // Term fee validation would go here once term fee calculation is implemented
-                ensure!(
-                    tx.perm_fee.is_none() || tx.perm_fee == Some(0),
-                    "Transaction {} in Submit ledger should not have perm_fee set",
-                    tx.id
-                );
-
-                // TODO: Validate term_fee once calculate_term_storage_fee is implemented
-                // For now, just ensure term_fee is non-zero
-                ensure!(
-                    tx.term_fee > 0,
-                    "Transaction {} in Submit ledger should have term_fee > 0",
-                    tx.id
-                );
+            TxInclusionState::Found {
+                current_ledger,
+                past_ledger,
+            } => {
+                // Validate allowed transitions between ledgers
+                match (past_ledger, current_ledger) {
+                    (DataLedger::Submit, DataLedger::Publish) => {
+                        // OK: Transaction promoted from Submit to Publish
+                        debug!(
+                            "Transaction {} promoted from Submit to Publish ledger",
+                            tx.id
+                        );
+                    }
+                    (DataLedger::Publish, DataLedger::Publish) => {
+                        return Err(eyre::eyre!(
+                            "Transaction {} already included in previous Publish ledger",
+                            tx.id
+                        ));
+                    }
+                    (DataLedger::Submit, DataLedger::Submit) => {
+                        return Err(eyre::eyre!(
+                            "Transaction {} already included in previous Submit ledger",
+                            tx.id
+                        ));
+                    }
+                    (DataLedger::Publish, DataLedger::Submit) => {
+                        return Err(eyre::eyre!(
+                            "Transaction {} cannot move from Publish to Submit ledger",
+                            tx.id
+                        ));
+                    }
+                }
+                current_ledger
             }
-            _ => {
-                eyre::bail!(
-                    "Transaction {} has invalid ledger_id: {}",
-                    tx.id,
-                    tx.ledger_id
+        };
+
+        // All data transactions must have ledger_id set to Publish
+        ensure!(
+            tx.ledger_id == DataLedger::Publish as u32,
+            "Transaction {} has invalid ledger_id. Expected: {}, Actual: {}",
+            tx.id,
+            DataLedger::Publish as u32,
+            tx.ledger_id
+        );
+
+        // Calculate expected perm_fee based on data size using block's EMA
+        let expected_perm_fee =
+            calculate_perm_storage_fee_with_ema(tx.data_size, &block_ema, config)?;
+
+        // Validate perm_fee is at least the expected amount
+        let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
+        ensure!(
+            actual_perm_fee >= expected_perm_fee,
+            "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
+            tx.id,
+            expected_perm_fee,
+            actual_perm_fee
+        );
+
+        // For publish ledger, term_fee should be 0
+        ensure!(
+            tx.term_fee == 0,
+            "Transaction {} in Publish ledger should have term_fee = 0, got {}",
+            tx.id,
+            tx.term_fee
+        );
+
+        match current_ledger {
+            DataLedger::Publish => {
+                // Validate ingress proofs are present
+                let ingress_proofs = tx.ingress_proofs.as_ref().ok_or_eyre(format!(
+                    "Transaction {} in Publish ledger missing ingress proofs",
+                    tx.id
+                ))?;
+
+                // Validate ingress proof signature
+                // The proof signature should be valid for the data_root
+                let _ = ingress_proofs.pre_validate(&tx.data_root).map_err(|e| {
+                    eyre::eyre!(
+                        "Transaction {} has invalid ingress proof signature: {}",
+                        tx.id,
+                        e
+                    )
+                })?;
+            }
+            DataLedger::Submit => {
+                // Submit ledger transactions should not have ingress proofs
+                // (they're waiting for proofs)
+                ensure!(
+                    tx.ingress_proofs.is_none(),
+                    "Transaction {} in Submit ledger should not have ingress proofs",
+                    tx.id
                 );
             }
         }
     }
 
-    debug!("Data transaction fee validation successful");
+    ensure!(
+        publish_ledger
+            .proofs
+            .as_ref()
+            .map(|x| x.0.len())
+            .unwrap_or_default()
+            == publish_txs.len(),
+        "the length of publish ledger proofs in a block does not match the count of publish txs"
+    );
+
+    // Validate ingress proofs list matches Publish ledger transactions
+    if let Some(proofs_list) = &publish_ledger.proofs {
+        ensure!(
+            proofs_list.len() == publish_txs.len(),
+            "Ingress proofs count mismatch. Expected: {}, Actual: {}",
+            publish_txs.len(),
+            proofs_list.len()
+        );
+
+        // Validate each proof corresponds to the correct transaction
+        for (tx, proof) in publish_txs.iter().zip(proofs_list.iter()) {
+            let tx_proof = tx
+                .ingress_proofs
+                .as_ref()
+                .ok_or_eyre("Transaction missing ingress proof")?;
+            ensure!(
+                tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
+                "Ingress proof mismatch for transaction {}",
+                tx.id
+            );
+        }
+    }
+
+    debug!("Data transaction validation successful");
+    Ok(())
+}
+
+/// State for tracking transaction inclusion search
+#[derive(Clone, Copy, Debug)]
+enum TxInclusionState {
+    Searching {
+        current_ledger: DataLedger,
+    },
+    Found {
+        current_ledger: DataLedger,
+        past_ledger: DataLedger,
+    },
+}
+
+async fn get_previous_tx_inclusions(
+    tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
+    block: &IrysBlockHeader,
+    anchor_expiry_depth: u64,
+    service_senders: &ServiceSenders,
+) -> eyre::Result<()> {
+    // Early return for empty input
+    if tx_ids.is_empty() {
+        return Ok(());
+    }
+
+    let min_height = block.height.saturating_sub(anchor_expiry_depth);
+
+    // Check mempool's prevalidated_blocks for recent blocks
+    // Get mempool data and release lock quickly
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    service_senders
+        .mempool
+        .send(MempoolServiceMessage::GetState(tx))?;
+    let mempool_state = rx.await?;
+    let mempool_guard = mempool_state.read().await;
+    mempool_guard
+        .prevalidated_blocks
+        .values()
+        .filter(|b| b.block_hash != block.block_hash)
+        .filter(|b| b.height >= min_height)
+        .try_for_each(|x| process_block_ledgers_with_states(&x.data_ledgers, tx_ids))?;
+    Ok(())
+}
+
+/// Process ledgers and update transaction states
+/// Returns true if all transactions have been found
+fn process_block_ledgers_with_states(
+    ledgers: &[DataTransactionLedger],
+    tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
+) -> eyre::Result<()> {
+    for ledger in ledgers {
+        let ledger_type = DataLedger::try_from(ledger.ledger_id)?;
+
+        // Check each transaction in this ledger
+        for tx_id in &ledger.tx_ids.0 {
+            if let Some((_, state)) = tx_states.get_mut(tx_id) {
+                if let TxInclusionState::Searching { current_ledger } = *state {
+                    *state = TxInclusionState::Found {
+                        current_ledger,
+                        past_ledger: ledger_type,
+                    };
+                }
+            }
+        }
+    }
     Ok(())
 }
 

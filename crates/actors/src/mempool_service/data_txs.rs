@@ -85,8 +85,10 @@ impl Inner {
         let anchor_height = self.validate_anchor(&tx).await?;
 
         // Validate ledger type and protocol fees
-        match tx.ledger_id {
-            0 => {
+        let ledger = DataLedger::try_from(tx.ledger_id)
+            .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
+        match ledger {
+            DataLedger::Publish => {
                 // Publish ledger - permanent storage
                 // Calculate expected perm_fee based on data size
                 let expected_fee = self.calculate_perm_storage_fee(tx.data_size)?;
@@ -109,13 +111,9 @@ impl Inner {
                     });
                 }
             }
-            1 => {
+            DataLedger::Submit => {
                 // Submit ledger - currently not supported
                 return Err(TxIngressError::InvalidLedger(1));
-            }
-            _ => {
-                // Invalid ledger type
-                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
             }
         }
 

@@ -328,7 +328,7 @@ impl BlockValidationTask {
             )
             .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
             .await
-            .inspect_err(|err| tracing::error!(?err, "data transaction fee validation failed"))
+            .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };
