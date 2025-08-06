@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{BlockValidationOutcome, IrysNodeTest, read_block_from_state, solution_context};
 use irys_actors::{
-    async_trait, block_tree_service::BlockTreeServiceMessage, BlockProdStrategy,
-    BlockProducerInner, ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
+    block_tree_service::BlockTreeServiceMessage,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, TxIngressProof, H256,
+    CommitmentTransaction, DataTransactionHeader, H256, H256List, IrysBlockHeader, NodeConfig,
+    SystemTransactionLedger, TxIngressProof,
 };
 
 // Helper function to send a block directly to the block tree service for validation
