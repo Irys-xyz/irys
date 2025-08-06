@@ -66,6 +66,7 @@ pub async fn get_price(
                 bytes: bytes_to_store,
             }))
         }
+        // TODO: support other term ledgers here
         DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
     }
 }

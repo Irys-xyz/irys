@@ -112,9 +112,9 @@ impl Inner {
                 }
             }
             DataLedger::Submit => {
-                // Submit ledger - currently not supported
+                // Submit ledger - a data transaction cannot target the submit ledger directly
                 return Err(TxIngressError::InvalidLedger(1));
-            }
+            } // TODO: support other term ledgers here
         }
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;

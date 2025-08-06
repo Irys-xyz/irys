@@ -941,6 +941,7 @@ fn calculate_perm_storage_fee_with_ema(
 
 /// Validates that data transactions in a block are correctly placed and have valid properties
 /// based on their ledger placement (Submit or Publish) and ingress proof availability
+/// TODO: All of the warnings below should actually be transformed to hard errors!
 #[tracing::instrument(skip_all, err)]
 pub async fn data_txs_are_valid(
     config: &Config,
@@ -1003,14 +1004,14 @@ pub async fn data_txs_are_valid(
         .iter()
         .map(|x| (x, DataLedger::Publish))
         .chain(submit_txs.iter().map(|x| (x, DataLedger::Submit)))
-        .map(|(tx, current_ledger)| {
+        .map(|(tx, ledger_current)| {
             let state = if same_block_promotions.contains(&tx.id) {
                 TxInclusionState::Found {
-                    current_ledger: DataLedger::Publish,
-                    past_ledger: DataLedger::Submit,
+                    ledger_current: DataLedger::Publish,
+                    ledger_historical: DataLedger::Submit,
                 }
             } else {
-                TxInclusionState::Searching { current_ledger }
+                TxInclusionState::Searching { ledger_current }
             };
             (tx.id, (tx, state))
         })
@@ -1028,8 +1029,8 @@ pub async fn data_txs_are_valid(
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
-            TxInclusionState::Searching { current_ledger } => {
-                match current_ledger {
+            TxInclusionState::Searching { ledger_current } => {
+                match ledger_current {
                     DataLedger::Publish => {
                         // Publish tx with no past inclusion - INVALID
                         tracing::warn!(
@@ -1044,10 +1045,10 @@ pub async fn data_txs_are_valid(
                 }
             }
             TxInclusionState::Found {
-                current_ledger,
-                past_ledger,
+                ledger_current,
+                ledger_historical,
             } => {
-                match (*current_ledger, *past_ledger) {
+                match (ledger_current, ledger_historical) {
                     (DataLedger::Publish, DataLedger::Submit) => {
                         // OK: Transaction promoted from past Submit to current Publish
                         debug!(
@@ -1065,16 +1066,16 @@ pub async fn data_txs_are_valid(
                         // Submit tx should not have any past inclusion
                         tracing::warn!(
                             "Transaction {} in Submit ledger was already included in past {:?} ledger",
-                            tx.id, past_ledger
+                            tx.id, ledger_historical
                         );
                     }
                 }
             }
-            TxInclusionState::Duplicate { past_ledger } => {
+            TxInclusionState::Duplicate { ledger_historical } => {
                 // Transaction found in multiple past blocks - this is always invalid
                 tracing::warn!(
                     "Transaction {} found in multiple previous blocks. First occurrence in {:?} ledger at block {}",
-                    tx.id, past_ledger.0, past_ledger.1
+                    tx.id, ledger_historical.0, ledger_historical.1
                 );
             }
         }
@@ -1088,6 +1089,7 @@ pub async fn data_txs_are_valid(
 
     for (tx, current_ledger) in all_txs {
         // All data transactions must have ledger_id set to Publish
+        // TODO: support other term ledgers here
         ensure!(
             tx.ledger_id == DataLedger::Publish as u32,
             "Transaction {} has invalid ledger_id. Expected: {}, Actual: {}",
@@ -1194,14 +1196,14 @@ pub async fn data_txs_are_valid(
 #[derive(Clone, Copy, Debug)]
 enum TxInclusionState {
     Searching {
-        current_ledger: DataLedger,
+        ledger_current: DataLedger,
     },
     Found {
-        current_ledger: DataLedger,
-        past_ledger: DataLedger,
+        ledger_current: DataLedger,
+        ledger_historical: DataLedger,
     },
     Duplicate {
-        past_ledger: (DataLedger, BlockHash),
+        ledger_historical: (DataLedger, BlockHash),
     },
 }
 
@@ -1234,6 +1236,7 @@ async fn get_previous_tx_inclusions(
         .try_for_each(|x| {
             process_block_ledgers_with_states(&x.data_ledgers, x.block_hash, tx_ids)
         })?;
+    // TODO: in case the anchor expiry is larger than the mempools list of prevalidated blocks, we should query the database!
     Ok(())
 }
 
@@ -1251,17 +1254,17 @@ fn process_block_ledgers_with_states(
         for tx_id in &ledger.tx_ids.0 {
             if let Some((_, state)) = tx_states.get_mut(tx_id) {
                 match state {
-                    TxInclusionState::Searching { current_ledger } => {
+                    TxInclusionState::Searching { ledger_current } => {
                         // First time finding this transaction
                         *state = TxInclusionState::Found {
-                            current_ledger: *current_ledger,
-                            past_ledger: ledger_type,
+                            ledger_current: *ledger_current,
+                            ledger_historical: ledger_type,
                         };
                     }
                     TxInclusionState::Found { .. } => {
                         // Transaction already found once, this is a duplicate
                         *state = TxInclusionState::Duplicate {
-                            past_ledger: (ledger_type, block_hash),
+                            ledger_historical: (ledger_type, block_hash),
                         };
                     }
                     TxInclusionState::Duplicate { .. } => {
