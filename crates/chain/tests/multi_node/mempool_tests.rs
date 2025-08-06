@@ -2008,3 +2008,107 @@ async fn commitment_tx_valid_higher_fee_test(
     genesis_node.stop().await;
     Ok(())
 }
+
+/// Test that data transactions with insufficient miner fees are accepted into mempool
+/// but excluded from block production (GetBestMempoolTxs).
+#[test_log::test(actix_web::test)]
+async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Result<()> {
+    use irys_types::storage_pricing::Amount;
+    use rust_decimal::prelude::*;
+
+    initialize_tracing();
+
+    // Setup test network
+    let seconds_to_wait = 15;
+    let mut genesis_config = NodeConfig::testing();
+
+    // Set a specific miner fee percentage for testing (10%)
+    genesis_config.pricing.fee_percentage = Amount::percentage(Decimal::from_str("0.10")?)?;
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Start genesis node
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.start_public_api().await;
+
+    // Get current price for data transactions
+    let data_size = 1024u64;
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data_size)
+        .await?;
+
+    // Create test data
+    let data_sufficient = vec![0u8; data_size as usize];
+    let data_insufficient = vec![1u8; data_size as usize];
+
+    // Calculate fees
+    let perm_fee = price_info.value;
+    let term_fee = irys_types::U256::from(0); // Always 0 for publish ledger txs
+    let protocol_cost = perm_fee + term_fee;
+
+    // Calculate minimum required miner fee (10% of protocol cost)
+    let fee_percentage = genesis_config.pricing.fee_percentage;
+    let min_required_miner_fee = Amount::new(protocol_cost)
+        .calculate_fee(fee_percentage)
+        .unwrap_or_default();
+
+    // Create tx with sufficient miner fee (exactly at minimum)
+    let tx_sufficient = signer.create_transaction_with_fees(
+        data_sufficient.clone(),
+        Some(H256::zero()),
+        DataLedger::Publish,
+        term_fee,
+        Some(perm_fee),
+        min_required_miner_fee,
+    )?;
+    let tx_sufficient = signer.sign_transaction(tx_sufficient)?;
+
+    // Create tx with insufficient miner fee (50% of minimum)
+    let insufficient_miner_fee = min_required_miner_fee / irys_types::U256::from(2);
+    let tx_insufficient = signer.create_transaction_with_fees(
+        data_insufficient.clone(),
+        Some(H256::zero()),
+        DataLedger::Publish,
+        term_fee,
+        Some(perm_fee),
+        insufficient_miner_fee,
+    )?;
+    let tx_insufficient = signer.sign_transaction(tx_insufficient)?;
+
+    // Post both transactions - they should both be accepted into mempool
+    genesis_node.post_data_tx_raw(&tx_sufficient.header).await;
+    genesis_node.post_data_tx_raw(&tx_insufficient.header).await;
+
+    // Wait for both txs to appear in mempool
+    genesis_node
+        .wait_for_mempool(tx_sufficient.header.id, seconds_to_wait)
+        .await?;
+    genesis_node
+        .wait_for_mempool(tx_insufficient.header.id, seconds_to_wait)
+        .await?;
+
+    // Get best mempool txs (this should filter out the insufficient fee tx)
+    let best_txs = genesis_node.get_best_mempool_tx(None).await.unwrap();
+
+    // Note: Even though we're using Publish ledger (id=0), transactions appear in submit_tx field
+    // This is how the mempool structures the response
+    let submit_tx_ids: Vec<H256> = best_txs.submit_tx.iter().map(|tx| tx.id).collect();
+
+    assert!(
+        submit_tx_ids.contains(&tx_sufficient.header.id),
+        "Transaction with sufficient miner fee should be included in best mempool txs"
+    );
+    assert!(
+        !submit_tx_ids.contains(&tx_insufficient.header.id),
+        "Transaction with insufficient miner fee should NOT be included in best mempool txs"
+    );
+
+    // The test successfully verifies that GetBestMempoolTxs filters out transactions
+    // with insufficient miner fees while keeping them in the mempool.
+    // The insufficient fee tx remains in mempool.
+    genesis_node.stop().await;
+    Ok(())
+}
