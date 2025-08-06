@@ -63,6 +63,9 @@ stake_value = 20000.0
 pledge_base_value = 950.0
 pledge_decay = 0.9
 
+genesis_miner_address = "0x0000000000000000000000000000000000000000"
+genesis_reward_address = "0x0000000000000000000000000000000000000000"
+
 [consensus.Custom.reth]
 chain = 1270
 
