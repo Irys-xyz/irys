@@ -4,12 +4,13 @@ use irys_types::NodeConfig;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
-/// too far in the future, the node rejects it.
+/// too far in the future, the node rejects it during block prevalidation.
 #[actix_web::test]
 async fn heavy_test_future_block_rejection() -> Result<()> {
+    // ------------------------------------------------------------------
     // 0. Create an evil block producer
-    use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome};
-    use crate::validation::send_block_to_block_tree;
+    // ------------------------------------------------------------------
+    use crate::utils::solution_context;
     use irys_actors::{
         async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
         ProductionStrategy,
@@ -92,30 +93,34 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         }
     }
 
+    // ------------------------------------------------------------------
     // 1. Start a node with default config
+    // ------------------------------------------------------------------
     let genesis_config = NodeConfig::testing();
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
     genesis_node.gossip_disable();
 
-    // create a timestamp too far in the future
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let future_timestamp = now_ms
-        + genesis_config
-            .consensus_config()
-            .max_future_timestamp_drift_millis
-        + 10_000; // too far into the future
+    let block_prod_strategy = {
+        // create a timestamp too far in the future
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let future_timestamp = now_ms
+            + genesis_config
+                .consensus_config()
+                .max_future_timestamp_drift_millis
+            + 10_000; // too far into the future
 
-    // Create block with evil strategy and invalid timestamp
-    let block_prod_strategy = EvilBlockProdStrategy {
-        prod: ProductionStrategy {
-            inner: genesis_node.node_ctx.block_producer_inner.clone(),
-        },
-        invalid_timestamp: future_timestamp,
+        // strategy to create evil block with invalid timestamp
+        EvilBlockProdStrategy {
+            prod: ProductionStrategy {
+                inner: genesis_node.node_ctx.block_producer_inner.clone(),
+            },
+            invalid_timestamp: future_timestamp,
+        }
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
@@ -123,12 +128,53 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         .await?
         .unwrap();
 
-    // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    // ------------------------------------------------------------------
+    // 2. Explicitly run pre-validation and assert it fails.
+    //    This simulates what BlockDiscovery would normally do before
+    //    handing the block over to the BlockTree.
+    // ------------------------------------------------------------------
+    {
+        use irys_actors::block_validation::prevalidate_block;
 
-    // Shut down the node
+        // Parent block (current tip before we try to add the evil block)
+        let parent_block_header = genesis_node
+            .get_block_by_height(block.height - 1)
+            .await
+            .expect("parent block header");
+
+        let parent_hash = parent_block_header.block_hash;
+
+        // Snapshots required by `prevalidate_block`
+        let (parent_epoch_snapshot, parent_ema_snapshot) = {
+            let read = genesis_node.node_ctx.block_tree_guard.read();
+            (
+                read.get_epoch_snapshot(&parent_hash)
+                    .expect("parent epoch snapshot")
+                    .clone(),
+                read.get_ema_snapshot(&parent_hash)
+                    .expect("parent ema snapshot"),
+            )
+        };
+
+        // The future-dated timestamp should cause pre-validation to fail.
+        assert!(
+            prevalidate_block(
+                (*block).clone(),
+                parent_block_header,
+                parent_epoch_snapshot,
+                genesis_node.node_ctx.config.clone(),
+                genesis_node.node_ctx.reward_curve.clone(),
+                &parent_ema_snapshot,
+            )
+            .await
+            .is_err(),
+            "pre-validation should fail for future timestamp"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 4. teardown
+    // ------------------------------------------------------------------
     genesis_node.stop().await;
     Ok(())
 }
