@@ -285,7 +285,12 @@ where
         ctx.spawn(trusted_peers_handshake_task);
 
         // Announce yourself to the network
-        let peers_cache = self.peer_list.all_know_peers_with_mining_address();
+        let peers_cache = self
+            .peer_list
+            .all_peers()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
         let announce_fut = Self::announce_yourself_to_all_peers(peers_cache, peer_service_address)
             .into_actor(self);
         ctx.spawn(announce_fut);
@@ -329,7 +334,8 @@ where
     fn flush(&self) -> Result<(), PeerListServiceError> {
         self.db
             .update(|tx| {
-                for (addr, peer) in self.peer_list.all_know_peers_with_mining_address().iter() {
+                // Only persist peers that are staked or have reached the persistence threshold
+                for (addr, peer) in self.peer_list.persistable_peers().iter() {
                     insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
                 }
                 Ok(())
@@ -941,7 +947,7 @@ mod tests {
         // Add peer using guard
         service
             .peer_list
-            .add_or_update_peer(mining_addr, peer.clone());
+            .add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Verify peer was added correctly
         let result = service
@@ -987,7 +993,7 @@ mod tests {
 
         service
             .peer_list
-            .add_or_update_peer(mining_addr, peer.clone());
+            .add_or_update_peer(mining_addr, peer.clone(), true);
         // Test increasing score
         service
             .peer_list
@@ -1063,11 +1069,13 @@ mod tests {
         // Add peers
         service
             .peer_list
-            .add_or_update_peer(mining_addr1, peer1.clone());
+            .add_or_update_peer(mining_addr1, peer1.clone(), true);
         service
             .peer_list
-            .add_or_update_peer(mining_addr2, peer2.clone());
-        service.peer_list.add_or_update_peer(mining_addr3, peer3);
+            .add_or_update_peer(mining_addr2, peer2.clone(), true);
+        service
+            .peer_list
+            .add_or_update_peer(mining_addr3, peer3, true);
 
         // Test active peers request using message handler
         let exclude_peers = HashSet::new();
@@ -1112,8 +1120,10 @@ mod tests {
         // Add same peer twice
         service
             .peer_list
-            .add_or_update_peer(mining_addr, peer.clone());
-        service.peer_list.add_or_update_peer(mining_addr, peer);
+            .add_or_update_peer(mining_addr, peer.clone(), true);
+        service
+            .peer_list
+            .add_or_update_peer(mining_addr, peer, true);
 
         // Verify only one entry exists using KnownPeersRequest
         let known_peers = service.peer_list.all_known_peers();
@@ -1198,7 +1208,7 @@ mod tests {
             true,
             None,
         );
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Wait for more than the flush interval to ensure a flush has occurred
         tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
@@ -1264,8 +1274,8 @@ mod tests {
             Some(IpAddr::from_str("127.0.0.3").expect("Invalid IP")),
         );
 
-        peer_list_data_guard.add_or_update_peer(mining_addr1, peer1.clone());
-        peer_list_data_guard.add_or_update_peer(mining_addr2, peer2.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr1, peer1.clone(), true);
+        peer_list_data_guard.add_or_update_peer(mining_addr2, peer2.clone(), true);
 
         // Wait for the data to be flushed to the database
         tokio::time::sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
@@ -1425,7 +1435,7 @@ mod tests {
         // Add the initial peer
         service
             .peer_list
-            .add_or_update_peer(mining_addr, initial_peer);
+            .add_or_update_peer(mining_addr, initial_peer, true);
 
         // Verify the peer was added
         let initial_result = service
@@ -1456,7 +1466,7 @@ mod tests {
         // Update the peer with new address
         service
             .peer_list
-            .add_or_update_peer(mining_addr, updated_peer);
+            .add_or_update_peer(mining_addr, updated_peer, true);
 
         // Verify the peer address was updated
         let updated_result = service.peer_list.peer_by_gossip_address(new_gossip_addr);
@@ -1534,7 +1544,7 @@ mod tests {
         };
 
         // Add the peer to the service
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Give some time for async processing
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1603,7 +1613,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Add the peer which should trigger announce_yourself_to_address_task
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -1662,7 +1672,7 @@ mod tests {
         );
 
         // Add the peer which should trigger announce_yourself_to_address_task
-        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone(), true);
 
         // Send a NewPotentialPeer message for the same peer while an announcement is already running
         service_addr
@@ -1780,7 +1790,7 @@ mod tests {
                 // Wait a bit to ensure the other task is waiting
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 debug!("Adding peer");
-                peer_list_data_guard.add_or_update_peer(mining_addr, peer);
+                peer_list_data_guard.add_or_update_peer(mining_addr, peer, true);
             }
         });
 
@@ -1923,6 +1933,158 @@ mod tests {
         assert!(
             api_calls.contains(&trusted_peer2.api),
             "Should have called the second trusted peer's API address"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_staked_unstaked_peer_flush_behavior() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = NodeConfig::testing().into();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock reth service actor
+        let mock_reth_actor = MockRethServiceActor::new();
+        let reth_actor = mock_reth_actor.start();
+
+        // Use our custom mock client
+        let mock_api_client = CountingMockClient::default();
+
+        let (service_sender, service_receiver) = PeerNetworkSender::new_with_receiver();
+        // Create service with our mocks
+        let service = PeerNetworkService::new_with_custom_api_client(
+            db.clone(),
+            &config,
+            mock_api_client,
+            reth_actor,
+            service_receiver,
+            service_sender,
+        );
+
+        // Create first peer (staked)
+        let (staked_mining_addr, staked_peer) = create_test_peer(
+            "0x1111111111111111111111111111111111111111",
+            8080,
+            true,
+            None,
+        );
+
+        // Create second peer (unstaked) with different address
+        let (unstaked_mining_addr, unstaked_peer) = create_test_peer(
+            "0x2222222222222222222222222222222222222222",
+            8081,
+            true,
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))),
+        );
+
+        // Add first peer with is_staked: true
+        service
+            .peer_list
+            .add_or_update_peer(staked_mining_addr, staked_peer.clone(), true);
+
+        // Add second peer with is_staked: false
+        service
+            .peer_list
+            .add_or_update_peer(unstaked_mining_addr, unstaked_peer, false);
+
+        // Flush and check that only the first peer (staked) has been flushed
+        service.flush().expect("flush should succeed");
+
+        // Verify staked peer is in persistable_peers (will be flushed)
+        let persistable_peers = service.peer_list.persistable_peers();
+        assert!(
+            persistable_peers.contains_key(&staked_mining_addr),
+            "Staked peer should be in persistable peers"
+        );
+        assert!(
+            !persistable_peers.contains_key(&unstaked_mining_addr),
+            "Unstaked peer should not be in persistable peers initially"
+        );
+
+        // Verify the data was persisted by reading directly from the database
+        let read_tx = db
+            .tx()
+            .map_err(PeerListServiceError::from)
+            .expect("failed to create read tx");
+
+        let items = walk_all::<PeerListItems, _>(&read_tx)
+            .map_err(PeerListServiceError::from)
+            .expect("failed to walk all items");
+
+        // Only the staked peer should be in the database at this point
+        assert_eq!(items.len(), 1, "Only staked peer should be in the database");
+        let (stored_addr, stored_peer) = items.into_iter().next().expect("no peers");
+        assert_eq!(
+            stored_addr, staked_mining_addr,
+            "Stored peer should be the staked peer"
+        );
+        assert_eq!(
+            stored_peer.0.address, staked_peer.address,
+            "Stored peer address should match"
+        );
+
+        // Increase the second peer's score until it reaches 81 or more
+        // Starting score is 50 (INITIAL), need to reach 81 (PERSISTENCE_THRESHOLD + 1)
+        // Each increase adds 1, so we need 31 increases to reach 81
+        for _ in 0..31 {
+            service
+                .peer_list
+                .increase_peer_score(&unstaked_mining_addr, ScoreIncreaseReason::Online);
+        }
+
+        // Verify the second peer's score is now 81 or more
+        let updated_peer = service
+            .peer_list
+            .get_peer(&unstaked_mining_addr)
+            .expect("unstaked peer should exist");
+        assert!(
+            updated_peer.reputation_score.get() >= 81,
+            "Unstaked peer score should be 81 or more, got: {}",
+            updated_peer.reputation_score.get()
+        );
+
+        // Flush again and check that the second peer is now also flushed
+        service.flush().expect("the second flush should succeed");
+
+        // Verify both peers are now in persistable_peers (will be flushed)
+        let persistable_peers_after = service.peer_list.persistable_peers();
+        assert!(
+            persistable_peers_after.contains_key(&staked_mining_addr),
+            "Staked peer should still be in persistable peers"
+        );
+        assert!(
+            persistable_peers_after.contains_key(&unstaked_mining_addr),
+            "Unstaked peer should now be in persistable peers after a score increase"
+        );
+
+        // Verify both peers are now in the database
+        let read_tx_after = db
+            .tx()
+            .map_err(PeerListServiceError::from)
+            .expect("failed to create read tx after the second flush");
+
+        let items_after = walk_all::<PeerListItems, _>(&read_tx_after)
+            .map_err(PeerListServiceError::from)
+            .expect("failed to walk all items after the second flush");
+
+        // Both peers should now be in the database
+        assert_eq!(
+            items_after.len(),
+            2,
+            "Both peers should be in the database after the second flush"
+        );
+
+        let stored_addrs: std::collections::HashSet<_> =
+            items_after.iter().map(|(addr, _)| *addr).collect();
+        assert!(
+            stored_addrs.contains(&staked_mining_addr),
+            "Staked peer should be in the database"
+        );
+        assert!(
+            stored_addrs.contains(&unstaked_mining_addr),
+            "Unstaked peer should now be in the database"
         );
     }
 }
