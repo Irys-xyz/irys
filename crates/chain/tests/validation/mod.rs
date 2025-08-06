@@ -13,7 +13,7 @@ use irys_types::{
 };
 
 // Helper function to send a block directly to the block tree service for validation
-pub async fn send_block_to_block_tree(
+async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
     commitment_txs: Vec<CommitmentTransaction>,
