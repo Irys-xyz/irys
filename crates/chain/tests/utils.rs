@@ -702,7 +702,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
                 //read its ingressproof(s)
                 if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-                    assert_eq!(proof.data_root, tx_header.data_root);
+                    assert_eq!(proof.proof.data_root, tx_header.data_root);
                     tracing::info!("Proofs available after {} attempts", attempts);
                     unconfirmed_promotions.pop();
                 };

@@ -1,5 +1,6 @@
 use alloy_primitives::{Address, ChainId};
 use alloy_signer::Signature;
+use arbitrary::Arbitrary;
 use eyre::OptionExt as _;
 use openssl::sha;
 use reth_codecs::Compact;
@@ -13,7 +14,15 @@ use crate::irys::IrysSigner;
 use crate::{
     generate_data_root, generate_ingress_leaves, ChunkBytes, DataRoot, IrysSignature, Node, H256,
 };
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
+
+pub struct CachedIngressProof {
+    pub address: Address, // subkey
+    pub proof: IngressProof,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
 pub struct IngressProof {
     pub signature: IrysSignature,
     pub data_root: H256,
@@ -49,7 +58,7 @@ pub fn generate_ingress_proof_tree(
 }
 
 pub fn generate_ingress_proof(
-    signer: IrysSigner,
+    signer: &IrysSigner,
     data_root: DataRoot,
     chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
     chain_id: u64,
@@ -175,7 +184,7 @@ mod tests {
             .collect();
         let chain_id = 1; // Example chain_id for testing
         let proof = generate_ingress_proof(
-            signer,
+            &signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
             chain_id,
@@ -224,7 +233,7 @@ mod tests {
         // Generate proof for testnet (chain_id = 1)
         let testnet_chain_id = 1;
         let testnet_proof = generate_ingress_proof(
-            signer.clone(),
+            &signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
             testnet_chain_id,
@@ -233,7 +242,7 @@ mod tests {
         // Generate proof for mainnet (chain_id = 2)
         let mainnet_chain_id = 2;
         let mainnet_proof = generate_ingress_proof(
-            signer,
+            &signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
             mainnet_chain_id,

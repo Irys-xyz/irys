@@ -879,8 +879,8 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
     a_blk1_tx1_published.ingress_proofs = Some(TxIngressProof {
-        proof: a_blk1_tx1_proof1.proof,
-        signature: a_blk1_tx1_proof1.signature,
+        proof: a_blk1_tx1_proof1.proof.proof,
+        signature: a_blk1_tx1_proof1.proof.signature,
     });
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
@@ -942,8 +942,8 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .clone()
         .unwrap()
         .ne(&IngressProofsList(vec![TxIngressProof {
-            proof: a_blk1_tx1_proof1.proof,
-            signature: a_blk1_tx1_proof1.signature
+            proof: a_blk1_tx1_proof1.proof.proof,
+            signature: a_blk1_tx1_proof1.proof.signature
         }])));
 
     // now we gossip B3 back to A
