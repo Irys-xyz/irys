@@ -149,8 +149,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             let read = genesis_node.node_ctx.block_tree_guard.read();
             (
                 read.get_epoch_snapshot(&parent_hash)
-                    .expect("parent epoch snapshot")
-                    .clone(),
+                    .expect("parent epoch snapshot"),
                 read.get_ema_snapshot(&parent_hash)
                     .expect("parent ema snapshot"),
             )
