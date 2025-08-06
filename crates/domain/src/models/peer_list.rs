@@ -394,10 +394,10 @@ impl PeerListDataInner {
             let address = peer_list_item.address;
             peer_list
                 .gossip_addr_to_mining_addr_map
-                .insert(entry.address.gossip.ip(), mining_addr);
+                .insert(peer_list_item.address.gossip.ip(), mining_address);
             peer_list
                 .persistent_peers_cache
-                .insert(mining_addr, entry.0);
+                .insert(mining_address, peer_list_item);
             peer_list.known_peers_cache.insert(address);
             peer_list
                 .api_addr_to_mining_addr_map
