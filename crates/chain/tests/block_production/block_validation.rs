@@ -84,15 +84,6 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 
     // 2. Modify block with a timestamp too far in the future
     //    i.e. just outside the exceptable drift
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let future_timestamp = now_ms
-        + genesis_config
-            .consensus_config()
-            .max_future_timestamp_drift_millis
-        + 10_000; // too far into the future
 
     // creating artificially future-dated block header
     let mut invalid_block = block_1;
