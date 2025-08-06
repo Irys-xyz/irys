@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use crate::utils::{BlockValidationOutcome, IrysNodeTest, read_block_from_state, solution_context};
+use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
-    block_tree_service::BlockTreeServiceMessage,
+    async_trait, block_tree_service::BlockTreeServiceMessage, BlockProdStrategy,
+    BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256, H256List, IrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, TxIngressProof,
+    CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
+    SystemTransactionLedger, TxIngressProof, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
@@ -400,6 +400,49 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         vec![wrong_commitment],
     )
     .await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+// This test ensures that blocks with incorrect `last_epoch_hash` are rejected during validation.
+#[test_log::test(actix_web::test)]
+async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Mine an initial block so we can tamper with the next block
+    genesis_node.mine_block().await?;
+
+    let block_prod_strategy = ProductionStrategy {
+        inner: genesis_node.node_ctx.block_producer_inner.clone(),
+    };
+
+    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Tamper with last_epoch_hash to make it invalid
+    let mut irys_block = (*block).clone();
+    irys_block.last_epoch_hash = irys_block.previous_block_hash;
+    test_signer.sign_block_header(&mut irys_block)?;
+    block = Arc::new(irys_block);
+
+    // Send the malformed block for validation
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
