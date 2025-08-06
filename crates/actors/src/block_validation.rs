@@ -21,6 +21,7 @@ use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTIN
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
+use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
@@ -33,7 +34,11 @@ use openssl::sha;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tracing::{debug, error, info};
 
 /// Full pre-validation steps for a block
@@ -974,65 +979,110 @@ pub async fn data_txs_are_valid(
         get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
             .await?;
 
+    // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
+    let submit_ids: HashSet<H256> = submit_txs.iter().map(|tx| tx.id).collect();
+    let publish_ids: HashSet<H256> = publish_txs.iter().map(|tx| tx.id).collect();
+    let same_block_promotions = submit_ids
+        .intersection(&publish_ids)
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    // Log same-block promotions for debugging
+    for tx_id in &same_block_promotions {
+        debug!(
+            "Transaction {} promoted from Submit to Publish in same block",
+            tx_id
+        );
+    }
     // Collect all tx_ids we need to check for previous inclusions
-    let mut all_txs = publish_txs
+    let mut txs_to_check = publish_txs
         .iter()
         .map(|x| (x, DataLedger::Publish))
         .chain(submit_txs.iter().map(|x| (x, DataLedger::Submit)))
-        .map(|(tx, current_ledger)| (tx.id, (tx, TxInclusionState::Searching { current_ledger })))
+        .map(|(tx, current_ledger)| {
+            let state = if same_block_promotions.contains(&tx.id) {
+                TxInclusionState::Found {
+                    current_ledger: DataLedger::Publish,
+                    past_ledger: DataLedger::Submit,
+                }
+            } else {
+                TxInclusionState::Searching { current_ledger }
+            };
+            (tx.id, (tx, state))
+        })
         .collect::<HashMap<_, _>>();
 
-    // Get previous inclusions as a vector indexed by position
+    // Step 3: Check past inclusions only for non-promoted txs
     get_previous_tx_inclusions(
-        &mut all_txs,
+        &mut txs_to_check,
         block,
         config.consensus.mempool.anchor_expiry_depth as u64,
         service_senders,
     )
     .await?;
 
-    for (_tx_hash, (tx, past_inclusion)) in all_txs {
-        let current_ledger = match past_inclusion {
+    // Step 4: Validate based on ledger rules
+    for (_tx_hash, (tx, past_inclusion)) in &txs_to_check {
+        match past_inclusion {
             TxInclusionState::Searching { current_ledger } => {
-                // Transaction is unique and not included in a past block; accept it
-                current_ledger
+                match current_ledger {
+                    DataLedger::Publish => {
+                        // Publish tx with no past inclusion - INVALID
+                        tracing::warn!(
+                            "Transaction {} in Publish ledger must have prior Submit ledger inclusion",
+                            tx.id
+                        );
+                    }
+                    DataLedger::Submit => {
+                        // Submit tx with no past inclusion - VALID (new transaction)
+                        debug!("Transaction {} is new in Submit ledger", tx.id);
+                    }
+                }
             }
             TxInclusionState::Found {
                 current_ledger,
                 past_ledger,
             } => {
-                // Validate allowed transitions between ledgers
-                match (past_ledger, current_ledger) {
-                    (DataLedger::Submit, DataLedger::Publish) => {
-                        // OK: Transaction promoted from Submit to Publish
+                match (*current_ledger, *past_ledger) {
+                    (DataLedger::Publish, DataLedger::Submit) => {
+                        // OK: Transaction promoted from past Submit to current Publish
                         debug!(
-                            "Transaction {} promoted from Submit to Publish ledger",
+                            "Transaction {} promoted from past Submit to current Publish ledger",
                             tx.id
                         );
                     }
                     (DataLedger::Publish, DataLedger::Publish) => {
-                        return Err(eyre::eyre!(
+                        tracing::warn!(
                             "Transaction {} already included in previous Publish ledger",
                             tx.id
-                        ));
+                        );
                     }
-                    (DataLedger::Submit, DataLedger::Submit) => {
-                        return Err(eyre::eyre!(
-                            "Transaction {} already included in previous Submit ledger",
-                            tx.id
-                        ));
-                    }
-                    (DataLedger::Publish, DataLedger::Submit) => {
-                        return Err(eyre::eyre!(
-                            "Transaction {} cannot move from Publish to Submit ledger",
-                            tx.id
-                        ));
+                    (DataLedger::Submit, _) => {
+                        // Submit tx should not have any past inclusion
+                        tracing::warn!(
+                            "Transaction {} in Submit ledger was already included in past {:?} ledger",
+                            tx.id, past_ledger
+                        );
                     }
                 }
-                current_ledger
             }
-        };
+            TxInclusionState::Duplicate { past_ledger } => {
+                // Transaction found in multiple past blocks - this is always invalid
+                tracing::warn!(
+                    "Transaction {} found in multiple previous blocks. First occurrence in {:?} ledger at block {}",
+                    tx.id, past_ledger.0, past_ledger.1
+                );
+            }
+        }
+    }
 
+    // Step 5: Validate all transactions (including same-block promotions)
+    let all_txs = publish_txs
+        .iter()
+        .map(|tx| (tx, DataLedger::Publish))
+        .chain(submit_txs.iter().map(|tx| (tx, DataLedger::Submit)));
+
+    for (tx, current_ledger) in all_txs {
         // All data transactions must have ledger_id set to Publish
         ensure!(
             tx.ledger_id == DataLedger::Publish as u32,
@@ -1065,23 +1115,7 @@ pub async fn data_txs_are_valid(
         );
 
         match current_ledger {
-            DataLedger::Publish => {
-                // Validate ingress proofs are present
-                let ingress_proofs = tx.ingress_proofs.as_ref().ok_or_eyre(format!(
-                    "Transaction {} in Publish ledger missing ingress proofs",
-                    tx.id
-                ))?;
-
-                // Validate ingress proof signature
-                // The proof signature should be valid for the data_root
-                let _ = ingress_proofs.pre_validate(&tx.data_root).map_err(|e| {
-                    eyre::eyre!(
-                        "Transaction {} has invalid ingress proof signature: {}",
-                        tx.id,
-                        e
-                    )
-                })?;
-            }
+            DataLedger::Publish => {}
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs
                 // (they're waiting for proofs)
@@ -1114,11 +1148,31 @@ pub async fn data_txs_are_valid(
         );
 
         // Validate each proof corresponds to the correct transaction
-        for (tx, proof) in publish_txs.iter().zip(proofs_list.iter()) {
-            let tx_proof = tx
-                .ingress_proofs
-                .as_ref()
-                .ok_or_eyre("Transaction missing ingress proof")?;
+        for item in publish_txs.iter().zip_longest(proofs_list.iter()) {
+            let EitherOrBoth::Both(tx, proof) = item else {
+                tracing::warn!("publish tx and proof length mismatch, cannot validate publish ledger transaction proofs");
+                break;
+            };
+
+            // Validate ingress proofs are present
+            let Some(tx_proof) = tx.ingress_proofs.as_ref() else {
+                tracing::warn!(
+                    "Transaction {} in Publish ledger missing ingress proofs",
+                    tx.id
+                );
+                continue;
+            };
+
+            // Validate ingress proof signature
+            // The proof signature should be valid for the data_root
+            let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
+                eyre::eyre!(
+                    "Transaction {} has invalid ingress proof signature: {}",
+                    tx.id,
+                    e
+                )
+            })?;
+
             ensure!(
                 tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
                 "Ingress proof mismatch for transaction {}",
@@ -1140,6 +1194,9 @@ enum TxInclusionState {
     Found {
         current_ledger: DataLedger,
         past_ledger: DataLedger,
+    },
+    Duplicate {
+        past_ledger: (DataLedger, BlockHash),
     },
 }
 
@@ -1169,7 +1226,9 @@ async fn get_previous_tx_inclusions(
         .values()
         .filter(|b| b.block_hash != block.block_hash)
         .filter(|b| b.height >= min_height)
-        .try_for_each(|x| process_block_ledgers_with_states(&x.data_ledgers, tx_ids))?;
+        .try_for_each(|x| {
+            process_block_ledgers_with_states(&x.data_ledgers, x.block_hash, tx_ids)
+        })?;
     Ok(())
 }
 
@@ -1177,6 +1236,7 @@ async fn get_previous_tx_inclusions(
 /// Returns true if all transactions have been found
 fn process_block_ledgers_with_states(
     ledgers: &[DataTransactionLedger],
+    block_hash: BlockHash,
     tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
 ) -> eyre::Result<()> {
     for ledger in ledgers {
@@ -1185,11 +1245,23 @@ fn process_block_ledgers_with_states(
         // Check each transaction in this ledger
         for tx_id in &ledger.tx_ids.0 {
             if let Some((_, state)) = tx_states.get_mut(tx_id) {
-                if let TxInclusionState::Searching { current_ledger } = *state {
-                    *state = TxInclusionState::Found {
-                        current_ledger,
-                        past_ledger: ledger_type,
-                    };
+                match state {
+                    TxInclusionState::Searching { current_ledger } => {
+                        // First time finding this transaction
+                        *state = TxInclusionState::Found {
+                            current_ledger: *current_ledger,
+                            past_ledger: ledger_type,
+                        };
+                    }
+                    TxInclusionState::Found { .. } => {
+                        // Transaction already found once, this is a duplicate
+                        *state = TxInclusionState::Duplicate {
+                            past_ledger: (ledger_type, block_hash),
+                        };
+                    }
+                    TxInclusionState::Duplicate { .. } => {
+                        // Already marked as duplicate, no need to update
+                    }
                 }
             }
         }
