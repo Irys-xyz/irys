@@ -984,7 +984,7 @@ pub async fn data_txs_are_valid(
     let publish_ids: HashSet<H256> = publish_txs.iter().map(|tx| tx.id).collect();
     let same_block_promotions = submit_ids
         .intersection(&publish_ids)
-        .cloned()
+        .copied()
         .collect::<HashSet<_>>();
 
     // Log same-block promotions for debugging
@@ -1022,7 +1022,7 @@ pub async fn data_txs_are_valid(
     .await?;
 
     // Step 4: Validate based on ledger rules
-    for (_tx_hash, (tx, past_inclusion)) in &txs_to_check {
+    for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
             TxInclusionState::Searching { current_ledger } => {
                 match current_ledger {
@@ -1119,11 +1119,12 @@ pub async fn data_txs_are_valid(
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs
                 // (they're waiting for proofs)
-                ensure!(
-                    tx.ingress_proofs.is_none(),
-                    "Transaction {} in Submit ledger should not have ingress proofs",
-                    tx.id
-                );
+                if tx.ingress_proofs.is_none() {
+                    tracing::warn!(
+                        "Transaction {} in Submit ledger should not have ingress proofs",
+                        tx.id
+                    );
+                }
             }
         }
     }

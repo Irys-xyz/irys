@@ -1,3 +1,5 @@
+mod data_tx_pricing;
+
 use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
