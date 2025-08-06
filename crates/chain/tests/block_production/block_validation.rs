@@ -156,18 +156,21 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         };
 
         // The future-dated timestamp should cause pre-validation to fail.
+        let prevalidation_result = prevalidate_block(
+            (*block).clone(),
+            parent_block_header,
+            parent_epoch_snapshot,
+            genesis_node.node_ctx.config.clone(),
+            genesis_node.node_ctx.reward_curve.clone(),
+            &parent_ema_snapshot,
+        )
+        .await;
+        let err_msg = prevalidation_result
+            .expect_err("pre-validation should fail for future timestamp")
+            .to_string();
         assert!(
-            prevalidate_block(
-                (*block).clone(),
-                parent_block_header,
-                parent_epoch_snapshot,
-                genesis_node.node_ctx.config.clone(),
-                genesis_node.node_ctx.reward_curve.clone(),
-                &parent_ema_snapshot,
-            )
-            .await
-            .is_err(),
-            "pre-validation should fail for future timestamp"
+            err_msg.contains("future"),
+            "error message should indicate the timestamp drift issue: {err_msg}"
         );
     }
 
