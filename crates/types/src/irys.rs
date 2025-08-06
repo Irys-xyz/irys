@@ -114,24 +114,6 @@ impl IrysSigner {
         )
     }
 
-    /// Creates a submit transaction with the provided term fee and miner fee
-    pub fn create_submit_transaction(
-        &self,
-        data: Vec<u8>,
-        anchor: Option<H256>,
-        term_fee: U256,
-        miner_fee: U256,
-    ) -> Result<DataTransaction> {
-        self.create_transaction_with_fees(
-            data,
-            anchor,
-            DataLedger::Submit,
-            term_fee, // Temporary storage fee
-            None,     // No permanent storage fee
-            miner_fee,
-        )
-    }
-
     /// signs and sets signature and id.
     pub fn sign_transaction(&self, mut transaction: DataTransaction) -> Result<DataTransaction> {
         // Store the signer address

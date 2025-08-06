@@ -113,7 +113,7 @@ impl Inner {
             }
             DataLedger::Submit => {
                 // Submit ledger - a data transaction cannot target the submit ledger directly
-                return Err(TxIngressError::InvalidLedger(1));
+                return Err(TxIngressError::InvalidLedger(ledger as u32));
             } // TODO: support other term ledgers here
         }
 

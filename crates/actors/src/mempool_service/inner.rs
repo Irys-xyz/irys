@@ -1,4 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
+use crate::block_validation::calculate_perm_storage_base_network_fee;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
@@ -905,22 +906,9 @@ impl Inner {
         drop(tree);
 
         // Calculate the cost per GB (take into account replica count & cost per replica)
-        let cost_per_gb = self
-            .config
-            .consensus
-            .annual_cost_per_gb
-            .cost_per_replica(
-                self.config.consensus.safe_minimum_number_of_years,
-                self.config.consensus.decay_rate,
-            )
-            .map_err(TxIngressError::other_display)?
-            .replica_count(self.config.consensus.number_of_ingress_proofs)
-            .map_err(TxIngressError::other_display)?;
-
-        // calculate the base network fee (protocol cost)
-        let base_network_fee = cost_per_gb
-            .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())
-            .map_err(TxIngressError::other_display)?;
+        let base_network_fee =
+            calculate_perm_storage_base_network_fee(bytes_to_store, &ema, &self.config)
+                .map_err(TxIngressError::other_display)?;
 
         Ok(base_network_fee)
     }

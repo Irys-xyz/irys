@@ -27,6 +27,7 @@ use reth::{
 };
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
+use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 use tracing::debug;
@@ -2014,16 +2015,13 @@ async fn commitment_tx_valid_higher_fee_test(
 #[test_log::test(actix_web::test)]
 async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Result<()> {
     use irys_types::storage_pricing::Amount;
-    use rust_decimal::prelude::*;
-
-    initialize_tracing();
 
     // Setup test network
     let seconds_to_wait = 15;
     let mut genesis_config = NodeConfig::testing();
 
     // Set a specific miner fee percentage for testing (10%)
-    genesis_config.pricing.fee_percentage = Amount::percentage(Decimal::from_str("0.10")?)?;
+    genesis_config.pricing.fee_percentage = Amount::percentage(dec!(0.1))?;
 
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);

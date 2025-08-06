@@ -77,7 +77,7 @@ impl<'a> ShadowTxGenerator<'a> {
                         irys_ref: tx.id.into(),
                     },
                 )),
-                transaction_fee: tx.miner_fee as u128,
+                transaction_fee: tx.miner_fee.into(),
             })
         })
     }

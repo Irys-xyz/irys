@@ -304,15 +304,18 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     config.consensus.get_mut().block_migration_depth = 1;
 
+    // Create test accounts:
+    // - account1: will send both an EVM transaction and a storage (data) transaction
+    // - recipient: will receive the EVM transfer from account1
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
-    let account_1_balance = TEST_USER_BALANCE_ETH;
+    let initial_balance = TEST_USER_BALANCE_ETH;
     config.consensus.extend_genesis_accounts(vec![(
         account1.address(),
         GenesisAccount {
             // 1ETH
-            balance: account_1_balance,
+            balance: initial_balance,
             ..Default::default()
         },
     )]);
@@ -385,8 +388,12 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
-    // Verify account1 balance decreased by storage fees and gas costs
-    let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
+    // Get account1's final balance after all transactions
+    let final_balance = reth_context.rpc.get_balance(account1.address(), None)?;
+
+    // Calculate how much account1 actually spent
+    // actual_spent = initial_balance - final_balance
+    let actual_spent = initial_balance - final_balance;
 
     // Calculate expected spending
     // The actual balance deduction includes:
@@ -399,8 +406,6 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let miner_fee = U256::from(irys_tx.header.miner_fee);
     // The miner fee is paid twice: once in total_cost and once as priority fee distribution
     let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT + miner_fee;
-
-    let actual_spent = account_1_balance - account1_balance;
 
     // Assert that the actual spent matches expected
     assert_eq!(

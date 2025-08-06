@@ -21,6 +21,8 @@ use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTIN
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
+use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
+use irys_types::storage_pricing::Amount;
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
@@ -658,7 +660,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
 
     // Lookup data txs
-    let data_txs = extract_data_txs(service_senders, block, db).await?;
+    let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
 
     let shadow_txs = ShadowTxGenerator::new(
         &block.height,
@@ -705,28 +707,15 @@ async fn extract_commitment_txs(
     Ok(commitment_txs)
 }
 
-async fn extract_data_txs(
+async fn extract_submit_ledger_txs(
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
-    let txs = match &block.data_ledgers[..] {
-        [publish_ledger, submit_ledger] => {
-            ensure!(
-                publish_ledger.ledger_id == DataLedger::Publish,
-                "Publish ledger must be the first ledger in the data ledgers"
-            );
-            ensure!(
-                submit_ledger.ledger_id == DataLedger::Submit,
-                "Submit ledger must be the second ledger in the data ledgers"
-            );
-            // we only access the submit ledger data. Publish ledger does not require billing the user extra
-            get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-                .await?
-        }
-        // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
-        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
-    };
+    let (_publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
+    // we only access the submit ledger data. Publish ledger does not require billing the user extra
+    let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+        .await?;
     Ok(txs)
 }
 
@@ -915,11 +904,11 @@ pub async fn commitment_txs_are_valid(
 }
 
 /// Helper function to calculate permanent storage fee using a specific EMA snapshot
-fn calculate_perm_storage_fee_with_ema(
+pub fn calculate_perm_storage_base_network_fee(
     bytes_to_store: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-) -> eyre::Result<U256> {
+) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
     // Calculate the cost per GB (take into account replica count & cost per replica)
     let cost_per_gb = config
         .consensus
@@ -936,7 +925,7 @@ fn calculate_perm_storage_fee_with_ema(
         ema_snapshot.ema_for_public_pricing(),
     )?;
 
-    Ok(base_network_fee.amount)
+    Ok(base_network_fee)
 }
 
 /// Validates that data transactions in a block are correctly placed and have valid properties
@@ -957,20 +946,7 @@ pub async fn data_txs_are_valid(
         .ok_or_eyre("Block EMA snapshot not found")?;
 
     // Extract data transactions from both ledgers
-    let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
-        [publish_ledger, submit_ledger] => {
-            ensure!(
-                publish_ledger.ledger_id == DataLedger::Publish,
-                "Publish ledger must be the first ledger in the data ledgers"
-            );
-            ensure!(
-                submit_ledger.ledger_id == DataLedger::Submit,
-                "Submit ledger must be the second ledger in the data ledgers"
-            );
-            (publish_ledger, submit_ledger)
-        }
-        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
-    };
+    let (publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
 
     // Get transactions from both ledgers
     let publish_txs = get_data_tx_in_parallel(
@@ -1100,12 +1076,12 @@ pub async fn data_txs_are_valid(
 
         // Calculate expected perm_fee based on data size using block's EMA
         let expected_perm_fee =
-            calculate_perm_storage_fee_with_ema(tx.data_size, &block_ema, config)?;
+            calculate_perm_storage_base_network_fee(tx.data_size, &block_ema, config)?;
 
         // Validate perm_fee is at least the expected amount
         let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
         ensure!(
-            actual_perm_fee >= expected_perm_fee,
+            actual_perm_fee >= expected_perm_fee.amount,
             "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
             tx.id,
             expected_perm_fee,
@@ -1121,10 +1097,12 @@ pub async fn data_txs_are_valid(
         );
 
         match current_ledger {
-            DataLedger::Publish => {}
+            DataLedger::Publish => {
+                // no special publish-ledger-only asserts here
+            }
             DataLedger::Submit => {
-                // Submit ledger transactions should not have ingress proofs
-                // (they're waiting for proofs)
+                // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+                // (they're waiting for proofs to arrive)
                 if tx.ingress_proofs.is_none() {
                     tracing::warn!(
                         "Transaction {} in Submit ledger should not have ingress proofs",
@@ -1190,6 +1168,26 @@ pub async fn data_txs_are_valid(
 
     debug!("Data transaction validation successful");
     Ok(())
+}
+
+fn extract_data_ledgers(
+    block: &IrysBlockHeader,
+) -> eyre::Result<(&DataTransactionLedger, &DataTransactionLedger)> {
+    let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+            (publish_ledger, submit_ledger)
+        }
+        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+    };
+    Ok((publish_ledger, submit_ledger))
 }
 
 /// State for tracking transaction inclusion search
