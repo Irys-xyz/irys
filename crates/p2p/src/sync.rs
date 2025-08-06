@@ -475,6 +475,10 @@ pub async fn sync_chain(
             block_queue.extend(additional_index);
             blocks_to_request = block_queue.len();
             if blocks_to_request == 0 {
+                debug!(
+                    "block index request for entries >{} returned no extra results",
+                    &target
+                );
                 break;
             }
         }
