@@ -118,20 +118,17 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             ZERO_BALANCE
         });
 
-    // The balance should decrease by the total cost, but there might be a miner fee difference
-    // similar to the previous test
+    // The balance should decrease by the total cost plus the priority fee
+    // The miner fee is paid twice: once in total_cost and once as priority fee distribution
     let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
-    let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
     let miner_fee = U256::from(tx.header.miner_fee);
+    let expected_spent_with_priority = expected_spent + miner_fee;
+    let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
 
-    // Allow for the miner fee difference plus a small tolerance
-    let tolerance = miner_fee + U256::from(1_000_000_000_u64); // miner_fee + 1 gwei tolerance
-    assert!(
-        actual_spent >= expected_spent && actual_spent <= expected_spent + tolerance,
-        "Balance spent ({}) not within expected range [{}, {}]",
-        actual_spent,
-        expected_spent,
-        expected_spent + tolerance
+    assert_eq!(
+        actual_spent, expected_spent_with_priority,
+        "Balance spent ({}) should equal expected ({}) = total_cost ({}) + priority_fee ({})",
+        actual_spent, expected_spent_with_priority, expected_spent, miner_fee
     );
 
     // ensure that the block reward has increased the block reward address balance
@@ -392,25 +389,24 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
 
     // Calculate expected spending
-    // The actual balance deduction includes the total storage cost (including miner fee)
-    // plus the gas costs and transfer amount
+    // The actual balance deduction includes:
+    // 1. The total storage cost (including miner fee)
+    // 2. The gas costs for the EVM transaction
+    // 3. The transfer amount
+    // 4. The priority fee distribution (miner fee paid again as priority fee)
     let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
-    let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT;
-
-    // The difference appears to be exactly the miner_fee, which suggests it's being
-    // handled differently in the shadow transaction processing (paid twice)
-    let actual_spent = account_1_balance - account1_balance;
     let miner_fee = U256::from(irys_tx.header.miner_fee);
+    // The miner fee is paid twice: once in total_cost and once as priority fee distribution
+    let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT + miner_fee;
 
-    // Allow for the miner fee difference plus a small tolerance for gas variations
-    let tolerance = miner_fee + U256::from(1_000_000_000_u64); // miner_fee + 1 gwei tolerance
-    assert!(
-        actual_spent >= expected_spent && actual_spent <= expected_spent + tolerance,
-        "Balance spent ({}) not within expected range [{}, {}]",
-        actual_spent,
-        expected_spent,
-        expected_spent + tolerance
+    let actual_spent = account_1_balance - account1_balance;
+
+    // Assert that the actual spent matches expected
+    assert_eq!(
+        actual_spent, expected_spent,
+        "Account1 balance should decrease by storage fees ({}) + gas costs ({}) + transfer ({}) + priority fee ({})",
+        storage_fees, gas_costs, EVM_TEST_TRANSFER_AMOUNT, miner_fee
     );
 
     node.stop().await;
@@ -736,14 +732,14 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
             ZERO_BALANCE
         });
 
-    // The user balance might not be exactly 0 due to miner fee handling
-    // Allow for up to miner_fee amount remaining
-    let miner_fee = U256::from(tx.header.miner_fee);
-    assert!(
-        user_balance <= miner_fee,
-        "User balance ({}) should be at most the miner fee ({})",
+    // User should have exactly zero balance after paying the exact required amount
+    assert_eq!(
         user_balance,
-        miner_fee
+        ZERO_BALANCE,
+        "User balance should be exactly zero after transaction with exact funds. Started with {}, paid {}, remaining: {}",
+        exact_required_balance,
+        tx.header.total_cost(),
+        user_balance
     );
 
     node.stop().await;
