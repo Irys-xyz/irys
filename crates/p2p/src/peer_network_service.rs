@@ -285,7 +285,12 @@ where
         ctx.spawn(trusted_peers_handshake_task);
 
         // Announce yourself to the network
-        let peers_cache = self.peer_list.all_peers_for_gossip();
+        let peers_cache = self
+            .peer_list
+            .all_peers()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
         let announce_fut = Self::announce_yourself_to_all_peers(peers_cache, peer_service_address)
             .into_actor(self);
         ctx.spawn(announce_fut);

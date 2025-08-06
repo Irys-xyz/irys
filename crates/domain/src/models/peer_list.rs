@@ -9,8 +9,9 @@ use irys_types::{
 };
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
+use std::iter::Chain;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
@@ -43,6 +44,29 @@ pub struct PeerListDataInner {
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_addresses: HashSet<SocketAddr>,
     peer_network_service_sender: PeerNetworkSender,
+}
+
+/// Iterator for all peers (persistent + purgatory) for gossip purposes
+pub struct AllPeersReadGuard<'a> {
+    guard: RwLockReadGuard<'a, PeerListDataInner>,
+}
+
+impl<'a> AllPeersReadGuard<'a> {
+    fn new(guard: RwLockReadGuard<'a, PeerListDataInner>) -> Self {
+        Self { guard }
+    }
+
+    pub fn iter(
+        &'a self,
+    ) -> Chain<
+        std::collections::hash_map::Iter<'a, Address, PeerListItem>,
+        lru::Iter<'a, Address, PeerListItem>,
+    > {
+        self.guard
+            .persistent_peers_cache
+            .iter()
+            .chain(self.guard.unstaked_peer_purgatory.iter())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,14 +112,9 @@ impl PeerList {
     }
 
     /// Get all peers (persistent + purgatory) for gossip purposes
-    pub fn all_peers_for_gossip(&self) -> HashMap<Address, PeerListItem> {
+    pub fn all_peers(&self) -> AllPeersReadGuard<'_> {
         let guard = self.read();
-        let mut all_peers = guard.persistent_peers_cache.clone();
-        // Add active peers from purgatory for gossip
-        for (addr, peer) in &guard.unstaked_peer_purgatory {
-            all_peers.insert(*addr, peer.clone());
-        }
-        all_peers
+        AllPeersReadGuard::new(guard)
     }
 
     /// Get only persistable peers (for database storage)
@@ -181,33 +200,30 @@ impl PeerList {
     ) -> Vec<(Address, PeerListItem)> {
         let guard = self.read();
 
-        let mut peers: Vec<(Address, PeerListItem)> = Vec::new();
+        // Create a chained iterator that combines both peer sources
+        let persistent_peers = guard
+            .persistent_peers_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
 
-        // Add peers from main cache
-        peers.extend(
-            guard
-                .persistent_peers_cache
-                .iter()
-                .map(|(key, value)| (*key, value.clone())),
-        );
+        let purgatory_peers = guard
+            .unstaked_peer_purgatory
+            .iter()
+            .filter(|(_, peer)| peer.reputation_score.is_active())
+            .map(|(key, value)| (*key, value.clone()));
 
-        // Add active peers from purgatory
-        peers.extend(
-            guard
-                .unstaked_peer_purgatory
-                .iter()
-                .filter(|(_, peer)| peer.reputation_score.is_active())
-                .map(|(key, value)| (*key, value.clone())),
-        );
+        // Chain iterators and apply all filters in one pass
+        let filtered_peers =
+            persistent_peers
+                .chain(purgatory_peers)
+                .filter(|(miner_address, peer)| {
+                    let exclude = exclude_peers
+                        .as_ref()
+                        .is_some_and(|excluded| excluded.contains(miner_address));
+                    !exclude && peer.reputation_score.is_active() && peer.is_online
+                });
 
-        peers.retain(|(miner_address, peer)| {
-            let exclude = if let Some(exclude_peers) = &exclude_peers {
-                exclude_peers.contains(miner_address)
-            } else {
-                false
-            };
-            !exclude && peer.reputation_score.is_active() && peer.is_online
-        });
+        let mut peers: Vec<(Address, PeerListItem)> = filtered_peers.collect();
 
         peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
         peers.reverse();
@@ -755,13 +771,21 @@ mod tests {
         );
 
         // Test 2: all_peers_for_gossip should return both staked and unstaked peers
-        let gossip_peers = peer_list.all_peers_for_gossip();
+        let gossip_peers_vec: Vec<_> = peer_list
+            .all_peers()
+            .iter()
+            .map(|(a, p)| (*a, p.clone()))
+            .collect();
         assert!(
-            gossip_peers.contains_key(&staked_addr),
+            gossip_peers_vec
+                .iter()
+                .any(|(addr, _)| addr == &staked_addr),
             "Gossip peers should contain staked peer"
         );
         assert!(
-            gossip_peers.contains_key(&unstaked_addr),
+            gossip_peers_vec
+                .iter()
+                .any(|(addr, _)| addr == &unstaked_addr),
             "Gossip peers should contain unstaked peer"
         );
 
@@ -771,7 +795,7 @@ mod tests {
         assert!(staked_result.is_some(), "get_peer should find staked peer");
         assert!(
             unstaked_result.is_some(),
-            "get_peer should find unstaked peer"
+            "get_peer should find an unstaked peer"
         );
 
         // Test 4: contains_api_address should work for both staked and unstaked peers

@@ -79,8 +79,11 @@ pub async fn post_version(
         ..Default::default()
     };
 
-    // TODO: add a check to see if the mining address is staked
-    let is_staked = false;
+    let is_staked = state
+        .block_tree
+        .read()
+        .canonical_epoch_snapshot()
+        .is_staked(mining_addr);
     state
         .peer_list
         .add_or_update_peer(mining_addr, peer_list_entry, is_staked);
