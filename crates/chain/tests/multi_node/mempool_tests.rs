@@ -2035,14 +2035,14 @@ async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Res
     genesis_node.start_public_api().await;
 
     // Get current price for data transactions
-    let data_size = 1024u64;
+    let data_size = 1024_u64;
     let price_info = genesis_node
         .get_data_price(DataLedger::Publish, data_size)
         .await?;
 
     // Create test data
-    let data_sufficient = vec![0u8; data_size as usize];
-    let data_insufficient = vec![1u8; data_size as usize];
+    let data_sufficient = vec![0_u8; data_size as usize];
+    let data_insufficient = vec![1_u8; data_size as usize];
 
     // Calculate fees
     let perm_fee = price_info.value;
