@@ -12,7 +12,7 @@
 //! - **POA**: Blocking cryptographic proof-of-access validation
 //! - **Shadow Transactions**: Async Reth integration validation
 //!
-//! ## Stage 3: Parent Dependency Resolution  
+//! ## Stage 3: Parent Dependency Resolution
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
@@ -218,6 +218,7 @@ impl BlockValidationTask {
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
         let block = &self.block;
+
         // Recall range validation
         let recall_task = async move {
             recall_recall_range_is_valid(

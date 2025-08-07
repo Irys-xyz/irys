@@ -163,6 +163,21 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
     pub pledge_decay: Amount<Percentage>,
+
+    /// Maximum future drift
+    #[serde(
+        default = "default_max_future_timestamp_drift_millis",
+        deserialize_with = "serde_utils::u128_millis_from_u64",
+        serialize_with = "serde_utils::u128_millis_to_u64"
+    )]
+    pub max_future_timestamp_drift_millis: u128,
+}
+
+// removed erroneous derive on helper function
+/// Default for `max_future_timestamp_drift_millis` when the field is not
+/// present in the provided TOML. This keeps legacy configurations working.
+fn default_max_future_timestamp_drift_millis() -> u128 {
+    15_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,6 +684,7 @@ impl ConsensusConfig {
             stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
             pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            max_future_timestamp_drift_millis: 15_000,
         }
     }
 
@@ -776,6 +792,7 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            max_future_timestamp_drift_millis: 15_000,
         }
     }
 }
@@ -1151,6 +1168,25 @@ pub mod serde_utils {
             .try_into()
             .expect("decimal to be convertible to a f64");
         serializer.serialize_f64(float)
+    }
+
+    /// Deserialize a timestamp drift value (stored as `u64` in TOML) into a `u128`
+    pub fn u128_millis_from_u64<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let val = u64::deserialize(deserializer)?;
+        Ok(val as u128)
+    }
+
+    /// Serialize a `u128` timestamp drift value as a `u64` so it can be encoded by `toml`
+    /// As this stores time and only 15 seconds, the 128 bit -> 64bit conversion is not a concern
+    pub fn u128_millis_to_u64<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // this type conversion is safe as time stores a value of 15 seconds, and not millions of years
+        serializer.serialize_u64(*value as u64)
     }
 
     pub fn duration_from_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
