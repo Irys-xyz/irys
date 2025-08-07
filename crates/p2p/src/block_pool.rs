@@ -1,5 +1,4 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
-use crate::SyncState;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -8,6 +7,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::{ExecutionPayloadCache, PeerList};
@@ -69,13 +69,13 @@ where
     /// Database provider for accessing transaction headers and related data.
     db: DatabaseProvider,
 
-    blocks_cache: BlockCache,
+    blocks_cache: BlockCacheGuard,
 
     block_discovery: B,
     mempool: M,
     peer_list: PeerList,
 
-    sync_state: SyncState,
+    sync_state: ChainSyncState,
 
     block_status_provider: BlockStatusProvider,
     execution_payload_provider: ExecutionPayloadCache,
@@ -94,11 +94,11 @@ struct BlockCacheInner {
 }
 
 #[derive(Clone, Debug)]
-struct BlockCache {
+pub(crate) struct BlockCacheGuard {
     inner: Arc<RwLock<BlockCacheInner>>,
 }
 
-impl BlockCache {
+impl BlockCacheGuard {
     fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(BlockCacheInner::new())),
@@ -176,6 +176,14 @@ impl BlockCache {
             .requested_blocks
             .contains(block_hash)
     }
+
+    /// Internal crate method to clear cache
+    pub(crate) async fn clear(&self) {
+        let mut guard = self.inner.write().await;
+        guard.orphaned_blocks_by_parent.clear();
+        guard.block_hash_to_parent_hash.clear();
+        guard.requested_blocks.clear();
+    }
 }
 
 impl BlockCacheInner {
@@ -229,7 +237,7 @@ where
         peer_list: PeerList,
         block_discovery: B,
         mempool: M,
-        sync_state: SyncState,
+        sync_state: ChainSyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadCache,
         vdf_state: VdfStateReadonly,
@@ -238,7 +246,7 @@ where
     ) -> Self {
         Self {
             db,
-            blocks_cache: BlockCache::new(),
+            blocks_cache: BlockCacheGuard::new(),
             peer_list,
             block_discovery,
             mempool,
@@ -790,6 +798,11 @@ where
                 .block_status(block_height, block_hash)
                 .is_processed()
         }
+    }
+
+    /// Internal method for the p2p services to get direct access to the cache
+    pub(crate) fn block_cache_guard(&self) -> BlockCacheGuard {
+        self.blocks_cache.clone()
     }
 
     async fn process_orphaned_ancestor(&self, block_hash: BlockHash) -> Result<(), BlockPoolError> {
