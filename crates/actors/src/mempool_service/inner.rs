@@ -434,8 +434,8 @@ impl Inner {
         // Prepare data transactions for inclusion after commitments
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
 
-        // Filter by minimum fee based on node's fee_percentage
-        let fee_percentage = self.config.node_config.pricing.fee_percentage;
+        // Filter by minimum fee based on consensus miner_fee_percentage
+        let fee_percentage = self.config.consensus.miner_fee_percentage;
         let total_data_available = submit_ledger_txs.len();
         submit_ledger_txs.retain(|tx| {
             let protocol_cost = U256::from(tx.term_fee + tx.perm_fee.unwrap_or(0));

@@ -104,7 +104,7 @@ fn cost_of_perm_storage(
 
     // calculate just the miner fee directly (more efficient)
     let miner_fee_u256 =
-        base_network_fee.calculate_fee(state.config.node_config.pricing.fee_percentage)?;
+        base_network_fee.calculate_fee(state.config.consensus.miner_fee_percentage)?;
 
     Ok((base_network_fee, miner_fee_u256))
 }

@@ -33,7 +33,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         )?
     };
     let expected_miner_fee =
-        expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
+        expected_base_fee.calculate_fee(ctx.node_ctx.config.consensus.miner_fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -90,7 +90,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         )?
     };
     let expected_miner_fee =
-        expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
+        expected_base_fee.calculate_fee(ctx.node_ctx.config.consensus.miner_fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -147,7 +147,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         )?
     };
     let expected_miner_fee =
-        expected_base_fee.calculate_fee(ctx.node_ctx.config.node_config.pricing.fee_percentage)?;
+        expected_base_fee.calculate_fee(ctx.node_ctx.config.consensus.miner_fee_percentage)?;
 
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;

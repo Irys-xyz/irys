@@ -2026,7 +2026,7 @@ async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Res
     let mut genesis_config = NodeConfig::testing();
 
     // Set a specific miner fee percentage for testing (10%)
-    genesis_config.pricing.fee_percentage = Amount::percentage(dec!(0.1))?;
+    genesis_config.consensus.get_mut().miner_fee_percentage = Amount::percentage(dec!(0.1))?;
 
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -2053,7 +2053,7 @@ async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Res
     let protocol_cost = perm_fee + term_fee;
 
     // Calculate minimum required miner fee (10% of protocol cost)
-    let fee_percentage = genesis_config.pricing.fee_percentage;
+    let fee_percentage = genesis_config.consensus_config().miner_fee_percentage;
     let min_required_miner_fee = Amount::new(protocol_cost)
         .calculate_fee(fee_percentage)
         .unwrap_or_default();

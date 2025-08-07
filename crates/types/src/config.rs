@@ -163,6 +163,14 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
     pub pledge_decay: Amount<Percentage>,
+
+    /// Minimum miner fee percentage that nodes require for transaction inclusion
+    /// This is a percentage of the protocol cost (perm_fee + term_fee)
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub miner_fee_percentage: Amount<Percentage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -669,6 +677,7 @@ impl ConsensusConfig {
             stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
             pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            miner_fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
         }
     }
 
@@ -776,6 +785,7 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            miner_fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
         }
     }
 }
@@ -1238,6 +1248,7 @@ mod tests {
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9
+        miner_fee_percentage = 0.01
 
         [reth]
         chain = 1270
