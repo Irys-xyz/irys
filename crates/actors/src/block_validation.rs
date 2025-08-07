@@ -33,7 +33,10 @@ use openssl::sha;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing::{debug, error, info};
 
 /// Full pre-validation steps for a block
@@ -69,6 +72,13 @@ pub async fn prevalidate_block(
         ?block.height,
         "prev_output_is_valid",
     );
+
+    // Check block timestamp drift
+    timestamp_is_valid(
+        block.timestamp,
+        previous_block.timestamp,
+        config.consensus.max_future_timestamp_drift_millis,
+    )?;
 
     // Check the difficulty
     difficulty_is_valid(
@@ -177,6 +187,36 @@ pub fn prev_output_is_valid(
             &previous_block.vdf_limiter_info.output
         ))
     }
+}
+
+// compares block timestamp against parent block
+// errors if the block has a lower timestamp than the parent block
+// compares timestamps of block against current system time
+// errors on drift more than MAX_TIMESTAMP_DRIFT_SECS into future
+pub fn timestamp_is_valid(current: u128, parent: u128, allowed_drift: u128) -> eyre::Result<()> {
+    if current < parent {
+        return Err(eyre::eyre!(
+            "block timestamp {} is older than parent block {}",
+            current,
+            parent
+        ));
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| eyre::eyre!("system time error: {e}"))?
+        .as_millis();
+
+    let max_future = now_ms + allowed_drift;
+
+    if current > max_future {
+        return Err(eyre::eyre!(
+            "block timestamp {} too far in the future (now {now_ms})",
+            current
+        ));
+    }
+
+    Ok(())
 }
 
 /// Validates if a block's difficulty matches the expected difficulty calculated
@@ -534,6 +574,15 @@ pub async fn shadow_transactions_are_valid(
         payload.withdrawals().is_empty(),
         "withdrawals must always be empty"
     );
+
+    // ensure the execution payload timestamp matches the block timestamp
+    // truncated to full seconds
+    let payload_timestamp: u128 = payload.timestamp().into();
+    let block_timestamp_sec = block.timestamp / 1000;
+    ensure!(
+            payload_timestamp == block_timestamp_sec,
+            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+        );
 
     let versioned_hashes = sidecar
         .versioned_hashes()
@@ -1571,6 +1620,72 @@ mod tests {
         );
 
         assert!(poa_valid.is_err(), "PoA should be invalid");
+    }
+
+    #[test]
+    /// unit test for acceptable block clock drift into future
+    fn test_timestamp_is_valid_future() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let future_ts = now_ms + consensus_config.max_future_timestamp_drift_millis - 1_000; // MAX DRIFT - 1 seconds in the future
+        let previous_ts = now_ms - 10_000;
+        let result = timestamp_is_valid(
+            future_ts,
+            previous_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        // Expect an error due to block timestamp being too far in the future
+        assert!(
+            result.is_ok(),
+            "Expected acceptable for future timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for block clock drift into past
+    fn test_timestamp_is_valid_past() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let block_ts = now_ms - consensus_config.max_future_timestamp_drift_millis - 1_000; // MAX DRIFT + 1 seconds in the past
+        let previous_ts = now_ms - 60_000;
+        let result = timestamp_is_valid(
+            block_ts,
+            previous_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        // Expect an no error when block timestamp being too far in the past
+        assert!(
+            result.is_ok(),
+            "Expected no error due to past timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for unacceptable block clock drift into future
+    fn test_timestamp_is_invalid_future() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let block_ts = now_ms + consensus_config.max_future_timestamp_drift_millis + 1_000; // MAX DRIFT + 1 seconds in the future
+        let previous_ts = now_ms - 10_000;
+        let result = timestamp_is_valid(
+            block_ts,
+            previous_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        // Expect an error due to block timestamp being too far in the future
+        assert!(
+            result.is_err(),
+            "Expected an error for future timestamp drift"
+        );
     }
 
     #[test]
