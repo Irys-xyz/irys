@@ -50,6 +50,8 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     InvalidIngressProofSignature(String),
+    #[error("Oracle price invalid")]
+    OraclePriceInvalid,
     #[error("PoA chunk offset out of block bounds")]
     PoAChunkOffsetOutOfBlockBounds,
     #[error("PoA chunk offset out of tx bounds")]
@@ -162,7 +164,7 @@ pub async fn prevalidate_block(
         config.consensus.token_price_safe_range,
     );
     if !oracle_price_valid {
-        return Err(eyre::eyre!("Oracle price must be valid").into());
+        return Err(PreValidationError::OraclePriceInvalid);
     }
 
     // Check that the EMA has been correctly calculated
