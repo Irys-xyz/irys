@@ -56,6 +56,8 @@ pub enum PreValidationError {
     IngressProofSignatureInvalid(String),
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch { expected: u128, got: u128 },
+    #[error("Invalid merkle proof: {0}")]
+    MerkleProofInvalid(String),
     #[error("Oracle price invalid")]
     OraclePriceInvalid,
     #[error("PoA capacity chunk mismatch")]
@@ -70,16 +72,26 @@ pub enum PreValidationError {
     PoAChunkOffsetOutOfBlockBounds,
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
+    #[error("Missing partition assignment for partition hash {partition_hash}")]
+    PartitionAssignmentMissing { partition_hash: H256 },
+    #[error("Partition assignment for partition hash {partition_hash} is missing slot index")]
+    PartitionAssignmentSlotIndexMissing { partition_hash: H256 },
     #[error(
         "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
     )]
     PoADataPartitionExpired { partition_hash: H256 },
+    #[error("system time error: {0}")]
+    SystemTimeError(String),
     #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
     PreviousSolutionHashMismatch { expected: H256, got: H256 },
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
     #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
     SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("block timestamp {current} is older than parent block {parent}")]
+    TimestampOlderThanParent { current: u128, parent: u128 },
+    #[error("block timestamp {current} too far in the future (now {now})")]
+    TimestampTooFarInFuture { current: u128, now: u128 },
     #[error("last_step_checkpoints validation failed: {0}")]
     VDFCheckpointsInvalid(String),
     #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
@@ -248,27 +260,27 @@ pub fn prev_output_is_valid(
 // errors if the block has a lower timestamp than the parent block
 // compares timestamps of block against current system time
 // errors on drift more than MAX_TIMESTAMP_DRIFT_SECS into future
-pub fn timestamp_is_valid(current: u128, parent: u128, allowed_drift: u128) -> eyre::Result<()> {
+pub fn timestamp_is_valid(
+    current: u128,
+    parent: u128,
+    allowed_drift: u128,
+) -> Result<(), PreValidationError> {
     if current < parent {
-        return Err(eyre::eyre!(
-            "block timestamp {} is older than parent block {}",
-            current,
-            parent
-        ));
+        return Err(PreValidationError::TimestampOlderThanParent { current, parent });
     }
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| eyre::eyre!("system time error: {e}"))?
+        .map_err(|e| PreValidationError::SystemTimeError(e.to_string()))?
         .as_millis();
 
     let max_future = now_ms + allowed_drift;
 
     if current > max_future {
-        return Err(eyre::eyre!(
-            "block timestamp {} too far in the future (now {now_ms})",
-            current
-        ));
+        return Err(PreValidationError::TimestampTooFarInFuture {
+            current,
+            now: now_ms,
+        });
     }
 
     Ok(())
@@ -488,16 +500,19 @@ pub fn poa_is_valid(
         // partition data -> ledger data
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(poa.partition_hash)
-            .ok_or_else(|| eyre::eyre!("Missing partition assignment for the provided hash"))?;
+            .ok_or(PreValidationError::PartitionAssignmentMissing {
+                partition_hash: poa.partition_hash,
+            })?;
 
-        let ledger_chunk_offset =
-            u64::try_from(partition_assignment.slot_index.ok_or_else(|| {
-                eyre::eyre!("Partition assignment for the provided hash is missing slot index")
-            })?)
-            .expect("Partition assignment slot index should fit into a u64")
-                * config.num_partitions_per_slot
-                * config.num_chunks_in_partition
-                + u64::from(poa.partition_chunk_offset);
+        let ledger_chunk_offset = u64::try_from(partition_assignment.slot_index.ok_or(
+            PreValidationError::PartitionAssignmentSlotIndexMissing {
+                partition_hash: poa.partition_hash,
+            },
+        )?)
+        .expect("Partition assignment slot index should fit into a u64")
+            * config.num_partitions_per_slot
+            * config.num_chunks_in_partition
+            + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)?;
@@ -516,7 +531,8 @@ pub fn poa_is_valid(
             bb.tx_root.0,
             &tx_path,
             block_chunk_offset * (config.chunk_size as u128),
-        )?;
+        )
+        .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
@@ -528,8 +544,8 @@ pub fn poa_is_valid(
             block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
 
         // data_path validation
-        let data_path_result =
-            validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)?;
+        let data_path_result = validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)
+            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
