@@ -1,7 +1,7 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
-use crate::{BlockStatusProvider, GetPeerListGuard, SyncState};
+use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
@@ -9,6 +9,7 @@ use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
+use irys_domain::sync_state::SyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;

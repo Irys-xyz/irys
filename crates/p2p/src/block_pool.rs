@@ -1,5 +1,4 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
-use crate::SyncState;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -10,6 +9,7 @@ use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
+use irys_domain::sync_state::SyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,

@@ -15,7 +15,6 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncState,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
@@ -23,6 +22,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
+use irys_domain::sync_state::SyncState;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
 use irys_vdf::state::VdfStateReadonly;

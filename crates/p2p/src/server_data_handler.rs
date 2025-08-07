@@ -1,7 +1,6 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
-    sync::SyncState,
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
@@ -12,6 +11,7 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade},
 };
 use irys_api_client::ApiClient;
+use irys_domain::sync_state::SyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipDataRequest,
