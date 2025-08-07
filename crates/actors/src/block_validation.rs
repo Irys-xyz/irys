@@ -47,6 +47,14 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     InvalidIngressProofSignature(String),
+    #[error("PoA chunk offset out of block bounds")]
+    PoAChunkOffsetOutOfBlockBounds,
+    #[error("PoA chunk offset out of tx bounds")]
+    PoAChunkOffsetOutOfTxBounds,
+    #[error("PoA chunk offset out of tx's data chunks bounds")]
+    PoAChunkOffsetOutOfDataChunksBounds,
+    #[error("PoA capacity chunk mismatch")]
+    PoACapacityChunkMismatch,
     #[error(transparent)]
     Other(#[from] eyre::Report),
 }
@@ -438,7 +446,7 @@ pub fn poa_is_valid(
             .read()
             .get_block_bounds(ledger, ledger_chunk_offset)?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
-            return Err(eyre::eyre!("PoA chunk offset out of block bounds").into());
+            return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
@@ -453,7 +461,7 @@ pub fn poa_is_valid(
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx bounds").into());
+            return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
         }
 
         let tx_chunk_offset =
@@ -465,7 +473,7 @@ pub fn poa_is_valid(
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx's data chunks bounds").into());
+            return Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds);
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -493,16 +501,7 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(
-                eyre::eyre!(
-                    "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
-                    poa_chunk,
-                    data_path_result.leaf_hash,
-                    ledger_id,
-                    ledger_chunk_offset
-                )
-                .into(),
-            );
+            return Err(PreValidationError::PoAChunkHashMismatch);
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -520,12 +519,7 @@ pub fn poa_is_valid(
                 debug!("Chunk PoA:{:?}", poa_chunk);
                 debug!("Entropy  :{:?}", entropy_chunk);
             }
-            return Err(eyre::eyre!(
-                "PoA capacity chunk mismatch {:?} /= {:?}",
-                entropy_chunk.first(),
-                poa_chunk.first()
-            )
-            .into());
+            return Err(PreValidationError::PoACapacityChunkMismatch);
         }
     }
     Ok(())
