@@ -11,6 +11,7 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{eyre, Context as _};
+use crate::block_validation::PreValidationError;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
@@ -42,7 +43,7 @@ pub enum BlockTreeServiceMessage {
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-        response: oneshot::Sender<eyre::Result<()>>,
+        response: oneshot::Sender<Result<(), PreValidationError>>,
     },
     BlockValidationFinished {
         block_hash: H256,
@@ -490,7 +491,7 @@ impl BlockTreeServiceInner {
         &mut self,
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-    ) -> eyre::Result<()> {
+    ) -> Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
         let mut cache = self.cache.write().expect("cache lock poisoned");
 

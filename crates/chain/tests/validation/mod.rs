@@ -29,7 +29,8 @@ async fn send_block_to_block_tree(
             response: response_tx,
         })?;
 
-    response_rx.await?
+    response_rx.await??;
+    Ok(())
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.

@@ -34,7 +34,22 @@ use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_ethereum_primitives::Block;
 use std::{sync::Arc, time::Duration};
+use thiserror::Error;
 use tracing::{debug, error, info};
+
+#[derive(Debug, Error)]
+pub enum PreValidationError {
+    #[error("Missing PoA chunk to be pre validated")]
+    MissingPoAChunk,
+    #[error("Block chunk hash distinct from PoA chunk hash")]
+    PoAChunkHashMismatch,
+    #[error("Ingress proofs missing")]
+    IngressProofsMissing,
+    #[error("Invalid ingress proof signature: {0}")]
+    InvalidIngressProofSignature(String),
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -44,7 +59,7 @@ pub async fn prevalidate_block(
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -53,13 +68,11 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
+        None => return Err(PreValidationError::MissingPoAChunk),
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
-        return Err(eyre::eyre!(
-            "Invalid block: chunk hash distinct from PoA chunk hash"
-        ));
+        return Err(PreValidationError::PoAChunkHashMismatch);
     }
 
     // Check prev_output (vdf)
@@ -126,7 +139,9 @@ pub async fn prevalidate_block(
         previous_block.oracle_irys_price,
         config.consensus.token_price_safe_range,
     );
-    ensure!(oracle_price_valid, "Oracle price must be valid");
+    if !oracle_price_valid {
+        return Err(eyre::eyre!("Oracle price must be valid").into());
+    }
 
     // Check that the EMA has been correctly calculated
     let ema_valid = {
@@ -140,7 +155,9 @@ pub async fn prevalidate_block(
             .ema;
         res == block.ema_irys_price
     };
-    ensure!(ema_valid, "EMA must be valid");
+    if !ema_valid {
+        return Err(eyre::eyre!("EMA must be valid").into());
+    }
 
     // Check valid curve price
     let reward = reward_curve.reward_between(
@@ -149,17 +166,21 @@ pub async fn prevalidate_block(
         block.timestamp.saturating_div(1000),
     )?;
     let encoded_reward = block.reward_amount;
-    ensure!(
-        reward.amount == block.reward_amount,
-        "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
-    );
+    if reward.amount != block.reward_amount {
+        return Err(eyre::eyre!(
+            "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
+        )
+        .into());
+    }
 
     // After pre-validating a bunch of quick checks we validate the signature
     // TODO: We may want to further check if the signer is a staked address
     // this is a little more advanced though as it requires knowing what the
     // commitment states looked like when this block was produced. For now
     // we just accept any valid signature.
-    ensure!(block.is_signature_valid(), "block signature is not valid");
+    if !block.is_signature_valid() {
+        return Err(eyre::eyre!("block signature is not valid").into());
+    }
 
     Ok(())
 }
@@ -386,11 +407,11 @@ pub fn poa_is_valid(
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &Address,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
+        None => return Err(PreValidationError::MissingPoAChunk),
     };
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
@@ -417,7 +438,7 @@ pub fn poa_is_valid(
             .read()
             .get_block_bounds(ledger, ledger_chunk_offset)?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
-            return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
+            return Err(eyre::eyre!("PoA chunk offset out of block bounds").into());
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
@@ -432,7 +453,7 @@ pub fn poa_is_valid(
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
+            return Err(eyre::eyre!("PoA chunk offset out of tx bounds").into());
         }
 
         let tx_chunk_offset =
@@ -444,9 +465,7 @@ pub fn poa_is_valid(
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!(
-                "PoA chunk offset out of tx's data chunks bounds"
-            ));
+            return Err(eyre::eyre!("PoA chunk offset out of tx's data chunks bounds").into());
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -474,13 +493,16 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(eyre::eyre!(
-                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
-                poa_chunk,
-                data_path_result.leaf_hash,
-                ledger_id,
-                ledger_chunk_offset
-            ));
+            return Err(
+                eyre::eyre!(
+                    "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
+                    poa_chunk,
+                    data_path_result.leaf_hash,
+                    ledger_id,
+                    ledger_chunk_offset
+                )
+                .into(),
+            );
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -502,7 +524,8 @@ pub fn poa_is_valid(
                 "PoA capacity chunk mismatch {:?} /= {:?}",
                 entropy_chunk.first(),
                 poa_chunk.first()
-            ));
+            )
+            .into());
         }
     }
     Ok(())
