@@ -1187,6 +1187,7 @@ pub mod serde_utils {
     {
         // this type conversion is safe as time stores a value of 15 seconds, and not millions of years
         serializer.serialize_u64(*value as u64)
+    }
 
     pub fn duration_from_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where
