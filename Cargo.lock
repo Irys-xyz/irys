@@ -4864,7 +4864,6 @@ dependencies = [
  "irys-actors",
  "irys-database",
  "irys-domain",
- "irys-p2p",
  "irys-reth-node-bridge",
  "irys-testing-utils",
  "irys-types",
