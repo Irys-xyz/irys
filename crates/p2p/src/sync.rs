@@ -1,4 +1,4 @@
-use crate::{GossipError, GossipResult};
+use crate::GossipError;
 use base58::ToBase58 as _;
 use eyre;
 use irys_api_client::{ApiClient, IrysApiClient};
@@ -13,6 +13,39 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, interval};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
+/// Sync service specific errors
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("Timeout error: {0}")]
+    Timeout(String),
+    #[error("Service communication error: {0}")]
+    ServiceCommunication(String),
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    #[error("Internal sync error: {0}")]
+    Internal(String),
+}
+
+/// Type alias for sync service results
+pub type SyncResult<T> = Result<T, SyncError>;
+
+impl From<GossipError> for SyncError {
+    fn from(err: GossipError) -> Self {
+        match err {
+            GossipError::Network(msg) => SyncError::Network(msg),
+            GossipError::InvalidPeer(msg) => SyncError::Network(format!("Invalid peer: {}", msg)),
+            GossipError::Cache(msg) => SyncError::Internal(format!("Cache error: {}", msg)),
+            GossipError::Internal(internal_err) => SyncError::Internal(format!("Internal gossip error: {}", internal_err)),
+            GossipError::InvalidData(data_err) => SyncError::Network(format!("Invalid data: {}", data_err)),
+            GossipError::BlockPool(pool_err) => SyncError::Internal(format!("Block pool error: {:?}", pool_err)),
+            GossipError::TransactionIsAlreadyHandled => SyncError::Internal("Transaction already handled".to_string()),
+            GossipError::CommitmentValidation(commit_err) => SyncError::Network(format!("Commitment validation error: {}", commit_err)),
+        }
+    }
+}
+
 const BLOCK_BATCH_SIZE: usize = 10;
 const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
 
@@ -20,7 +53,7 @@ const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if 
 #[derive(Debug)]
 pub enum SyncServiceMessage {
     /// Request an initial sync operation
-    InitialSync(oneshot::Sender<GossipResult<()>>),
+    InitialSync(oneshot::Sender<SyncResult<()>>),
     /// Check if we need periodic sync (internal message)
     PeriodicSyncCheck,
 }
@@ -55,14 +88,14 @@ impl SyncServiceFacade {
     }
 
     /// Request an initial sync and wait for completion
-    pub async fn initial_sync(&self) -> GossipResult<()> {
+    pub async fn initial_sync(&self) -> SyncResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(SyncServiceMessage::InitialSync(tx))
-            .map_err(|_| GossipError::Network("Failed to send sync request".to_string()))?;
+            .map_err(|_| SyncError::ServiceCommunication("Failed to send sync request".to_string()))?;
         
         rx.await
-            .map_err(|_| GossipError::Network("Failed to receive sync response".to_string()))?
+            .map_err(|_| SyncError::ServiceCommunication("Failed to receive sync response".to_string()))?
     }
 }
 
@@ -84,14 +117,14 @@ impl<T: ApiClient> SyncServiceInner<T> {
     }
 
     /// Check if local index is behind trusted peers
-    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> GossipResult<bool> {
+    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> SyncResult<bool> {
         let migration_depth = u64::from(self.config.consensus.block_migration_depth);
 
         let mut highest_trusted_peer_height = None;
 
         let trusted_peers = self.peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(GossipError::Network(
+            return Err(SyncError::Network(
                 "No trusted peers available".to_string(),
             ));
         }
@@ -118,14 +151,14 @@ impl<T: ApiClient> SyncServiceInner<T> {
         if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
             Ok(self.block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
         } else {
-            Err(GossipError::Network(
+            Err(SyncError::Network(
                 "Wasn't able to fetch node info from any of the trusted peers".to_string()
             ))
         }
     }
 
     /// Perform a sync operation
-    async fn sync_chain(&self) -> GossipResult<()> {
+    async fn sync_chain(&self) -> SyncResult<()> {
         let start_sync_from_height = self.block_index.read().latest_height();
         sync_chain(
             self.sync_state.clone(),
@@ -263,7 +296,7 @@ pub async fn sync_chain(
     peer_list: &PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
-) -> Result<(), GossipError> {
+) -> SyncResult<()> {
     let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
@@ -327,7 +360,7 @@ pub async fn sync_chain(
         let migration_depth = config.consensus.block_migration_depth as usize;
         let trusted_peers = peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(GossipError::Network(
+            return Err(SyncError::Network(
                 "No trusted peers available".to_string(),
             ));
         }
@@ -383,7 +416,7 @@ pub async fn sync_chain(
         }
 
         if !switch_height_set {
-            return Err(GossipError::Network(
+            return Err(SyncError::Network(
                 "Failed to get node info from any trusted peer after 5 retry attempts".to_string(),
             ));
         }
@@ -506,7 +539,7 @@ async fn get_block_index(
     limit: usize,
     retries: usize,
     fetch_from_the_trusted_peer: bool,
-) -> GossipResult<Vec<BlockIndexItem>> {
+) -> SyncResult<Vec<BlockIndexItem>> {
     let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         peer_list.trusted_peers()
     } else {
@@ -514,14 +547,14 @@ async fn get_block_index(
     };
 
     if peers_to_fetch_index_from.is_empty() {
-        return Err(GossipError::Network("No peers available".to_string()));
+        return Err(SyncError::Network("No peers available".to_string()));
     }
 
     for _ in 0..retries {
         let (miner_address, top_peer) =
             peers_to_fetch_index_from
                 .choose(&mut rand::thread_rng())
-                .ok_or(GossipError::Network("No peers available".to_string()))?;
+                .ok_or(SyncError::Network("No peers available".to_string()))?;
         match api_client
             .get_block_index(
                 top_peer.address.api,
@@ -531,7 +564,7 @@ async fn get_block_index(
                 },
             )
             .await
-            .map_err(|network_error| GossipError::Network(network_error.to_string()))
+            .map_err(|network_error| SyncError::Network(network_error.to_string()))
         {
             Ok(index) => {
                 debug!(
@@ -550,7 +583,7 @@ async fn get_block_index(
         }
     }
 
-    Err(GossipError::Network(
+    Err(SyncError::Network(
         "Failed to fetch block index from peer".to_string(),
     ))
 }
