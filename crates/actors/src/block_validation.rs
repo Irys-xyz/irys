@@ -24,7 +24,7 @@ use irys_storage::ii;
 use irys_types::{
     app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
     Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256, U256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -55,6 +55,10 @@ pub enum PreValidationError {
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA capacity chunk mismatch")]
     PoACapacityChunkMismatch,
+    #[error("Ema mismatch")]
+    EmaMismatch,
+    #[error("Reward mismatch: got {got}, expected {expected}")]
+    RewardMismatch { got: U256, expected: U256 },
     #[error(transparent)]
     Other(#[from] eyre::Report),
 }
@@ -164,7 +168,7 @@ pub async fn prevalidate_block(
         res == block.ema_irys_price
     };
     if !ema_valid {
-        return Err(eyre::eyre!("EMA must be valid").into());
+        return Err(PreValidationError::EmaMismatch);
     }
 
     // Check valid curve price
@@ -173,12 +177,11 @@ pub async fn prevalidate_block(
         previous_block.timestamp.saturating_div(1000),
         block.timestamp.saturating_div(1000),
     )?;
-    let encoded_reward = block.reward_amount;
     if reward.amount != block.reward_amount {
-        return Err(eyre::eyre!(
-            "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
-        )
-        .into());
+        return Err(PreValidationError::RewardMismatch {
+            got: block.reward_amount,
+            expected: reward.amount,
+        });
     }
 
     // After pre-validating a bunch of quick checks we validate the signature
