@@ -1,7 +1,10 @@
-use crate::GossipError;
+use crate::block_pool::BlockCacheGuard;
+use crate::{BlockPool, GossipError};
 use base58::ToBase58 as _;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_domain::sync_state::SyncState;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode, TokioServiceHandle};
 use rand::prelude::SliceRandom as _;
@@ -14,7 +17,7 @@ use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Sync service specific errors
 #[derive(Debug, thiserror::Error)]
-pub enum SyncError {
+pub enum ChainSyncError {
     #[error("Network error: {0}")]
     Network(String),
     #[error("Service communication error: {0}")]
@@ -24,9 +27,9 @@ pub enum SyncError {
 }
 
 /// Type alias for sync service results
-pub type SyncResult<T> = Result<T, SyncError>;
+pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 
-impl From<GossipError> for SyncError {
+impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
         match err {
             GossipError::Network(msg) => Self::Network(msg),
@@ -56,63 +59,65 @@ const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if 
 
 /// Messages that can be sent to the SyncService
 #[derive(Debug)]
-pub enum SyncServiceMessage {
+pub enum SyncChainServiceMessage {
     /// Request an initial sync operation
-    InitialSync(oneshot::Sender<SyncResult<()>>),
+    InitialSync(oneshot::Sender<ChainSyncResult<()>>),
     /// Check if we need periodic sync (internal message)
     PeriodicSyncCheck,
 }
 
 /// Inner service containing the sync logic
 #[derive(Debug)]
-pub struct SyncServiceInner<T: ApiClient> {
-    sync_state: SyncState,
+pub struct ChainSyncServiceInner<T: ApiClient> {
+    sync_state: ChainSyncState,
     api_client: T,
     peer_list: PeerList,
     config: irys_types::Config,
     block_index: BlockIndexReadGuard,
+    block_cache_guard: BlockCacheGuard,
 }
 
 /// Main sync service that runs in its own tokio task
 #[derive(Debug)]
-pub struct SyncService<T: ApiClient> {
+pub struct ChainSyncService<T: ApiClient> {
     shutdown: Shutdown,
-    msg_rx: mpsc::UnboundedReceiver<SyncServiceMessage>,
-    inner: SyncServiceInner<T>,
+    msg_rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
+    inner: ChainSyncServiceInner<T>,
 }
 
 /// Facade for interacting with the sync service
 #[derive(Debug, Clone)]
-pub struct SyncServiceFacade {
-    sender: mpsc::UnboundedSender<SyncServiceMessage>,
+pub struct SyncChainServiceFacade {
+    sender: mpsc::UnboundedSender<SyncChainServiceMessage>,
 }
 
-impl SyncServiceFacade {
-    pub fn new(sender: mpsc::UnboundedSender<SyncServiceMessage>) -> Self {
+impl SyncChainServiceFacade {
+    pub fn new(sender: mpsc::UnboundedSender<SyncChainServiceMessage>) -> Self {
         Self { sender }
     }
 
     /// Request an initial sync and wait for completion
-    pub async fn initial_sync(&self) -> SyncResult<()> {
+    pub async fn initial_sync(&self) -> ChainSyncResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(SyncServiceMessage::InitialSync(tx))
+            .send(SyncChainServiceMessage::InitialSync(tx))
             .map_err(|_| {
-                SyncError::ServiceCommunication("Failed to send sync request".to_string())
+                ChainSyncError::ServiceCommunication("Failed to send sync request".to_string())
             })?;
 
         rx.await.map_err(|_| {
-            SyncError::ServiceCommunication("Failed to receive sync response".to_string())
+            ChainSyncError::ServiceCommunication("Failed to receive sync response".to_string())
         })?
     }
 }
 
-impl SyncServiceInner<IrysApiClient> {
-    pub fn new(
-        sync_state: SyncState,
+impl ChainSyncServiceInner<IrysApiClient> {
+    pub fn new<B: BlockDiscoveryFacade, M: MempoolFacade>(
+        sync_state: ChainSyncState,
         peer_list: PeerList,
         config: irys_types::Config,
         block_index: BlockIndexReadGuard,
+        block_pool: &BlockPool<B, M>,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -120,17 +125,19 @@ impl SyncServiceInner<IrysApiClient> {
             peer_list,
             config,
             block_index,
+            block_pool,
         )
     }
 }
 
-impl<T: ApiClient> SyncServiceInner<T> {
-    pub fn new_with_client(
-        sync_state: SyncState,
+impl<T: ApiClient> ChainSyncServiceInner<T> {
+    pub fn new_with_client<B: BlockDiscoveryFacade, M: MempoolFacade>(
+        sync_state: ChainSyncState,
         api_client: T,
         peer_list: PeerList,
         config: irys_types::Config,
         block_index: BlockIndexReadGuard,
+        block_pool: &BlockPool<B, M>,
     ) -> Self {
         Self {
             sync_state,
@@ -138,18 +145,21 @@ impl<T: ApiClient> SyncServiceInner<T> {
             peer_list,
             config,
             block_index,
+            block_cache_guard: block_pool.block_cache_guard(),
         }
     }
 
-    /// Check if local index is behind trusted peers
-    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> SyncResult<bool> {
+    /// Check if the local index is behind trusted peers
+    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> ChainSyncResult<bool> {
         let migration_depth = u64::from(self.config.consensus.block_migration_depth);
 
         let mut highest_trusted_peer_height = None;
 
         let trusted_peers = self.peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(SyncError::Network("No trusted peers available".to_string()));
+            return Err(ChainSyncError::Network(
+                "No trusted peers available".to_string(),
+            ));
         }
 
         for (_, peer) in trusted_peers.iter() {
@@ -175,15 +185,17 @@ impl<T: ApiClient> SyncServiceInner<T> {
             Ok(self.block_index.read().latest_height() + migration_depth
                 < highest_trusted_peer_height)
         } else {
-            Err(SyncError::Network(
+            Err(ChainSyncError::Network(
                 "Wasn't able to fetch node info from any of the trusted peers".to_string(),
             ))
         }
     }
 
     /// Perform a sync operation
-    async fn sync_chain(&self) -> SyncResult<()> {
+    async fn sync_chain(&self) -> ChainSyncResult<()> {
         let start_sync_from_height = self.block_index.read().latest_height();
+        // Clear any pending blocks from the cache
+        self.block_cache_guard.clear().await;
         sync_chain(
             self.sync_state.clone(),
             self.api_client.clone(),
@@ -197,11 +209,11 @@ impl<T: ApiClient> SyncServiceInner<T> {
     }
 }
 
-impl<T: ApiClient> SyncService<T> {
+impl<T: ApiClient> ChainSyncService<T> {
     #[tracing::instrument(skip_all)]
     pub fn spawn_service(
-        inner: SyncServiceInner<T>,
-        rx: mpsc::UnboundedReceiver<SyncServiceMessage>,
+        inner: ChainSyncServiceInner<T>,
+        rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning sync service");
@@ -231,7 +243,7 @@ impl<T: ApiClient> SyncService<T> {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn start(mut self) -> eyre::Result<()> {
+    async fn start(mut self) -> ChainSyncResult<()> {
         info!("Starting sync service");
 
         // Set up periodic sync check timer
@@ -273,15 +285,15 @@ impl<T: ApiClient> SyncService<T> {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_message(&self, msg: SyncServiceMessage) -> eyre::Result<()> {
+    async fn handle_message(&self, msg: SyncChainServiceMessage) -> ChainSyncResult<()> {
         match msg {
-            SyncServiceMessage::InitialSync(sender) => {
+            SyncChainServiceMessage::InitialSync(sender) => {
                 let result = self.inner.sync_chain().await;
                 if let Err(e) = sender.send(result) {
                     tracing::error!("Failed to send sync response: {:?}", e);
                 }
             }
-            SyncServiceMessage::PeriodicSyncCheck => {
+            SyncChainServiceMessage::PeriodicSyncCheck => {
                 self.handle_periodic_sync_check().await;
             }
         }
@@ -323,12 +335,12 @@ impl<T: ApiClient> SyncService<T> {
 
 #[instrument(skip_all, err)]
 pub async fn sync_chain(
-    sync_state: SyncState,
+    sync_state: ChainSyncState,
     api_client: impl ApiClient,
     peer_list: &PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
-) -> SyncResult<()> {
+) -> ChainSyncResult<()> {
     let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
@@ -392,7 +404,9 @@ pub async fn sync_chain(
         let migration_depth = config.consensus.block_migration_depth as usize;
         let trusted_peers = peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(SyncError::Network("No trusted peers available".to_string()));
+            return Err(ChainSyncError::Network(
+                "No trusted peers available".to_string(),
+            ));
         }
 
         let mut switch_height_set = false;
@@ -446,7 +460,7 @@ pub async fn sync_chain(
         }
 
         if !switch_height_set {
-            return Err(SyncError::Network(
+            return Err(ChainSyncError::Network(
                 "Failed to get node info from any trusted peer after 5 retry attempts".to_string(),
             ));
         }
@@ -569,7 +583,7 @@ async fn get_block_index(
     limit: usize,
     retries: usize,
     fetch_from_the_trusted_peer: bool,
-) -> SyncResult<Vec<BlockIndexItem>> {
+) -> ChainSyncResult<Vec<BlockIndexItem>> {
     let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         peer_list.trusted_peers()
     } else {
@@ -577,14 +591,14 @@ async fn get_block_index(
     };
 
     if peers_to_fetch_index_from.is_empty() {
-        return Err(SyncError::Network("No peers available".to_string()));
+        return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
     for _ in 0..retries {
         let (miner_address, top_peer) =
             peers_to_fetch_index_from
                 .choose(&mut rand::thread_rng())
-                .ok_or(SyncError::Network("No peers available".to_string()))?;
+                .ok_or(ChainSyncError::Network("No peers available".to_string()))?;
         match api_client
             .get_block_index(
                 top_peer.address.api,
@@ -594,7 +608,7 @@ async fn get_block_index(
                 },
             )
             .await
-            .map_err(|network_error| SyncError::Network(network_error.to_string()))
+            .map_err(|network_error| ChainSyncError::Network(network_error.to_string()))
         {
             Ok(index) => {
                 debug!(
@@ -613,7 +627,7 @@ async fn get_block_index(
         }
     }
 
-    Err(SyncError::Network(
+    Err(ChainSyncError::Network(
         "Failed to fetch block index from peer".to_string(),
     ))
 }
@@ -643,7 +657,7 @@ mod tests {
         async fn should_sync_and_change_status() -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
-            let sync_state = SyncState::new(true, false);
+            let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
                 open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
@@ -792,7 +806,7 @@ mod tests {
         ) -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
-            let sync_state = SyncState::new(true, false);
+            let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
                 open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())

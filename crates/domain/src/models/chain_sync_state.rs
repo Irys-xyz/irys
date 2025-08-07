@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 
 #[derive(Clone, Debug, Default)]
-pub struct SyncState {
+pub struct ChainSyncState {
     syncing: Arc<AtomicBool>,
     trusted_sync: Arc<AtomicBool>,
     sync_target_height: Arc<AtomicUsize>,
@@ -16,7 +16,7 @@ pub struct SyncState {
     gossip_reception_enabled: Arc<AtomicBool>,
 }
 
-impl SyncState {
+impl ChainSyncState {
     /// Creates a new SyncState with a given syncing flag and sync_height = 0
     pub fn new(is_syncing: bool, is_trusted_sync: bool) -> Self {
         Self {

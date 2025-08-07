@@ -31,15 +31,15 @@ use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
-use irys_domain::sync_state::SyncState;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
     EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
     StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
-    ServiceHandleWithShutdownSignal, SyncService, SyncServiceFacade, SyncServiceInner,
+    BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
+    P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -103,13 +103,13 @@ pub struct IrysNodeCtx {
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
     pub peer_list: PeerList,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
-    pub sync_service_facade: SyncServiceFacade,
+    pub sync_service_facade: SyncChainServiceFacade,
 }
 
 impl IrysNodeCtx {
@@ -1128,6 +1128,7 @@ impl IrysNode {
             config.clone(),
             block_index_guard.clone(),
             runtime_handle.clone(),
+            &block_pool,
         );
 
         // set up IrysNodeCtx
@@ -1553,18 +1554,25 @@ impl IrysNode {
     }
 
     fn init_sync_service(
-        sync_state: SyncState,
+        sync_state: ChainSyncState,
         peer_list: PeerList,
         config: Config,
         block_index_guard: BlockIndexReadGuard,
         runtime_handle: tokio::runtime::Handle,
-    ) -> (SyncServiceFacade, TokioServiceHandle) {
+        block_pool: &BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>,
+    ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let facade = SyncServiceFacade::new(tx);
+        let facade = SyncChainServiceFacade::new(tx);
 
-        let inner = SyncServiceInner::new(sync_state, peer_list, config, block_index_guard);
+        let inner = ChainSyncServiceInner::new(
+            sync_state,
+            peer_list,
+            config,
+            block_index_guard,
+            block_pool,
+        );
 
-        let handle = SyncService::spawn_service(inner, rx, runtime_handle);
+        let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);
 
         (facade, handle)
     }

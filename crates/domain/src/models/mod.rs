@@ -1,12 +1,12 @@
 pub mod block_index;
 pub mod block_tree;
+pub mod chain_sync_state;
 pub mod chunk_provider;
 pub mod circular_buffer;
 pub mod execution_payload_cache;
 pub mod peer_list;
 pub mod reth_provider;
 pub mod storage_module;
-pub mod sync_state;
 
 pub use block_index::*;
 pub use block_tree::*;
