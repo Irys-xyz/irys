@@ -249,10 +249,10 @@ pub fn prev_output_is_valid(
     if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
         Ok(())
     } else {
-        return Err(PreValidationError::VDFPreviousOutputMismatch {
+        Err(PreValidationError::VDFPreviousOutputMismatch {
             got: block.vdf_limiter_info.prev_output,
             expected: previous_block.vdf_limiter_info.output,
-        });
+        })
     }
 }
 
