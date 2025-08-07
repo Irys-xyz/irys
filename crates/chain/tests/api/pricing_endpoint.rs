@@ -45,8 +45,9 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     assert_eq!(
         price_info,
         PriceInfo {
-            value: expected_base_fee.amount,
-            fee: expected_miner_fee,
+            perm_fee: expected_base_fee.amount,
+            term_fee: U256::from(42), // TODO: Implement proper term pricing calculation
+            immediate_inclusion_fee: expected_miner_fee,
             ledger: 0,
             bytes: data_size_bytes,
         }
@@ -101,8 +102,9 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     assert_eq!(
         price_info,
         PriceInfo {
-            value: expected_base_fee.amount,
-            fee: expected_miner_fee,
+            perm_fee: expected_base_fee.amount,
+            term_fee: U256::from(42), // TODO: Implement proper term pricing calculation
+            immediate_inclusion_fee: expected_miner_fee,
             ledger: 0,
             bytes: ctx.node_ctx.config.consensus.chunk_size,
         }
@@ -157,8 +159,9 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     assert_eq!(
         price_info,
         PriceInfo {
-            value: expected_base_fee.amount,
-            fee: expected_miner_fee,
+            perm_fee: expected_base_fee.amount,
+            term_fee: U256::from(42), // TODO: Implement proper term pricing calculation
+            immediate_inclusion_fee: expected_miner_fee,
             ledger: 0,
             bytes: ctx.node_ctx.config.consensus.chunk_size * 2,
         }

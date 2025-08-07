@@ -1104,8 +1104,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             .create_publish_transaction(
                 data,
                 None, // anchor
-                price_info.value,
-                price_info.fee,
+                price_info.perm_fee,
+                price_info.immediate_inclusion_fee,
             )
             .map_err(AddTxError::CreateTx)?;
 
@@ -1150,8 +1150,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             .create_publish_transaction(
                 data,
                 None, // anchor
-                price_info.value,
-                price_info.fee,
+                price_info.perm_fee,
+                price_info.immediate_inclusion_fee,
             )
             .map_err(AddTxError::CreateTx)?;
 
@@ -1469,7 +1469,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("Failed to get price");
 
         let tx = signer
-            .create_publish_transaction(data, Some(anchor), price_info.value, price_info.fee)
+            .create_publish_transaction(
+                data,
+                Some(anchor),
+                price_info.perm_fee,
+                price_info.immediate_inclusion_fee,
+            )
             .expect("Expect to create a storage transaction from the data");
         let tx = signer
             .sign_transaction(tx)

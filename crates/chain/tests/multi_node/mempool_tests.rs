@@ -69,7 +69,12 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .await
         .expect("Failed to get price");
 
-    let tx = signer.create_publish_transaction(data, None, price_info.value, price_info.fee)?;
+    let tx = signer.create_publish_transaction(
+        data,
+        None,
+        price_info.perm_fee,
+        price_info.immediate_inclusion_fee,
+    )?;
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
@@ -2043,7 +2048,7 @@ async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Res
     let data_insufficient = vec![1_u8; data_size as usize];
 
     // Calculate fees
-    let perm_fee = price_info.value;
+    let perm_fee = price_info.perm_fee;
     let term_fee = irys_types::U256::from(0); // Always 0 for publish ledger txs
     let protocol_cost = perm_fee + term_fee;
 

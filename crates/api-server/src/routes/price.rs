@@ -20,10 +20,12 @@ use crate::ApiState;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
-    // Protocol-enforced storage cost
-    pub value: U256,
-    // Miner configurable fee
-    pub fee: U256,
+    // Protocol-enforced permanent storage cost
+    pub perm_fee: U256,
+    // TODO: Implement proper term pricing calculation - currently using placeholder value
+    pub term_fee: U256,
+    // Miner configurable fee for immediate inclusion
+    pub immediate_inclusion_fee: U256,
     pub ledger: u32,
     pub bytes: u64,
 }
@@ -60,8 +62,9 @@ pub async fn get_price(
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
-                value: base_cost.amount,
-                fee: miner_fee,
+                perm_fee: base_cost.amount,
+                term_fee: U256::from(42), // TODO: Implement proper term pricing calculation
+                immediate_inclusion_fee: miner_fee,
                 ledger,
                 bytes: bytes_to_store,
             }))

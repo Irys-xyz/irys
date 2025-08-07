@@ -6,7 +6,6 @@ use irys_actors::{
     BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_domain::ChainState;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
     IrysBlockHeader, NodeConfig, SystemTransactionLedger, TxIngressProof, H256, U256,
@@ -89,14 +88,14 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
         .await?;
 
     // Create transaction with INSUFFICIENT perm_fee (50% of expected)
-    let insufficient_perm_fee = price_info.value / U256::from(2);
+    let insufficient_perm_fee = price_info.perm_fee / U256::from(2);
     let malicious_tx = test_signer.create_transaction_with_fees(
         data,
         Some(H256::zero()),
         DataLedger::Publish,
         U256::zero(),                // term_fee (can be non-zero but using 0 here)
         Some(insufficient_perm_fee), // Insufficient perm_fee!
-        price_info.fee,              // Normal miner fee
+        price_info.immediate_inclusion_fee, // Normal miner fee
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 

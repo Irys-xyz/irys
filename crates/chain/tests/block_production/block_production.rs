@@ -636,9 +636,10 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .await?;
 
     // The user needs the total cost plus the miner fee due to how shadow transactions are processed
-    // The miner fee is typically 1% of the perm_fee (value)
-    let miner_fee = price_info.value / 100;
-    let exact_required_balance = price_info.value + price_info.fee + miner_fee;
+    // The miner fee is typically 1% of the perm_fee
+    let miner_fee = price_info.perm_fee / 100;
+    let exact_required_balance =
+        price_info.perm_fee + price_info.immediate_inclusion_fee + miner_fee;
     temp_node.stop().await;
 
     // Now create the actual test node with the correct balance

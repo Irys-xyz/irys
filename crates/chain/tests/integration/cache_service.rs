@@ -87,7 +87,12 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .expect("Failed to get price");
 
     let tx = account1
-        .create_publish_transaction(data_bytes.clone(), anchor, price_info.value, price_info.fee)
+        .create_publish_transaction(
+            data_bytes.clone(),
+            anchor,
+            price_info.perm_fee,
+            price_info.immediate_inclusion_fee,
+        )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 
