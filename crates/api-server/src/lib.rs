@@ -9,8 +9,8 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
-use irys_p2p::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
@@ -36,7 +36,7 @@ pub struct ApiState {
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 

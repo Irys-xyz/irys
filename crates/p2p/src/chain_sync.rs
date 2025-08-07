@@ -1,257 +1,346 @@
-use crate::{GossipError, GossipResult};
+use crate::block_pool::BlockCacheGuard;
+use crate::{BlockPool, GossipError};
 use base58::ToBase58 as _;
-use irys_api_client::ApiClient;
-use irys_domain::PeerList;
-use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
+use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::mempool_service::MempoolFacade;
+use irys_api_client::{ApiClient, IrysApiClient};
+use irys_domain::chain_sync_state::ChainSyncState;
+use irys_domain::{BlockIndexReadGuard, PeerList};
+use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode, TokioServiceHandle};
 use rand::prelude::SliceRandom as _;
+use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
-use tokio::time::timeout;
-use tracing::{debug, error, info, instrument, warn};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{interval, timeout};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
-const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
-const BLOCK_BATCH_SIZE: usize = 10;
-
-#[derive(Clone, Debug, Default)]
-pub struct SyncState {
-    syncing: Arc<AtomicBool>,
-    trusted_sync: Arc<AtomicBool>,
-    sync_target_height: Arc<AtomicUsize>,
-    highest_processed_block: Arc<AtomicUsize>,
-    switch_to_full_validation_at_height: Arc<RwLock<Option<usize>>>,
-    gossip_broadcast_enabled: Arc<AtomicBool>,
-    gossip_reception_enabled: Arc<AtomicBool>,
+/// Sync service specific errors
+#[derive(Debug, thiserror::Error)]
+pub enum ChainSyncError {
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("Service communication error: {0}")]
+    ServiceCommunication(String),
+    #[error("Internal sync error: {0}")]
+    Internal(String),
 }
 
-impl SyncState {
-    /// Creates a new SyncState with given syncing flag and sync_height = 0
-    pub fn new(is_syncing: bool, is_trusted_sync: bool) -> Self {
+/// Type alias for sync service results
+pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
+
+impl From<GossipError> for ChainSyncError {
+    fn from(err: GossipError) -> Self {
+        match err {
+            GossipError::Network(msg) => Self::Network(msg),
+            GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
+            GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
+            GossipError::Internal(internal_err) => {
+                Self::Internal(format!("Internal gossip error: {}", internal_err))
+            }
+            GossipError::InvalidData(data_err) => {
+                Self::Network(format!("Invalid data: {}", data_err))
+            }
+            GossipError::BlockPool(pool_err) => {
+                Self::Internal(format!("Block pool error: {:?}", pool_err))
+            }
+            GossipError::TransactionIsAlreadyHandled => {
+                Self::Internal("Transaction already handled".to_string())
+            }
+            GossipError::CommitmentValidation(commit_err) => {
+                Self::Network(format!("Commitment validation error: {}", commit_err))
+            }
+        }
+    }
+}
+
+const BLOCK_BATCH_SIZE: usize = 10;
+const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
+
+/// Messages that can be sent to the SyncService
+#[derive(Debug)]
+pub enum SyncChainServiceMessage {
+    /// Request an initial sync operation
+    InitialSync(oneshot::Sender<ChainSyncResult<()>>),
+    /// Check if we need periodic sync (internal message)
+    PeriodicSyncCheck,
+}
+
+/// Inner service containing the sync logic
+#[derive(Debug)]
+pub struct ChainSyncServiceInner<T: ApiClient> {
+    sync_state: ChainSyncState,
+    api_client: T,
+    peer_list: PeerList,
+    config: irys_types::Config,
+    block_index: BlockIndexReadGuard,
+    block_cache_guard: BlockCacheGuard,
+}
+
+/// Main sync service that runs in its own tokio task
+#[derive(Debug)]
+pub struct ChainSyncService<T: ApiClient> {
+    shutdown: Shutdown,
+    msg_rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
+    inner: ChainSyncServiceInner<T>,
+}
+
+/// Facade for interacting with the sync service
+#[derive(Debug, Clone)]
+pub struct SyncChainServiceFacade {
+    sender: mpsc::UnboundedSender<SyncChainServiceMessage>,
+}
+
+impl SyncChainServiceFacade {
+    pub fn new(sender: mpsc::UnboundedSender<SyncChainServiceMessage>) -> Self {
+        Self { sender }
+    }
+
+    /// Request an initial sync and wait for completion
+    pub async fn initial_sync(&self) -> ChainSyncResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SyncChainServiceMessage::InitialSync(tx))
+            .map_err(|_| {
+                ChainSyncError::ServiceCommunication("Failed to send sync request".to_string())
+            })?;
+
+        rx.await.map_err(|_| {
+            ChainSyncError::ServiceCommunication("Failed to receive sync response".to_string())
+        })?
+    }
+}
+
+impl ChainSyncServiceInner<IrysApiClient> {
+    pub fn new<B: BlockDiscoveryFacade, M: MempoolFacade>(
+        sync_state: ChainSyncState,
+        peer_list: PeerList,
+        config: irys_types::Config,
+        block_index: BlockIndexReadGuard,
+        block_pool: &BlockPool<B, M>,
+    ) -> Self {
+        Self::new_with_client(
+            sync_state,
+            IrysApiClient::new(),
+            peer_list,
+            config,
+            block_index,
+            block_pool,
+        )
+    }
+}
+
+impl<T: ApiClient> ChainSyncServiceInner<T> {
+    pub fn new_with_client<B: BlockDiscoveryFacade, M: MempoolFacade>(
+        sync_state: ChainSyncState,
+        api_client: T,
+        peer_list: PeerList,
+        config: irys_types::Config,
+        block_index: BlockIndexReadGuard,
+        block_pool: &BlockPool<B, M>,
+    ) -> Self {
         Self {
-            syncing: Arc::new(AtomicBool::new(is_syncing)),
-            trusted_sync: Arc::new(AtomicBool::new(is_trusted_sync)),
-            sync_target_height: Arc::new(AtomicUsize::new(0)),
-            highest_processed_block: Arc::new(AtomicUsize::new(0)),
-            switch_to_full_validation_at_height: Arc::new(RwLock::new(None)),
-            gossip_broadcast_enabled: Arc::new(AtomicBool::new(true)),
-            gossip_reception_enabled: Arc::new(AtomicBool::new(true)),
+            sync_state,
+            api_client,
+            peer_list,
+            config,
+            block_index,
+            block_cache_guard: block_pool.block_cache_guard(),
         }
     }
 
-    pub fn set_is_syncing(&self, is_syncing: bool) {
-        self.syncing.store(is_syncing, Ordering::Relaxed);
-        self.set_gossip_broadcast_enabled(!is_syncing);
-    }
+    /// Check if the local index is behind trusted peers
+    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> ChainSyncResult<bool> {
+        let migration_depth = u64::from(self.config.consensus.block_migration_depth);
 
-    pub fn set_syncing_from(&self, height: usize) {
-        self.set_is_syncing(true);
-        self.set_sync_target_height(height);
-        self.mark_processed(height.saturating_sub(1));
-    }
+        let mut highest_trusted_peer_height = None;
 
-    pub fn finish_sync(&self) {
-        self.set_is_syncing(false);
-    }
-
-    /// Returns whether the gossip service is currently syncing
-    pub fn is_syncing(&self) -> bool {
-        self.syncing.load(Ordering::Relaxed)
-    }
-
-    /// Waits for the sync flag to be set to false.
-    #[must_use]
-    pub async fn wait_for_sync(&self) {
-        // If already synced, return immediately
-        if !self.is_syncing() {
-            return;
+        let trusted_peers = self.peer_list.trusted_peers();
+        if trusted_peers.is_empty() {
+            return Err(ChainSyncError::Network(
+                "No trusted peers available".to_string(),
+            ));
         }
 
-        // Create a future that polls the sync state
-        let syncing = Arc::clone(&self.syncing);
-        tokio::spawn(async move {
-            while syncing.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("Sync checking task failed");
-    }
+        for (_, peer) in trusted_peers.iter() {
+            debug!("Sync task: Trusted peer: {:?}", peer);
+            let node_info = match self.api_client.node_info(peer.address.api).await {
+                Ok(info) => info,
+                Err(err) => {
+                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
+                    continue;
+                }
+            };
 
-    /// Sets the current sync height. During syncing, the gossip won't
-    /// accept blocks higher than this height
-    pub fn set_sync_target_height(&self, height: usize) {
-        self.sync_target_height.store(height, Ordering::Relaxed);
-    }
+            let index_tip = node_info.block_index_height;
 
-    /// Returns the current sync height
-    pub fn sync_target_height(&self) -> usize {
-        self.sync_target_height.load(Ordering::Relaxed)
-    }
-
-    /// Increments sync height by 1 and returns the new height
-    pub fn increment_sync_target_height(&self) -> usize {
-        self.sync_target_height.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// [`crate::block_pool::BlockPool`] marks block as processed once the
-    /// BlockDiscovery finished the pre-validation and scheduled the block for full validation
-    pub fn mark_processed(&self, height: usize) {
-        let current_height = self.highest_processed_block.load(Ordering::Relaxed);
-        if height > current_height {
-            self.highest_processed_block
-                .store(height, Ordering::Relaxed);
-
-            if let Some(switch_height) = *self.switch_to_full_validation_at_height.read().unwrap() {
-                if self.is_trusted_sync() && height >= switch_height {
-                    self.set_trusted_sync(false)
+            if let Some(peer_height) = highest_trusted_peer_height {
+                if index_tip > peer_height {
+                    highest_trusted_peer_height = Some(index_tip);
                 }
             }
         }
-    }
 
-    /// Sets the height at which the node should switch to full validation.
-    pub fn set_switch_to_full_validation_at_height(&self, height: Option<usize>) {
-        let mut lock = self.switch_to_full_validation_at_height.write().unwrap();
-        *lock = height;
-    }
-
-    /// Returns the height at which the node should switch to full validation.
-    pub fn full_validation_switch_height(&self) -> Option<usize> {
-        *self.switch_to_full_validation_at_height.read().unwrap()
-    }
-
-    pub fn is_in_trusted_sync_range(&self, height: usize) -> bool {
-        if let Some(switch_height) = self.full_validation_switch_height() {
-            self.is_trusted_sync() && switch_height >= height
+        if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
+            Ok(self.block_index.read().latest_height() + migration_depth
+                < highest_trusted_peer_height)
         } else {
-            false
+            Err(ChainSyncError::Network(
+                "Wasn't able to fetch node info from any of the trusted peers".to_string(),
+            ))
         }
     }
 
-    /// Highest pre-validated block height. Set by the [`crate::block_pool::BlockPool`]
-    pub fn highest_processed_block(&self) -> usize {
-        self.highest_processed_block.load(Ordering::Relaxed)
+    /// Perform a sync operation
+    async fn sync_chain(&self) -> ChainSyncResult<()> {
+        let start_sync_from_height = self.block_index.read().latest_height();
+        // Clear any pending blocks from the cache
+        self.block_cache_guard.clear().await;
+        sync_chain(
+            self.sync_state.clone(),
+            self.api_client.clone(),
+            &self.peer_list,
+            start_sync_from_height
+                .try_into()
+                .expect("Expected to be able to convert u64 to usize"),
+            &self.config,
+        )
+        .await
+    }
+}
+
+impl<T: ApiClient> ChainSyncService<T> {
+    #[tracing::instrument(skip_all)]
+    pub fn spawn_service(
+        inner: ChainSyncServiceInner<T>,
+        rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning sync service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(
+            async move {
+                let service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner,
+                };
+                service
+                    .start()
+                    .await
+                    .expect("Sync service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
+
+        TokioServiceHandle {
+            name: "sync_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
-    /// Sets whether gossip broadcast is enabled
-    pub fn set_gossip_broadcast_enabled(&self, enabled: bool) {
-        self.gossip_broadcast_enabled
-            .store(enabled, Ordering::Relaxed);
-    }
+    #[tracing::instrument(skip_all)]
+    async fn start(mut self) -> ChainSyncResult<()> {
+        info!("Starting sync service");
 
-    /// Returns whether gossip broadcast is enabled
-    pub fn is_gossip_broadcast_enabled(&self) -> bool {
-        self.gossip_broadcast_enabled.load(Ordering::Relaxed)
-    }
+        // Set up periodic sync check timer
+        let mut periodic_timer = interval(Duration::from_secs(PERIODIC_SYNC_CHECK_INTERVAL_SECS));
+        periodic_timer.tick().await; // Consume the first immediate tick
 
-    /// Sets whether gossip reception is enabled
-    pub fn set_gossip_reception_enabled(&self, enabled: bool) {
-        self.gossip_reception_enabled
-            .store(enabled, Ordering::Relaxed);
-    }
+        loop {
+            tokio::select! {
+                biased; // enable bias so polling happens in definition order
 
-    /// Returns whether gossip reception is enabled
-    pub fn is_gossip_reception_enabled(&self) -> bool {
-        self.gossip_reception_enabled.load(Ordering::Relaxed)
-    }
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for sync service");
+                    break;
+                }
 
-    /// Checks if more blocks can be scheduled for validation by checking the
-    /// number of blocks scheduled for validation so far versus the highest block
-    /// marked by [`crate::block_pool::BlockPool`] after pre-validation
-    pub fn is_queue_full(&self) -> bool {
-        // We already past the sync target height, so there's nothing in the queue
-        //  scheduled by the sync task specifically (gossip still can schedule blocks)
-        if self.highest_processed_block() > self.sync_target_height() {
-            return false;
+                // Handle periodic sync checks
+                _ = periodic_timer.tick() => {
+                    self.handle_periodic_sync_check().await;
+                }
+
+                // Handle commands
+                cmd = self.msg_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            self.handle_message(cmd).await?;
+                        }
+                        None => {
+                            warn!("Sync service command channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
-        self.sync_target_height() - self.highest_processed_block()
-            >= MAX_PROCESSING_BLOCKS_QUEUE_SIZE
+        info!("Shutting down sync service gracefully");
+        Ok(())
     }
 
-    /// Waits until the length of the validation queue is less than the maximum
-    /// allowed size.
-    pub async fn wait_for_an_empty_queue_slot(&self) {
-        while self.is_queue_full() {
-            tokio::time::sleep(Duration::from_millis(100)).await
+    #[tracing::instrument(skip_all)]
+    async fn handle_message(&self, msg: SyncChainServiceMessage) -> ChainSyncResult<()> {
+        match msg {
+            SyncChainServiceMessage::InitialSync(sender) => {
+                let result = self.inner.sync_chain().await;
+                if let Err(e) = sender.send(result) {
+                    tracing::error!("Failed to send sync response: {:?}", e);
+                }
+            }
+            SyncChainServiceMessage::PeriodicSyncCheck => {
+                self.handle_periodic_sync_check().await;
+            }
         }
+        Ok(())
     }
 
-    /// Waits for the highest pre-validated block to reach target sync height
-    /// This has a progress/time based early out - if we don't make at least a block's worth of progress in `progress_timeout`, we return early
-    pub async fn wait_for_processed_block_to_reach_target(&self) {
-        // If already synced, return immediately
-        if !self.is_syncing() {
+    async fn handle_periodic_sync_check(&self) {
+        // Skip if already syncing
+        if self.inner.sync_state.is_syncing() {
+            debug!("Periodic sync check: Already syncing, skipping");
             return;
         }
 
-        // Create a future that polls the sync state
-        let target = Arc::clone(&self.sync_target_height);
-        let highest_processed_block = Arc::clone(&self.highest_processed_block);
-        tokio::spawn(async move {
-            let progress_timeout = Duration::from_secs(60);
-            let mut last_made_progress = Instant::now();
-            let mut prev_hpb = 0;
-            loop {
-                let target = target.load(Ordering::Relaxed);
-                let hpb = highest_processed_block.load(Ordering::Relaxed);
-                let made_progress = hpb > prev_hpb;
-
-                // We need to add 1 to the highest processed block. For the cases when the node
-                // starts fully caught up, no new blocks are added to the index, and the
-                // target is always going to be one more than the highest processed block.
-                // If this function never resolves, no new blocks can arrive over gossip in that case.
-
-                if hpb + 1 >= target {
-                    // synchronised
-                    break;
-                } else if !made_progress && last_made_progress.elapsed() > progress_timeout {
-                    // didn't make any progress in the last `progress_timeout` duration
-                    warn!(
-                        "Did not make sync process from {} in {}ms",
-                        &hpb,
-                        &progress_timeout.as_millis()
-                    );
-                    break; // progression timeout
-                } else {
-                    if made_progress {
-                        debug!(
-                            "Progressed: {} -> {} (target: {})",
-                            &prev_hpb, &hpb, &target
-                        );
-                        last_made_progress = Instant::now();
-                        prev_hpb = hpb;
-                    };
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+        // Check if we're behind the network
+        match self
+            .inner
+            .check_if_local_index_is_behind_trusted_peers()
+            .await
+        {
+            Ok(true) => {
+                info!("Periodic sync check: We're behind the network, starting sync");
+                match self.inner.sync_chain().await {
+                    Ok(()) => info!("Periodic sync completed successfully"),
+                    Err(e) => error!("Periodic sync failed: {}", e),
                 }
             }
-        })
-        .await
-        .expect("Sync checking task failed");
-    }
-
-    pub fn set_trusted_sync(&self, is_trusted_sync: bool) {
-        self.trusted_sync.store(is_trusted_sync, Ordering::Relaxed);
-    }
-
-    pub fn is_trusted_sync(&self) -> bool {
-        self.trusted_sync.load(Ordering::Relaxed)
-    }
-
-    pub fn is_syncing_from_a_trusted_peer(&self) -> bool {
-        self.is_syncing() && self.is_trusted_sync()
+            Ok(false) => {
+                debug!("Periodic sync check: We're up to date with the network");
+            }
+            Err(e) => {
+                warn!(
+                    "Periodic sync check: Failed to check if behind network: {}",
+                    e
+                );
+            }
+        }
     }
 }
 
 #[instrument(skip_all, err)]
 pub async fn sync_chain(
-    sync_state: SyncState,
+    sync_state: ChainSyncState,
     api_client: impl ApiClient,
     peer_list: &PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
-) -> Result<(), GossipError> {
+) -> ChainSyncResult<()> {
     let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
@@ -315,7 +404,7 @@ pub async fn sync_chain(
         let migration_depth = config.consensus.block_migration_depth as usize;
         let trusted_peers = peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(GossipError::Network(
+            return Err(ChainSyncError::Network(
                 "No trusted peers available".to_string(),
             ));
         }
@@ -371,7 +460,7 @@ pub async fn sync_chain(
         }
 
         if !switch_height_set {
-            return Err(GossipError::Network(
+            return Err(ChainSyncError::Network(
                 "Failed to get node info from any trusted peer after 5 retry attempts".to_string(),
             ));
         }
@@ -494,7 +583,7 @@ async fn get_block_index(
     limit: usize,
     retries: usize,
     fetch_from_the_trusted_peer: bool,
-) -> GossipResult<Vec<BlockIndexItem>> {
+) -> ChainSyncResult<Vec<BlockIndexItem>> {
     let peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         peer_list.trusted_peers()
     } else {
@@ -502,14 +591,14 @@ async fn get_block_index(
     };
 
     if peers_to_fetch_index_from.is_empty() {
-        return Err(GossipError::Network("No peers available".to_string()));
+        return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
     for _ in 0..retries {
         let (miner_address, top_peer) =
             peers_to_fetch_index_from
                 .choose(&mut rand::thread_rng())
-                .ok_or(GossipError::Network("No peers available".to_string()))?;
+                .ok_or(ChainSyncError::Network("No peers available".to_string()))?;
         match api_client
             .get_block_index(
                 top_peer.address.api,
@@ -519,7 +608,7 @@ async fn get_block_index(
                 },
             )
             .await
-            .map_err(|network_error| GossipError::Network(network_error.to_string()))
+            .map_err(|network_error| ChainSyncError::Network(network_error.to_string()))
         {
             Ok(index) => {
                 debug!(
@@ -538,7 +627,7 @@ async fn get_block_index(
         }
     }
 
-    Err(GossipError::Network(
+    Err(ChainSyncError::Network(
         "Failed to fetch block index from peer".to_string(),
     ))
 }
@@ -562,13 +651,13 @@ mod tests {
             PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
-        use std::sync::{Arc, Mutex};
+        use std::sync::{Arc, Mutex, RwLock};
 
         #[actix_web::test]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
-            let sync_state = SyncState::new(true, false);
+            let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
                 open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
@@ -717,7 +806,7 @@ mod tests {
         ) -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
-            let sync_state = SyncState::new(true, false);
+            let sync_state = ChainSyncState::new(true, false);
 
             let db = DatabaseProvider(Arc::new(
                 open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())

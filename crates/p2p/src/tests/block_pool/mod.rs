@@ -1,7 +1,7 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
-use crate::{BlockStatusProvider, GetPeerListGuard, SyncState};
+use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
@@ -9,6 +9,7 @@ use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -242,7 +243,7 @@ async fn should_process_block() {
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let sync_state = SyncState::new(false, false);
+    let sync_state = ChainSyncState::new(false, false);
     let service = BlockPool::new(
         db.clone(),
         peer_list_data_guard,
@@ -355,7 +356,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         true,
     );
 
-    let sync_state = SyncState::new(false, false);
+    let sync_state = ChainSyncState::new(false, false);
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -428,7 +429,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let sync_state = SyncState::new(false, false);
+    let sync_state = ChainSyncState::new(false, false);
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -529,7 +530,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         true,
     );
 
-    let sync_state = SyncState::new(false, false);
+    let sync_state = ChainSyncState::new(false, false);
 
     let block_pool = BlockPool::new(
         db.clone(),
@@ -636,7 +637,7 @@ async fn should_fast_track_block() {
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let sync_state = SyncState::new(false, true);
+    let sync_state = ChainSyncState::new(false, true);
 
     let service = BlockPool::new(
         db.clone(),
@@ -697,7 +698,7 @@ async fn should_not_fast_track_block_already_in_index() {
         service_senders,
     } = MockedServices::new(&config).await;
 
-    let sync_state = SyncState::new(false, true);
+    let sync_state = ChainSyncState::new(false, true);
     let service = BlockPool::new(
         db.clone(),
         peer_list_data_guard,
