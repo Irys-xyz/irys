@@ -420,7 +420,7 @@ impl BlockDiscoveryServiceInner {
             for (i, tx_header) in publish_txs.iter().enumerate() {
                 if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
                     return Err(BlockDiscoveryError::BlockValidationError(
-                        PreValidationError::InvalidIngressProofSignature(e.to_string()),
+                        PreValidationError::IngressProofSignatureInvalid(e.to_string()),
                     ));
                 }
             }

@@ -49,7 +49,7 @@ pub enum PreValidationError {
     #[error("Ingress proofs missing")]
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
-    InvalidIngressProofSignature(String),
+    IngressProofSignatureInvalid(String),
     #[error("Oracle price invalid")]
     OraclePriceInvalid,
     #[error("PoA chunk offset out of block bounds")]
