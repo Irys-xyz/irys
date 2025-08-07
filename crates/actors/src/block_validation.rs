@@ -43,7 +43,7 @@ use tracing::{debug, error, info};
 #[derive(Debug, Error)]
 pub enum PreValidationError {
     #[error("Missing PoA chunk to be pre validated")]
-    MissingPoAChunk,
+    PoAChunkMissing,
     #[error("Block chunk hash distinct from PoA chunk hash")]
     PoAChunkHashMismatch,
     #[error("Ingress proofs missing")]
@@ -85,7 +85,7 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(PreValidationError::MissingPoAChunk),
+        None => return Err(PreValidationError::PoAChunkMissing),
     };
 
     if block.chunk_hash != sha::sha256(&poa_chunk).into() {
@@ -464,7 +464,7 @@ pub fn poa_is_valid(
     debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(PreValidationError::MissingPoAChunk),
+        None => return Err(PreValidationError::PoAChunkMissing),
     };
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
