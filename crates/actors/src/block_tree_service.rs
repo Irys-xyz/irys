@@ -878,6 +878,7 @@ impl BlockTreeServiceInner {
         block_header: &IrysBlockHeader,
         ledger: DataLedger,
     ) -> eyre::Result<Vec<DataTransactionHeader>> {
+        // FIXME: when we add multiple term ledgers this will not work as there may be gaps in the index range
         // Explicitly cast enum to index
         let ledger_index = ledger as usize;
 
