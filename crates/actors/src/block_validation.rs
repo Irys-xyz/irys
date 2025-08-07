@@ -42,26 +42,31 @@ use tracing::{debug, error, info};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
-    #[error("Missing PoA chunk to be pre validated")]
-    PoAChunkMissing,
-    #[error("Block chunk hash distinct from PoA chunk hash")]
-    PoAChunkHashMismatch,
+    #[error("Ema mismatch")]
+    EmaMismatch,
+
     #[error("Ingress proofs missing")]
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
+
     #[error("Oracle price invalid")]
     OraclePriceInvalid,
+
+    #[error("PoA capacity chunk mismatch")]
+    PoACapacityChunkMismatch,
+    #[error("Block chunk hash distinct from PoA chunk hash")]
+    PoAChunkHashMismatch,
+    #[error("Missing PoA chunk to be pre validated")]
+    PoAChunkMissing,
+
+    #[error("PoA chunk offset out of tx's data chunks bounds")]
+    PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
     PoAChunkOffsetOutOfBlockBounds,
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
-    #[error("PoA chunk offset out of tx's data chunks bounds")]
-    PoAChunkOffsetOutOfDataChunksBounds,
-    #[error("PoA capacity chunk mismatch")]
-    PoACapacityChunkMismatch,
-    #[error("Ema mismatch")]
-    EmaMismatch,
+
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
     #[error(transparent)]
