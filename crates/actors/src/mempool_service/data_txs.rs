@@ -103,13 +103,7 @@ impl Inner {
                     });
                 }
 
-                // For publish ledger, term_fee should be 0
-                if tx.term_fee != 0 {
-                    return Err(TxIngressError::IncorrectProtocolFee {
-                        expected: U256::zero(),
-                        actual: U256::from(tx.term_fee),
-                    });
-                }
+                // TODO: validate term_fee once we have support for it
             }
             DataLedger::Submit => {
                 // Submit ledger - a data transaction cannot target the submit ledger directly

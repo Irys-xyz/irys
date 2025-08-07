@@ -1088,13 +1088,7 @@ pub async fn data_txs_are_valid(
             actual_perm_fee
         );
 
-        // For publish ledger, term_fee should be 0
-        ensure!(
-            tx.term_fee == 0,
-            "Transaction {} in Publish ledger should have term_fee = 0, got {}",
-            tx.id,
-            tx.term_fee
-        );
+        // TODO: validate term fee once we have support for them
 
         match current_ledger {
             DataLedger::Publish => {
