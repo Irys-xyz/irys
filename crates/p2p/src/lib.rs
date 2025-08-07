@@ -19,5 +19,5 @@ pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 pub use peer_network_service::PeerListServiceError;
 pub use peer_network_service::{GetPeerListGuard, PeerNetworkService};
-pub use sync::sync_chain;
+pub use sync::{sync_chain, SyncService, SyncServiceInner, SyncServiceFacade, SyncServiceMessage};
 pub use types::{GossipError, GossipResult};
