@@ -72,6 +72,9 @@ pub enum PreValidationError {
 
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
+
+    #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
+    VDFPreviousOutputMismatch { got: H256, expected: H256 },
     #[error(transparent)]
     Other(#[from] eyre::Report),
 }
@@ -219,15 +222,14 @@ pub async fn prevalidate_block(
 pub fn prev_output_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "vdf_limiter.prev_output ({}) does not match previous blocks vdf_limiter.output ({})",
-            &block.vdf_limiter_info.prev_output,
-            &previous_block.vdf_limiter_info.output
-        ))
+        return Err(PreValidationError::VDFPreviousOutputMismatch {
+            got: block.vdf_limiter_info.prev_output,
+            expected: previous_block.vdf_limiter_info.output,
+        });
     }
 }
 
