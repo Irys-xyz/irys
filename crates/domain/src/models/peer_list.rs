@@ -78,7 +78,25 @@ impl PeerList {
         db: &DatabaseProvider,
         peer_service_sender: PeerNetworkSender,
     ) -> Result<Self, PeerNetworkError> {
-        let inner = PeerListDataInner::new(config, db, peer_service_sender)?;
+        let read_tx = db.tx().map_err(PeerNetworkError::from)?;
+        let compact_peers =
+            walk_all::<PeerListItems, _>(&read_tx).map_err(PeerNetworkError::from)?;
+
+        let peers = compact_peers
+            .into_iter()
+            .map(|(address, compact_item)| (address, PeerListItem::from(compact_item)))
+            .collect();
+
+        let inner = PeerListDataInner::new(peers, peer_service_sender, config)?;
+        Ok(Self(Arc::new(RwLock::new(inner))))
+    }
+
+    pub fn from_peers(
+        peers: Vec<(Address, PeerListItem)>,
+        peer_network: PeerNetworkSender,
+        config: &Config,
+    ) -> Result<Self, PeerNetworkError> {
+        let inner = PeerListDataInner::new(peers, peer_network, config)?;
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
 
@@ -350,9 +368,9 @@ impl PeerList {
 
 impl PeerListDataInner {
     pub fn new(
+        peers: Vec<(Address, PeerListItem)>,
+        peer_network_sender: PeerNetworkSender,
         config: &Config,
-        db: &DatabaseProvider,
-        peer_service_sender: PeerNetworkSender,
     ) -> Result<Self, PeerNetworkError> {
         let mut peer_list = Self {
             gossip_addr_to_mining_addr_map: HashMap::new(),
@@ -369,26 +387,21 @@ impl PeerListDataInner {
                 .iter()
                 .map(|p| p.api)
                 .collect(),
-            peer_network_service_sender: peer_service_sender,
+            peer_network_service_sender: peer_network_sender,
         };
 
-        let read_tx = db.tx().map_err(PeerNetworkError::from)?;
-
-        let peer_list_items =
-            walk_all::<PeerListItems, _>(&read_tx).map_err(PeerNetworkError::from)?;
-
-        for (mining_addr, entry) in peer_list_items {
-            let address = entry.address;
+        for (mining_address, peer_list_item) in peers {
+            let address = peer_list_item.address;
             peer_list
                 .gossip_addr_to_mining_addr_map
-                .insert(entry.address.gossip.ip(), mining_addr);
+                .insert(peer_list_item.address.gossip.ip(), mining_address);
             peer_list
                 .persistent_peers_cache
-                .insert(mining_addr, entry.0);
+                .insert(mining_address, peer_list_item);
             peer_list.known_peers_cache.insert(address);
             peer_list
                 .api_addr_to_mining_addr_map
-                .insert(address.api, mining_addr);
+                .insert(address.api, mining_address);
         }
 
         Ok(peer_list)
