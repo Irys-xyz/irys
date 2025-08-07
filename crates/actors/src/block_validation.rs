@@ -42,6 +42,8 @@ use tracing::{debug, error, info};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
+    #[error("Failed to get block bounds: {0}")]
+    BlockBoundsLookupError(String),
     #[error("block signature is not valid")]
     BlockSignatureInvalid,
     #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
@@ -56,6 +58,8 @@ pub enum PreValidationError {
     IngressProofSignatureInvalid(String),
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch { expected: u128, got: u128 },
+    #[error("Invalid ledger id {ledger_id}")]
+    LedgerIdInvalid { ledger_id: u32 },
     #[error("Invalid merkle proof: {0}")]
     MerkleProofInvalid(String),
     #[error("Oracle price invalid")]
@@ -80,24 +84,28 @@ pub enum PreValidationError {
         "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
     )]
     PoADataPartitionExpired { partition_hash: H256 },
-    #[error("system time error: {0}")]
-    SystemTimeError(String),
     #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
     PreviousSolutionHashMismatch { expected: H256, got: H256 },
+    #[error("Reward curve error: {0}")]
+    RewardCurveError(String),
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
+    #[error("Snapshot creation error: {0}")]
+    SnapshotError(String),
     #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
     SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("system time error: {0}")]
+    SystemTimeError(String),
     #[error("block timestamp {current} is older than parent block {parent}")]
     TimestampOlderThanParent { current: u128, parent: u128 },
     #[error("block timestamp {current} too far in the future (now {now})")]
     TimestampTooFarInFuture { current: u128, now: u128 },
+    #[error("Validation service unreachable")]
+    ValidationServiceUnreachable,
     #[error("last_step_checkpoints validation failed: {0}")]
     VDFCheckpointsInvalid(String),
     #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
     VDFPreviousOutputMismatch { got: H256, expected: H256 },
-    #[error(transparent)]
-    Other(#[from] eyre::Report),
 }
 
 /// Full pre-validation steps for a block
@@ -218,11 +226,13 @@ pub async fn prevalidate_block(
     }
 
     // Check valid curve price
-    let reward = reward_curve.reward_between(
-        // adjust ms to sec
-        previous_block.timestamp.saturating_div(1000),
-        block.timestamp.saturating_div(1000),
-    )?;
+    let reward = reward_curve
+        .reward_between(
+            // adjust ms to sec
+            previous_block.timestamp.saturating_div(1000),
+            block.timestamp.saturating_div(1000),
+        )
+        .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
     if reward.amount != block.reward_amount {
         return Err(PreValidationError::RewardMismatch {
             got: block.reward_amount,
@@ -515,11 +525,13 @@ pub fn poa_is_valid(
             + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
-        let ledger = DataLedger::try_from(ledger_id)?;
+        let ledger = DataLedger::try_from(ledger_id)
+            .map_err(|_| PreValidationError::LedgerIdInvalid { ledger_id })?;
 
         let bb = block_index_guard
             .read()
-            .get_block_bounds(ledger, ledger_chunk_offset)?;
+            .get_block_bounds(ledger, ledger_chunk_offset)
+            .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
