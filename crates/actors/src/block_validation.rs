@@ -42,6 +42,9 @@ use tracing::{debug, error, info};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
+    #[error("block signature is not valid")]
+    BlockSignatureInvalid,
+
     #[error("Ema mismatch")]
     EmaMismatch,
 
@@ -207,7 +210,7 @@ pub async fn prevalidate_block(
     // commitment states looked like when this block was produced. For now
     // we just accept any valid signature.
     if !block.is_signature_valid() {
-        return Err(eyre::eyre!("block signature is not valid").into());
+        return Err(PreValidationError::BlockSignatureInvalid);
     }
 
     Ok(())
