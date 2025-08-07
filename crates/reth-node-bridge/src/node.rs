@@ -95,6 +95,7 @@ pub async fn run_node(
     reth_config.rpc.http = true;
     reth_config.rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
         RethRpcModule::Eth,
+        RethRpcModule::Debug,
     ])));
     reth_config.rpc.http_addr = node_config.reth_peer_info.peering_tcp_addr.ip();
     reth_config.network.discovery.addr = node_config.reth_peer_info.peering_tcp_addr.ip();
