@@ -1,16 +1,260 @@
 use crate::{GossipError, GossipResult};
 use base58::ToBase58 as _;
-use irys_api_client::ApiClient;
+use eyre;
+use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::sync_state::SyncState;
-use irys_domain::PeerList;
-use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode};
+use irys_domain::{BlockIndexReadGuard, PeerList};
+use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode, TokioServiceHandle};
 use rand::prelude::SliceRandom as _;
+use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
 use std::time::Duration;
-use tokio::time::timeout;
-use tracing::{debug, error, info, instrument, warn};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{timeout, interval};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 const BLOCK_BATCH_SIZE: usize = 10;
+const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
+
+/// Messages that can be sent to the SyncService
+#[derive(Debug)]
+pub enum SyncServiceMessage {
+    /// Request an initial sync operation
+    InitialSync(oneshot::Sender<GossipResult<()>>),
+    /// Check if we need periodic sync (internal message)
+    PeriodicSyncCheck,
+}
+
+/// Inner service containing the sync logic
+#[derive(Debug)]
+pub struct SyncServiceInner<T: ApiClient> {
+    sync_state: SyncState,
+    api_client: T,
+    peer_list: PeerList,
+    config: irys_types::Config,
+    block_index: BlockIndexReadGuard,
+}
+
+/// Main sync service that runs in its own tokio task
+#[derive(Debug)]
+pub struct SyncService<T: ApiClient> {
+    shutdown: Shutdown,
+    msg_rx: mpsc::UnboundedReceiver<SyncServiceMessage>,
+    inner: SyncServiceInner<T>,
+}
+
+/// Facade for interacting with the sync service
+#[derive(Debug, Clone)]
+pub struct SyncServiceFacade {
+    sender: mpsc::UnboundedSender<SyncServiceMessage>,
+}
+
+impl SyncServiceFacade {
+    pub fn new(sender: mpsc::UnboundedSender<SyncServiceMessage>) -> Self {
+        Self { sender }
+    }
+
+    /// Request an initial sync and wait for completion
+    pub async fn initial_sync(&self) -> GossipResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SyncServiceMessage::InitialSync(tx))
+            .map_err(|_| GossipError::Network("Failed to send sync request".to_string()))?;
+        
+        rx.await
+            .map_err(|_| GossipError::Network("Failed to receive sync response".to_string()))?
+    }
+}
+
+impl SyncServiceInner<IrysApiClient> {
+    pub fn new(sync_state: SyncState, peer_list: PeerList, config: irys_types::Config, block_index: BlockIndexReadGuard) -> Self {
+        Self::new_with_client(sync_state, IrysApiClient::new(), peer_list, config, block_index)
+    }
+}
+
+impl<T: ApiClient> SyncServiceInner<T> {
+    pub fn new_with_client(
+        sync_state: SyncState,
+        api_client: T,
+        peer_list: PeerList,
+        config: irys_types::Config,
+        block_index: BlockIndexReadGuard
+    ) -> Self {
+        Self { sync_state, api_client, peer_list, config, block_index }
+    }
+
+    /// Check if local index is behind trusted peers
+    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> GossipResult<bool> {
+        let migration_depth = u64::from(self.config.consensus.block_migration_depth);
+
+        let mut highest_trusted_peer_height = None;
+
+        let trusted_peers = self.peer_list.trusted_peers();
+        if trusted_peers.is_empty() {
+            return Err(GossipError::Network(
+                "No trusted peers available".to_string(),
+            ));
+        }
+
+        for (_, peer) in trusted_peers.iter() {
+            debug!("Sync task: Trusted peer: {:?}", peer);
+            let node_info = match self.api_client.node_info(peer.address.api).await {
+                Ok(info) => info,
+                Err(err) => {
+                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
+                    continue;
+                }
+            };
+
+            let index_tip = node_info.block_index_height;
+
+            if let Some(peer_height) = highest_trusted_peer_height {
+                if index_tip > peer_height {
+                    highest_trusted_peer_height = Some(index_tip);
+                }
+            }
+        }
+
+        if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
+            Ok(self.block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
+        } else {
+            Err(GossipError::Network(
+                "Wasn't able to fetch node info from any of the trusted peers".to_string()
+            ))
+        }
+    }
+
+    /// Perform a sync operation
+    async fn sync_chain(&self) -> GossipResult<()> {
+        let start_sync_from_height = self.block_index.read().latest_height();
+        sync_chain(
+            self.sync_state.clone(),
+            self.api_client.clone(),
+            &self.peer_list,
+            start_sync_from_height.try_into().expect("Expected to be able to convert u64 to usize"),
+            &self.config,
+        ).await
+    }
+}
+
+impl<T: ApiClient> SyncService<T> {
+    #[tracing::instrument(skip_all)]
+    pub fn spawn_service(
+        inner: SyncServiceInner<T>,
+        rx: mpsc::UnboundedReceiver<SyncServiceMessage>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning sync service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(
+            async move {
+                let service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner,
+                };
+                service
+                    .start()
+                    .await
+                    .expect("Sync service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
+
+        TokioServiceHandle {
+            name: "sync_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("Starting sync service");
+
+        // Set up periodic sync check timer
+        let mut periodic_timer = interval(Duration::from_secs(PERIODIC_SYNC_CHECK_INTERVAL_SECS));
+        periodic_timer.tick().await; // Consume the first immediate tick
+
+        loop {
+            tokio::select! {
+                biased; // enable bias so polling happens in definition order
+
+                // Check for shutdown signal
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for sync service");
+                    break;
+                }
+                
+                // Handle periodic sync checks
+                _ = periodic_timer.tick() => {
+                    self.handle_periodic_sync_check().await;
+                }
+                
+                // Handle commands
+                cmd = self.msg_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            self.handle_message(cmd).await?;
+                        }
+                        None => {
+                            warn!("Sync service command channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Shutting down sync service gracefully");
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_message(&self, msg: SyncServiceMessage) -> eyre::Result<()> {
+        match msg {
+            SyncServiceMessage::InitialSync(sender) => {
+                let result = self.inner.sync_chain().await;
+                if let Err(e) = sender.send(result) {
+                    tracing::error!("Failed to send sync response: {:?}", e);
+                }
+            }
+            SyncServiceMessage::PeriodicSyncCheck => {
+                self.handle_periodic_sync_check().await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_periodic_sync_check(&self) {
+        // Skip if already syncing
+        if self.inner.sync_state.is_syncing() {
+            debug!("Periodic sync check: Already syncing, skipping");
+            return;
+        }
+
+        // Check if we're behind the network
+        match self.inner.check_if_local_index_is_behind_trusted_peers().await {
+            Ok(true) => {
+                info!("Periodic sync check: We're behind the network, starting sync");
+                match self.inner.sync_chain().await {
+                    Ok(()) => info!("Periodic sync completed successfully"),
+                    Err(e) => error!("Periodic sync failed: {}", e),
+                }
+            }
+            Ok(false) => {
+                debug!("Periodic sync check: We're up to date with the network");
+            }
+            Err(e) => {
+                warn!("Periodic sync check: Failed to check if behind network: {}", e);
+            }
+        }
+    }
+
+
+}
 
 #[instrument(skip_all, err)]
 pub async fn sync_chain(
