@@ -1,5 +1,6 @@
 use crate::{
     block_index_service::BlockIndexService,
+    block_validation::PreValidationError,
     broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolServiceMessage,
@@ -11,7 +12,6 @@ use crate::{
 use actix::prelude::*;
 use base58::ToBase58 as _;
 use eyre::{eyre, Context as _};
-use crate::block_validation::PreValidationError;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
