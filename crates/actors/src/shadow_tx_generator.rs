@@ -4,10 +4,16 @@ use irys_reth::shadow_tx::{
     ShadowTransaction, TransactionPacket,
 };
 use irys_types::{
-    Address, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    IrysTransactionCommon as _,
+    Address, CommitmentTransaction, DataTransactionHeader, IngressProofsList, IrysBlockHeader,
+    IrysTransactionCommon as _, U256,
 };
 use reth::revm::primitives::ruint::Uint;
+
+/// Structure holding publish ledger transactions with their proofs
+pub struct PublishLedgerWithTxs {
+    pub txs: Vec<DataTransactionHeader>,
+    pub proofs: Option<IngressProofsList>,
+}
 
 #[derive(Debug)]
 pub struct ShadowMetadata {
@@ -18,7 +24,7 @@ pub struct ShadowMetadata {
 pub struct ShadowTxGenerator<'a> {
     pub block_height: &'a u64,
     pub reward_address: &'a Address,
-    pub reward_amount: &'a irys_types::U256,
+    pub reward_amount: &'a U256,
     pub parent_block: &'a IrysBlockHeader,
 }
 
@@ -26,7 +32,7 @@ impl<'a> ShadowTxGenerator<'a> {
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a Address,
-        reward_amount: &'a irys_types::U256,
+        reward_amount: &'a U256,
         parent_block: &'a IrysBlockHeader,
     ) -> Self {
         Self {
@@ -41,10 +47,12 @@ impl<'a> ShadowTxGenerator<'a> {
         &'a self,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
+        publish_ledger: &'a PublishLedgerWithTxs,
     ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
         self.generate_shadow_tx_header()
             .chain(self.generate_commitment_shadow_transactions(commitment_txs))
             .chain(self.generate_data_storage_shadow_transactions(submit_txs))
+            .chain(self.generate_term_fee_reward_shadow_transactions(publish_ledger))
     }
 
     /// Generates the expected header shadow transactions for a given block
@@ -159,5 +167,60 @@ impl<'a> ShadowTxGenerator<'a> {
                 }
             }
         })
+    }
+
+    /// Generates term fee reward shadow transactions for publish ledger transactions
+    pub fn generate_term_fee_reward_shadow_transactions(
+        &'a self,
+        publish_ledger: &'a PublishLedgerWithTxs,
+    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
+        // Create an iterator over the publish ledger transactions
+        publish_ledger
+            .txs
+            .iter()
+            .map(move |tx| (tx, publish_ledger.proofs.as_ref()))
+            .flat_map(move |(tx, proofs_opt)| {
+                // Calculate 5% of term_fee for each reward
+                let term_fee_5_percent = tx.term_fee / 20; // 5% = 1/20
+                
+                // Create rewards for ingress proof providers
+                let proof_rewards = proofs_opt
+                    .into_iter()
+                    .flat_map(|proofs| &proofs.0)
+                    .map(move |proof| {
+                        // Get the address from the ingress proof signature
+                        // This requires validating the proof to extract the signer address
+                        let target = match proof.pre_validate(&tx.data_root) {
+                            Ok(addr) => addr,
+                            Err(e) => return Err(eyre::eyre!("Failed to validate ingress proof: {}", e)),
+                        };
+                        
+                        Ok(ShadowMetadata {
+                            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
+                                BalanceIncrement {
+                                    amount: Uint::from_le_bytes(term_fee_5_percent.to_le_bytes()),
+                                    target,
+                                    irys_ref: tx.id.into(),
+                                },
+                            )),
+                            transaction_fee: 0, // Term fee rewards have no transaction fee
+                        })
+                    });
+                
+                // Create reward for block beneficiary (5% of term_fee)
+                let beneficiary_reward = std::iter::once(Ok(ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
+                        BalanceIncrement {
+                            amount: Uint::from_le_bytes(term_fee_5_percent.to_le_bytes()),
+                            target: *self.reward_address,
+                            irys_ref: tx.id.into(),
+                        },
+                    )),
+                    transaction_fee: 0,
+                }));
+                
+                // Chain both rewards together
+                proof_rewards.chain(beneficiary_reward)
+            })
     }
 }

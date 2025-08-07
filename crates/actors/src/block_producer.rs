@@ -4,7 +4,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    shadow_tx_generator::ShadowTxGenerator,
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use actix::prelude::*;
 use alloy_consensus::{
@@ -388,6 +388,7 @@ pub trait BlockProdStrategy {
                 &prev_evm_block,
                 &commitment_txs_to_bill,
                 &submit_txs,
+                &publish_txs,
                 block_reward,
                 current_timestamp,
             )
@@ -439,11 +440,23 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         commitment_txs_to_bill: &[CommitmentTransaction],
         submit_txs: &[DataTransactionHeader],
+        publish_txs: &(Vec<DataTransactionHeader>, Vec<TxIngressProof>),
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
+        
+        // Convert publish transactions to PublishLedgerWithTxs structure
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: publish_txs.0.clone(),
+            proofs: if publish_txs.1.is_empty() {
+                None
+            } else {
+                Some(IngressProofsList::from(publish_txs.1.clone()))
+            },
+        };
+        
         // Generate expected shadow transactions using shared logic
         let shadow_txs = ShadowTxGenerator::new(
             &block_height,
@@ -452,7 +465,7 @@ pub trait BlockProdStrategy {
             prev_block_header,
         );
         let shadow_txs = shadow_txs
-            .generate_all(commitment_txs_to_bill, submit_txs)
+            .generate_all(commitment_txs_to_bill, submit_txs, &publish_ledger)
             .map(|tx_result| {
                 let metadata = tx_result?;
                 let mut tx_raw = compose_shadow_tx(

@@ -4,7 +4,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
-    shadow_tx_generator::ShadowTxGenerator,
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
@@ -661,6 +661,9 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 
     // Lookup data txs
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
+    
+    // Lookup publish ledger for term fee rewards
+    let publish_ledger_with_txs = extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     let shadow_txs = ShadowTxGenerator::new(
         &block.height,
@@ -669,7 +672,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &prev_block,
     );
     let shadow_txs = shadow_txs
-        .generate_all(&commitment_txs, &data_txs)
+        .generate_all(&commitment_txs, &data_txs, &publish_ledger_with_txs)
         .map(|result| result.map(|metadata| metadata.shadow_tx))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(shadow_txs)
@@ -717,6 +720,23 @@ async fn extract_submit_ledger_txs(
     let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
         .await?;
     Ok(txs)
+}
+
+/// Extracts publish ledger with transactions and ingress proofs for term fee reward distribution
+async fn extract_publish_ledger_with_txs(
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<PublishLedgerWithTxs, eyre::Error> {
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
+    
+    // Fetch the actual transactions for the publish ledger
+    let txs = get_data_tx_in_parallel(publish_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+        .await?;
+    Ok(PublishLedgerWithTxs {
+        txs,
+        proofs: publish_ledger.proofs.clone(),
+    })
 }
 
 /// Validates  the actual shadow transactions match the expected ones
