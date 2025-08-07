@@ -44,35 +44,44 @@ use tracing::{debug, error, info};
 pub enum PreValidationError {
     #[error("block signature is not valid")]
     BlockSignatureInvalid,
-
+    #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
+    CumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error("Invalid difficulty (expected {expected} got {got})")]
+    DifficultyMismatch { expected: U256, got: U256 },
     #[error("Ema mismatch")]
     EmaMismatch,
-
     #[error("Ingress proofs missing")]
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
-
+    #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
+    LastDiffTimestampMismatch { expected: u128, got: u128 },
     #[error("Oracle price invalid")]
     OraclePriceInvalid,
-
     #[error("PoA capacity chunk mismatch")]
     PoACapacityChunkMismatch,
     #[error("Block chunk hash distinct from PoA chunk hash")]
     PoAChunkHashMismatch,
     #[error("Missing PoA chunk to be pre validated")]
     PoAChunkMissing,
-
     #[error("PoA chunk offset out of tx's data chunks bounds")]
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
     PoAChunkOffsetOutOfBlockBounds,
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
-
+    #[error(
+        "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
+    )]
+    PoADataPartitionExpired { partition_hash: H256 },
+    #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
+    PreviousSolutionHashMismatch { expected: H256, got: H256 },
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
-
+    #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
+    SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("last_step_checkpoints validation failed: {0}")]
+    VDFCheckpointsInvalid(String),
     #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
     VDFPreviousOutputMismatch { got: H256, expected: H256 },
     #[error(transparent)]
@@ -166,7 +175,9 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf)
+        .await
+        .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
@@ -270,7 +281,7 @@ pub fn difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let block_height = block.height;
     let current_timestamp = block.timestamp;
     let last_diff_timestamp = previous_block.last_diff_timestamp;
@@ -287,11 +298,10 @@ pub fn difficulty_is_valid(
     if diff == block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid difficulty (expected {} got {})",
-            &diff,
-            &block.diff
-        ))
+        Err(PreValidationError::DifficultyMismatch {
+            expected: diff,
+            got: block.diff,
+        })
     }
 }
 
@@ -304,7 +314,7 @@ pub fn last_diff_timestamp_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
     let expected = if block.height % blocks_between_adjustments == 0 {
         block.timestamp
@@ -315,11 +325,10 @@ pub fn last_diff_timestamp_is_valid(
     if block.last_diff_timestamp == expected {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid last_diff_timestamp (expected {} got {})",
+        Err(PreValidationError::LastDiffTimestampMismatch {
             expected,
-            block.last_diff_timestamp
-        ))
+            got: block.last_diff_timestamp,
+        })
     }
 }
 
@@ -327,7 +336,7 @@ pub fn last_diff_timestamp_is_valid(
 pub fn check_poa_data_expiration(
     poa: &PoaData,
     epoch_snapshot: Arc<EpochSnapshot>,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let is_data_partition_assigned = epoch_snapshot
         .partition_assignments
         .data_partitions
@@ -339,9 +348,9 @@ pub fn check_poa_data_expiration(
         && poa.ledger_id.is_some()
         && !is_data_partition_assigned
     {
-        return Err(eyre::eyre!(
-            "Invalid data PoA, partition hash is not a data partition, it may have expired"
-        ));
+        return Err(PreValidationError::PoADataPartitionExpired {
+            partition_hash: poa.partition_hash,
+        });
     };
     Ok(())
 }
@@ -353,7 +362,7 @@ pub fn check_poa_data_expiration(
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let previous_cumulative_diff = previous_block.cumulative_diff;
     let new_diff = block.diff;
 
@@ -361,11 +370,10 @@ pub fn cumulative_difficulty_is_valid(
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid cumulative_difficulty (expected {}, got {})",
-            &cumulative_diff,
-            &block.cumulative_diff
-        ))
+        Err(PreValidationError::CumulativeDifficultyMismatch {
+            expected: cumulative_diff,
+            got: block.cumulative_diff,
+        })
     }
 }
 
@@ -376,19 +384,17 @@ pub fn cumulative_difficulty_is_valid(
 pub fn solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
     if solution_diff >= previous_block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
-            &previous_block.diff,
-            &solution_diff,
-            &previous_block.diff.abs_diff(solution_diff)
-        ))
+        Err(PreValidationError::SolutionHashBelowDifficulty {
+            expected: previous_block.diff,
+            got: solution_diff,
+        })
     }
 }
 
@@ -396,15 +402,14 @@ pub fn solution_hash_is_valid(
 pub fn previous_solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     if block.previous_solution_hash == previous_block.solution_hash {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid previous_solution_hash - expected {} got {}",
-            previous_block.solution_hash,
-            block.previous_solution_hash
-        ))
+        Err(PreValidationError::PreviousSolutionHashMismatch {
+            expected: previous_block.solution_hash,
+            got: block.previous_solution_hash,
+        })
     }
 }
 
