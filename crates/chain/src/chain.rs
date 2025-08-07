@@ -39,7 +39,7 @@ use irys_domain::{
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
-    ServiceHandleWithShutdownSignal, SyncService, SyncServiceInner, SyncServiceFacade,
+    ServiceHandleWithShutdownSignal, SyncService, SyncServiceFacade, SyncServiceInner,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -1561,16 +1561,11 @@ impl IrysNode {
     ) -> (SyncServiceFacade, TokioServiceHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
         let facade = SyncServiceFacade::new(tx);
-        
-        let inner = SyncServiceInner::new(
-            sync_state,
-            peer_list,
-            config,
-            block_index_guard,
-        );
-        
+
+        let inner = SyncServiceInner::new(sync_state, peer_list, config, block_index_guard);
+
         let handle = SyncService::spawn_service(inner, rx, runtime_handle);
-        
+
         (facade, handle)
     }
 }

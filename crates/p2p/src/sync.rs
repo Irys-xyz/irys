@@ -1,6 +1,5 @@
 use crate::GossipError;
 use base58::ToBase58 as _;
-use eyre;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::sync_state::SyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
@@ -10,7 +9,7 @@ use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout, interval};
+use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Sync service specific errors
@@ -18,12 +17,8 @@ use tracing::{debug, error, info, instrument, warn, Instrument as _};
 pub enum SyncError {
     #[error("Network error: {0}")]
     Network(String),
-    #[error("Timeout error: {0}")]
-    Timeout(String),
     #[error("Service communication error: {0}")]
     ServiceCommunication(String),
-    #[error("Configuration error: {0}")]
-    Configuration(String),
     #[error("Internal sync error: {0}")]
     Internal(String),
 }
@@ -34,14 +29,24 @@ pub type SyncResult<T> = Result<T, SyncError>;
 impl From<GossipError> for SyncError {
     fn from(err: GossipError) -> Self {
         match err {
-            GossipError::Network(msg) => SyncError::Network(msg),
-            GossipError::InvalidPeer(msg) => SyncError::Network(format!("Invalid peer: {}", msg)),
-            GossipError::Cache(msg) => SyncError::Internal(format!("Cache error: {}", msg)),
-            GossipError::Internal(internal_err) => SyncError::Internal(format!("Internal gossip error: {}", internal_err)),
-            GossipError::InvalidData(data_err) => SyncError::Network(format!("Invalid data: {}", data_err)),
-            GossipError::BlockPool(pool_err) => SyncError::Internal(format!("Block pool error: {:?}", pool_err)),
-            GossipError::TransactionIsAlreadyHandled => SyncError::Internal("Transaction already handled".to_string()),
-            GossipError::CommitmentValidation(commit_err) => SyncError::Network(format!("Commitment validation error: {}", commit_err)),
+            GossipError::Network(msg) => Self::Network(msg),
+            GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
+            GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
+            GossipError::Internal(internal_err) => {
+                Self::Internal(format!("Internal gossip error: {}", internal_err))
+            }
+            GossipError::InvalidData(data_err) => {
+                Self::Network(format!("Invalid data: {}", data_err))
+            }
+            GossipError::BlockPool(pool_err) => {
+                Self::Internal(format!("Block pool error: {:?}", pool_err))
+            }
+            GossipError::TransactionIsAlreadyHandled => {
+                Self::Internal("Transaction already handled".to_string())
+            }
+            GossipError::CommitmentValidation(commit_err) => {
+                Self::Network(format!("Commitment validation error: {}", commit_err))
+            }
         }
     }
 }
@@ -92,16 +97,30 @@ impl SyncServiceFacade {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(SyncServiceMessage::InitialSync(tx))
-            .map_err(|_| SyncError::ServiceCommunication("Failed to send sync request".to_string()))?;
-        
-        rx.await
-            .map_err(|_| SyncError::ServiceCommunication("Failed to receive sync response".to_string()))?
+            .map_err(|_| {
+                SyncError::ServiceCommunication("Failed to send sync request".to_string())
+            })?;
+
+        rx.await.map_err(|_| {
+            SyncError::ServiceCommunication("Failed to receive sync response".to_string())
+        })?
     }
 }
 
 impl SyncServiceInner<IrysApiClient> {
-    pub fn new(sync_state: SyncState, peer_list: PeerList, config: irys_types::Config, block_index: BlockIndexReadGuard) -> Self {
-        Self::new_with_client(sync_state, IrysApiClient::new(), peer_list, config, block_index)
+    pub fn new(
+        sync_state: SyncState,
+        peer_list: PeerList,
+        config: irys_types::Config,
+        block_index: BlockIndexReadGuard,
+    ) -> Self {
+        Self::new_with_client(
+            sync_state,
+            IrysApiClient::new(),
+            peer_list,
+            config,
+            block_index,
+        )
     }
 }
 
@@ -111,9 +130,15 @@ impl<T: ApiClient> SyncServiceInner<T> {
         api_client: T,
         peer_list: PeerList,
         config: irys_types::Config,
-        block_index: BlockIndexReadGuard
+        block_index: BlockIndexReadGuard,
     ) -> Self {
-        Self { sync_state, api_client, peer_list, config, block_index }
+        Self {
+            sync_state,
+            api_client,
+            peer_list,
+            config,
+            block_index,
+        }
     }
 
     /// Check if local index is behind trusted peers
@@ -124,9 +149,7 @@ impl<T: ApiClient> SyncServiceInner<T> {
 
         let trusted_peers = self.peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(SyncError::Network(
-                "No trusted peers available".to_string(),
-            ));
+            return Err(SyncError::Network("No trusted peers available".to_string()));
         }
 
         for (_, peer) in trusted_peers.iter() {
@@ -149,10 +172,11 @@ impl<T: ApiClient> SyncServiceInner<T> {
         }
 
         if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
-            Ok(self.block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
+            Ok(self.block_index.read().latest_height() + migration_depth
+                < highest_trusted_peer_height)
         } else {
             Err(SyncError::Network(
-                "Wasn't able to fetch node info from any of the trusted peers".to_string()
+                "Wasn't able to fetch node info from any of the trusted peers".to_string(),
             ))
         }
     }
@@ -164,9 +188,12 @@ impl<T: ApiClient> SyncServiceInner<T> {
             self.sync_state.clone(),
             self.api_client.clone(),
             &self.peer_list,
-            start_sync_from_height.try_into().expect("Expected to be able to convert u64 to usize"),
+            start_sync_from_height
+                .try_into()
+                .expect("Expected to be able to convert u64 to usize"),
             &self.config,
-        ).await
+        )
+        .await
     }
 }
 
@@ -220,12 +247,12 @@ impl<T: ApiClient> SyncService<T> {
                     info!("Shutdown signal received for sync service");
                     break;
                 }
-                
+
                 // Handle periodic sync checks
                 _ = periodic_timer.tick() => {
                     self.handle_periodic_sync_check().await;
                 }
-                
+
                 // Handle commands
                 cmd = self.msg_rx.recv() => {
                     match cmd {
@@ -269,7 +296,11 @@ impl<T: ApiClient> SyncService<T> {
         }
 
         // Check if we're behind the network
-        match self.inner.check_if_local_index_is_behind_trusted_peers().await {
+        match self
+            .inner
+            .check_if_local_index_is_behind_trusted_peers()
+            .await
+        {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
                 match self.inner.sync_chain().await {
@@ -281,12 +312,13 @@ impl<T: ApiClient> SyncService<T> {
                 debug!("Periodic sync check: We're up to date with the network");
             }
             Err(e) => {
-                warn!("Periodic sync check: Failed to check if behind network: {}", e);
+                warn!(
+                    "Periodic sync check: Failed to check if behind network: {}",
+                    e
+                );
             }
         }
     }
-
-
 }
 
 #[instrument(skip_all, err)]
@@ -360,9 +392,7 @@ pub async fn sync_chain(
         let migration_depth = config.consensus.block_migration_depth as usize;
         let trusted_peers = peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(SyncError::Network(
-                "No trusted peers available".to_string(),
-            ));
+            return Err(SyncError::Network("No trusted peers available".to_string()));
         }
 
         let mut switch_height_set = false;
