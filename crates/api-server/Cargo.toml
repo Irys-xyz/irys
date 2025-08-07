@@ -10,7 +10,6 @@ irys-database.workspace = true
 irys-domain.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-types.workspace = true
-irys-p2p.workspace = true
 
 reth.workspace = true
 awc.workspace = true

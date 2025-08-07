@@ -1,7 +1,6 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
-    sync::SyncState,
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
@@ -13,6 +12,7 @@ use irys_actors::{
     mempool_service::{ChunkIngressError, MempoolFacade},
 };
 use irys_api_client::ApiClient;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipDataRequest,
@@ -38,7 +38,7 @@ where
     pub api_client: TApiClient,
     pub gossip_client: GossipClient,
     pub peer_list: PeerList,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
     /// Tracing span
     pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,

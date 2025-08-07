@@ -1,5 +1,6 @@
 pub mod block_index;
 pub mod block_tree;
+pub mod chain_sync_state;
 pub mod chunk_provider;
 pub mod circular_buffer;
 pub mod execution_payload_cache;
