@@ -1105,7 +1105,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                 data,
                 None, // anchor
                 price_info.perm_fee,
-                price_info.immediate_inclusion_fee,
             )
             .map_err(AddTxError::CreateTx)?;
 
@@ -1151,7 +1150,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                 data,
                 None, // anchor
                 price_info.perm_fee,
-                price_info.immediate_inclusion_fee,
             )
             .map_err(AddTxError::CreateTx)?;
 
@@ -1473,7 +1471,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                 data,
                 Some(anchor),
                 price_info.perm_fee,
-                price_info.immediate_inclusion_fee,
             )
             .expect("Expect to create a storage transaction from the data");
         let tx = signer

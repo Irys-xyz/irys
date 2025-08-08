@@ -86,7 +86,6 @@ async fn heavy_double_root_data_promotion_test() {
                 data,
                 None,
                 price_info.perm_fee,
-                price_info.immediate_inclusion_fee,
             )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
@@ -253,7 +252,6 @@ async fn heavy_double_root_data_promotion_test() {
                 data,
                 Some(block1.block_hash),
                 price_info.perm_fee,
-                price_info.immediate_inclusion_fee,
             )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();

@@ -97,10 +97,6 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub chain_id: u64,
 
-    /// Miner's configurable fee (separate from protocol storage costs)
-    #[serde(default, with = "string_u64")]
-    pub miner_fee: u64,
-
     /// Transaction signature bytes
     #[rlp(skip)]
     #[rlp(default)]
@@ -198,7 +194,6 @@ impl DataTransactionHeader {
             bundle_format: None,
             version: 0,
             chain_id: config.chain_id,
-            miner_fee: 0,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
         }
@@ -525,7 +520,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee + self.miner_fee)
+        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
     }
 
     fn signer(&self) -> Address {
@@ -541,7 +536,8 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        U256::from(self.miner_fee)
+        // Return term_fee as the user fee for prioritization
+        U256::from(self.term_fee)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -801,12 +797,10 @@ mod test_helpers {
 mod tests {
     use super::*;
     use crate::irys::IrysSigner;
-    use crate::storage_pricing::Amount;
 
     use alloy_rlp::Decodable as _;
 
     use k256::ecdsa::SigningKey;
-    use rust_decimal_macros::dec;
     use serde_json;
 
     #[test]
@@ -865,9 +859,9 @@ mod tests {
     }
 
     #[test]
-    fn test_irys_transaction_header_serde_without_miner_fee() {
-        // Test deserialization of old format without miner_fee field
-        let json_without_miner_fee = r#"{
+    fn test_irys_transaction_header_serde_backward_compat() {
+        // Test deserialization of format without deprecated fields
+        let json_current_format = r#"{
             "id": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
             "version": 0,
             "anchor": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
@@ -881,12 +875,11 @@ mod tests {
             "permFee": "200"
         }"#;
 
-        // Deserialize should succeed with miner_fee defaulting to 0
+        // Deserialize should succeed
         let deserialized: DataTransactionHeader =
-            serde_json::from_str(json_without_miner_fee).expect("Failed to deserialize");
+            serde_json::from_str(json_current_format).expect("Failed to deserialize");
 
-        // Verify miner_fee defaulted to 0
-        assert_eq!(deserialized.miner_fee, 0);
+        // Verify fields
         assert_eq!(deserialized.term_fee, 100);
         assert_eq!(deserialized.perm_fee, Some(200));
     }
@@ -980,7 +973,6 @@ mod tests {
             bundle_format: None,
             chain_id: config.chain_id,
             version: 0,
-            miner_fee: 50,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),
         }

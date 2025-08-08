@@ -85,13 +85,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     let generate_tx_with_size = |a: &IrysSigner,
                                  data_size: usize,
-                                 price_value: irys_types::U256,
-                                 price_fee: irys_types::U256|
+                                 price_value: irys_types::U256|
      -> eyre::Result<(DataTransaction, Vec<u8>)> {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let tx = a.create_publish_transaction(data_bytes.clone(), None, price_value, price_fee)?;
+        let tx = a.create_publish_transaction(data_bytes.clone(), None, price_value)?;
         let tx = a.sign_transaction(tx)?;
         Ok((tx, data_bytes))
     };
@@ -114,7 +113,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             account,
             data_size,
             price_info.perm_fee,
-            price_info.immediate_inclusion_fee,
         )?;
         pending_txs.push((tx_with_data, 0));
     }
@@ -228,7 +226,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 a,
                 new_data_size,
                 new_price_info.perm_fee,
-                new_price_info.immediate_inclusion_fee,
             )
             .expect("Failed to generate tx");
 

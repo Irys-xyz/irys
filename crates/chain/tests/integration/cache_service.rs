@@ -91,7 +91,6 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             data_bytes.clone(),
             anchor,
             price_info.perm_fee,
-            price_info.immediate_inclusion_fee,
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();

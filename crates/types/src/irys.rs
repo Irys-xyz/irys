@@ -72,7 +72,6 @@ impl IrysSigner {
         ledger: DataLedger,
         term_fee: U256,
         perm_fee: Option<U256>,
-        miner_fee: U256,
     ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize)?;
 
@@ -85,9 +84,6 @@ impl IrysSigner {
             .map(std::convert::TryInto::try_into)
             .transpose()
             .map_err(|_| eyre::eyre!("perm_fee exceeds u64::MAX"))?;
-        transaction.header.miner_fee = miner_fee
-            .try_into()
-            .map_err(|_| eyre::eyre!("miner_fee exceeds u64::MAX"))?;
 
         // Fetch and set anchor if not provided
         let anchor = anchor.unwrap_or_default();
@@ -96,13 +92,12 @@ impl IrysSigner {
         Ok(transaction)
     }
 
-    /// Creates a publish transaction with the provided protocol fee and miner fee
+    /// Creates a publish transaction with the provided protocol fee
     pub fn create_publish_transaction(
         &self,
         data: Vec<u8>,
         anchor: Option<H256>,
         protocol_fee: U256,
-        miner_fee: U256,
     ) -> Result<DataTransaction> {
         self.create_transaction_with_fees(
             data,
@@ -110,7 +105,6 @@ impl IrysSigner {
             DataLedger::Publish,
             U256::zero(),       // No term fee for publish
             Some(protocol_fee), // Permanent storage fee
-            miner_fee,
         )
     }
 

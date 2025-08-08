@@ -74,7 +74,6 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         data,
         None,
         price_info.perm_fee,
-        price_info.immediate_inclusion_fee,
     )?;
     let tx = signer.sign_transaction(tx)?;
 
@@ -2009,10 +2008,13 @@ async fn commitment_tx_valid_higher_fee_test(
     Ok(())
 }
 
-/// Test that data transactions with insufficient miner fees are accepted into mempool
-/// but excluded from block production (GetBestMempoolTxs).
-#[test_log::test(actix_web::test)]
-async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Result<()> {
+// NOTE: This test is commented out as miner_fee filtering has been removed from the system.
+// All transactions with valid term fees are now included in block production.
+// /// Test that data transactions with insufficient miner fees are accepted into mempool
+// /// but excluded from block production (GetBestMempoolTxs).
+// #[test_log::test(actix_web::test)]
+#[allow(dead_code)]
+async fn _disabled_heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Result<()> {
     use irys_types::storage_pricing::Amount;
 
     // Setup test network
@@ -2052,26 +2054,29 @@ async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Res
         .calculate_fee(fee_percentage)
         .unwrap_or_default();
 
-    // Create tx with sufficient miner fee (exactly at minimum)
+    // Note: These transaction creation calls need to be updated as miner_fee parameter has been removed
+    // The test logic is no longer valid as miner fee filtering has been removed
+    return Ok(()); // Early return as this test is no longer applicable
+    
+    #[allow(unreachable_code)]
+    {
+    // Create tx with sufficient fees
     let tx_sufficient = signer.create_transaction_with_fees(
         data_sufficient.clone(),
         Some(H256::zero()),
         DataLedger::Publish,
         term_fee,
         Some(perm_fee),
-        min_required_miner_fee,
     )?;
     let tx_sufficient = signer.sign_transaction(tx_sufficient)?;
 
-    // Create tx with insufficient miner fee (50% of minimum)
-    let insufficient_miner_fee = min_required_miner_fee / irys_types::U256::from(2);
+    // Create another tx with same fees (no longer testing insufficient miner fee)
     let tx_insufficient = signer.create_transaction_with_fees(
         data_insufficient.clone(),
         Some(H256::zero()),
         DataLedger::Publish,
         term_fee,
         Some(perm_fee),
-        insufficient_miner_fee,
     )?;
     let tx_insufficient = signer.sign_transaction(tx_insufficient)?;
 
@@ -2108,4 +2113,5 @@ async fn heavy_insufficient_miner_fee_excluded_from_best_txs_test() -> eyre::Res
     // The insufficient fee tx remains in mempool.
     genesis_node.stop().await;
     Ok(())
+    } // Close the unreachable code block
 }

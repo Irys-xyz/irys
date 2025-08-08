@@ -74,7 +74,6 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
             data_bytes.clone(),
             None,
             price_info.perm_fee,
-            price_info.immediate_inclusion_fee,
         )
         .unwrap();
     let tx = main_signer.sign_transaction(tx).unwrap();

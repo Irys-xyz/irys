@@ -434,28 +434,10 @@ impl Inner {
 
         // Prepare data transactions for inclusion after commitments
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
-
-        // Filter by minimum fee based on consensus miner_fee_percentage
-        let fee_percentage = self.config.consensus.miner_fee_percentage;
         let total_data_available = submit_ledger_txs.len();
-        submit_ledger_txs.retain(|tx| {
-            let protocol_cost = U256::from(tx.term_fee + tx.perm_fee.unwrap_or(0));
-            // Calculate minimum acceptable miner fee
-            let minimum_miner_fee = Amount::new(protocol_cost)
-                .calculate_fee(fee_percentage)
-                .unwrap_or_default();
-
-            let meets_minimum = U256::from(tx.miner_fee) >= minimum_miner_fee;
-            if !meets_minimum {
-                debug!(
-                    "Filtering out tx {} with miner_fee {} (minimum required: {})",
-                    tx.id, tx.miner_fee, minimum_miner_fee
-                );
-            }
-            meets_minimum
-        });
 
         // Sort data transactions by fee (highest first) to maximize revenue
+        // user_fee() now returns term_fee for prioritization
         submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,

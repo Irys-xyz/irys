@@ -118,10 +118,10 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             ZERO_BALANCE
         });
 
-    // The balance should decrease by the total cost plus the priority fee
-    // The miner fee is paid twice: once in total_cost and once as priority fee distribution
+    // The balance should decrease by the total cost
+    // The miner fee has been removed from the protocol
     let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
-    let miner_fee = U256::from(tx.header.miner_fee);
+    let miner_fee = U256::ZERO;
     let expected_spent_with_priority = expected_spent + miner_fee;
     let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
 
@@ -142,10 +142,9 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             tracing::warn!("Failed to get block reward address balance: {}", err);
             ZERO_BALANCE
         });
-    // The block reward recipient gets both the block reward and miner fees from transactions
+    // The block reward recipient gets the block reward (miner fees have been removed)
     let expected_block_reward_balance = ZERO_BALANCE
-        + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
-        + U256::from(tx.header.miner_fee);
+        + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes());
     assert_eq!(block_reward_balance, expected_block_reward_balance);
 
     // ensure that block heights in reth and irys are the same
@@ -397,14 +396,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // Calculate expected spending
     // The actual balance deduction includes:
-    // 1. The total storage cost (including miner fee)
+    // 1. The total storage cost
     // 2. The gas costs for the EVM transaction
     // 3. The transfer amount
-    // 4. The priority fee distribution (miner fee paid again as priority fee)
+    // (miner fees have been removed from the protocol)
     let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
-    let miner_fee = U256::from(irys_tx.header.miner_fee);
-    // The miner fee is paid twice: once in total_cost and once as priority fee distribution
+    let miner_fee = U256::ZERO;
+    // The expected cost is now just storage fees + gas costs + transfer amount
     let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT + miner_fee;
 
     // Assert that the actual spent matches expected
@@ -635,11 +634,8 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
         .await?;
 
-    // The user needs the total cost plus the miner fee due to how shadow transactions are processed
-    // The miner fee is typically 1% of the perm_fee
-    let miner_fee = price_info.perm_fee / 100;
-    let exact_required_balance =
-        price_info.perm_fee + price_info.immediate_inclusion_fee + miner_fee;
+    // The user needs the total cost (miner fees have been removed from the protocol)
+    let exact_required_balance = price_info.perm_fee;
     temp_node.stop().await;
 
     // Now create the actual test node with the correct balance

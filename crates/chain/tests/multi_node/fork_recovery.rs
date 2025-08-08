@@ -905,14 +905,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // check balances in block b2
     // Only 1 Submit tx from node B should be in block b2
-    // The transaction fee includes term_fee + perm_fee + miner_fee
+    // The transaction fee includes term_fee + perm_fee (miner_fee has been removed)
     let peer_b_total_fee = U256::from(peer_b_b2_submit_tx.header.term_fee)
-        + U256::from(peer_b_b2_submit_tx.header.perm_fee.unwrap_or(0))
-        + U256::from(peer_b_b2_submit_tx.header.miner_fee);
+        + U256::from(peer_b_b2_submit_tx.header.perm_fee.unwrap_or(0));
 
-    // When the sender is also the miner, they pay the fee but receive it back as part of mining rewards
-    // So the net effect is only the term_fee + perm_fee are deducted
-    let peer_b_miner_fee = U256::from(peer_b_b2_submit_tx.header.miner_fee);
+    // Miner fees have been removed from the protocol
+    let peer_b_miner_fee = U256::ZERO;
 
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
@@ -1154,9 +1152,8 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         // assert final balances
         // Calculate peer C's total fee (for the tx that was included in c_block4)
         let peer_c_total_fee = U256::from(peer_c_b2_submit_tx.header.term_fee)
-            + U256::from(peer_c_b2_submit_tx.header.perm_fee.unwrap_or(0))
-            + U256::from(peer_c_b2_submit_tx.header.miner_fee);
-        let peer_c_miner_fee = U256::from(peer_c_b2_submit_tx.header.miner_fee);
+            + U256::from(peer_c_b2_submit_tx.header.perm_fee.unwrap_or(0));
+        let peer_c_miner_fee = U256::ZERO;
 
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),

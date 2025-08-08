@@ -69,7 +69,6 @@ async fn heavy_data_promotion_test() {
                 data,
                 None,
                 price_info.perm_fee,
-                price_info.immediate_inclusion_fee,
             )
             .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
