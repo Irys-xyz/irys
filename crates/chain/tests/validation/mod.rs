@@ -497,6 +497,20 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         read_block_from_state(&genesis_node.node_ctx, &block_after_epoch.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
 
+    // Positive case: mine a valid first-after-epoch block and expect it to be stored
+    let valid_block_after_epoch = genesis_node.mine_block().await?;
+
+    // ensure we're still testing the intended height
+    assert_eq!(
+        valid_block_after_epoch.height % num_blocks_in_epoch_u64,
+        1,
+        "Must be first block after an epoch boundary"
+    );
+
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &valid_block_after_epoch.block_hash).await;
+    assert!(matches!(outcome, BlockValidationOutcome::StoredOnNode(_)));
+
     genesis_node.stop().await;
 
     Ok(())
