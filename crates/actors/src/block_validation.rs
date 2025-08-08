@@ -39,11 +39,6 @@ use reth_ethereum_primitives::Block;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
-};
-use std::{sync::Arc, time::Duration};
-use std::{
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, error, info};
@@ -1218,11 +1213,11 @@ pub async fn data_txs_are_valid(
                 continue;
             };
 
-            // Validate ingress proof signature
-            // The proof signature should be valid for the data_root
+            // Validate ingress proof signature and data_root match
+            // The proof signature should be valid for the transaction's data_root
             let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
                 eyre::eyre!(
-                    "Transaction {} has invalid ingress proof signature: {}",
+                    "Transaction {} has invalid ingress proof: {}",
                     tx.id,
                     e
                 )

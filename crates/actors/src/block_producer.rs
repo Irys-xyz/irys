@@ -34,8 +34,9 @@ use irys_types::{
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
     Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
     H256List, IngressProofsList, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, TxIngressProof, VDFLimiterInfo, H256, U256,
+    TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
+use irys_types::ingress::IngressProof;
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
@@ -440,7 +441,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         commitment_txs_to_bill: &[CommitmentTransaction],
         submit_txs: &[DataTransactionHeader],
-        publish_txs: &(Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+        publish_txs: &(Vec<DataTransactionHeader>, Vec<IngressProof>),
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
     ) -> eyre::Result<EthBuiltPayload> {
@@ -588,7 +589,7 @@ pub trait BlockProdStrategy {
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
         submit_txs: Vec<DataTransactionHeader>,
-        publish_txs: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+        publish_txs: (Vec<DataTransactionHeader>, Vec<IngressProof>),
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
@@ -859,7 +860,7 @@ pub trait BlockProdStrategy {
         Vec<SystemTransactionLedger>,
         Vec<CommitmentTransaction>,
         Vec<DataTransactionHeader>,
-        (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+        (Vec<DataTransactionHeader>, Vec<IngressProof>),
     )> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()

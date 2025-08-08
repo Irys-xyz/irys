@@ -8,8 +8,9 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, TxIngressProof, H256, U256,
+    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
+use irys_types::ingress::IngressProof;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
@@ -53,7 +54,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            (Vec<DataTransactionHeader>, Vec<IngressProof>),
         )> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
             Ok((

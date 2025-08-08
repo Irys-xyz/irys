@@ -189,7 +189,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     .flat_map(|proofs| &proofs.0)
                     .map(move |proof| {
                         // Get the address from the ingress proof signature
-                        // This requires validating the proof to extract the signer address
+                        // This validates the proof matches the tx data_root and extracts the signer address
                         let target = match proof.pre_validate(&tx.data_root) {
                             Ok(addr) => addr,
                             Err(e) => return Err(eyre::eyre!("Failed to validate ingress proof: {}", e)),

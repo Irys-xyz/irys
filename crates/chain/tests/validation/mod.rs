@@ -11,8 +11,9 @@ use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, TxIngressProof, H256,
+    SystemTransactionLedger, H256,
 };
+use irys_types::ingress::IngressProof;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
@@ -60,7 +61,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            (Vec<DataTransactionHeader>, Vec<IngressProof>),
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -150,7 +151,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            (Vec<DataTransactionHeader>, Vec<IngressProof>),
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -240,7 +241,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            (Vec<DataTransactionHeader>, Vec<IngressProof>),
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -340,7 +341,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            (Vec<DataTransactionHeader>, Vec<IngressProof>),
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -436,7 +437,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            (Vec<DataTransactionHeader>, Vec<IngressProof>),
         )> {
             Ok((
                 vec![SystemTransactionLedger {

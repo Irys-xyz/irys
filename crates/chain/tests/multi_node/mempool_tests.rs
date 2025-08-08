@@ -14,8 +14,9 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
-    IngressProofsList, IrysBlockHeader, NodeConfig, TxIngressProof, H256,
+    IngressProofsList, IrysBlockHeader, NodeConfig, H256,
 };
+use irys_types::ingress::IngressProof;
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
 use reth::{
@@ -877,17 +878,13 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
-        // TODO: why do we have two structs? TxIngressProof and IngressProof?
-        // probably not worth worrying about given ingress proofs need a proper impl, and this should be handled then
+        // Get the ingress proof from the database
         tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
             .expect("Able to get a_blk1_tx1's ingress proof from DB")
     };
 
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
-    a_blk1_tx1_published.ingress_proofs = Some(TxIngressProof {
-        proof: a_blk1_tx1_proof1.proof.proof,
-        signature: a_blk1_tx1_proof1.proof.signature,
-    });
+    a_blk1_tx1_published.ingress_proofs = Some(a_blk1_tx1_proof1.proof.clone());
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
     assert_eq!(
@@ -947,10 +944,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .proofs
         .clone()
         .unwrap()
-        .ne(&IngressProofsList(vec![TxIngressProof {
-            proof: a_blk1_tx1_proof1.proof.proof,
-            signature: a_blk1_tx1_proof1.proof.signature
-        }])));
+        .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()])));
 
     // now we gossip B3 back to A
     // it shouldn't reorg, and should accept the block

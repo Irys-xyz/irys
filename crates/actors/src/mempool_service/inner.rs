@@ -24,8 +24,9 @@ use irys_types::{
         Amount,
     },
     Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::ingress::IngressProof;
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::TaskExecutor;
@@ -561,9 +562,9 @@ impl Inner {
 
     pub async fn get_publish_txs_and_proofs(
         &self,
-    ) -> Result<(Vec<DataTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+    ) -> Result<(Vec<DataTransactionHeader>, Vec<IngressProof>), eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
-        let mut publish_proofs: Vec<TxIngressProof> = Vec::new();
+        let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
         {
             let read_tx = self
@@ -628,16 +629,13 @@ impl Inner {
                     match proofs.first() {
                         Some((_data_root, proof)) => {
                             let mut tx_header = tx_header.clone();
-                            let proof = TxIngressProof {
-                                proof: proof.proof.proof,
-                                signature: proof.proof.signature,
-                            };
+                            let ingress_proof = proof.proof.clone();
                             debug!(
                                 "Got ingress proof {} for publish candidate {}",
                                 &tx_header.data_root, &tx_header.id
                             );
-                            publish_proofs.push(proof.clone());
-                            tx_header.ingress_proofs = Some(proof);
+                            publish_proofs.push(ingress_proof.clone());
+                            tx_header.ingress_proofs = Some(ingress_proof);
                             publish_txs.push(tx_header)
                         }
                         None => {
@@ -1027,5 +1025,5 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
-    pub publish_tx: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+    pub publish_tx: (Vec<DataTransactionHeader>, Vec<IngressProof>),
 }

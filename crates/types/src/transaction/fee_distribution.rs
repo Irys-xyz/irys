@@ -29,7 +29,7 @@ use crate::ingress::IngressProof;
 use crate::storage_pricing::{mul_div, BPS_SCALE};
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use eyre::{ensure, eyre};
 pub use irys_primitives::CommitmentType;

@@ -19,8 +19,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
         CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
-        TxIngressProof,
     };
+    use irys_types::ingress::IngressProof;
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;
 
@@ -70,7 +70,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             solution: SolutionContext,
             prev_block_header: &IrysBlockHeader,
             submit_txs: Vec<DataTransactionHeader>,
-            publish_txs: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+            publish_txs: (Vec<DataTransactionHeader>, Vec<IngressProof>),
             system_transaction_ledger: Vec<SystemTransactionLedger>,
             _current_timestamp: u128,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
