@@ -88,6 +88,11 @@ pub enum PreValidationError {
     PartitionAssignmentMissing { partition_hash: H256 },
     #[error("Partition assignment for partition hash {partition_hash} is missing slot index")]
     PartitionAssignmentSlotIndexMissing { partition_hash: H256 },
+    #[error("Partition assignment slot index too large for u64: {slot_index} (partition {partition_hash})")]
+    PartitionAssignmentSlotIndexTooLarge {
+        partition_hash: H256,
+        slot_index: usize,
+    },
     #[error(
         "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
     )]
@@ -528,15 +533,20 @@ pub fn poa_is_valid(
                 partition_hash: poa.partition_hash,
             })?;
 
-        let ledger_chunk_offset = u64::try_from(partition_assignment.slot_index.ok_or(
+        let slot_index = partition_assignment.slot_index.ok_or(
             PreValidationError::PartitionAssignmentSlotIndexMissing {
                 partition_hash: poa.partition_hash,
             },
-        )?)
-        .expect("Partition assignment slot index should fit into a u64")
-            * config.num_partitions_per_slot
-            * config.num_chunks_in_partition
-            + u64::from(poa.partition_chunk_offset);
+        )?;
+        let slot_index_u64 = u64::try_from(slot_index).map_err(|_| {
+            PreValidationError::PartitionAssignmentSlotIndexTooLarge {
+                partition_hash: poa.partition_hash,
+                slot_index,
+            }
+        })?;
+        let ledger_chunk_offset =
+            slot_index_u64 * config.num_partitions_per_slot * config.num_chunks_in_partition
+                + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)
