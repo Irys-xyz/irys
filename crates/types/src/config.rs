@@ -92,6 +92,16 @@ pub struct ConsensusConfig {
     /// Address that receives the genesis block reward
     pub genesis_reward_address: Address,
 
+    /// The initial last_epoch_hash used by the genesis block
+    pub genesis_last_epoch_hash: crate::H256,
+
+    /// The timestamp in milliseconds used for the genesis block
+    #[serde(
+        deserialize_with = "serde_utils::u128_millis_from_u64",
+        serialize_with = "serde_utils::u128_millis_to_u64"
+    )]
+    pub genesis_timestamp_millis: u128,
+
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
     #[serde(
@@ -605,6 +615,8 @@ impl ConsensusConfig {
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis_miner_address: Address::ZERO,
             genesis_reward_address: Address::ZERO,
+            genesis_last_epoch_hash: crate::H256::zero(),
+            genesis_timestamp_millis: 0,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
@@ -713,6 +725,8 @@ impl ConsensusConfig {
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis_miner_address: Address::ZERO,
             genesis_reward_address: Address::ZERO,
+            genesis_last_epoch_hash: crate::H256::zero(),
+            genesis_timestamp_millis: 0,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 51_872_000,
@@ -1291,6 +1305,8 @@ mod tests {
         pledge_decay = 0.9
         genesis_miner_address = "0x0000000000000000000000000000000000000000"
         genesis_reward_address = "0x0000000000000000000000000000000000000000"
+        genesis_last_epoch_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+        genesis_timestamp_millis = 0
 
         [reth]
         chain = 1270
