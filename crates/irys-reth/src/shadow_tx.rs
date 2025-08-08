@@ -62,6 +62,8 @@ pub enum TransactionPacket {
     Unpledge(EitherIncrementOrDecrement),
     /// Term fee reward payment to ingress proof providers and block producer (balance increment).
     TermFeeReward(BalanceIncrement),
+    /// Ingress proof reward payment to providers who submitted valid proofs (balance increment).
+    IngressProofReward(BalanceIncrement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -88,6 +90,7 @@ impl TransactionPacket {
                 EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
             },
             Self::TermFeeReward(inc) => Some(inc.target),
+            Self::IngressProofReward(inc) => Some(inc.target),
         }
     }
 }
@@ -110,6 +113,8 @@ pub mod shadow_tx_topics {
     pub static UNPLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE").0);
     pub static TERM_FEE_REWARD: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SHADOW_TX_TERM_FEE_REWARD").0);
+    pub static INGRESS_PROOF_REWARD: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD").0);
 }
 
 impl ShadowTransaction {
@@ -175,6 +180,7 @@ impl TransactionPacket {
             Self::Pledge(_) => (*PLEDGE).into(),
             Self::Unpledge(_) => (*UNPLEDGE).into(),
             Self::TermFeeReward(_) => (*TERM_FEE_REWARD).into(),
+            Self::IngressProofReward(_) => (*INGRESS_PROOF_REWARD).into(),
         }
     }
 }
@@ -187,6 +193,7 @@ pub const STORAGE_FEES_ID: u8 = 0x04;
 pub const PLEDGE_ID: u8 = 0x05;
 pub const UNPLEDGE_ID: u8 = 0x06;
 pub const TERM_FEE_REWARD_ID: u8 = 0x07;
+pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -251,6 +258,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[TERM_FEE_REWARD_ID])?;
                 inner.serialize(writer)
             }
+            Self::IngressProofReward(inner) => {
+                writer.write_all(&[INGRESS_PROOF_REWARD_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -267,6 +278,7 @@ impl BorshDeserialize for TransactionPacket {
             PLEDGE_ID => Self::Pledge(BalanceDecrement::deserialize_reader(reader)?),
             UNPLEDGE_ID => Self::Unpledge(EitherIncrementOrDecrement::deserialize_reader(reader)?),
             TERM_FEE_REWARD_ID => Self::TermFeeReward(BalanceIncrement::deserialize_reader(reader)?),
+            INGRESS_PROOF_REWARD_ID => Self::IngressProofReward(BalanceIncrement::deserialize_reader(reader)?),
             _ => {
                 return Err(borsh::io::Error::new(
                     borsh::io::ErrorKind::InvalidData,
