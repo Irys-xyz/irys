@@ -108,6 +108,16 @@ pub struct ValidatePathResult {
 }
 
 pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
+    // Validate that path_buff has sufficient length to avoid arithmetic underflow
+    let min_required_length = HASH_SIZE + NOTE_SIZE;
+    if path_buff.len() < min_required_length {
+        return Err(eyre!(
+            "Invalid path buffer: length {} is less than minimum required length {}",
+            path_buff.len(),
+            min_required_length
+        ));
+    }
+
     let (_, leaf) = path_buff.split_at(path_buff.len() - HASH_SIZE - NOTE_SIZE);
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
     Ok(leaf_proof)
@@ -118,6 +128,16 @@ pub fn validate_path(
     path_buff: &Base64,
     target_offset: u128,
 ) -> Result<ValidatePathResult, Error> {
+    // Validate that path_buff has sufficient length to avoid arithmetic underflow
+    let min_required_length = HASH_SIZE + NOTE_SIZE;
+    if path_buff.len() < min_required_length {
+        return Err(eyre!(
+            "Invalid path buffer: length {} is less than minimum required length {}",
+            path_buff.len(),
+            min_required_length
+        ));
+    }
+
     // Split proof into branches and leaf. Leaf is the final proof and branches
     // are ordered from root to leaf.
     let (branches, leaf) = path_buff.split_at(path_buff.len() - HASH_SIZE - NOTE_SIZE);
@@ -205,6 +225,16 @@ pub fn validate_path(
 
 /// Utility method for logging a proof out to the terminal.
 pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
+    // Validate that proof has sufficient length to avoid arithmetic underflow
+    let min_required_length = HASH_SIZE + NOTE_SIZE;
+    if proof.len() < min_required_length {
+        return Err(eyre!(
+            "Invalid proof buffer: length {} is less than minimum required length {}",
+            proof.len(),
+            min_required_length
+        ));
+    }
+
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
     let (branches, leaf) = proof.split_at(proof.len() - HASH_SIZE - NOTE_SIZE);
@@ -267,6 +297,16 @@ pub fn validate_chunk(
             max_byte_range,
             ..
         } => {
+            // Validate that proof has sufficient length to avoid arithmetic underflow
+            let min_required_length = HASH_SIZE + NOTE_SIZE;
+            if proof.proof.len() < min_required_length {
+                return Err(eyre!(
+                    "Invalid proof buffer: length {} is less than minimum required length {}",
+                    proof.proof.len(),
+                    min_required_length
+                ));
+            }
+
             // Split proof into branches and leaf. Leaf is at the end and branches are ordered
             // from root to leaf.
             let (branches, leaf) = proof
