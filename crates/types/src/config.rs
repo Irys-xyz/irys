@@ -1305,7 +1305,7 @@ mod tests {
         pledge_decay = 0.9
         genesis_miner_address = "0x0000000000000000000000000000000000000000"
         genesis_reward_address = "0x0000000000000000000000000000000000000000"
-        genesis_last_epoch_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+        genesis_last_epoch_hash = "11111111111111111111111111111111"
         genesis_timestamp_millis = 0
 
         [reth]
