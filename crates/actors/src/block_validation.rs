@@ -64,10 +64,18 @@ pub enum PreValidationError {
     MerkleProofInvalid(String),
     #[error("Oracle price invalid")]
     OraclePriceInvalid,
-    #[error("PoA capacity chunk mismatch")]
-    PoACapacityChunkMismatch,
-    #[error("Block chunk hash distinct from PoA chunk hash")]
-    PoAChunkHashMismatch,
+    #[error("PoA capacity chunk mismatch entropy_first={entropy_first:?} poa_first={poa_first:?}")]
+    PoACapacityChunkMismatch {
+        entropy_first: Option<u8>,
+        poa_first: Option<u8>,
+    },
+    #[error("PoA chunk hash mismatch: expected {expected:?}, got {got:?}, ledger_id={ledger_id:?}, ledger_chunk_offset={ledger_chunk_offset:?}")]
+    PoAChunkHashMismatch {
+        expected: H256,
+        got: H256,
+        ledger_id: Option<u32>,
+        ledger_chunk_offset: Option<u64>,
+    },
     #[error("Missing PoA chunk to be pre validated")]
     PoAChunkMissing,
     #[error("PoA chunk offset out of tx's data chunks bounds")]
@@ -128,8 +136,14 @@ pub async fn prevalidate_block(
         None => return Err(PreValidationError::PoAChunkMissing),
     };
 
-    if block.chunk_hash != sha::sha256(&poa_chunk).into() {
-        return Err(PreValidationError::PoAChunkHashMismatch);
+    let block_poa_hash: H256 = sha::sha256(&poa_chunk).into();
+    if block.chunk_hash != block_poa_hash {
+        return Err(PreValidationError::PoAChunkHashMismatch {
+            expected: block.chunk_hash,
+            got: block_poa_hash,
+            ledger_id: None,
+            ledger_chunk_offset: None,
+        });
     }
 
     // Check prev_output (vdf)
@@ -589,7 +603,12 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(PreValidationError::PoAChunkHashMismatch);
+            return Err(PreValidationError::PoAChunkHashMismatch {
+                expected: data_path_result.leaf_hash.into(),
+                got: poa_chunk_hash.into(),
+                ledger_id: Some(ledger_id),
+                ledger_chunk_offset: Some(ledger_chunk_offset),
+            });
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -607,7 +626,10 @@ pub fn poa_is_valid(
                 debug!("Chunk PoA:{:?}", poa_chunk);
                 debug!("Entropy  :{:?}", entropy_chunk);
             }
-            return Err(PreValidationError::PoACapacityChunkMismatch);
+            return Err(PreValidationError::PoACapacityChunkMismatch {
+                entropy_first: entropy_chunk.first().copied(),
+                poa_first: poa_chunk.first().copied(),
+            });
         }
     }
     Ok(())
