@@ -171,6 +171,17 @@ impl EpochSnapshot {
         // Verify that each commitment transaction ID referenced in the commitments ledger has a
         // corresponding commitment transaction in the replay data
         if let Some(commitment_ledger) = commitment_ledger {
+            // Ensure the counts match exactly - no extra commitments allowed
+            if commitment_ledger.tx_ids.len() != commitments.len() {
+                return Err(eyre::eyre!(
+                    "Commitment count mismatch for block {:?}: ledger has {} commitments, but {} commitments provided",
+                    block_header.block_hash,
+                    commitment_ledger.tx_ids.len(),
+                    commitments.len()
+                ));
+            }
+
+            // Verify each commitment transaction ID in the ledger has a corresponding commitment
             for txid in commitment_ledger.tx_ids.iter() {
                 // If we can't find the commitment transaction for a referenced txid, return an error
                 if !commitments.iter().any(|c| c.id == *txid) {
@@ -180,6 +191,27 @@ impl EpochSnapshot {
                         block_header.block_hash.0.to_base58()
                     ));
                 }
+            }
+
+            // Also check the other way around to verify each provided commitment is referenced in
+            // the ledger (no extra commitments)
+            for commitment in commitments.iter() {
+                if !commitment_ledger.tx_ids.contains(&commitment.id) {
+                    return Err(eyre::eyre!(
+                        "Extra commitment transaction {} not referenced in block {} ledger",
+                        commitment.id.0.to_base58(),
+                        block_header.block_hash.0.to_base58()
+                    ));
+                }
+            }
+        } else {
+            // If no commitment ledger exists, there should be no commitments provided
+            if !commitments.is_empty() {
+                return Err(eyre::eyre!(
+                    "Block {} has no commitment ledger, but {} commitments were provided",
+                    block_header.block_hash.0.to_base58(),
+                    commitments.len()
+                ));
             }
         }
         Ok(())
