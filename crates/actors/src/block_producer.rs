@@ -763,7 +763,7 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block))
+            .handle_block(Arc::clone(&block), false)
             .await
         {
             Ok(()) => Ok(()),
