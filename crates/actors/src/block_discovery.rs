@@ -416,9 +416,12 @@ impl BlockDiscoveryServiceInner {
 
             // Pre-Validate the ingress-proof by verifying the signature
             for (i, tx_header) in publish_txs.iter().enumerate() {
-                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                let proof = &publish_proofs.0[i];
+
+                // Validate the ingress proof matches the transaction's data_root and has a valid signature
+                if let Err(e) = proof.pre_validate(&tx_header.data_root) {
                     return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                        "Invalid ingress proof signature: {}",
+                        "Invalid ingress proof: {}",
                         e
                     )));
                 }

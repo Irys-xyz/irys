@@ -662,7 +662,6 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
     let seconds_to_wait = 15;
-    let tx_fee = U256::from(1_u128); // todo: this is hard coded in various places test utils and should be corrected in future
     const DATA_CHUNK_SIZE: usize = 32;
 
     // setup config
@@ -905,12 +904,17 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     );
 
     // check balances in block b2
-    // tx fee is 1, and there should be two txs that we got into block b2 therefore subtract 2 in the assert
-    // including the block reward is required for a valid assertion.
-    // The block reward varies with time and therefore is not constant
+    // Only 1 Submit tx from node B should be in block b2
+    // The transaction fee includes term_fee + perm_fee (miner_fee has been removed)
+    let peer_b_total_fee = U256::from(peer_b_b2_submit_tx.header.term_fee)
+        + U256::from(peer_b_b2_submit_tx.header.perm_fee.unwrap_or(0));
+
+    // Miner fees have been removed from the protocol
+    let peer_b_miner_fee = U256::from(0);
+
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
-        signer_b_genesis_balance + b_block2.reward_amount - tx_fee * 2,
+        signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee + peer_b_miner_fee,
         "Address: {:?}",
         b_signer.address()
     );
@@ -922,9 +926,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     );
 
     // check balances in block b3
+    // The same Submit tx is promoted to Publish in block b3, no additional fee is charged
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block3.evm_block_hash),
-        signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2,
+        signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
+            - peer_b_total_fee
+            + peer_b_miner_fee,
         "Address: {:?}",
         b_signer.address()
     );
@@ -1143,13 +1150,20 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             signer_c_genesis_balance,
         );
         // assert final balances
+        // Calculate peer C's total fee (for the tx that was included in c_block4)
+        let peer_c_total_fee = U256::from(peer_c_b2_submit_tx.header.term_fee)
+            + U256::from(peer_c_b2_submit_tx.header.perm_fee.unwrap_or(0));
+        let peer_c_miner_fee = U256::from(0);
+
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
-            signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2,
+            signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
+                - peer_b_total_fee
+                + peer_b_miner_fee,
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash),
-            signer_c_genesis_balance + c_block4.reward_amount - tx_fee * 2,
+            signer_c_genesis_balance + c_block4.reward_amount - peer_c_total_fee + peer_c_miner_fee,
         );
     }
 

@@ -1,12 +1,15 @@
+pub use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod fee_distribution;
 
 pub type IrysTransactionId = H256;
 
@@ -83,7 +86,7 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub data_size: u64,
 
-    /// Funds the storage of the transaction data during the storage term
+    /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
     #[serde(with = "string_u64")]
     pub term_fee: u64,
 
@@ -102,7 +105,7 @@ pub struct DataTransactionHeader {
     #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
-    /// Funds the storage of the transaction for the next 200+ years
+    /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
     #[serde(default, with = "optional_string_u64")]
     pub perm_fee: Option<u64>,
 
@@ -111,7 +114,7 @@ pub struct DataTransactionHeader {
     #[rlp(skip)]
     #[rlp(default)]
     #[serde(skip)]
-    pub ingress_proofs: Option<TxIngressProof>,
+    pub ingress_proofs: Option<IngressProof>,
 }
 
 impl DataTransactionHeader {
@@ -533,7 +536,8 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        // Return term_fee as the user fee for prioritization
+        U256::from(self.term_fee)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -852,6 +856,32 @@ mod tests {
 
         // Ensure the deserialized struct matches the original
         assert_eq!(original_header, deserialized);
+    }
+
+    #[test]
+    fn test_irys_transaction_header_serde_backward_compat() {
+        // Test deserialization of format without deprecated fields
+        let json_current_format = r#"{
+            "id": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
+            "version": 0,
+            "anchor": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+            "signer": "11111111111111111111",
+            "dataRoot": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8",
+            "dataSize": "1024",
+            "termFee": "100",
+            "ledgerId": 1,
+            "chainId": "1",
+            "signature": "CesTUmRKzSoY1HMj8TsAGDYEEUHEEjL6oqXcZd8XZCS5zJJ9C8HFXCv1KwZKSRscpm4qnu1sLU9Xm3HrDmJFLdBq4",
+            "permFee": "200"
+        }"#;
+
+        // Deserialize should succeed
+        let deserialized: DataTransactionHeader =
+            serde_json::from_str(json_current_format).expect("Failed to deserialize");
+
+        // Verify fields
+        assert_eq!(deserialized.term_fee, 100);
+        assert_eq!(deserialized.perm_fee, Some(200));
     }
 
     #[test]

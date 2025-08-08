@@ -37,11 +37,9 @@ const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 // Test account balances
 const ZERO_BALANCE: U256 = U256::ZERO;
-const TEST_USER_BALANCE: U256 = U256::from_limbs([1000, 0, 0, 0]);
 const TEST_USER_BALANCE_ETH: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 ETH
-const MINIMAL_TEST_BALANCE: U256 = U256::from_limbs([2, 0, 0, 0]); // Exactly enough for perm_fee(1) + term_fee(1)
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let user_account = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -57,7 +55,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         (
             user_account.address(),
             GenesisAccount {
-                balance: TEST_USER_BALANCE,
+                balance: TEST_USER_BALANCE_ETH, // Use 1 ETH instead of 1000 wei to cover fees
                 ..Default::default()
             },
         ),
@@ -70,7 +68,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let node = node.start().await;
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx = node
-        .create_submit_data_tx(&user_account, data_bytes.clone())
+        .create_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
@@ -119,9 +117,18 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             tracing::warn!("Failed to get signer_b balance: {}", err);
             ZERO_BALANCE
         });
+
+    // The balance should decrease by the total cost
+    // The miner fee has been removed from the protocol
+    let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
+    let miner_fee = U256::ZERO;
+    let expected_spent_with_priority = expected_spent + miner_fee;
+    let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
+
     assert_eq!(
-        signer_balance,
-        TEST_USER_BALANCE - U256::from_le_bytes(tx.header.total_cost().to_le_bytes())
+        actual_spent, expected_spent_with_priority,
+        "Balance spent ({}) should equal expected ({}) = total_cost ({}) + priority_fee ({})",
+        actual_spent, expected_spent_with_priority, expected_spent, miner_fee
     );
 
     // ensure that the block reward has increased the block reward address balance
@@ -135,11 +142,10 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             tracing::warn!("Failed to get block reward address balance: {}", err);
             ZERO_BALANCE
         });
-    assert_eq!(
-        block_reward_balance,
-        // started with 0 balance
-        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
-    );
+    // The block reward recipient gets the block reward (miner fees have been removed)
+    let expected_block_reward_balance =
+        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes());
+    assert_eq!(block_reward_balance, expected_block_reward_balance);
 
     // ensure that block heights in reth and irys are the same
     let reth_block = reth_exec_env.block().clone();
@@ -156,7 +162,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
@@ -209,7 +215,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
@@ -255,7 +261,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
@@ -286,7 +292,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -297,15 +303,18 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     config.consensus.get_mut().block_migration_depth = 1;
 
+    // Create test accounts:
+    // - account1: will send both an EVM transaction and a storage (data) transaction
+    // - recipient: will receive the EVM transfer from account1
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
-    let account_1_balance = TEST_USER_BALANCE_ETH;
+    let initial_balance = TEST_USER_BALANCE_ETH;
     config.consensus.extend_genesis_accounts(vec![(
         account1.address(),
         GenesisAccount {
             // 1ETH
-            balance: account_1_balance,
+            balance: initial_balance,
             ..Default::default()
         },
     )]);
@@ -331,7 +340,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .expect("tx should be accepted");
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let irys_tx = node
-        .create_submit_data_tx(&account1, data_bytes.clone())
+        .create_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
     let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
@@ -378,19 +387,37 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
-    // Verify account1 balance decreased by storage fees and gas costs
-    let account1_balance = reth_context.rpc.get_balance(account1.address(), None)?;
-    // Balance should be: initial balance - storage fees - gas costs - transfer amount
+    // Get account1's final balance after all transactions
+    let final_balance = reth_context.rpc.get_balance(account1.address(), None)?;
+
+    // Calculate how much account1 actually spent
+    // actual_spent = initial_balance - final_balance
+    let actual_spent = initial_balance - final_balance;
+
+    // Calculate expected spending
+    // The actual balance deduction includes:
+    // 1. The total storage cost
+    // 2. The gas costs for the EVM transaction
+    // 3. The transfer amount
+    // (miner fees have been removed from the protocol)
     let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
-    let expected_balance = account_1_balance - storage_fees - gas_costs - EVM_TEST_TRANSFER_AMOUNT;
-    assert_eq!(account1_balance, expected_balance);
+    let miner_fee = U256::ZERO;
+    // The expected cost is now just storage fees + gas costs + transfer amount
+    let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT + miner_fee;
+
+    // Assert that the actual spent matches expected
+    assert_eq!(
+        actual_spent, expected_spent,
+        "Account1 balance should decrease by storage fees ({}) + gas costs ({}) + transfer ({}) + priority fee ({})",
+        storage_fees, gas_costs, EVM_TEST_TRANSFER_AMOUNT, miner_fee
+    );
 
     node.stop().await;
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async();
     let node = node.start().await;
@@ -425,7 +452,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let unfunded_user = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -455,7 +482,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     // Attempt to create and submit a transaction from the unfunded user
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx_result = node
-        .create_submit_data_tx(&unfunded_user, data_bytes.clone())
+        .create_publish_data_tx(&unfunded_user, data_bytes.clone())
         .await;
 
     // Verify that the transaction was rejected due to insufficient funds
@@ -512,7 +539,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let nonexistent_user = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -535,7 +562,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     // Attempt to create and submit a transaction from the nonexistent user
     let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx_result = node
-        .create_submit_data_tx(&nonexistent_user, data_bytes.clone())
+        .create_publish_data_tx(&nonexistent_user, data_bytes.clone())
         .await;
 
     // Verify that the transaction was rejected due to insufficient funds
@@ -593,12 +620,29 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
+    let data_bytes = "Hello, world!".as_bytes().to_vec();
+
+    // Start a temporary node to query the price
+    let temp_config = NodeConfig::testing();
+    let temp_node = IrysNodeTest::new_genesis(temp_config).start().await;
+    temp_node.start_public_api().await;
+
+    // Query the actual price for the data
+    let price_info = temp_node
+        .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
+        .await?;
+
+    // The user needs the total cost (miner fees have been removed from the protocol)
+    let exact_required_balance = price_info.perm_fee;
+    temp_node.stop().await;
+
+    // Now create the actual test node with the correct balance
     let mut node = IrysNodeTest::default_async();
     let user = IrysSigner::random_signer(&node.cfg.consensus_config());
 
-    // Set up genesis accounts - user gets balance 2, but total fee is 2 (perm_fee=1 + term_fee=1)
+    // Set up genesis accounts - user gets exactly the amount needed for the transaction
     node.cfg.consensus.extend_genesis_accounts(vec![
         (
             // ensure that the block reward address has 0 balance
@@ -611,25 +655,26 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         (
             user.address(),
             GenesisAccount {
-                balance: MINIMAL_TEST_BALANCE,
+                balance: exact_required_balance.into(),
                 ..Default::default()
             },
         ),
     ]);
 
     let node = node.start().await;
+    node.start_public_api().await;
 
     // Create and submit a transaction from the user
-    let data_bytes = "Hello, world!".as_bytes().to_vec();
     let tx = node
-        .create_submit_data_tx(&user, data_bytes.clone())
+        .create_publish_data_tx(&user, data_bytes.clone())
         .await?;
 
-    // Verify the transaction was accepted (fee is 2: perm_fee=1 + term_fee=1)
-    assert_eq!(
+    // Verify the transaction was accepted and cost is within the balance
+    assert!(
+        tx.header.total_cost() <= exact_required_balance,
+        "Total cost ({}) should be less than or equal to the balance provided ({})",
         tx.header.total_cost(),
-        irys_types::U256::from_le_bytes(MINIMAL_TEST_BALANCE.to_le_bytes()),
-        "Total cost should match minimal test balance (perm_fee=1 + term_fee=1)"
+        exact_required_balance
     );
 
     // Mine a block - should contain block reward and storage fee transactions
@@ -665,7 +710,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     let storage_fee_receipt = &reth_receipts[1];
     assert!(
         storage_fee_receipt.success,
-        "Storage fee transaction should fail due to insufficient funds"
+        "Storage fee transaction should succeed with exact funds"
     );
     assert_eq!(
         storage_fee_receipt.logs[0].topics()[0],
@@ -688,9 +733,15 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
             tracing::warn!("Failed to get user balance: {}", err);
             ZERO_BALANCE
         });
+
+    // User should have exactly zero balance after paying the exact required amount
     assert_eq!(
-        user_balance, ZERO_BALANCE,
-        "User balance should go down to 0"
+        user_balance,
+        ZERO_BALANCE,
+        "User balance should be exactly zero after transaction with exact funds. Started with {}, paid {}, remaining: {}",
+        exact_required_balance,
+        tx.header.total_cost(),
+        user_balance
     );
 
     node.stop().await;
@@ -1085,7 +1136,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     Ok(())
 }
 
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // Define the OptimisticBlockMiningStrategy that mines blocks without waiting for validation
     struct OptimisticBlockMiningStrategy {
@@ -1217,7 +1268,7 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
 // Setup: Configure a node with block_tree_depth=3 to test pruning behavior
 // Action: Mine 10 blocks, checking that blocks get pruned while mining.
 // Assert: Verify blocks 1-7 are pruned and blocks 8, 9, 10 still exist in the tree
-#[test_log::test(tokio::test)]
+#[test_log::test(actix::test)]
 async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     // Setup
     // Configure test parameters

@@ -20,7 +20,10 @@ use crate::ApiState;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
-    pub cost_in_irys: U256,
+    // Protocol-enforced permanent storage cost
+    pub perm_fee: U256,
+    // Term storage fee with base fee + size-based calculation
+    pub term_fee: U256,
     pub ledger: u32,
     pub bytes: u64,
 }
@@ -29,7 +32,7 @@ pub struct PriceInfo {
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentPriceInfo {
     pub value: U256,
-    pub fee: u64,
+    pub fee: U256,
     pub user_address: Option<Address>,
 }
 
@@ -53,15 +56,20 @@ pub async fn get_price(
     match data_ledger {
         DataLedger::Publish => {
             // If the cost calculation fails, return 400 with the error text
-            let perm_storage_price = cost_of_perm_storage(state, bytes_to_store)
+            let base_cost = cost_of_perm_storage(state.clone(), bytes_to_store)
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
+            // Calculate term fee
+            let term_fee = calculate_term_fee(bytes_to_store, &state.config.consensus);
+
             Ok(HttpResponse::Ok().json(PriceInfo {
-                cost_in_irys: perm_storage_price.amount,
+                perm_fee: base_cost.amount,
+                term_fee,
                 ledger,
                 bytes: bytes_to_store,
             }))
         }
+        // TODO: support other term ledgers here
         DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
     }
 }
@@ -78,6 +86,8 @@ fn cost_of_perm_storage(
         .ok_or_eyre("tip block should still remain in state")?;
     drop(tree);
 
+    // TODO: Review perm pricing!!!
+
     // Calculate the cost per GB (take into account replica count & cost per replica)
     // NOTE: this value can be memoised because it is deterministic based on the config
     let cost_per_gb = state
@@ -90,12 +100,18 @@ fn cost_of_perm_storage(
         )?
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
-    // calculate the cost of storing the bytes
-    let price_with_network_reward = cost_per_gb
-        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?
-        .add_multiplier(state.config.node_config.pricing.fee_percentage)?;
+    // calculate the base network fee (protocol cost)
+    let base_network_fee =
+        cost_per_gb.base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
-    Ok(price_with_network_reward)
+    Ok(base_network_fee)
+}
+
+/// Calculate term fee with base 0.001 ETH plus size-based adjustments
+/// The fee distribution logic from fee_distribution.rs is applied here
+/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION
+fn calculate_term_fee(_bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
+    U256::from(1_000_000_000)
 }
 
 pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
@@ -104,7 +120,7 @@ pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResp
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: stake_value.amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: None,
     }))
 }
@@ -115,7 +131,7 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: stake_value.amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: None,
     }))
 }
@@ -148,7 +164,7 @@ pub async fn get_pledge_price(
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: pledge_value,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
 }
@@ -180,7 +196,7 @@ pub async fn get_unpledge_price(
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: refund_amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
 }

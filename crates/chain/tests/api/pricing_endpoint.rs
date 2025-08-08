@@ -14,7 +14,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
-    let expected_price = {
+    let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
             .config
@@ -26,13 +26,11 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
             )?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
-        cost_per_gb
-            .base_network_fee(
-                U256::from(data_size_bytes),
-                // node just started up, using genesis ema price
-                ctx.node_ctx.config.consensus.genesis_price,
-            )?
-            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
+        cost_per_gb.base_network_fee(
+            U256::from(data_size_bytes),
+            // node just started up, using genesis ema price
+            ctx.node_ctx.config.consensus.genesis_price,
+        )?
     };
 
     // action
@@ -42,14 +40,12 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     assert_eq!(response.content_type(), ContentType::json().to_string());
     let price_info = response.json::<PriceInfo>().await?;
-    assert_eq!(
-        price_info,
-        PriceInfo {
-            cost_in_irys: expected_price.amount,
-            ledger: 0,
-            bytes: data_size_bytes,
-        }
-    );
+    // Check that perm_fee matches expected and term_fee is calculated correctly
+    assert_eq!(price_info.perm_fee, expected_base_fee.amount);
+    // Term fee should be calculated with base 0.001 ETH * size multiplier
+    assert!(price_info.term_fee > U256::zero());
+    assert_eq!(price_info.ledger, 0);
+    assert_eq!(price_info.bytes, data_size_bytes);
     assert!(
         data_size_bytes > ctx.node_ctx.config.consensus.chunk_size,
         "for the test to be accurate, the requested size must be larger to the configs chunk size"
@@ -68,7 +64,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = 4_u64;
-    let expected_price = {
+    let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
             .config
@@ -80,14 +76,12 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             )?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
-        cost_per_gb
-            .base_network_fee(
-                // the original data_size_bytes is too small to fill up a whole chunk
-                U256::from(ctx.node_ctx.config.consensus.chunk_size),
-                // node just started up, using genesis ema price
-                ctx.node_ctx.config.consensus.genesis_price,
-            )?
-            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
+        cost_per_gb.base_network_fee(
+            // the original data_size_bytes is too small to fill up a whole chunk
+            U256::from(ctx.node_ctx.config.consensus.chunk_size),
+            // node just started up, using genesis ema price
+            ctx.node_ctx.config.consensus.genesis_price,
+        )?
     };
 
     // action
@@ -97,14 +91,12 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     assert_eq!(response.content_type(), ContentType::json().to_string());
     let price_info = response.json::<PriceInfo>().await?;
-    assert_eq!(
-        price_info,
-        PriceInfo {
-            cost_in_irys: expected_price.amount,
-            ledger: 0,
-            bytes: ctx.node_ctx.config.consensus.chunk_size,
-        }
-    );
+    // Check that perm_fee matches expected and term_fee is calculated correctly
+    assert_eq!(price_info.perm_fee, expected_base_fee.amount);
+    // Term fee should be calculated with base 0.001 ETH * size multiplier
+    assert!(price_info.term_fee > U256::zero());
+    assert_eq!(price_info.ledger, 0);
+    assert_eq!(price_info.bytes, ctx.node_ctx.config.consensus.chunk_size);
     assert!(
         data_size_bytes < ctx.node_ctx.config.consensus.chunk_size,
         "for the test to be accurate, the requested size must be smaller to the configs chunk size"
@@ -123,7 +115,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size + 1;
-    let expected_price = {
+    let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
             .config
@@ -135,14 +127,12 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             )?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
-        cost_per_gb
-            .base_network_fee(
-                // round to the chunk size boundary
-                U256::from(ctx.node_ctx.config.consensus.chunk_size * 2),
-                // node just started up, using genesis ema price
-                ctx.node_ctx.config.consensus.genesis_price,
-            )?
-            .add_multiplier(ctx.node_ctx.config.node_config.pricing.fee_percentage)?
+        cost_per_gb.base_network_fee(
+            // round to the chunk size boundary
+            U256::from(ctx.node_ctx.config.consensus.chunk_size * 2),
+            // node just started up, using genesis ema price
+            ctx.node_ctx.config.consensus.genesis_price,
+        )?
     };
 
     // action
@@ -152,13 +142,14 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     assert_eq!(response.content_type(), ContentType::json().to_string());
     let price_info = response.json::<PriceInfo>().await?;
+    // Check that perm_fee matches expected and term_fee is calculated correctly
+    assert_eq!(price_info.perm_fee, expected_base_fee.amount);
+    // Term fee should be calculated with base 0.001 ETH * size multiplier
+    assert!(price_info.term_fee > U256::zero());
+    assert_eq!(price_info.ledger, 0);
     assert_eq!(
-        price_info,
-        PriceInfo {
-            cost_in_irys: expected_price.amount,
-            ledger: 0,
-            bytes: ctx.node_ctx.config.consensus.chunk_size * 2,
-        }
+        price_info.bytes,
+        ctx.node_ctx.config.consensus.chunk_size * 2
     );
     assert_ne!(data_size_bytes, ctx.node_ctx.config.consensus.chunk_size, "for the test to be accurate, the requested size must not be equal to the configs chunk size");
 

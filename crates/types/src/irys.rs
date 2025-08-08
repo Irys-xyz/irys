@@ -1,7 +1,7 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
-    VersionRequest, H256,
+    DataLedger, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
+    VersionRequest, H256, U256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -62,6 +62,50 @@ impl IrysSigner {
         transaction.header.anchor = anchor;
 
         Ok(transaction)
+    }
+
+    /// Creates a transaction with explicit fee and ledger parameters
+    pub fn create_transaction_with_fees(
+        &self,
+        data: Vec<u8>,
+        anchor: Option<H256>,
+        ledger: DataLedger,
+        term_fee: U256,
+        perm_fee: Option<U256>,
+    ) -> Result<DataTransaction> {
+        let mut transaction = self.merklize(data, self.chunk_size as usize)?;
+
+        // Set the provided fees, converting from U256 to u64
+        transaction.header.ledger_id = ledger as u32;
+        transaction.header.term_fee = term_fee
+            .try_into()
+            .map_err(|_| eyre::eyre!("term_fee exceeds u64::MAX"))?;
+        transaction.header.perm_fee = perm_fee
+            .map(std::convert::TryInto::try_into)
+            .transpose()
+            .map_err(|_| eyre::eyre!("perm_fee exceeds u64::MAX"))?;
+
+        // Fetch and set anchor if not provided
+        let anchor = anchor.unwrap_or_default();
+        transaction.header.anchor = anchor;
+
+        Ok(transaction)
+    }
+
+    /// Creates a publish transaction with the provided protocol fee
+    pub fn create_publish_transaction(
+        &self,
+        data: Vec<u8>,
+        anchor: Option<H256>,
+        protocol_fee: U256,
+    ) -> Result<DataTransaction> {
+        self.create_transaction_with_fees(
+            data,
+            anchor,
+            DataLedger::Publish,
+            U256::zero(),       // No term fee for publish
+            Some(protocol_fee), // Permanent storage fee
+        )
     }
 
     /// signs and sets signature and id.

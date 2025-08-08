@@ -1,4 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
+use crate::block_validation::calculate_perm_storage_base_network_fee;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use base58::ToBase58 as _;
@@ -13,13 +14,18 @@ use irys_domain::{
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
+use irys_types::ingress::IngressProof;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
 };
 use irys_types::{
+    storage_pricing::{
+        phantoms::{Irys, NetworkFee},
+        Amount,
+    },
     Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -428,10 +434,10 @@ impl Inner {
 
         // Prepare data transactions for inclusion after commitments
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
-
-        // Sort data transactions by fee (highest first) to maximize revenue
         let total_data_available = submit_ledger_txs.len();
 
+        // Sort data transactions by fee (highest first) to maximize revenue
+        // user_fee() now returns term_fee for prioritization
         submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
@@ -538,9 +544,9 @@ impl Inner {
 
     pub async fn get_publish_txs_and_proofs(
         &self,
-    ) -> Result<(Vec<DataTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+    ) -> Result<(Vec<DataTransactionHeader>, Vec<IngressProof>), eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
-        let mut publish_proofs: Vec<TxIngressProof> = Vec::new();
+        let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
         {
             let read_tx = self
@@ -605,16 +611,13 @@ impl Inner {
                     match proofs.first() {
                         Some((_data_root, proof)) => {
                             let mut tx_header = tx_header.clone();
-                            let proof = TxIngressProof {
-                                proof: proof.proof.proof,
-                                signature: proof.proof.signature,
-                            };
+                            let ingress_proof = proof.proof.clone();
                             debug!(
                                 "Got ingress proof {} for publish candidate {}",
                                 &tx_header.data_root, &tx_header.id
                             );
-                            publish_proofs.push(proof.clone());
-                            tx_header.ingress_proofs = Some(proof);
+                            publish_proofs.push(ingress_proof.clone());
+                            tx_header.ingress_proofs = Some(ingress_proof);
                             publish_txs.push(tx_header)
                         }
                         None => {
@@ -867,6 +870,39 @@ impl Inner {
 
         Ok(latest.height)
     }
+
+    /// Calculate the expected protocol fee for permanent storage
+    /// This is the same calculation used by the pricing API
+    pub fn calculate_perm_storage_fee(
+        &self,
+        bytes_to_store: u64,
+    ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
+        // Get the latest EMA to use for pricing
+        let tree = self.block_tree_read_guard.read();
+        let tip = tree.tip;
+        let ema = tree.get_ema_snapshot(&tip).ok_or_else(|| {
+            TxIngressError::Other("tip block should still remain in state".to_string())
+        })?;
+        drop(tree);
+
+        // Calculate the cost per GB (take into account replica count & cost per replica)
+        let base_network_fee =
+            calculate_perm_storage_base_network_fee(bytes_to_store, &ema, &self.config)
+                .map_err(TxIngressError::other_display)?;
+
+        Ok(base_network_fee)
+    }
+
+    /// Calculate the expected term fee for temporary storage
+    /// This matches the calculation in the pricing API
+    /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
+    pub fn calculate_term_storage_fee(
+        &self,
+        _bytes_to_store: u64,
+    ) -> Result<U256, TxIngressError> {
+        // Placeholder implementation matching price.rs
+        Ok(U256::from(1_000_000_000))
+    }
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -945,6 +981,12 @@ pub enum TxIngressError {
     /// Invalid anchor value (unknown or too old)
     #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
+    /// Invalid ledger type specified in transaction
+    #[error("Invalid or unsupported ledger type: {0}")]
+    InvalidLedger(u32),
+    /// Protocol fee doesn't match expected calculation
+    #[error("Incorrect protocol fee: expected {expected}, got {actual}")]
+    IncorrectProtocolFee { expected: U256, actual: U256 },
     // /// Unknown anchor value (could be valid)
     // PendingAnchor,
     /// Some database error occurred
@@ -976,5 +1018,5 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
-    pub publish_tx: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+    pub publish_tx: (Vec<DataTransactionHeader>, Vec<IngressProof>),
 }

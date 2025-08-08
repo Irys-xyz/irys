@@ -405,6 +405,24 @@ where
                         target,
                     ))
                 }
+                shadow_tx::TransactionPacket::TermFeeReward(balance_increment)
+                | shadow_tx::TransactionPacket::IngressProofReward(balance_increment) => {
+                    let log = Self::create_shadow_log(
+                        balance_increment.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(balance_increment.amount, 256),
+                            DynSolValue::Address(balance_increment.target),
+                        ],
+                    );
+                    let target = balance_increment.target;
+                    let (plain_account, execution_result, account_existed) =
+                        self.handle_balance_increment(log, balance_increment);
+                    Ok((
+                        Ok((plain_account, execution_result, account_existed)),
+                        target,
+                    ))
+                }
             },
         }
     }
