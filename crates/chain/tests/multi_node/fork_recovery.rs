@@ -910,7 +910,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         + U256::from(peer_b_b2_submit_tx.header.perm_fee.unwrap_or(0));
 
     // Miner fees have been removed from the protocol
-    let peer_b_miner_fee = U256::ZERO;
+    let peer_b_miner_fee = U256::from(0);
 
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
@@ -1153,7 +1153,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         // Calculate peer C's total fee (for the tx that was included in c_block4)
         let peer_c_total_fee = U256::from(peer_c_b2_submit_tx.header.term_fee)
             + U256::from(peer_c_b2_submit_tx.header.perm_fee.unwrap_or(0));
-        let peer_c_miner_fee = U256::ZERO;
+        let peer_c_miner_fee = U256::from(0);
 
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),

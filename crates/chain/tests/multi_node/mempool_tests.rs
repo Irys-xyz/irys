@@ -11,7 +11,6 @@ use irys_reth_node_bridge::{
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
-use irys_types::ingress::IngressProof;
 use irys_types::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
@@ -1358,8 +1357,8 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let recipient2_init_balance = genesis_reth_context
         .rpc
         .get_balance(recipient2.address(), None)?;
-    assert_eq!(recipient1_init_balance, U256::ZERO);
-    assert_eq!(recipient2_init_balance, U256::ZERO);
+    assert_eq!(recipient1_init_balance, U256::from(0));
+    assert_eq!(recipient2_init_balance, U256::from(0));
 
     // need to stake & pledge peers before they can mine
     let post_wait_stake_commitment =
@@ -2046,7 +2045,7 @@ async fn _disabled_heavy_insufficient_miner_fee_excluded_from_best_txs_test() ->
 
     // Calculate minimum required miner fee (10% of protocol cost)
     let fee_percentage = genesis_config.consensus_config().miner_fee_percentage;
-    let min_required_miner_fee = Amount::new(protocol_cost)
+    let _min_required_miner_fee = Amount::new(protocol_cost)
         .calculate_fee(fee_percentage)
         .unwrap_or_default();
 

@@ -32,6 +32,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
+            data_txs_with_proofs: &(Vec<DataTransactionHeader>, Vec<irys_types::ingress::IngressProof>),
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -43,6 +44,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
                     perv_evm_block,
                     commitment_txs_to_bill,
                     submit_txs,
+                    data_txs_with_proofs,
                     // NOTE: Point of error - trying to give yourself extra funds in the evm state
                     invalid_reward_amount,
                     timestamp_ms,
@@ -183,6 +185,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
+            data_txs_with_proofs: &(Vec<DataTransactionHeader>, Vec<irys_types::ingress::IngressProof>),
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -195,6 +198,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                     perv_evm_block,
                     commitment_txs_to_bill,
                     &submit_txs,
+                    data_txs_with_proofs,
                     reward_amount,
                     timestamp_ms,
                 )
@@ -271,6 +275,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
+            data_txs_with_proofs: &(Vec<DataTransactionHeader>, Vec<irys_types::ingress::IngressProof>),
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -287,6 +292,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                     perv_evm_block,
                     commitment_txs_to_bill,
                     &submit_txs,
+                    data_txs_with_proofs,
                     reward_amount,
                     timestamp_ms,
                 )
