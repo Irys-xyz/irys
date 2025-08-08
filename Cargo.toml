@@ -13,7 +13,6 @@ members = [
   "crates/testing-utils",
   "crates/config",
   "crates/efficient-sampling",
-  "crates/macros",
   "crates/debug-utils",
   "xtask",
   "crates/price-oracle",
@@ -35,7 +34,6 @@ authors = []
 
 [workspace.dependencies]
 # Irys
-irys-macros = { path = "./crates/macros" }
 irys-database = { path = "./crates/database" }
 irys-domain = { path = "./crates/domain" }
 irys-actors = { path = "./crates/actors" }
