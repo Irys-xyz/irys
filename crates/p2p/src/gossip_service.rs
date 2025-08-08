@@ -171,7 +171,10 @@ impl P2PService {
         B: BlockDiscoveryFacade,
         A: ApiClient,
     {
-        debug!("Staring gossip service");
+        debug!(
+            "Starting gossip service is syncing? {}",
+            &self.sync_state.is_syncing()
+        );
 
         let block_pool = BlockPool::new(
             db,
@@ -225,6 +228,7 @@ impl P2PService {
             broadcast_task_handle,
             task_executor,
         );
+        debug!("Started gossip service");
 
         Ok((gossip_service_handle, arc_pool))
     }

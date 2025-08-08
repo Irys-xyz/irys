@@ -111,9 +111,13 @@ impl SyncState {
     }
 
     /// Sets the height at which the node should switch to full validation.
-    pub fn set_switch_to_full_validation_at_height(&self, height: Option<usize>) {
+    pub fn set_switch_to_full_validation_at_height(&self, height: usize) {
+        debug!(
+            "Sync task: Setting switch to full validation at height {}",
+            height
+        );
         let mut lock = self.switch_to_full_validation_at_height.write().unwrap();
-        *lock = height;
+        *lock = Some(height);
     }
 
     /// Returns the height at which the node should switch to full validation.
@@ -354,7 +358,7 @@ pub async fn sync_chain(
                 let index_tip = node_info.block_index_height;
                 if index_tip > migration_depth as u64 {
                     let switch_height = index_tip as usize - migration_depth;
-                    sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
+                    sync_state.set_switch_to_full_validation_at_height(switch_height);
                     debug!(
                         "Sync task: Setting switch to full validation at height {}",
                         switch_height
@@ -457,7 +461,7 @@ pub async fn sync_chain(
                     );
                 }
             }
-        });
+        }.in_current_span());
 
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
@@ -491,7 +495,10 @@ pub async fn sync_chain(
         sync_state.mark_processed(sync_state.sync_target_height());
     }
     debug!("Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height");
-    sync_state.wait_for_processed_block_to_reach_target().await;
+    sync_state
+        .wait_for_processed_block_to_reach_target()
+        .in_current_span()
+        .await;
     sync_state.finish_sync();
     info!("Sync task: Gossip service sync task completed");
     Ok(())
