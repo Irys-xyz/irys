@@ -11,42 +11,6 @@ use irys_types::{
 use reth::revm::primitives::ruint::Uint;
 use std::collections::HashMap;
 
-/// Newtype for reward amounts to prevent mixing with other U256 values
-#[derive(Debug, Clone, Copy, Default)]
-struct RewardAmount(U256);
-
-impl RewardAmount {
-    fn zero() -> Self {
-        Self(U256::zero())
-    }
-
-    fn add_assign(&mut self, amount: U256) {
-        self.0 += amount;
-    }
-
-    fn into_inner(self) -> U256 {
-        self.0
-    }
-}
-
-/// Newtype for rolling hash to prevent mixing with other U256 values
-#[derive(Debug, Clone, Copy, Default)]
-struct RollingHash(U256);
-
-impl RollingHash {
-    fn zero() -> Self {
-        Self(U256::zero())
-    }
-
-    fn xor_assign(&mut self, value: U256) {
-        self.0 ^= value;
-    }
-
-    fn to_bytes(self) -> [u8; 32] {
-        self.0.to_be_bytes()
-    }
-}
-
 /// Structure holding publish ledger transactions with their proofs
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
@@ -142,144 +106,15 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
                 }
 
                 Phase::Commitments => {
-                    if self.index < self.commitment_txs.len() {
-                        let tx = &self.commitment_txs[self.index];
-                        self.index += 1;
-
-                        // Process commitment transaction
-                        // TODO: should commitment txs impact the treasury balance?
-                        return Some(self.process_commitment_transaction(tx));
-                    } else {
-                        self.phase = Phase::SubmitLedger;
-                        self.index = 0;
-                        continue;
-                    }
+                    return self.try_process_commitments().transpose();
                 }
 
                 Phase::SubmitLedger => {
-                    if self.index < self.submit_txs.len() {
-                        let tx = &self.submit_txs[self.index];
-                        self.index += 1;
-
-                        // Step 1: Construct term fee charges (propagate errors)
-                        let term_charges =
-                            TermFeeCharges::new(U256::from(tx.term_fee), self.config);
-
-                        // Step 2: Construct perm fee charges if applicable (propagate errors)
-                        let perm_charges = if let Some(perm_fee) = tx.perm_fee {
-                            match PublishFeeCharges::new(
-                                U256::from(perm_fee),
-                                U256::from(tx.term_fee),
-                                self.config,
-                            ) {
-                                Ok(charges) => Some(charges),
-                                Err(e) => return Some(Err(e)),
-                            }
-                        } else {
-                            None
-                        };
-
-                        // Step 3: Construct shadow tx properly (propagate errors)
-                        let shadow_metadata = match self.create_submit_shadow_tx(tx, &term_charges)
-                        {
-                            Ok(metadata) => metadata,
-                            Err(e) => return Some(Err(e)),
-                        };
-
-                        // Step 4: Update treasury with checked arithmetic
-                        self.treasury_balance = match self
-                            .treasury_balance
-                            .checked_add(term_charges.term_fee_treasury)
-                        {
-                            Some(balance) => balance,
-                            None => {
-                                return Some(Err(eyre!(
-                                    "Treasury balance overflow when adding term fee treasury"
-                                )));
-                            }
-                        };
-
-                        if let Some(perm_charges) = perm_charges {
-                            self.treasury_balance = match self
-                                .treasury_balance
-                                .checked_add(perm_charges.perm_fee_treasury)
-                            {
-                                Some(balance) => balance,
-                                None => {
-                                    return Some(Err(eyre!(
-                                        "Treasury balance overflow when adding perm fee treasury"
-                                    )));
-                                }
-                            };
-                        }
-
-                        // Step 5: Return shadow tx
-                        return Some(Ok(shadow_metadata));
-                    } else {
-                        self.phase = Phase::PublishLedger;
-                        self.index = 0;
-                        continue;
-                    }
+                    return self.try_process_submit_ledger().transpose();
                 }
 
                 Phase::PublishLedger => {
-                    // On first entry to PublishLedger phase, prepare all rewards
-                    if self.current_publish_iter.is_none() {
-                        // Step 1: Accumulate all rewards from ingress proofs (propagate errors)
-                        let aggregated_rewards = match self.accumulate_ingress_rewards() {
-                            Ok(rewards) => rewards,
-                            Err(e) => return Some(Err(e)),
-                        };
-
-                        if aggregated_rewards.is_empty() {
-                            // No rewards to process, move to Done
-                            self.phase = Phase::Done;
-                            continue;
-                        }
-
-                        // Step 2: Construct all shadow txs
-                        let shadow_txs = match self.create_publish_shadow_txs(aggregated_rewards) {
-                            Ok(txs) => txs,
-                            Err(e) => return Some(Err(e)),
-                        };
-
-                        self.current_publish_iter = Some(
-                            shadow_txs
-                                .into_iter()
-                                .map(Ok)
-                                .collect::<Vec<_>>()
-                                .into_iter(),
-                        );
-                    }
-
-                    // Step 3: Yield shadow txs and update treasury balance
-                    if let Some(ref mut iter) = self.current_publish_iter {
-                        if let Some(result) = iter.next() {
-                            // Update treasury balance with checked arithmetic
-                            if let Ok(ref metadata) = result {
-                                if let ShadowTransaction::V1 {
-                                    packet: TransactionPacket::IngressProofReward(increment),
-                                    ..
-                                } = &metadata.shadow_tx
-                                {
-                                    self.treasury_balance = match self
-                                        .treasury_balance
-                                        .checked_sub(U256::from(increment.amount))
-                                    {
-                                        Some(balance) => balance,
-                                        None => {
-                                            return Some(Err(eyre!("Treasury balance underflow when paying ingress proof reward")));
-                                        }
-                                    };
-                                }
-                            }
-                            return Some(result);
-                        }
-                    }
-
-                    // All rewards processed, move to Done
-                    self.phase = Phase::Done;
-                    continue;
+                    return self.try_process_publish_ledger().transpose();
                 }
 
                 Phase::Done => return None,
@@ -462,5 +297,150 @@ impl<'a> ShadowTxGenerator<'a> {
             // Block producer gets their reward via transaction_fee
             transaction_fee: term_charges.block_producer_reward.low_u128(),
         })
+    }
+
+    /// Process a single submit ledger transaction with clean error handling
+    fn try_process_submit_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
+        if self.index >= self.submit_txs.len() {
+            self.phase = Phase::PublishLedger;
+            self.index = 0;
+            return Ok(None);
+        }
+
+        let tx = &self.submit_txs[self.index];
+        self.index += 1;
+
+        // Construct term fee charges
+        let term_charges = TermFeeCharges::new(U256::from(tx.term_fee), self.config);
+
+        // Construct perm fee charges if applicable
+        let perm_charges = tx
+            .perm_fee
+            .map(|perm_fee| {
+                PublishFeeCharges::new(U256::from(perm_fee), U256::from(tx.term_fee), self.config)
+            })
+            .transpose()?;
+
+        // Create shadow transaction
+        let shadow_metadata = self.create_submit_shadow_tx(tx, &term_charges)?;
+
+        // Update treasury with checked arithmetic
+        self.treasury_balance = self
+            .treasury_balance
+            .checked_add(term_charges.term_fee_treasury)
+            .ok_or_else(|| eyre!("Treasury balance overflow when adding term fee treasury"))?;
+
+        if let Some(ref charges) = perm_charges {
+            self.treasury_balance = self
+                .treasury_balance
+                .checked_add(charges.perm_fee_treasury)
+                .ok_or_else(|| eyre!("Treasury balance overflow when adding perm fee treasury"))?;
+        }
+
+        Ok(Some(shadow_metadata))
+    }
+
+    /// Process commitments phase with clean error handling
+    fn try_process_commitments(&mut self) -> Result<Option<ShadowMetadata>> {
+        if self.index >= self.commitment_txs.len() {
+            self.phase = Phase::SubmitLedger;
+            self.index = 0;
+            return Ok(None);
+        }
+
+        let tx = &self.commitment_txs[self.index];
+        self.index += 1;
+
+        // Process commitment transaction (no treasury impact currently)
+        Ok(Some(self.process_commitment_transaction(tx)?))
+    }
+
+    /// Process publish ledger phase with clean error handling
+    fn try_process_publish_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
+        // On first entry to PublishLedger phase, prepare all rewards
+        if self.current_publish_iter.is_none() {
+            // Accumulate all rewards from ingress proofs
+            let aggregated_rewards = self.accumulate_ingress_rewards()?;
+
+            if aggregated_rewards.is_empty() {
+                // No rewards to process, move to Done
+                self.phase = Phase::Done;
+                return Ok(None);
+            }
+
+            // Construct all shadow txs
+            let shadow_txs = self.create_publish_shadow_txs(aggregated_rewards)?;
+
+            self.current_publish_iter = Some(
+                shadow_txs
+                    .into_iter()
+                    .map(Ok)
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+        }
+
+        // Yield shadow txs and update treasury balance
+        if let Some(ref mut iter) = self.current_publish_iter {
+            if let Some(result) = iter.next() {
+                // Update treasury balance with checked arithmetic
+                if let Ok(ref metadata) = result {
+                    if let ShadowTransaction::V1 {
+                        packet: TransactionPacket::IngressProofReward(increment),
+                        ..
+                    } = &metadata.shadow_tx
+                    {
+                        self.treasury_balance = self
+                            .treasury_balance
+                            .checked_sub(U256::from(increment.amount))
+                            .ok_or_else(|| {
+                                eyre!("Treasury balance underflow when paying ingress proof reward")
+                            })?;
+                    }
+                }
+                // result is already Result<ShadowMetadata, _>, wrap in Some
+                return Ok(Some(result?));
+            }
+        }
+
+        // All rewards processed, move to Done
+        self.phase = Phase::Done;
+        Ok(None)
+    }
+}
+
+/// Newtype for reward amounts to prevent mixing with other U256 values
+#[derive(Debug, Clone, Copy, Default)]
+struct RewardAmount(U256);
+
+impl RewardAmount {
+    fn zero() -> Self {
+        Self(U256::zero())
+    }
+
+    fn add_assign(&mut self, amount: U256) {
+        self.0 += amount;
+    }
+
+    fn into_inner(self) -> U256 {
+        self.0
+    }
+}
+
+/// Newtype for rolling hash to prevent mixing with other U256 values
+#[derive(Debug, Clone, Copy, Default)]
+struct RollingHash(U256);
+
+impl RollingHash {
+    fn zero() -> Self {
+        Self(U256::zero())
+    }
+
+    fn xor_assign(&mut self, value: U256) {
+        self.0 ^= value;
+    }
+
+    fn to_bytes(self) -> [u8; 32] {
+        self.0.to_be_bytes()
     }
 }
