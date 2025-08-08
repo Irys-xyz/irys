@@ -86,21 +86,8 @@ pub struct ConsensusConfig {
     )]
     pub genesis_price: Amount<(IrysPrice, Usd)>,
 
-    /// Address that signs the genesis block
-    pub genesis_miner_address: Address,
-
-    /// Address that receives the genesis block reward
-    pub genesis_reward_address: Address,
-
-    /// The initial last_epoch_hash used by the genesis block
-    pub genesis_last_epoch_hash: crate::H256,
-
-    /// The timestamp in milliseconds used for the genesis block
-    #[serde(
-        deserialize_with = "serde_utils::u128_millis_from_u64",
-        serialize_with = "serde_utils::u128_millis_to_u64"
-    )]
-    pub genesis_timestamp_millis: u128,
+    /// Genesis-specific config values
+    pub genesis: GenesisConfig,
 
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
@@ -187,6 +174,25 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::u128_millis_to_u64"
     )]
     pub max_future_timestamp_drift_millis: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisConfig {
+    /// The timestamp in milliseconds used for the genesis block
+    #[serde(
+        deserialize_with = "serde_utils::u128_millis_from_u64",
+        serialize_with = "serde_utils::u128_millis_to_u64"
+    )]
+    pub timestamp_millis: u128,
+
+    /// Address that signs the genesis block
+    pub miner_address: Address,
+
+    /// Address that receives the genesis block reward
+    pub reward_address: Address,
+
+    /// The initial last_epoch_hash used by the genesis block
+    pub last_epoch_hash: crate::H256,
 }
 
 // removed erroneous derive on helper function
@@ -613,10 +619,12 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
-            genesis_miner_address: Address::ZERO,
-            genesis_reward_address: Address::ZERO,
-            genesis_last_epoch_hash: crate::H256::zero(),
-            genesis_timestamp_millis: 0,
+            genesis: GenesisConfig {
+                timestamp_millis: 0,
+                miner_address: Address::ZERO,
+                reward_address: Address::ZERO,
+                last_epoch_hash: crate::H256::zero(),
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
@@ -723,10 +731,12 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
-            genesis_miner_address: Address::ZERO,
-            genesis_reward_address: Address::ZERO,
-            genesis_last_epoch_hash: crate::H256::zero(),
-            genesis_timestamp_millis: 0,
+            genesis: GenesisConfig {
+                timestamp_millis: 0,
+                miner_address: Address::ZERO,
+                reward_address: Address::ZERO,
+                last_epoch_hash: crate::H256::zero(),
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 51_872_000,
@@ -883,8 +893,8 @@ impl NodeConfig {
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
         let mut consensus = ConsensusConfig::testing();
-        consensus.genesis_miner_address = reward_address;
-        consensus.genesis_reward_address = reward_address;
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
         Self {
             mode: NodeMode::Genesis,
             consensus: ConsensusOptions::Custom(consensus),
@@ -981,8 +991,8 @@ impl NodeConfig {
 
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
-        consensus.genesis_miner_address = reward_address;
-        consensus.genesis_reward_address = reward_address;
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
         Self {
             mode: NodeMode::PeerSync,
             consensus: ConsensusOptions::Custom(consensus),
@@ -1303,10 +1313,12 @@ mod tests {
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9
-        genesis_miner_address = "0x0000000000000000000000000000000000000000"
-        genesis_reward_address = "0x0000000000000000000000000000000000000000"
-        genesis_last_epoch_hash = "11111111111111111111111111111111"
-        genesis_timestamp_millis = 0
+
+        [genesis]
+        miner_address = "0x0000000000000000000000000000000000000000"
+        reward_address = "0x0000000000000000000000000000000000000000"
+        last_epoch_hash = "11111111111111111111111111111111"
+        timestamp_millis = 0
 
         [reth]
         chain = 1270

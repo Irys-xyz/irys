@@ -412,7 +412,7 @@ impl IrysNode {
             .expect("valid calculated initial difficulty");
 
         // Create timestamp for genesis block (prefer configured value if provided)
-        let configured_ts = self.config.consensus.genesis_timestamp_millis;
+        let configured_ts = self.config.consensus.genesis.timestamp_millis;
         let timestamp = if configured_ts != 0 {
             configured_ts
         } else {
@@ -423,8 +423,8 @@ impl IrysNode {
         };
         genesis_block.diff = difficulty;
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
-        if self.config.consensus.genesis_last_epoch_hash != H256::zero() {
-            genesis_block.last_epoch_hash = self.config.consensus.genesis_last_epoch_hash;
+        if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
+            genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
         }
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;

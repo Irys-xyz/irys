@@ -27,7 +27,7 @@ impl IrysChainSpecBuilder {
             solution_hash: H256::zero(),
             last_diff_timestamp: 0,
             previous_solution_hash: H256::zero(),
-            last_epoch_hash: config.consensus.genesis_last_epoch_hash,
+            last_epoch_hash: config.consensus.genesis.last_epoch_hash,
             chunk_hash: H256::zero(),
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(0),
@@ -40,10 +40,10 @@ impl IrysChainSpecBuilder {
                 tx_path: None,
                 data_path: None,
             },
-            reward_address: config.consensus.genesis_reward_address,
+            reward_address: config.consensus.genesis.reward_address,
             reward_amount: U256::from(0),
-            miner_address: config.consensus.genesis_miner_address,
-            timestamp: config.consensus.genesis_timestamp_millis,
+            miner_address: config.consensus.genesis.miner_address,
+            timestamp: config.consensus.genesis.timestamp_millis,
             system_ledgers: vec![],
             data_ledgers: vec![
                 DataTransactionLedger {
