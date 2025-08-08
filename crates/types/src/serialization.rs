@@ -1,7 +1,7 @@
 #![allow(clippy::manual_div_ceil, clippy::assign_op_pattern)]
 
-use crate::Arbitrary;
 use crate::ingress::IngressProof;
+use crate::Arbitrary;
 use alloy_primitives::{bytes, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
@@ -293,7 +293,6 @@ impl Decodable for H256 {
         Decodable::decode(buf).map(Self)
     }
 }
-
 
 #[derive(
     Debug,

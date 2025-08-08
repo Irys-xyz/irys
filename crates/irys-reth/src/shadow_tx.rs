@@ -277,8 +277,12 @@ impl BorshDeserialize for TransactionPacket {
             STORAGE_FEES_ID => Self::StorageFees(BalanceDecrement::deserialize_reader(reader)?),
             PLEDGE_ID => Self::Pledge(BalanceDecrement::deserialize_reader(reader)?),
             UNPLEDGE_ID => Self::Unpledge(EitherIncrementOrDecrement::deserialize_reader(reader)?),
-            TERM_FEE_REWARD_ID => Self::TermFeeReward(BalanceIncrement::deserialize_reader(reader)?),
-            INGRESS_PROOF_REWARD_ID => Self::IngressProofReward(BalanceIncrement::deserialize_reader(reader)?),
+            TERM_FEE_REWARD_ID => {
+                Self::TermFeeReward(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            INGRESS_PROOF_REWARD_ID => {
+                Self::IngressProofReward(BalanceIncrement::deserialize_reader(reader)?)
+            }
             _ => {
                 return Err(borsh::io::Error::new(
                     borsh::io::ErrorKind::InvalidData,

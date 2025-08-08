@@ -11,12 +11,12 @@ use irys_reth_node_bridge::{
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
+use irys_types::ingress::IngressProof;
 use irys_types::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
     IngressProofsList, IrysBlockHeader, NodeConfig, H256,
 };
-use irys_types::ingress::IngressProof;
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
 use reth::{
@@ -70,11 +70,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .await
         .expect("Failed to get price");
 
-    let tx = signer.create_publish_transaction(
-        data,
-        None,
-        price_info.perm_fee,
-    )?;
+    let tx = signer.create_publish_transaction(data, None, price_info.perm_fee)?;
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
@@ -2057,61 +2053,61 @@ async fn _disabled_heavy_insufficient_miner_fee_excluded_from_best_txs_test() ->
     // Note: These transaction creation calls need to be updated as miner_fee parameter has been removed
     // The test logic is no longer valid as miner fee filtering has been removed
     return Ok(()); // Early return as this test is no longer applicable
-    
+
     #[allow(unreachable_code)]
     {
-    // Create tx with sufficient fees
-    let tx_sufficient = signer.create_transaction_with_fees(
-        data_sufficient.clone(),
-        Some(H256::zero()),
-        DataLedger::Publish,
-        term_fee,
-        Some(perm_fee),
-    )?;
-    let tx_sufficient = signer.sign_transaction(tx_sufficient)?;
+        // Create tx with sufficient fees
+        let tx_sufficient = signer.create_transaction_with_fees(
+            data_sufficient.clone(),
+            Some(H256::zero()),
+            DataLedger::Publish,
+            term_fee,
+            Some(perm_fee),
+        )?;
+        let tx_sufficient = signer.sign_transaction(tx_sufficient)?;
 
-    // Create another tx with same fees (no longer testing insufficient miner fee)
-    let tx_insufficient = signer.create_transaction_with_fees(
-        data_insufficient.clone(),
-        Some(H256::zero()),
-        DataLedger::Publish,
-        term_fee,
-        Some(perm_fee),
-    )?;
-    let tx_insufficient = signer.sign_transaction(tx_insufficient)?;
+        // Create another tx with same fees (no longer testing insufficient miner fee)
+        let tx_insufficient = signer.create_transaction_with_fees(
+            data_insufficient.clone(),
+            Some(H256::zero()),
+            DataLedger::Publish,
+            term_fee,
+            Some(perm_fee),
+        )?;
+        let tx_insufficient = signer.sign_transaction(tx_insufficient)?;
 
-    // Post both transactions - they should both be accepted into mempool
-    genesis_node.post_data_tx_raw(&tx_sufficient.header).await;
-    genesis_node.post_data_tx_raw(&tx_insufficient.header).await;
+        // Post both transactions - they should both be accepted into mempool
+        genesis_node.post_data_tx_raw(&tx_sufficient.header).await;
+        genesis_node.post_data_tx_raw(&tx_insufficient.header).await;
 
-    // Wait for both txs to appear in mempool
-    genesis_node
-        .wait_for_mempool(tx_sufficient.header.id, seconds_to_wait)
-        .await?;
-    genesis_node
-        .wait_for_mempool(tx_insufficient.header.id, seconds_to_wait)
-        .await?;
+        // Wait for both txs to appear in mempool
+        genesis_node
+            .wait_for_mempool(tx_sufficient.header.id, seconds_to_wait)
+            .await?;
+        genesis_node
+            .wait_for_mempool(tx_insufficient.header.id, seconds_to_wait)
+            .await?;
 
-    // Get best mempool txs (this should filter out the insufficient fee tx)
-    let best_txs = genesis_node.get_best_mempool_tx(None).await.unwrap();
+        // Get best mempool txs (this should filter out the insufficient fee tx)
+        let best_txs = genesis_node.get_best_mempool_tx(None).await.unwrap();
 
-    // Note: Even though we're using Publish ledger (id=0), transactions appear in submit_tx field
-    // This is how the mempool structures the response
-    let submit_tx_ids: Vec<H256> = best_txs.submit_tx.iter().map(|tx| tx.id).collect();
+        // Note: Even though we're using Publish ledger (id=0), transactions appear in submit_tx field
+        // This is how the mempool structures the response
+        let submit_tx_ids: Vec<H256> = best_txs.submit_tx.iter().map(|tx| tx.id).collect();
 
-    assert!(
-        submit_tx_ids.contains(&tx_sufficient.header.id),
-        "Transaction with sufficient miner fee should be included in best mempool txs"
-    );
-    assert!(
-        !submit_tx_ids.contains(&tx_insufficient.header.id),
-        "Transaction with insufficient miner fee should NOT be included in best mempool txs"
-    );
+        assert!(
+            submit_tx_ids.contains(&tx_sufficient.header.id),
+            "Transaction with sufficient miner fee should be included in best mempool txs"
+        );
+        assert!(
+            !submit_tx_ids.contains(&tx_insufficient.header.id),
+            "Transaction with insufficient miner fee should NOT be included in best mempool txs"
+        );
 
-    // The test successfully verifies that GetBestMempoolTxs filters out transactions
-    // with insufficient miner fees while keeping them in the mempool.
-    // The insufficient fee tx remains in mempool.
-    genesis_node.stop().await;
-    Ok(())
+        // The test successfully verifies that GetBestMempoolTxs filters out transactions
+        // with insufficient miner fees while keeping them in the mempool.
+        // The insufficient fee tx remains in mempool.
+        genesis_node.stop().await;
+        Ok(())
     } // Close the unreachable code block
 }

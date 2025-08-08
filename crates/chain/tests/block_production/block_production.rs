@@ -143,8 +143,8 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             ZERO_BALANCE
         });
     // The block reward recipient gets the block reward (miner fees have been removed)
-    let expected_block_reward_balance = ZERO_BALANCE
-        + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes());
+    let expected_block_reward_balance =
+        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes());
     assert_eq!(block_reward_balance, expected_block_reward_balance);
 
     // ensure that block heights in reth and irys are the same

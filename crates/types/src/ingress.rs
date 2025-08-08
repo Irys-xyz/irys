@@ -22,7 +22,19 @@ pub struct CachedIngressProof {
     pub proof: IngressProof,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary, alloy_rlp::RlpEncodable, alloy_rlp::RlpDecodable)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Compact,
+    Arbitrary,
+    alloy_rlp::RlpEncodable,
+    alloy_rlp::RlpDecodable,
+)]
 pub struct IngressProof {
     pub signature: IrysSignature,
     pub data_root: H256,
@@ -39,14 +51,14 @@ impl IngressProof {
         hasher.update(&self.data_root.0);
         hasher.update(&self.chain_id.to_be_bytes());
         let prehash = hasher.finish();
-        
+
         // Recover the signer from the signature
         let sig = self.signature.as_bytes();
         let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
-        
+
         Ok(recovered_address)
     }
-    
+
     /// Validates that the proof matches the provided data_root and recovers the signer address
     /// This method ensures the proof is for the correct data_root before validating the signature
     pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
@@ -54,7 +66,7 @@ impl IngressProof {
         if self.data_root != *data_root {
             return Err(eyre::eyre!("Ingress proof data_root mismatch"));
         }
-        
+
         // Recover and return the signer address
         self.recover_signer()
     }

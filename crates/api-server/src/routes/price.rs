@@ -110,15 +110,15 @@ fn cost_of_perm_storage(
 fn calculate_term_fee(bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
     // Base term fee: 0.001 ETH = 10^15 wei
     let base_term_fee_wei = U256::from(10u64).pow(U256::from(15u64));
-    
+
     // Size-based multiplier: scale fee based on data size
     // For each GB (10^9 bytes), multiply the base fee
     let gb_count = (bytes_to_store as f64 / 1_000_000_000.0).max(1.0);
     let size_multiplier = U256::from((gb_count * 1000.0) as u64) / U256::from(1000u64);
-    
+
     // Calculate total term fee
     let term_fee = base_term_fee_wei.saturating_mul(size_multiplier.max(U256::from(1)));
-    
+
     // Apply fee distribution calculations as per TermFeeCharges
     // The actual distribution happens at block production time
     // Here we just return the total term fee that will be distributed

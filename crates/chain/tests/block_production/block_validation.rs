@@ -16,11 +16,11 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         ProductionStrategy,
     };
     use irys_domain::EmaSnapshot;
+    use irys_types::ingress::IngressProof;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
         CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
     };
-    use irys_types::ingress::IngressProof;
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;
 

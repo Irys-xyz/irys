@@ -99,24 +99,25 @@ impl TermFeeCharges {
 
         // Calculate remainder from integer division
         let total_base_distribution = base_per_miner_reward.saturating_mul(num_miners);
-        let remainder = self.term_fee_treasury.saturating_sub(total_base_distribution);
-        
+        let remainder = self
+            .term_fee_treasury
+            .saturating_sub(total_base_distribution);
+
         // Create distribution vector
         let mut rewards = vec![base_per_miner_reward; miners.len()];
-        
+
         // Give the remainder to the first miner (if any)
         if remainder > U256::from(0) {
             rewards[0] = rewards[0].saturating_add(remainder);
         }
-        
+
         // Assert that the sum of all the fees we're distributing equals term_fee_treasury exactly
         let total_distributed: U256 = rewards
             .iter()
             .fold(U256::from(0), |acc, reward| acc.saturating_add(*reward));
-        
+
         debug_assert_eq!(
-            total_distributed,
-            self.term_fee_treasury,
+            total_distributed, self.term_fee_treasury,
             "Total distributed must equal term_fee_treasury exactly"
         );
 
@@ -192,26 +193,25 @@ impl PublishFeeCharges {
 
         // Calculate remainder from integer division
         let total_base_distribution = base_per_proof_reward.saturating_mul(num_proofs);
-        let remainder = self.ingress_proof_reward.saturating_sub(total_base_distribution);
-        
+        let remainder = self
+            .ingress_proof_reward
+            .saturating_sub(total_base_distribution);
+
         // Extract addresses and create fee charges
         let mut fee_charges = Vec::with_capacity(ingress_proofs.len());
-        
+
         for (i, proof) in ingress_proofs.iter().enumerate() {
             // Recover the address from the ingress proof signature
             let address = proof.recover_signer()?;
-            
+
             // First proof gets base + remainder, others get base
             let amount = if i == 0 && remainder > U256::from(0) {
                 base_per_proof_reward.saturating_add(remainder)
             } else {
                 base_per_proof_reward
             };
-            
-            fee_charges.push(FeeCharge {
-                address,
-                amount,
-            });
+
+            fee_charges.push(FeeCharge { address, amount });
         }
 
         // Assert that we're distributing exactly what was allocated
@@ -221,8 +221,7 @@ impl PublishFeeCharges {
             .fold(U256::from(0), |acc, amount| acc.saturating_add(amount));
 
         debug_assert_eq!(
-            total_distributed,
-            self.ingress_proof_reward,
+            total_distributed, self.ingress_proof_reward,
             "Total distributed fees must equal total allocated rewards"
         );
 
@@ -270,46 +269,50 @@ mod tests {
 
         // Check we have the right number of rewards
         assert_eq!(rewards.len(), 10);
-        
+
         // Each miner should get approximately treasury / 10
         let base_per_miner = charges.term_fee_treasury / U256::from(10);
-        
+
         // First 9 miners should get the base amount (or first miner gets base + remainder)
         for (i, reward) in rewards.iter().enumerate().skip(1) {
-            assert_eq!(*reward, base_per_miner, "Miner {} should get base amount", i);
+            assert_eq!(
+                *reward, base_per_miner,
+                "Miner {} should get base amount",
+                i
+            );
         }
-        
+
         // Total should equal treasury exactly
         let total: U256 = rewards.iter().fold(U256::from(0), |acc, r| acc + *r);
         assert_eq!(total, charges.term_fee_treasury);
     }
-    
+
     #[test]
     fn test_term_fee_distribution_with_remainder() {
         let config = ConsensusConfig::testing();
         let term_fee = U256::from(1003); // Not evenly divisible by 10
         let charges = TermFeeCharges::new(term_fee, &config);
 
-        // Test with 10 miners  
+        // Test with 10 miners
         let miners: Vec<Address> = (0..10).map(|_| Address::random()).collect();
 
         let rewards = charges.distribution_on_expiry(&miners).unwrap();
 
         // Check we have the right number of rewards
         assert_eq!(rewards.len(), 10);
-        
+
         // Calculate expected values
         let base_per_miner = charges.term_fee_treasury / U256::from(10);
         let remainder = charges.term_fee_treasury % U256::from(10);
-        
+
         // First miner should get base + remainder
         assert_eq!(rewards[0], base_per_miner + remainder);
-        
+
         // Rest should get base amount
         for reward in &rewards[1..] {
             assert_eq!(*reward, base_per_miner);
         }
-        
+
         // Total should equal treasury exactly
         let total: U256 = rewards.iter().fold(U256::from(0), |acc, r| acc + *r);
         assert_eq!(total, charges.term_fee_treasury);
@@ -353,61 +356,64 @@ mod tests {
             perm_fee
         );
     }
-    
+
     #[test]
     fn test_publish_fee_ingress_proof_rewards() {
-        use crate::irys::IrysSigner;
         use crate::ingress::generate_ingress_proof;
-        
+        use crate::irys::IrysSigner;
+
         let mut config = ConsensusConfig::testing();
         config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        
+
         let term_fee = U256::from(1000);
         let perm_fee = U256::from(10000);
         let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
-        
+
         // Create some test ingress proofs
         let signer1 = IrysSigner::random_signer(&config);
         let signer2 = IrysSigner::random_signer(&config);
         let data_root = H256::random();
-        
+
         // Generate actual ingress proofs
         let proof1 = generate_ingress_proof(
             &signer1,
             data_root,
             vec![vec![0u8; 32]].into_iter().map(Ok),
             config.chain_id,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let proof2 = generate_ingress_proof(
             &signer2,
             data_root,
             vec![vec![0u8; 32]].into_iter().map(Ok),
             config.chain_id,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let proofs = vec![proof1, proof2];
         let fee_charges = charges.ingress_proof_rewards(&proofs).unwrap();
-        
+
         // Should have 2 fee charges
         assert_eq!(fee_charges.len(), 2);
-        
+
         // Each should get half of total (75 each)
         let expected_per_proof = charges.ingress_proof_reward / U256::from(2);
         assert_eq!(fee_charges[0].amount, expected_per_proof);
         assert_eq!(fee_charges[1].amount, expected_per_proof);
-        
+
         // Addresses should match signers
         assert_eq!(fee_charges[0].address, signer1.address());
         assert_eq!(fee_charges[1].address, signer2.address());
-        
+
         // Total should equal ingress_proof_reward
-        let total: U256 = fee_charges.iter()
+        let total: U256 = fee_charges
+            .iter()
             .map(|fc| fc.amount)
             .fold(U256::from(0), |acc, amt| acc + amt);
         assert_eq!(total, charges.ingress_proof_reward);
     }
-    
+
     #[test]
     fn test_publish_fee_insufficient_perm_fee() {
         let mut config = ConsensusConfig::testing();
@@ -418,59 +424,63 @@ mod tests {
         let perm_fee = U256::from(100); // Too small to cover ingress rewards (150)
 
         let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
-        
+
         // Should fail with insufficient fee error
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("insufficient to cover ingress proof rewards"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("insufficient to cover ingress proof rewards"));
     }
 
     #[test]
     fn test_publish_fee_ingress_proof_rewards_with_remainder() {
-        use crate::irys::IrysSigner;
         use crate::ingress::generate_ingress_proof;
-        
+        use crate::irys::IrysSigner;
+
         let mut config = ConsensusConfig::testing();
         config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        
+
         let term_fee = U256::from(1003); // Not evenly divisible
         let perm_fee = U256::from(10000);
         let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
-        
+
         // Create 3 test ingress proofs
-        let signers: Vec<_> = (0..3)
-            .map(|_| IrysSigner::random_signer(&config))
-            .collect();
+        let signers: Vec<_> = (0..3).map(|_| IrysSigner::random_signer(&config)).collect();
         let data_root = H256::random();
-        
-        let proofs: Vec<_> = signers.iter()
+
+        let proofs: Vec<_> = signers
+            .iter()
             .map(|signer| {
                 generate_ingress_proof(
                     signer,
                     data_root,
                     vec![vec![0u8; 32]].into_iter().map(Ok),
                     config.chain_id,
-                ).unwrap()
+                )
+                .unwrap()
             })
             .collect();
-        
+
         let fee_charges = charges.ingress_proof_rewards(&proofs).unwrap();
-        
+
         // Should have 3 fee charges
         assert_eq!(fee_charges.len(), 3);
-        
+
         // Calculate expected values
         let base_per_proof = charges.ingress_proof_reward / U256::from(3);
         let remainder = charges.ingress_proof_reward % U256::from(3);
-        
+
         // First proof should get base + remainder
         assert_eq!(fee_charges[0].amount, base_per_proof + remainder);
-        
+
         // Others should get base
         assert_eq!(fee_charges[1].amount, base_per_proof);
         assert_eq!(fee_charges[2].amount, base_per_proof);
-        
+
         // Total should equal ingress_proof_reward exactly
-        let total: U256 = fee_charges.iter()
+        let total: U256 = fee_charges
+            .iter()
             .map(|fc| fc.amount)
             .fold(U256::from(0), |acc, amt| acc + amt);
         assert_eq!(total, charges.ingress_proof_reward);

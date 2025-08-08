@@ -6,11 +6,11 @@ use irys_actors::{
     BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
+use irys_types::ingress::IngressProof;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
     IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
-use irys_types::ingress::IngressProof;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(

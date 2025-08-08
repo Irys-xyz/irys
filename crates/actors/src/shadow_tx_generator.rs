@@ -11,6 +11,42 @@ use irys_types::{
 use reth::revm::primitives::ruint::Uint;
 use std::collections::HashMap;
 
+/// Newtype for reward amounts to prevent mixing with other U256 values
+#[derive(Debug, Clone, Copy, Default)]
+struct RewardAmount(U256);
+
+impl RewardAmount {
+    fn zero() -> Self {
+        Self(U256::zero())
+    }
+
+    fn add_assign(&mut self, amount: U256) {
+        self.0 += amount;
+    }
+
+    fn into_inner(self) -> U256 {
+        self.0
+    }
+}
+
+/// Newtype for rolling hash to prevent mixing with other U256 values
+#[derive(Debug, Clone, Copy, Default)]
+struct RollingHash(U256);
+
+impl RollingHash {
+    fn zero() -> Self {
+        Self(U256::zero())
+    }
+
+    fn xor_assign(&mut self, value: U256) {
+        self.0 ^= value;
+    }
+
+    fn to_bytes(self) -> [u8; 32] {
+        self.0.to_be_bytes()
+    }
+}
+
 /// Structure holding publish ledger transactions with their proofs
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
@@ -126,7 +162,8 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
                         self.index += 1;
 
                         // Step 1: Construct term fee charges (propagate errors)
-                        let term_charges = TermFeeCharges::new(U256::from(tx.term_fee), self.config);
+                        let term_charges =
+                            TermFeeCharges::new(U256::from(tx.term_fee), self.config);
 
                         // Step 2: Construct perm fee charges if applicable (propagate errors)
                         let perm_charges = if let Some(perm_fee) = tx.perm_fee {
@@ -143,7 +180,8 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
                         };
 
                         // Step 3: Construct shadow tx properly (propagate errors)
-                        let shadow_metadata = match self.create_submit_shadow_tx(tx, &term_charges) {
+                        let shadow_metadata = match self.create_submit_shadow_tx(tx, &term_charges)
+                        {
                             Ok(metadata) => metadata,
                             Err(e) => return Some(Err(e)),
                         };
@@ -155,7 +193,9 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
                         {
                             Some(balance) => balance,
                             None => {
-                                return Some(Err(eyre!("Treasury balance overflow when adding term fee treasury")));
+                                return Some(Err(eyre!(
+                                    "Treasury balance overflow when adding term fee treasury"
+                                )));
                             }
                         };
 
@@ -166,7 +206,9 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
                             {
                                 Some(balance) => balance,
                                 None => {
-                                    return Some(Err(eyre!("Treasury balance overflow when adding perm fee treasury")));
+                                    return Some(Err(eyre!(
+                                        "Treasury balance overflow when adding perm fee treasury"
+                                    )));
                                 }
                             };
                         }
@@ -201,7 +243,13 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
                             Err(e) => return Some(Err(e)),
                         };
 
-                        self.current_publish_iter = Some(shadow_txs.into_iter().map(Ok).collect::<Vec<_>>().into_iter());
+                        self.current_publish_iter = Some(
+                            shadow_txs
+                                .into_iter()
+                                .map(Ok)
+                                .collect::<Vec<_>>()
+                                .into_iter(),
+                        );
                     }
 
                     // Step 3: Yield shadow txs and update treasury balance
@@ -242,9 +290,9 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
 
 impl<'a> ShadowTxGenerator<'a> {
     /// Accumulates all rewards from ingress proofs into a map
-    fn accumulate_ingress_rewards(&self) -> Result<HashMap<Address, U256>> {
-        // HashMap to aggregate rewards by provider address
-        let mut rewards_map: HashMap<Address, U256> = HashMap::new();
+    fn accumulate_ingress_rewards(&self) -> Result<HashMap<Address, (RewardAmount, RollingHash)>> {
+        // HashMap to aggregate rewards by provider address and rolling hash
+        let mut rewards_map: HashMap<Address, (RewardAmount, RollingHash)> = HashMap::new();
 
         // Get ingress proofs if available
         let proofs = self
@@ -280,9 +328,14 @@ impl<'a> ShadowTxGenerator<'a> {
             // Get fee charges for all ingress proofs
             let fee_charges = publish_charges.ingress_proof_rewards(proofs)?;
 
-            // Aggregate rewards by address
+            // Aggregate rewards by address and update rolling hash
             for charge in fee_charges {
-                *rewards_map.entry(charge.address).or_insert(U256::zero()) += charge.amount;
+                let entry = rewards_map
+                    .entry(charge.address)
+                    .or_insert((RewardAmount::zero(), RollingHash::zero()));
+                entry.0.add_assign(charge.amount); // Add to total amount
+                                                   // XOR the rolling hash with the transaction ID
+                entry.1.xor_assign(U256::from_be_bytes(tx.id.0));
             }
         }
 
@@ -361,25 +414,25 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Creates shadow transactions from aggregated rewards
     fn create_publish_shadow_txs(
         &self,
-        rewards_map: HashMap<Address, U256>,
+        rewards_map: HashMap<Address, (RewardAmount, RollingHash)>,
     ) -> Result<Vec<ShadowMetadata>> {
-        // Use a deterministic tx reference from first tx
-        let tx_ref = self
-            .publish_ledger
-            .txs
-            .first()
-            .map(|tx| tx.id.into())
-            .unwrap_or_default();
-
         let shadow_txs: Vec<ShadowMetadata> = rewards_map
             .into_iter()
-            .map(|(address, total_amount)| {
+            .map(|(address, (reward_amount, rolling_hash))| {
+                // Convert the rolling hash to FixedBytes<32> for irys_ref
+                let hash_bytes = rolling_hash.to_bytes();
+                let h256 = irys_types::H256::from(hash_bytes);
+                let irys_ref = h256.into();
+
+                // Extract the inner U256 from RewardAmount
+                let total_amount = reward_amount.into_inner();
+
                 ShadowMetadata {
                     shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
                         BalanceIncrement {
                             amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
                             target: address,
-                            irys_ref: tx_ref,
+                            irys_ref,
                         },
                     )),
                     transaction_fee: 0, // No block producer reward for ingress proofs

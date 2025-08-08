@@ -14,6 +14,7 @@ use irys_domain::{
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
+use irys_types::ingress::IngressProof;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
@@ -26,7 +27,6 @@ use irys_types::{
     Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::ingress::IngressProof;
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::TaskExecutor;

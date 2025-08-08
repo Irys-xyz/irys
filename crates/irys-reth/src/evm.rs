@@ -405,8 +405,8 @@ where
                         target,
                     ))
                 }
-                shadow_tx::TransactionPacket::TermFeeReward(balance_increment) |
-                shadow_tx::TransactionPacket::IngressProofReward(balance_increment) => {
+                shadow_tx::TransactionPacket::TermFeeReward(balance_increment)
+                | shadow_tx::TransactionPacket::IngressProofReward(balance_increment) => {
                     let log = Self::create_shadow_log(
                         balance_increment.target,
                         vec![topic],

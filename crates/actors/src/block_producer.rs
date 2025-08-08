@@ -29,6 +29,7 @@ use irys_reth::{
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
+use irys_types::ingress::IngressProof;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
@@ -36,7 +37,6 @@ use irys_types::{
     H256List, IngressProofsList, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
     TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
-use irys_types::ingress::IngressProof;
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
 use openssl::sha;
@@ -447,7 +447,7 @@ pub trait BlockProdStrategy {
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
-        
+
         // Convert publish transactions to PublishLedgerWithTxs structure
         let publish_ledger = PublishLedgerWithTxs {
             txs: publish_txs.0.clone(),
@@ -457,10 +457,10 @@ pub trait BlockProdStrategy {
                 Some(IngressProofsList::from(publish_txs.1.clone()))
             },
         };
-        
+
         // TODO: Get treasury balance from previous block once it's tracked in block headers
         let initial_treasury_balance = U256::zero();
-        
+
         // Generate expected shadow transactions using shared logic
         let shadow_txs_iter = ShadowTxGenerator::new(
             &block_height,
@@ -473,23 +473,23 @@ pub trait BlockProdStrategy {
             &publish_ledger,
             initial_treasury_balance,
         )
-            .map(|tx_result| {
-                let metadata = tx_result?;
-                let mut tx_raw = compose_shadow_tx(
-                    self.inner().config.consensus.chain_id,
-                    &metadata.shadow_tx,
-                    metadata.transaction_fee,
-                );
-                let signature = local_signer
-                    .sign_transaction_sync(&mut tx_raw)
-                    .expect("shadow tx must always be signable");
-                let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
-                    .try_into_recovered()
-                    .expect("shadow tx must always be signable");
+        .map(|tx_result| {
+            let metadata = tx_result?;
+            let mut tx_raw = compose_shadow_tx(
+                self.inner().config.consensus.chain_id,
+                &metadata.shadow_tx,
+                metadata.transaction_fee,
+            );
+            let signature = local_signer
+                .sign_transaction_sync(&mut tx_raw)
+                .expect("shadow tx must always be signable");
+            let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
+                .try_into_recovered()
+                .expect("shadow tx must always be signable");
 
-                Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
         self.build_and_submit_reth_payload(
             prev_block_header,

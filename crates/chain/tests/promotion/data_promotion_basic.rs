@@ -65,11 +65,7 @@ async fn heavy_data_promotion_test() {
             .expect("Failed to get price");
 
         let tx = signer
-            .create_publish_transaction(
-                data,
-                None,
-                price_info.perm_fee,
-            )
+            .create_publish_transaction(data, None, price_info.perm_fee)
             .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());

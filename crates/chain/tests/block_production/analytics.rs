@@ -109,11 +109,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             .get_data_price(irys_types::DataLedger::Publish, data_size as u64)
             .await
             .expect("Failed to get price");
-        let tx_with_data = generate_tx_with_size(
-            account,
-            data_size,
-            price_info.perm_fee,
-        )?;
+        let tx_with_data = generate_tx_with_size(account, data_size, price_info.perm_fee)?;
         pending_txs.push((tx_with_data, 0));
     }
     upload_header(&pending_txs[0].0 .0).await.unwrap();
@@ -222,12 +218,8 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .get_data_price(irys_types::DataLedger::Publish, new_data_size as u64)
                 .await
                 .expect("Failed to get price");
-            (*tx, *data_bytes) = generate_tx_with_size(
-                a,
-                new_data_size,
-                new_price_info.perm_fee,
-            )
-            .expect("Failed to generate tx");
+            (*tx, *data_bytes) = generate_tx_with_size(a, new_data_size, new_price_info.perm_fee)
+                .expect("Failed to generate tx");
 
             *num_chunks_uploaded = simple_rng
                 .next_range((tx.chunks.len() + 1).try_into().unwrap())

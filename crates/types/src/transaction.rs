@@ -1,8 +1,8 @@
+pub use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
-pub use crate::ingress::IngressProof;
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;

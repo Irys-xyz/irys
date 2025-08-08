@@ -799,8 +799,8 @@ impl BlockIndexItem {
 
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, NodeConfig};
     use crate::ingress::IngressProof;
+    use crate::{validate_path, Config, NodeConfig};
 
     use super::*;
     use alloy_primitives::Signature;

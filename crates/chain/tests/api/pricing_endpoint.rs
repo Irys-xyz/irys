@@ -147,7 +147,10 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // Term fee should be calculated with base 0.001 ETH * size multiplier
     assert!(price_info.term_fee > U256::zero());
     assert_eq!(price_info.ledger, 0);
-    assert_eq!(price_info.bytes, ctx.node_ctx.config.consensus.chunk_size * 2);
+    assert_eq!(
+        price_info.bytes,
+        ctx.node_ctx.config.consensus.chunk_size * 2
+    );
     assert_ne!(data_size_bytes, ctx.node_ctx.config.consensus.chunk_size, "for the test to be accurate, the requested size must not be equal to the configs chunk size");
 
     ctx.node_ctx.stop().await;

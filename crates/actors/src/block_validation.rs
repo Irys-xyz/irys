@@ -714,7 +714,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 
     // TODO: Get treasury balance from previous block once it's tracked in block headers
     let initial_treasury_balance = U256::zero();
-    
+
     let shadow_txs_vec = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -726,8 +726,8 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &publish_ledger_with_txs,
         initial_treasury_balance,
     )
-        .map(|result| result.map(|metadata| metadata.shadow_tx))
-        .collect::<Result<Vec<_>, _>>()?;
+    .map(|result| result.map(|metadata| metadata.shadow_tx))
+    .collect::<Result<Vec<_>, _>>()?;
     Ok(shadow_txs_vec)
 }
 
@@ -1222,11 +1222,7 @@ pub async fn data_txs_are_valid(
             // Validate ingress proof signature and data_root match
             // The proof signature should be valid for the transaction's data_root
             let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
-                eyre::eyre!(
-                    "Transaction {} has invalid ingress proof: {}",
-                    tx.id,
-                    e
-                )
+                eyre::eyre!("Transaction {} has invalid ingress proof: {}", tx.id, e)
             })?;
 
             ensure!(
