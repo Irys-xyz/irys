@@ -14,6 +14,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
+use reth::rpc::eth::EthApiServer;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
@@ -23,7 +24,7 @@ use reth::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::utils::{
     mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
@@ -374,6 +375,16 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .expect("EVM transaction should be included in the block");
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
+    let debug_api = reth_context.rpc.inner.debug_api();
+    let res = debug_api
+        .debug_trace_transaction(
+            evm_tx_hash,
+            alloy_rpc_types_trace::geth::GethDebugTracingOptions::new_tracer(
+                alloy_rpc_types_trace::geth::GethDebugBuiltInTracerType::CallTracer,
+            ),
+        )
+        .await?;
+    debug!("GOT TRACE FOR {} {:?}", &evm_tx_hash, &res);
     // Verify recipient received the transfer
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
