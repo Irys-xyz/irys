@@ -6,7 +6,8 @@
 .tmp
 .irys
 /.VSCodeCounter
-.vscode/settings.json
+.vscode
+!.vscode/launch.json
 ext/
 config.toml
 emission_simulation.csv
