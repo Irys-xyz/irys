@@ -276,6 +276,28 @@ where
             }
         });
 
+        // Using the constant value we do additional check
+        // where if reputation threshold is set then peers
+        // connection is dropped
+        ctx.run_interval(INACTIVE_PEERS_HEALTH_CHECK_INTERVAL, |act, _| {
+            let active_peers: Vec<(Address, PeerListItem)> = act.peer_list.active_peers();
+
+            let min_threshold = act.config.node_config.reputation_threshold;
+
+            // we only loop over active peers if threshold is defined
+            if let Some(threshold) = min_threshold {
+                for (mining_addr, peer) in active_peers {
+                    let reputation = peer.reputation_score.get();
+                    // check each peer's reputation, if its below threshold
+                    // remove them from the list
+                    if threshold > reputation {
+                        debug!("Peer {:?} detected with low reputation", mining_addr);
+                        act.peer_list.remove_peer(mining_addr, peer);
+                    }
+                }
+            }
+        });
+
         // Initiate the trusted peers handshake
         let trusted_peers_handshake_task = Self::trusted_peers_handshake_task(
             peer_service_address.clone(),
@@ -1018,6 +1040,79 @@ mod tests {
             .peer_by_gossip_address(peer.address.gossip)
             .expect("failed to get updated peer");
         assert_eq!(updated_peer.reputation_score.get(), 48);
+    }
+
+    #[actix_rt::test]
+    async fn test_peer_reputation_threshold() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut config = NodeConfig::testing();
+        config.reputation_threshold = Some(50);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+        let mock_client = CountingMockClient::default();
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let config: Config = config.into();
+
+        let service = PeerNetworkService::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+            receiver,
+            sender,
+        );
+        let peer_list_data_guard = service.peer_list.clone();
+        service.start();
+
+        // Give some time for the service to start
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Add a test peer
+        let (mining_addr, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        peer_list_data_guard.add_or_update_peer(mining_addr, peer.clone());
+
+        // Test increasing score
+        peer_list_data_guard.increase_peer_score(&mining_addr, ScoreIncreaseReason::Online);
+
+        // Verify score increased
+        let updated_peer = peer_list_data_guard
+            .peer_by_gossip_address(peer.address.gossip)
+            .expect("failed to get updated peer");
+
+        assert_eq!(updated_peer.reputation_score.get(), 51);
+
+        // Test decreasing score using message handler
+        peer_list_data_guard.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
+
+        // Verify score decreased
+        let updated_peer = peer_list_data_guard
+            .peer_by_gossip_address(peer.address.gossip)
+            .expect("failed to get updated peer");
+
+        assert_eq!(updated_peer.reputation_score.get(), 48);
+
+        // Wait for more than the peer health check interval to ensure the check has occurred
+        tokio::time::sleep(INACTIVE_PEERS_HEALTH_CHECK_INTERVAL + Duration::from_millis(100)).await;
+
+        let updated_peer = peer_list_data_guard
+            .peer_by_gossip_address(peer.address.gossip)
+            .is_some();
+
+        let cache_entry = peer_list_data_guard
+            .peer_by_mining_address(&mining_addr)
+            .is_some();
+
+        assert!(!updated_peer);
+        assert!(!cache_entry);
     }
 
     #[actix_rt::test]

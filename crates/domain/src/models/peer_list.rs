@@ -115,14 +115,9 @@ impl PeerList {
         inner.decrease_peer_score(mining_addr, reason);
     }
 
-    /// Get a peer from any cache (persistent or purgatory)
-    pub fn get_peer(&self, mining_addr: &Address) -> Option<PeerListItem> {
-        let inner = self.read();
-        inner
-            .persistent_peers_cache
-            .get(mining_addr)
-            .or_else(|| inner.unstaked_peer_purgatory.peek(mining_addr))
-            .cloned()
+    pub fn remove_peer(&self, mining_addr: Address, peer: PeerListItem) {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        inner.remove_peer_address(mining_addr, peer);
     }
 
     pub fn all_known_peers(&self) -> Vec<PeerAddress> {
@@ -276,6 +271,20 @@ impl PeerList {
         );
 
         inactive
+    }
+
+    pub fn active_peers(&self) -> Vec<(Address, PeerListItem)> {
+        self.read()
+            .peer_list_cache
+            .iter()
+            .filter(|(_mining_addr, peer)| peer.reputation_score.is_active())
+            .map(|(mining_addr, peer)| {
+                // Clone or copy the fields we need for the async operation
+                let peer_item = peer.clone();
+                let mining_addr = *mining_addr;
+                (mining_addr, peer_item)
+            })
+            .collect()
     }
 
     pub fn peer_by_gossip_address(&self, address: SocketAddr) -> Option<PeerListItem> {
@@ -708,6 +717,19 @@ impl PeerListDataInner {
             let old_address = peer.address;
             peer.address = new_address;
             self.update_address_mappings(mining_addr, old_address, new_address);
+        }
+    }
+
+    fn remove_peer_address(&mut self, mining_addr: Address, peer: PeerListItem) {
+        if let Some(existing_peer) = self.peer_list_cache.get(&mining_addr) {
+            if existing_peer.address == peer.address {
+                debug!("Removing peer {:?} from the peer list", mining_addr);
+                self.peer_list_cache.remove(&mining_addr);
+                self.gossip_addr_to_mining_addr_map
+                    .remove(&peer.address.gossip.ip());
+                self.api_addr_to_mining_addr_map.remove(&peer.address.api);
+                self.known_peers_cache.remove(&peer.address);
+            }
         }
     }
 }
