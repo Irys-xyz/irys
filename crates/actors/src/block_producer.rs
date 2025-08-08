@@ -464,9 +464,12 @@ pub trait BlockProdStrategy {
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
+            &self.inner().config.consensus,
         );
+        // TODO: Get treasury balance from previous block once it's tracked in block headers
+        let initial_treasury_balance = U256::zero();
         let shadow_txs = shadow_txs
-            .generate_all(commitment_txs_to_bill, submit_txs, &publish_ledger)
+            .generate_all(commitment_txs_to_bill, submit_txs, &publish_ledger, initial_treasury_balance)
             .map(|tx_result| {
                 let metadata = tx_result?;
                 let mut tx_raw = compose_shadow_tx(

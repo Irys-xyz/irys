@@ -717,9 +717,12 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &block.reward_address,
         &block.reward_amount,
         &prev_block,
+        &config.consensus,
     );
+    // TODO: Get treasury balance from previous block once it's tracked in block headers
+    let initial_treasury_balance = U256::zero();
     let shadow_txs = shadow_txs
-        .generate_all(&commitment_txs, &data_txs, &publish_ledger_with_txs)
+        .generate_all(&commitment_txs, &data_txs, &publish_ledger_with_txs, initial_treasury_balance)
         .map(|result| result.map(|metadata| metadata.shadow_tx))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(shadow_txs)
