@@ -8,6 +8,7 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
+    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
     IrysTransactionId, H256, U256,
 };
@@ -94,16 +95,41 @@ impl Inner {
                 let expected_fee = self.calculate_perm_storage_fee(tx.data_size)?;
                 let expected_perm_fee = expected_fee.amount;
 
-                // Validate perm_fee is at least the expected amount
+                // Validate perm_fee matches exactly the expected amount
                 let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
-                if actual_perm_fee < expected_perm_fee {
+                if actual_perm_fee != expected_perm_fee {
                     return Err(TxIngressError::IncorrectProtocolFee {
                         expected: expected_perm_fee,
                         actual: actual_perm_fee,
                     });
                 }
 
-                // TODO: validate term_fee once we have support for it
+                // Validate term_fee matches exactly the expected calculation
+                let expected_term_fee = self.calculate_term_storage_fee(tx.data_size)?;
+                let actual_term_fee = U256::from(tx.term_fee);
+                
+                // Term fee must be exactly the expected amount - deterministic pricing
+                if actual_term_fee != expected_term_fee {
+                    return Err(TxIngressError::IncorrectProtocolFee {
+                        expected: expected_term_fee,
+                        actual: actual_term_fee,
+                    });
+                }
+
+                // Validate that fee distribution objects can be created successfully
+                // This ensures the fee structure is internally consistent
+                
+                // Validate term fee distribution structure
+                TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
+                    .map_err(|e| TxIngressError::Other(format!("Invalid term fee structure: {}", e)))?;
+                
+                // Validate publish fee distribution structure
+                PublishFeeCharges::new(
+                    actual_perm_fee,
+                    actual_term_fee,
+                    &self.config.node_config.consensus_config(),
+                )
+                .map_err(|e| TxIngressError::Other(format!("Invalid perm fee structure: {}", e)))?;
             }
             DataLedger::Submit => {
                 // Submit ledger - a data transaction cannot target the submit ledger directly

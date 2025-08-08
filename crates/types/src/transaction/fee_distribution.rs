@@ -59,7 +59,7 @@ pub struct TermFeeCharges {
 }
 
 impl TermFeeCharges {
-    pub fn new(term_fee: U256, config: &ConsensusConfig) -> Self {
+    pub fn new(term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
         // Calculate block producer reward using miner_fee_percentage from config
         let block_producer_reward =
             mul_div(term_fee, config.miner_fee_percentage.amount, BPS_SCALE)
@@ -68,17 +68,19 @@ impl TermFeeCharges {
         // The rest of the fee goes to the treasury
         let term_fee_treasury = term_fee.saturating_sub(block_producer_reward);
 
-        // Assert that the sum of all the fields equals term_fee
-        debug_assert_eq!(
-            block_producer_reward.saturating_add(term_fee_treasury),
-            term_fee,
-            "Fee distribution must equal total term_fee"
-        );
-
-        Self {
+        // Validate that the sum of all the fields equals term_fee
+        ensure!(
+            block_producer_reward.saturating_add(term_fee_treasury) == term_fee,
+            "Fee distribution must equal total term_fee: {} + {} != {}",
             block_producer_reward,
             term_fee_treasury,
-        }
+            term_fee
+        );
+
+        Ok(Self {
+            block_producer_reward,
+            term_fee_treasury,
+        })
     }
 
     /// Returns the reward for each miner, distributing any remainder to the first miner
@@ -111,14 +113,16 @@ impl TermFeeCharges {
             rewards[0] = rewards[0].saturating_add(remainder);
         }
 
-        // Assert that the sum of all the fees we're distributing equals term_fee_treasury exactly
+        // Validate that the sum of all the fees we're distributing equals term_fee_treasury exactly
         let total_distributed: U256 = rewards
             .iter()
             .fold(U256::from(0), |acc, reward| acc.saturating_add(*reward));
 
-        debug_assert_eq!(
-            total_distributed, self.term_fee_treasury,
-            "Total distributed must equal term_fee_treasury exactly"
+        ensure!(
+            total_distributed == self.term_fee_treasury,
+            "Total distributed must equal term_fee_treasury exactly: {} != {}",
+            total_distributed,
+            self.term_fee_treasury
         );
 
         Ok(rewards)
@@ -160,11 +164,13 @@ impl PublishFeeCharges {
         // So the treasury gets: perm_fee - total_ingress_rewards
         let perm_fee_treasury = perm_fee.saturating_sub(ingress_proof_reward);
 
-        // Assert that the sum of all fields equals perm_fee
-        debug_assert_eq!(
-            ingress_proof_reward.saturating_add(perm_fee_treasury),
-            perm_fee,
-            "Fee distribution must equal total perm_fee"
+        // Validate that the sum of all fields equals perm_fee
+        ensure!(
+            ingress_proof_reward.saturating_add(perm_fee_treasury) == perm_fee,
+            "Fee distribution must equal total perm_fee: {} + {} != {}",
+            ingress_proof_reward,
+            perm_fee_treasury,
+            perm_fee
         );
 
         Ok(Self {
@@ -214,15 +220,17 @@ impl PublishFeeCharges {
             fee_charges.push(FeeCharge { address, amount });
         }
 
-        // Assert that we're distributing exactly what was allocated
+        // Validate that we're distributing exactly what was allocated
         let total_distributed: U256 = fee_charges
             .iter()
             .map(|fc| fc.amount)
             .fold(U256::from(0), |acc, amount| acc.saturating_add(amount));
 
-        debug_assert_eq!(
-            total_distributed, self.ingress_proof_reward,
-            "Total distributed fees must equal total allocated rewards"
+        ensure!(
+            total_distributed == self.ingress_proof_reward,
+            "Total distributed fees must equal total allocated rewards: {} != {}",
+            total_distributed,
+            self.ingress_proof_reward
         );
 
         Ok(fee_charges)
@@ -243,7 +251,7 @@ mod tests {
         config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
         let term_fee = U256::from(1000);
-        let charges = TermFeeCharges::new(term_fee, &config);
+        let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Block producer should get 5% = 50
         assert_eq!(charges.block_producer_reward, U256::from(50));
@@ -260,7 +268,7 @@ mod tests {
     fn test_term_fee_distribution_on_expiry() {
         let config = ConsensusConfig::testing();
         let term_fee = U256::from(1000);
-        let charges = TermFeeCharges::new(term_fee, &config);
+        let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Test with 10 miners
         let miners: Vec<Address> = (0..10).map(|_| Address::random()).collect();
@@ -291,7 +299,7 @@ mod tests {
     fn test_term_fee_distribution_with_remainder() {
         let config = ConsensusConfig::testing();
         let term_fee = U256::from(1003); // Not evenly divisible by 10
-        let charges = TermFeeCharges::new(term_fee, &config);
+        let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Test with 10 miners
         let miners: Vec<Address> = (0..10).map(|_| Address::random()).collect();
@@ -322,7 +330,7 @@ mod tests {
     fn test_term_fee_distribution_empty_miners() {
         let config = ConsensusConfig::testing();
         let term_fee = U256::from(1000);
-        let charges = TermFeeCharges::new(term_fee, &config);
+        let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         let miners: Vec<Address> = vec![];
         let result = charges.distribution_on_expiry(&miners);

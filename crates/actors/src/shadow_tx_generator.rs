@@ -311,7 +311,7 @@ impl<'a> ShadowTxGenerator<'a> {
         self.index += 1;
 
         // Construct term fee charges
-        let term_charges = TermFeeCharges::new(U256::from(tx.term_fee), self.config);
+        let term_charges = TermFeeCharges::new(U256::from(tx.term_fee), self.config)?;
 
         // Construct perm fee charges if applicable
         let perm_charges = tx
