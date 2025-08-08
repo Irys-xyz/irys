@@ -1,13 +1,15 @@
-use eyre::Result;
+use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
     ShadowTransaction, TransactionPacket,
 };
 use irys_types::{
-    Address, CommitmentTransaction, DataTransactionHeader, IngressProofsList, IrysBlockHeader,
-    IrysTransactionCommon as _, U256,
+    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
+    Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
+    IrysBlockHeader, IrysTransactionCommon as _, U256,
 };
 use reth::revm::primitives::ruint::Uint;
+use std::collections::HashMap;
 
 /// Structure holding publish ledger transactions with their proofs
 pub struct PublishLedgerWithTxs {
@@ -26,6 +28,19 @@ pub struct ShadowTxGenerator<'a> {
     pub reward_address: &'a Address,
     pub reward_amount: &'a U256,
     pub parent_block: &'a IrysBlockHeader,
+    pub config: &'a ConsensusConfig,
+
+    // Transaction slices
+    commitment_txs: &'a [CommitmentTransaction],
+    submit_txs: &'a [DataTransactionHeader],
+    publish_ledger: &'a PublishLedgerWithTxs,
+
+    // Iterator state
+    treasury_balance: U256,
+    phase: Phase,
+    index: usize,
+    // Current publish ledger iterator (if processing publish ledger)
+    current_publish_iter: Option<std::vec::IntoIter<Result<ShadowMetadata>>>,
 }
 
 impl<'a> ShadowTxGenerator<'a> {
@@ -34,193 +49,365 @@ impl<'a> ShadowTxGenerator<'a> {
         reward_address: &'a Address,
         reward_amount: &'a U256,
         parent_block: &'a IrysBlockHeader,
+        config: &'a ConsensusConfig,
+        commitment_txs: &'a [CommitmentTransaction],
+        submit_txs: &'a [DataTransactionHeader],
+        publish_ledger: &'a PublishLedgerWithTxs,
+        initial_treasury_balance: U256,
     ) -> Self {
         Self {
             block_height,
             reward_address,
             reward_amount,
             parent_block,
+            config,
+            commitment_txs,
+            submit_txs,
+            publish_ledger,
+            treasury_balance: initial_treasury_balance,
+            phase: Phase::Header,
+            index: 0,
+            current_publish_iter: None,
         }
     }
 
-    pub fn generate_all(
-        &'a self,
-        commitment_txs: &'a [CommitmentTransaction],
-        submit_txs: &'a [DataTransactionHeader],
-        publish_ledger: &'a PublishLedgerWithTxs,
-    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
-        self.generate_shadow_tx_header()
-            .chain(self.generate_commitment_shadow_transactions(commitment_txs))
-            .chain(self.generate_data_storage_shadow_transactions(submit_txs))
-            .chain(self.generate_term_fee_reward_shadow_transactions(publish_ledger))
+    /// Get the current treasury balance
+    pub fn treasury_balance(&self) -> U256 {
+        self.treasury_balance
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Phase {
+    Header,
+    Commitments,
+    SubmitLedger,
+    PublishLedger,
+    Done,
+}
+
+impl<'a> Iterator for ShadowTxGenerator<'a> {
+    type Item = Result<ShadowMetadata>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.phase {
+                Phase::Header => {
+                    self.phase = Phase::Commitments;
+                    // Block reward has no treasury impact
+                    return Some(Ok(ShadowMetadata {
+                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                            BlockRewardIncrement {
+                                amount: (*self.reward_amount).into(),
+                            },
+                        )),
+                        transaction_fee: 0,
+                    }));
+                }
+
+                Phase::Commitments => {
+                    if self.index < self.commitment_txs.len() {
+                        let tx = &self.commitment_txs[self.index];
+                        self.index += 1;
+
+                        // Process commitment transaction
+                        // TODO: should commitment txs impact the treasury balance?
+                        return Some(self.process_commitment_transaction(tx));
+                    } else {
+                        self.phase = Phase::SubmitLedger;
+                        self.index = 0;
+                        continue;
+                    }
+                }
+
+                Phase::SubmitLedger => {
+                    if self.index < self.submit_txs.len() {
+                        let tx = &self.submit_txs[self.index];
+                        self.index += 1;
+
+                        // Step 1: Construct term fee charges (propagate errors)
+                        let term_charges = TermFeeCharges::new(U256::from(tx.term_fee), self.config);
+
+                        // Step 2: Construct perm fee charges if applicable (propagate errors)
+                        let perm_charges = if let Some(perm_fee) = tx.perm_fee {
+                            match PublishFeeCharges::new(
+                                U256::from(perm_fee),
+                                U256::from(tx.term_fee),
+                                self.config,
+                            ) {
+                                Ok(charges) => Some(charges),
+                                Err(e) => return Some(Err(e)),
+                            }
+                        } else {
+                            None
+                        };
+
+                        // Step 3: Construct shadow tx properly (propagate errors)
+                        let shadow_metadata = match self.create_submit_shadow_tx(tx, &term_charges) {
+                            Ok(metadata) => metadata,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        // Step 4: Update treasury with checked arithmetic
+                        self.treasury_balance = match self
+                            .treasury_balance
+                            .checked_add(term_charges.term_fee_treasury)
+                        {
+                            Some(balance) => balance,
+                            None => {
+                                return Some(Err(eyre!("Treasury balance overflow when adding term fee treasury")));
+                            }
+                        };
+
+                        if let Some(perm_charges) = perm_charges {
+                            self.treasury_balance = match self
+                                .treasury_balance
+                                .checked_add(perm_charges.perm_fee_treasury)
+                            {
+                                Some(balance) => balance,
+                                None => {
+                                    return Some(Err(eyre!("Treasury balance overflow when adding perm fee treasury")));
+                                }
+                            };
+                        }
+
+                        // Step 5: Return shadow tx
+                        return Some(Ok(shadow_metadata));
+                    } else {
+                        self.phase = Phase::PublishLedger;
+                        self.index = 0;
+                        continue;
+                    }
+                }
+
+                Phase::PublishLedger => {
+                    // On first entry to PublishLedger phase, prepare all rewards
+                    if self.current_publish_iter.is_none() {
+                        // Step 1: Accumulate all rewards from ingress proofs (propagate errors)
+                        let aggregated_rewards = match self.accumulate_ingress_rewards() {
+                            Ok(rewards) => rewards,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        if aggregated_rewards.is_empty() {
+                            // No rewards to process, move to Done
+                            self.phase = Phase::Done;
+                            continue;
+                        }
+
+                        // Step 2: Construct all shadow txs
+                        let shadow_txs = match self.create_publish_shadow_txs(aggregated_rewards) {
+                            Ok(txs) => txs,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        self.current_publish_iter = Some(shadow_txs.into_iter().map(Ok).collect::<Vec<_>>().into_iter());
+                    }
+
+                    // Step 3: Yield shadow txs and update treasury balance
+                    if let Some(ref mut iter) = self.current_publish_iter {
+                        if let Some(result) = iter.next() {
+                            // Update treasury balance with checked arithmetic
+                            if let Ok(ref metadata) = result {
+                                if let ShadowTransaction::V1 {
+                                    packet: TransactionPacket::IngressProofReward(increment),
+                                    ..
+                                } = &metadata.shadow_tx
+                                {
+                                    self.treasury_balance = match self
+                                        .treasury_balance
+                                        .checked_sub(U256::from(increment.amount))
+                                    {
+                                        Some(balance) => balance,
+                                        None => {
+                                            return Some(Err(eyre!("Treasury balance underflow when paying ingress proof reward")));
+                                        }
+                                    };
+                                }
+                            }
+                            return Some(result);
+                        }
+                    }
+
+                    // All rewards processed, move to Done
+                    self.phase = Phase::Done;
+                    continue;
+                }
+
+                Phase::Done => return None,
+            }
+        }
+    }
+}
+
+impl<'a> ShadowTxGenerator<'a> {
+    /// Accumulates all rewards from ingress proofs into a map
+    fn accumulate_ingress_rewards(&self) -> Result<HashMap<Address, U256>> {
+        // HashMap to aggregate rewards by provider address
+        let mut rewards_map: HashMap<Address, U256> = HashMap::new();
+
+        // Get ingress proofs if available
+        let proofs = self
+            .publish_ledger
+            .proofs
+            .as_ref()
+            .map(|p| &p.0[..])
+            .unwrap_or(&[]);
+
+        // Skip processing if no proofs (nothing to reward)
+        if proofs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Process all transactions and aggregate rewards
+        for tx in &self.publish_ledger.txs {
+            // CRITICAL: All publish ledger txs MUST have perm_fee
+            let perm_fee = match tx.perm_fee {
+                Some(fee) => fee,
+                None => {
+                    return Err(eyre!(
+                        "Critical: publish ledger tx {} missing perm_fee",
+                        tx.id
+                    ));
+                }
+            };
+
+            // Calculate fee distribution using PublishFeeCharges
+            // PublishFeeCharges::new will return an error if perm_fee is insufficient
+            let publish_charges =
+                PublishFeeCharges::new(U256::from(perm_fee), U256::from(tx.term_fee), self.config)?;
+
+            // Get fee charges for all ingress proofs
+            let fee_charges = publish_charges.ingress_proof_rewards(proofs)?;
+
+            // Aggregate rewards by address
+            for charge in fee_charges {
+                *rewards_map.entry(charge.address).or_insert(U256::zero()) += charge.amount;
+            }
+        }
+
+        Ok(rewards_map)
     }
 
-    /// Generates the expected header shadow transactions for a given block
-    pub fn generate_shadow_tx_header(
+    fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
+        // Keep existing commitment transaction logic unchanged
+        let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
+        let fee = Uint::from(tx.fee);
+        let total_cost = Uint::from_le_bytes(tx.total_cost().to_le_bytes());
+
+        let create_increment_or_decrement =
+            |operation_type: &str| -> Result<EitherIncrementOrDecrement> {
+                if fee > commitment_value {
+                    let amount = fee.checked_sub(commitment_value).ok_or_else(|| {
+                        eyre::eyre!(
+                            "Underflow when calculating {} decrement amount",
+                            operation_type
+                        )
+                    })?;
+                    Ok(EitherIncrementOrDecrement::BalanceDecrement(
+                        BalanceDecrement {
+                            amount,
+                            target: tx.signer,
+                            irys_ref: tx.id.into(),
+                        },
+                    ))
+                } else {
+                    let amount = commitment_value.checked_sub(fee).ok_or_else(|| {
+                        eyre::eyre!("Underflow when calculating {} amount", operation_type)
+                    })?;
+                    Ok(EitherIncrementOrDecrement::BalanceIncrement(
+                        BalanceIncrement {
+                            amount,
+                            target: tx.signer,
+                            irys_ref: tx.id.into(),
+                        },
+                    ))
+                }
+            };
+
+        let transaction_fee = tx.fee as u128;
+
+        match tx.commitment_type {
+            irys_primitives::CommitmentType::Stake => Ok(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
+                    amount: total_cost,
+                    target: tx.signer,
+                    irys_ref: tx.id.into(),
+                })),
+                transaction_fee,
+            }),
+            irys_primitives::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
+                    amount: total_cost,
+                    target: tx.signer,
+                    irys_ref: tx.id.into(),
+                })),
+                transaction_fee,
+            }),
+            irys_primitives::CommitmentType::Unpledge { .. } => {
+                create_increment_or_decrement("unpledge").map(|result| ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(result)),
+                    transaction_fee,
+                })
+            }
+            irys_primitives::CommitmentType::Unstake => create_increment_or_decrement("unstake")
+                .map(|result| ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unstake(result)),
+                    transaction_fee,
+                }),
+        }
+    }
+
+    /// Creates shadow transactions from aggregated rewards
+    fn create_publish_shadow_txs(
         &self,
-    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> {
-        std::iter::once(Ok(ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                BlockRewardIncrement {
-                    amount: (*self.reward_amount).into(),
+        rewards_map: HashMap<Address, U256>,
+    ) -> Result<Vec<ShadowMetadata>> {
+        // Use a deterministic tx reference from first tx
+        let tx_ref = self
+            .publish_ledger
+            .txs
+            .first()
+            .map(|tx| tx.id.into())
+            .unwrap_or_default();
+
+        let shadow_txs: Vec<ShadowMetadata> = rewards_map
+            .into_iter()
+            .map(|(address, total_amount)| {
+                ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
+                        BalanceIncrement {
+                            amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
+                            target: address,
+                            irys_ref: tx_ref,
+                        },
+                    )),
+                    transaction_fee: 0, // No block producer reward for ingress proofs
+                }
+            })
+            .collect();
+
+        Ok(shadow_txs)
+    }
+
+    /// Creates a shadow transaction for a submit ledger transaction
+    fn create_submit_shadow_tx(
+        &self,
+        tx: &DataTransactionHeader,
+        term_charges: &TermFeeCharges,
+    ) -> Result<ShadowMetadata> {
+        // Create shadow transaction for total cost deduction
+        let total_cost = tx.total_cost();
+        Ok(ShadowMetadata {
+            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
+                BalanceDecrement {
+                    amount: Uint::from_le_bytes(total_cost.to_le_bytes()),
+                    target: tx.signer,
+                    irys_ref: tx.id.into(),
                 },
             )),
-            transaction_fee: 0, // Block rewards have no fee
-        }))
-    }
-
-    /// Generates the expected data shadow transactions for a given block
-    pub fn generate_data_storage_shadow_transactions(
-        &'a self,
-        submit_txs: &'a [DataTransactionHeader],
-    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
-        // create a storage fee shadow txs
-        submit_txs.iter().map(move |tx| {
-            let total_cost = tx.total_cost();
-            Ok(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-                    BalanceDecrement {
-                        amount: Uint::from_le_bytes(total_cost.to_le_bytes()),
-                        target: tx.signer,
-                        irys_ref: tx.id.into(),
-                    },
-                )),
-                transaction_fee: tx.miner_fee.into(),
-            })
+            // Block producer gets their reward via transaction_fee
+            transaction_fee: term_charges.block_producer_reward.low_u128(),
         })
-    }
-
-    /// Generates the expected commitment transactions for a given block
-    pub fn generate_commitment_shadow_transactions(
-        &'a self,
-        commitment_txs: &'a [CommitmentTransaction],
-    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
-        commitment_txs.iter().map(move |tx| {
-            let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
-            let fee = Uint::from(tx.fee);
-            let total_cost = Uint::from_le_bytes(tx.total_cost().to_le_bytes());
-
-            let create_increment_or_decrement =
-                |operation_type: &str| -> Result<EitherIncrementOrDecrement> {
-                    if fee > commitment_value {
-                        let amount = fee.checked_sub(commitment_value).ok_or_else(|| {
-                            eyre::eyre!(
-                                "Underflow when calculating {} decrement amount",
-                                operation_type
-                            )
-                        })?;
-                        Ok(EitherIncrementOrDecrement::BalanceDecrement(
-                            BalanceDecrement {
-                                amount,
-                                target: tx.signer,
-                                irys_ref: tx.id.into(),
-                            },
-                        ))
-                    } else {
-                        let amount = commitment_value.checked_sub(fee).ok_or_else(|| {
-                            eyre::eyre!("Underflow when calculating {} amount", operation_type)
-                        })?;
-                        Ok(EitherIncrementOrDecrement::BalanceIncrement(
-                            BalanceIncrement {
-                                amount,
-                                target: tx.signer,
-                                irys_ref: tx.id.into(),
-                            },
-                        ))
-                    }
-                };
-
-            let transaction_fee = tx.fee as u128;
-
-            match tx.commitment_type {
-                irys_primitives::CommitmentType::Stake => Ok(ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Stake(
-                        BalanceDecrement {
-                            amount: total_cost,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    )),
-                    transaction_fee,
-                }),
-                irys_primitives::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(
-                        BalanceDecrement {
-                            amount: total_cost,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    )),
-                    transaction_fee,
-                }),
-                irys_primitives::CommitmentType::Unpledge { .. } => {
-                    create_increment_or_decrement("unpledge").map(|result| ShadowMetadata {
-                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(result)),
-                        transaction_fee,
-                    })
-                }
-                irys_primitives::CommitmentType::Unstake => {
-                    create_increment_or_decrement("unstake").map(|result| ShadowMetadata {
-                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unstake(result)),
-                        transaction_fee,
-                    })
-                }
-            }
-        })
-    }
-
-    /// Generates term fee reward shadow transactions for publish ledger transactions
-    pub fn generate_term_fee_reward_shadow_transactions(
-        &'a self,
-        publish_ledger: &'a PublishLedgerWithTxs,
-    ) -> impl std::iter::Iterator<Item = Result<ShadowMetadata>> + use<'a> {
-        // Create an iterator over the publish ledger transactions
-        publish_ledger
-            .txs
-            .iter()
-            .map(move |tx| (tx, publish_ledger.proofs.as_ref()))
-            .flat_map(move |(tx, proofs_opt)| {
-                // Calculate 5% of term_fee for each reward
-                let term_fee_5_percent = tx.term_fee / 20; // 5% = 1/20
-                
-                // Create rewards for ingress proof providers
-                let proof_rewards = proofs_opt
-                    .into_iter()
-                    .flat_map(|proofs| &proofs.0)
-                    .map(move |proof| {
-                        // Get the address from the ingress proof signature
-                        // This validates the proof matches the tx data_root and extracts the signer address
-                        let target = match proof.pre_validate(&tx.data_root) {
-                            Ok(addr) => addr,
-                            Err(e) => return Err(eyre::eyre!("Failed to validate ingress proof: {}", e)),
-                        };
-                        
-                        Ok(ShadowMetadata {
-                            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
-                                BalanceIncrement {
-                                    amount: Uint::from_le_bytes(term_fee_5_percent.to_le_bytes()),
-                                    target,
-                                    irys_ref: tx.id.into(),
-                                },
-                            )),
-                            transaction_fee: 0, // Term fee rewards have no transaction fee
-                        })
-                    });
-                
-                // Create reward for block beneficiary (5% of term_fee)
-                let beneficiary_reward = std::iter::once(Ok(ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
-                        BalanceIncrement {
-                            amount: Uint::from_le_bytes(term_fee_5_percent.to_le_bytes()),
-                            target: *self.reward_address,
-                            irys_ref: tx.id.into(),
-                        },
-                    )),
-                    transaction_fee: 0,
-                }));
-                
-                // Chain both rewards together
-                proof_rewards.chain(beneficiary_reward)
-            })
     }
 }
