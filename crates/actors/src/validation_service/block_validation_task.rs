@@ -46,6 +46,7 @@ pub(crate) struct BlockValidationTask {
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub priority: BlockPriorityMeta,
+    pub skip_vdf_validation: bool,
 }
 
 impl Ord for BlockValidationTask {
@@ -73,12 +74,14 @@ impl BlockValidationTask {
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         meta: BlockPriorityMeta,
+        skip_vdf_validation: bool,
     ) -> Self {
         Self {
             block,
             service_inner,
             block_tree_guard,
             priority: meta,
+            skip_vdf_validation
         }
     }
 
@@ -111,12 +114,13 @@ impl BlockValidationTask {
     pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
+        let skip_validation = self.skip_vdf_validation;
 
         // run the VDF validation
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
         let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
-            async move { inner.ensure_vdf_is_valid(&block, cancel2).await }.in_current_span(),
+            async move { inner.ensure_vdf_is_valid(&block, cancel2, skip_validation).await }.in_current_span(),
         )
         .await
         .expect("Failed to join ensure_vdf_is_valid task");

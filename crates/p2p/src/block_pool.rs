@@ -627,20 +627,9 @@ where
         block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
     ) -> Result<(), BlockPoolError> {
-        let block_hash = block_header.block_hash;
-        if skip_validation_for_fast_track {
-            debug!(
-                "Block pool: The block {:?} (height {}) is marked for fast track, skipping validation",
-                block_header.block_hash, block_header.height,
-            );
-            return match self.fast_track_block(block_header).await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    self.blocks_cache.remove_block(&block_hash).await;
-                    Err(err)
-                }
-            };
-        }
+    // Note: skip_validation_for_fast_track no longer triggers a separate fast-track path.
+    // It's propagated downstream to selectively skip the slowest checks (e.g., VDF verification)
+    // while preserving the normal processing flow.
 
         check_block_status(
             &self.block_status_provider,
@@ -682,7 +671,7 @@ where
 
             if let Err(block_discovery_error) = self
                 .block_discovery
-                .handle_block(Arc::clone(&block_header))
+                .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
                 .await
             {
                 error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);

@@ -159,7 +159,8 @@ pub(crate) struct BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
+    block: Arc<IrysBlockHeader>,
+    _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.blocks
             .write()

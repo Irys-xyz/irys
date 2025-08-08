@@ -108,7 +108,11 @@ impl BlockDiscoveryStub {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
-    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError> {
+    async fn handle_block(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        _skip_vdf: bool,
+    ) -> Result<(), BlockDiscoveryError> {
         self.block_status_provider
             .add_block_to_index_and_tree_for_testing(&block);
         self.received_blocks
@@ -671,16 +675,16 @@ async fn should_fast_track_block() {
         .expect("can't process block");
 
     let blocks_in_discovery = block_discovery_stub.get_blocks();
-    // No blocks should be in discovery service, since we've fast tracked the block
-    assert_eq!(blocks_in_discovery.len(), 0);
+    // Fast-track now only skips VDF verification; block still goes through discovery
+    assert_eq!(blocks_in_discovery.len(), 1);
+    assert_eq!(blocks_in_discovery[0].block_hash, test_header.block_hash);
 
     let migrated_blocks = mempool_stub
         .migrated_blocks
         .read()
         .expect("to lock migrated blocks");
-    // The block should be migrated to the mempool
-    assert_eq!(migrated_blocks.len(), 1);
-    assert_eq!(migrated_blocks[0].block_hash, test_header.block_hash);
+    // No direct migration is performed in fast-track mode anymore
+    assert_eq!(migrated_blocks.len(), 0);
 }
 
 #[actix_rt::test]
