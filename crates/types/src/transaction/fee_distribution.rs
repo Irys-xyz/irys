@@ -16,15 +16,15 @@
 ///
 /// ## Permanent Data Payment Distribution
 /// Users pay the following fees for permanent data storage:
-/// - term_fee: Standard fee for term storage
-/// - perm_fee: Fee for permanent storage
-/// - 5% of term_fee for block inclusion
-/// - 5% of term_fee for each ingress-proof
+/// - term_fee: Standard fee for term storage (distributed as with regular term data)
+/// - perm_fee: Total fee for permanent storage which includes:
+///   - Base permanent storage cost (200 years × 10 replicas with 1% annual decline)
+///   - PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 ///
 /// ### Fee Distribution
 /// - term_fee: Processed identically to regular term data transactions.
-/// - 5% of term_fee for each ingress-proof provided. The value is tracked on transactions `prem_fee` field.
-/// - perm_fee base value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs. This is added to the treasury
+/// - 5% of term_fee for each ingress-proof provided. These rewards are included in the transaction's `perm_fee` field along with the base permanent storage cost.
+/// - perm_fee total value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 use crate::ingress::IngressProof;
 use crate::storage_pricing::{mul_div, BPS_SCALE};
 pub use crate::{
@@ -135,7 +135,7 @@ pub struct PublishFeeCharges {
 }
 
 impl PublishFeeCharges {
-    pub fn new(prem_fee: U256, term_fee: U256, config: &ConsensusConfig) -> Self {
+    pub fn new(perm_fee: U256, term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
         // Calculate the reward for each ingress proof (x% of term_fee)
         let per_ingress_reward = mul_div(term_fee, config.miner_fee_percentage.amount, BPS_SCALE)
             .unwrap_or(U256::from(0));
@@ -147,21 +147,29 @@ impl PublishFeeCharges {
         let ingress_proof_reward =
             per_ingress_reward.saturating_mul(U256::from(num_ingress_proofs));
 
-        // The prem_fee already includes base perm fee + ingress rewards
-        // So the treasury gets: prem_fee - total_ingress_rewards
-        let perm_fee_treasury = prem_fee.saturating_sub(ingress_proof_reward);
-
-        // Assert that the sum of all fields equals prem_fee
-        debug_assert_eq!(
-            ingress_proof_reward.saturating_add(perm_fee_treasury),
-            prem_fee,
-            "Fee distribution must equal total prem_fee"
+        // Validate that perm_fee is sufficient to cover ingress rewards
+        ensure!(
+            perm_fee >= ingress_proof_reward,
+            "Permanent fee ({}) is insufficient to cover ingress proof rewards ({})",
+            perm_fee,
+            ingress_proof_reward
         );
 
-        Self {
+        // The perm_fee already includes base perm fee + ingress rewards
+        // So the treasury gets: perm_fee - total_ingress_rewards
+        let perm_fee_treasury = perm_fee.saturating_sub(ingress_proof_reward);
+
+        // Assert that the sum of all fields equals perm_fee
+        debug_assert_eq!(
+            ingress_proof_reward.saturating_add(perm_fee_treasury),
+            perm_fee,
+            "Fee distribution must equal total perm_fee"
+        );
+
+        Ok(Self {
             ingress_proof_reward,
             perm_fee_treasury,
-        }
+        })
     }
 
     /// Provided a list of ingress proofs, figure out the fee allocations for each of them
@@ -329,20 +337,20 @@ mod tests {
         config.number_of_ingress_proofs = 3;
 
         let term_fee = U256::from(1000);
-        let prem_fee = U256::from(10000);
+        let perm_fee = U256::from(10000);
 
-        let charges = PublishFeeCharges::new(prem_fee, term_fee, &config);
+        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
 
         // Total ingress reward should be 3 * (5% of term_fee) = 3 * 50 = 150
         assert_eq!(charges.ingress_proof_reward, U256::from(150));
 
-        // Treasury should get prem_fee - 150 = 10000 - 150 = 9850
+        // Treasury should get perm_fee - 150 = 10000 - 150 = 9850
         assert_eq!(charges.perm_fee_treasury, U256::from(9850));
 
-        // Total should equal prem_fee
+        // Total should equal perm_fee
         assert_eq!(
             charges.ingress_proof_reward + charges.perm_fee_treasury,
-            prem_fee
+            perm_fee
         );
     }
     
@@ -355,8 +363,8 @@ mod tests {
         config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         
         let term_fee = U256::from(1000);
-        let prem_fee = U256::from(10000);
-        let charges = PublishFeeCharges::new(prem_fee, term_fee, &config);
+        let perm_fee = U256::from(10000);
+        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
         
         // Create some test ingress proofs
         let signer1 = IrysSigner::random_signer(&config);
@@ -401,6 +409,22 @@ mod tests {
     }
     
     #[test]
+    fn test_publish_fee_insufficient_perm_fee() {
+        let mut config = ConsensusConfig::testing();
+        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.number_of_ingress_proofs = 3;
+
+        let term_fee = U256::from(1000);
+        let perm_fee = U256::from(100); // Too small to cover ingress rewards (150)
+
+        let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
+        
+        // Should fail with insufficient fee error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("insufficient to cover ingress proof rewards"));
+    }
+
+    #[test]
     fn test_publish_fee_ingress_proof_rewards_with_remainder() {
         use crate::irys::IrysSigner;
         use crate::ingress::generate_ingress_proof;
@@ -409,8 +433,8 @@ mod tests {
         config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         
         let term_fee = U256::from(1003); // Not evenly divisible
-        let prem_fee = U256::from(10000);
-        let charges = PublishFeeCharges::new(prem_fee, term_fee, &config);
+        let perm_fee = U256::from(10000);
+        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
         
         // Create 3 test ingress proofs
         let signers: Vec<_> = (0..3)
