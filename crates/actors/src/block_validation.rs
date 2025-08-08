@@ -1716,7 +1716,33 @@ mod tests {
             &context.miner_address,
         );
 
-        assert!(poa_valid.is_err(), "PoA should be invalid");
+        match poa_valid {
+            Err(PreValidationError::PoAChunkHashMismatch {
+                ledger_id,
+                ledger_chunk_offset,
+                expected,
+                got,
+            }) => {
+                assert!(ledger_id.is_some(), "expected ledger_id context");
+                assert!(
+                    ledger_chunk_offset.is_some(),
+                    "expected ledger_chunk_offset context"
+                );
+                assert_ne!(expected, got, "expected and got hashes should differ");
+            }
+            Err(PreValidationError::MerkleProofInvalid(msg)) => {
+                assert!(
+                    msg.contains("hash mismatch"),
+                    "expected hash mismatch merkle proof error, got: {}",
+                    msg
+                );
+            }
+            Err(other) => panic!(
+                "expected PoAChunkHashMismatch or MerkleProofInvalid, got {:?}",
+                other
+            ),
+            Ok(_) => panic!("expected invalid PoA, but validation succeeded"),
+        }
     }
 
     #[test]
@@ -1778,11 +1804,38 @@ mod tests {
             previous_ts,
             consensus_config.max_future_timestamp_drift_millis,
         );
-        // Expect an error due to block timestamp being too far in the future
-        assert!(
-            result.is_err(),
-            "Expected an error for future timestamp drift"
+        match result {
+            Err(super::PreValidationError::TimestampTooFarInFuture { current, now }) => {
+                assert!(
+                    current > now,
+                    "current should be greater than now for future drift"
+                );
+            }
+            other => panic!("expected TimestampTooFarInFuture, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timestamp_older_than_parent_is_invalid() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let parent_ts = now_ms;
+        let current_ts = parent_ts.saturating_sub(1);
+        let result = timestamp_is_valid(
+            current_ts,
+            parent_ts,
+            consensus_config.max_future_timestamp_drift_millis,
         );
+        match result {
+            Err(super::PreValidationError::TimestampOlderThanParent { current, parent }) => {
+                assert_eq!(current, current_ts);
+                assert_eq!(parent, parent_ts);
+            }
+            other => panic!("expected TimestampOlderThanParent, got {:?}", other),
+        }
     }
 
     #[test]
