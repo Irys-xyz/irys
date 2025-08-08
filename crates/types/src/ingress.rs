@@ -30,6 +30,24 @@ pub struct IngressProof {
     pub chain_id: ChainId,
 }
 
+impl IngressProof {
+    /// Recovers the signer address from the ingress proof signature
+    pub fn recover_signer(&self) -> eyre::Result<Address> {
+        // Recreate the prehash that was signed
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&self.proof.0);
+        hasher.update(&self.data_root.0);
+        hasher.update(&self.chain_id.to_be_bytes());
+        let prehash = hasher.finish();
+        
+        // Recover the signer from the signature
+        let sig = self.signature.as_bytes();
+        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
+        
+        Ok(recovered_address)
+    }
+}
+
 impl Compress for IngressProof {
     type Compressed = Vec<u8>;
     fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {

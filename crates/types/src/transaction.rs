@@ -1,4 +1,3 @@
-use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
