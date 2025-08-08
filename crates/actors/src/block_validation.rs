@@ -382,6 +382,7 @@ pub fn last_epoch_hash_is_valid(
     previous_block: &IrysBlockHeader,
     blocks_in_epoch: u64,
 ) -> eyre::Result<()> {
+    // if First block after an epoch boundary
     let expected = if block.height > 0 && block.height % blocks_in_epoch == 1 {
         previous_block.block_hash
     } else {
