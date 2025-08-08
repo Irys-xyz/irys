@@ -15,13 +15,13 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncState,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
@@ -103,7 +103,7 @@ pub struct P2PService {
     cache: Arc<GossipCache>,
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
     client: GossipClient,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
 }
 
 impl P2PService {
@@ -133,7 +133,7 @@ impl P2PService {
             client,
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
-            sync_state: SyncState::new(true, false),
+            sync_state: ChainSyncState::new(true, false),
         }
     }
 
