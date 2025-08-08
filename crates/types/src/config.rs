@@ -4,7 +4,7 @@ use crate::{
         phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
-    PeerAddress, RethPeerInfo,
+    PeerAddress, RethPeerInfo, H256,
 };
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
@@ -192,7 +192,16 @@ pub struct GenesisConfig {
     pub reward_address: Address,
 
     /// The initial last_epoch_hash used by the genesis block
-    pub last_epoch_hash: crate::H256,
+    pub last_epoch_hash: H256,
+
+    /// The initial VDF seed used by the genesis block
+    /// Must be explicitly set for deterministic VDF output at genesis.
+    pub vdf_seed: H256,
+
+    /// The initial next VDF seed used after the first reset boundary.
+    /// If not set in config, defaults to the same value as `vdf_seed`.
+    #[serde(default)]
+    pub vdf_next_seed: Option<H256>,
 }
 
 // removed erroneous derive on helper function
@@ -623,7 +632,9 @@ impl ConsensusConfig {
                 timestamp_millis: 0,
                 miner_address: Address::ZERO,
                 reward_address: Address::ZERO,
-                last_epoch_hash: crate::H256::zero(),
+                last_epoch_hash: H256::zero(),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
             },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
@@ -735,7 +746,9 @@ impl ConsensusConfig {
                 timestamp_millis: 0,
                 miner_address: Address::ZERO,
                 reward_address: Address::ZERO,
-                last_epoch_hash: crate::H256::zero(),
+                last_epoch_hash: H256::zero(),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
             },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
@@ -1318,6 +1331,9 @@ mod tests {
         miner_address = "0x0000000000000000000000000000000000000000"
         reward_address = "0x0000000000000000000000000000000000000000"
         last_epoch_hash = "11111111111111111111111111111111"
+        vdf_seed = "11111111111111111111111111111111"
+        # Optional: if omitted, defaults to vdf_seed
+        # vdf_next_seed = "22222222222222222222222222222222"
         timestamp_millis = 0
 
         [reth]

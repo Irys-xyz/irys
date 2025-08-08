@@ -67,8 +67,12 @@ impl IrysChainSpecBuilder {
             vdf_limiter_info: VDFLimiterInfo {
                 output: H256::zero(),
                 global_step_number: 0,
-                seed: H256::zero(),
-                next_seed: H256::zero(),
+                seed: config.consensus.genesis.vdf_seed,
+                next_seed: config
+                    .consensus
+                    .genesis
+                    .vdf_next_seed
+                    .unwrap_or(config.consensus.genesis.vdf_seed),
                 prev_output: H256::zero(),
                 last_step_checkpoints: H256List::new(),
                 steps: H256List::new(),
