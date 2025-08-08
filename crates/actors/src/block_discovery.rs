@@ -116,10 +116,18 @@ impl BlockDiscoveryFacadeImpl {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
-    async fn handle_block(&self, block: Arc<IrysBlockHeader>, skip_vdf: bool) -> Result<(), BlockDiscoveryError> {
+    async fn handle_block(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        skip_vdf: bool,
+    ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(BlockDiscoveryMessage::BlockDiscovered(block, skip_vdf, Some(tx)))
+            .send(BlockDiscoveryMessage::BlockDiscovered(
+                block,
+                skip_vdf,
+                Some(tx),
+            ))
             .map_err(BlockDiscoveryInternalError::SenderError)?;
 
         rx.await.map_err(BlockDiscoveryInternalError::RecvError)?
@@ -239,7 +247,11 @@ impl BlockDiscoveryService {
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
-                let result = self.inner.clone().block_discovered(irys_block_header, skip_vdf).await;
+                let result = self
+                    .inner
+                    .clone()
+                    .block_discovered(irys_block_header, skip_vdf)
+                    .await;
                 if let Some(sender) = sender {
                     if let Err(e) = sender.send(result) {
                         tracing::error!("sender error: {:?}", e);

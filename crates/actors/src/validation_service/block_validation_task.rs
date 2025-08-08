@@ -81,7 +81,7 @@ impl BlockValidationTask {
             service_inner,
             block_tree_guard,
             priority: meta,
-            skip_vdf_validation
+            skip_vdf_validation,
         }
     }
 
@@ -120,7 +120,12 @@ impl BlockValidationTask {
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
         let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
-            async move { inner.ensure_vdf_is_valid(&block, cancel2, skip_validation).await }.in_current_span(),
+            async move {
+                inner
+                    .ensure_vdf_is_valid(&block, cancel2, skip_validation)
+                    .await
+            }
+            .in_current_span(),
         )
         .await
         .expect("Failed to join ensure_vdf_is_valid task");

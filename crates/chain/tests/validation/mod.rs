@@ -114,8 +114,13 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         .unwrap();
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![invalid_pledge], false)
-        .await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        vec![invalid_pledge],
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -206,8 +211,13 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         .unwrap();
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![invalid_pledge], false)
-        .await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        vec![invalid_pledge],
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);

@@ -48,7 +48,10 @@ pub enum VdfValidationResult {
 #[derive(Debug)]
 pub enum ValidationServiceMessage {
     /// Validate a block
-    ValidateBlock { block: Arc<IrysBlockHeader>, skip_vdf_validation: bool }
+    ValidateBlock {
+        block: Arc<IrysBlockHeader>,
+        skip_vdf_validation: bool,
+    },
 }
 
 /// Main validation service structure
@@ -268,7 +271,13 @@ impl ValidationServiceInner {
 
         let priority: std::cmp::Reverse<active_validations::BlockPriorityMeta> =
             active_validations.calculate_priority(&block);
-        let task = BlockValidationTask::new(block, self, block_tree_guard, priority.0, skip_vdf_validation);
+        let task = BlockValidationTask::new(
+            block,
+            self,
+            block_tree_guard,
+            priority.0,
+            skip_vdf_validation,
+        );
         Some(task)
     }
 
@@ -343,7 +352,10 @@ impl ValidationServiceInner {
             })
             .await??;
         } else {
-            debug!("Skipping vdf_steps_are_valid for block {:?}", block.block_hash);
+            debug!(
+                "Skipping vdf_steps_are_valid for block {:?}",
+                block.block_hash
+            );
         }
 
         // Fast forward VDF steps

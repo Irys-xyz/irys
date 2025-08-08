@@ -42,7 +42,7 @@ pub enum BlockTreeServiceMessage {
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-    skip_vdf_validation: bool,
+        skip_vdf_validation: bool,
         response: oneshot::Sender<eyre::Result<()>>,
     },
     BlockValidationFinished {
@@ -545,7 +545,10 @@ impl BlockTreeServiceInner {
             // Schedule validation and mark as scheduled
             self.service_senders
                 .validation_service
-                .send(ValidationServiceMessage::ValidateBlock { block: block.clone(), skip_vdf_validation: skip_vdf })
+                .send(ValidationServiceMessage::ValidateBlock {
+                    block: block.clone(),
+                    skip_vdf_validation: skip_vdf,
+                })
                 .context("validation service unreachable!")?;
 
             if cache
