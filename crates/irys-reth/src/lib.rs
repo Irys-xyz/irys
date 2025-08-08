@@ -2169,6 +2169,46 @@ mod tests {
 
         Ok(())
     }
+
+    #[test_log::test(tokio::test(flavor = "multi_thread", worker_threads = 2))]
+    async fn can_trace_normal_tx() -> eyre::Result<()> {
+        // setup
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let normal_tx_hash = create_and_submit_normal_tx(
+            &mut node,
+            0,
+            U256::from(1000),
+            1_000_000_000_u128,
+            Address::random(),
+            &ctx.normal_signer,
+        )
+        .await?;
+
+        let payload_node_a = advance_block(&mut node, &shadow_tx_store, vec![]).await?;
+
+        assert_txs_in_block(
+            &payload_node_a,
+            &[normal_tx_hash],
+            "expected regular tx to be included",
+        );
+
+        let debug_api = node.rpc.inner.debug_api();
+
+        let res = debug_api
+            .debug_trace_transaction(
+                normal_tx_hash,
+                alloy_rpc_types_trace::geth::GethDebugTracingOptions::new_tracer(
+                    alloy_rpc_types_trace::geth::GethDebugBuiltInTracerType::CallTracer,
+                ),
+            )
+            .await;
+
+        assert!(res.is_ok(), "unexpected error tracing tx {:?}", &res);
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "test-utils", test))]
