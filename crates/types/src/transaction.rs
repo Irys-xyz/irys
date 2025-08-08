@@ -1,3 +1,4 @@
+use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
@@ -7,6 +8,8 @@ use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod fee_distribution;
 
 pub type IrysTransactionId = H256;
 
@@ -798,10 +801,12 @@ mod test_helpers {
 mod tests {
     use super::*;
     use crate::irys::IrysSigner;
+    use crate::storage_pricing::Amount;
 
     use alloy_rlp::Decodable as _;
 
     use k256::ecdsa::SigningKey;
+    use rust_decimal_macros::dec;
     use serde_json;
 
     #[test]
