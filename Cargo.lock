@@ -4928,6 +4928,7 @@ dependencies = [
  "modular-bitfield",
  "rand 0.8.5",
  "reth",
+ "reth-cli-util",
  "reth-db",
  "reth-tracing",
  "rstest",
