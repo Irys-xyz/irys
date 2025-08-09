@@ -161,6 +161,7 @@ impl BlockValidationTask {
                 break;
             } else {
                 // Parent not ready, yield and try again when polled later
+                debug!("Waiting for parent...");
                 tokio::task::yield_now().await;
                 continue;
             }

@@ -99,7 +99,7 @@ impl BlockStatusProvider {
 
     pub async fn wait_for_block_to_appear_in_index(&self, block_height: u64) {
         const ATTEMPTS_PER_SECOND: u64 = 5;
-
+        let mut attempts = 0;
         loop {
             {
                 let binding = self.block_index_read_guard.read();
@@ -109,10 +109,19 @@ impl BlockStatusProvider {
                 }
             }
 
+            if attempts % ATTEMPTS_PER_SECOND == 0 {
+                debug!(
+                    "Waiting for block {} to appear in the block index...",
+                    &block_height
+                );
+            }
+
             tokio::time::sleep(tokio::time::Duration::from_millis(
                 1000 / ATTEMPTS_PER_SECOND,
             ))
             .await;
+
+            attempts += 1;
         }
     }
 
