@@ -1,4 +1,4 @@
-use eyre::{eyre, Result};
+use eyre::{eyre, OptionExt as _, Result};
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
     ShadowTransaction, TransactionPacket,
@@ -9,7 +9,7 @@ use irys_types::{
     IrysBlockHeader, IrysTransactionCommon as _, U256,
 };
 use reth::revm::primitives::ruint::Uint;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Structure holding publish ledger transactions with their proofs
 pub struct PublishLedgerWithTxs {
@@ -17,7 +17,7 @@ pub struct PublishLedgerWithTxs {
     pub proofs: Option<IngressProofsList>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ShadowMetadata {
     pub shadow_tx: ShadowTransaction,
     pub transaction_fee: u128,
@@ -33,7 +33,7 @@ pub struct ShadowTxGenerator<'a> {
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
     submit_txs: &'a [DataTransactionHeader],
-    publish_ledger: &'a PublishLedgerWithTxs,
+    publish_ledger: &'a mut PublishLedgerWithTxs,
 
     // Iterator state
     treasury_balance: U256,
@@ -52,9 +52,12 @@ impl<'a> ShadowTxGenerator<'a> {
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
-        publish_ledger: &'a PublishLedgerWithTxs,
+        publish_ledger: &'a mut PublishLedgerWithTxs,
         initial_treasury_balance: U256,
     ) -> Self {
+        // Sort publish ledger transactions by id for deterministic processing
+        publish_ledger.txs.sort();
+
         Self {
             block_height,
             reward_address,
@@ -106,15 +109,24 @@ impl Iterator for ShadowTxGenerator<'_> {
                 }
 
                 Phase::Commitments => {
-                    return self.try_process_commitments().transpose();
+                    if let Some(result) = self.try_process_commitments().transpose() {
+                        return Some(result);
+                    }
+                    // Continue to next iteration if phase completed
                 }
 
                 Phase::SubmitLedger => {
-                    return self.try_process_submit_ledger().transpose();
+                    if let Some(result) = self.try_process_submit_ledger().transpose() {
+                        return Some(result);
+                    }
+                    // Continue to next iteration if phase completed
                 }
 
                 Phase::PublishLedger => {
-                    return self.try_process_publish_ledger().transpose();
+                    if let Some(result) = self.try_process_publish_ledger().transpose() {
+                        return Some(result);
+                    }
+                    // Continue to next iteration if phase completed
                 }
 
                 Phase::Done => return None,
@@ -125,9 +137,9 @@ impl Iterator for ShadowTxGenerator<'_> {
 
 impl ShadowTxGenerator<'_> {
     /// Accumulates all rewards from ingress proofs into a map
-    fn accumulate_ingress_rewards(&self) -> Result<HashMap<Address, (RewardAmount, RollingHash)>> {
-        // HashMap to aggregate rewards by provider address and rolling hash
-        let mut rewards_map: HashMap<Address, (RewardAmount, RollingHash)> = HashMap::new();
+    fn accumulate_ingress_rewards(&self) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
+        // BTreeMap to aggregate rewards by provider address and rolling hash (sorted by address)
+        let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
 
         // Get ingress proofs if available
         let proofs = self
@@ -139,21 +151,15 @@ impl ShadowTxGenerator<'_> {
 
         // Skip processing if no proofs (nothing to reward)
         if proofs.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(BTreeMap::new());
         }
 
-        // Process all transactions and aggregate rewards
+        // Process all transactions (MUST BE SORTED)
         for tx in &self.publish_ledger.txs {
             // CRITICAL: All publish ledger txs MUST have perm_fee
-            let perm_fee = match tx.perm_fee {
-                Some(fee) => fee,
-                None => {
-                    return Err(eyre!(
-                        "Critical: publish ledger tx {} missing perm_fee",
-                        tx.id
-                    ));
-                }
-            };
+            let perm_fee = tx
+                .perm_fee
+                .ok_or_eyre("publish ledger tx missing perm_fee")?;
 
             // Calculate fee distribution using PublishFeeCharges
             // PublishFeeCharges::new will return an error if perm_fee is insufficient
@@ -248,8 +254,9 @@ impl ShadowTxGenerator<'_> {
     /// Creates shadow transactions from aggregated rewards
     fn create_publish_shadow_txs(
         &self,
-        rewards_map: HashMap<Address, (RewardAmount, RollingHash)>,
+        rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)>,
     ) -> Result<Vec<ShadowMetadata>> {
+        // BTreeMap already maintains sorted order by address
         let shadow_txs: Vec<ShadowMetadata> = rewards_map
             .into_iter()
             .map(|(address, (reward_amount, rolling_hash))| {
@@ -439,5 +446,481 @@ impl RollingHash {
 
     fn to_bytes(self) -> [u8; 32] {
         self.0.to_be_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_primitives::CommitmentType;
+    use irys_types::{
+        ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
+        Signature, H256,
+    };
+    use itertools::Itertools;
+    use openssl::sha;
+
+    fn create_test_commitment(
+        commitment_type: CommitmentType,
+        value: U256,
+        fee: u64,
+    ) -> CommitmentTransaction {
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+        CommitmentTransaction {
+            id: H256::from([7u8; 32]),
+            commitment_type,
+            anchor: H256::from([8u8; 32]),
+            signer: signer.address(),
+            value,
+            fee,
+            signature: IrysSignature::new(Signature::try_from([0u8; 65].as_slice()).unwrap()),
+            version: 1,
+            chain_id: config.chain_id,
+        }
+    }
+
+    fn create_data_tx_header(
+        signer: &IrysSigner,
+        term_fee: U256,
+        perm_fee: Option<U256>,
+    ) -> DataTransactionHeader {
+        let data = vec![0u8; 1024];
+        let anchor = Some(H256::from([9u8; 32]));
+
+        // Always create with perm_fee for publish ledger (ledger_id = 0)
+        // The tests simulate the actual usage where submit txs have been promoted to publish
+        let actual_perm_fee = perm_fee.unwrap_or_else(|| {
+            // If no perm_fee specified, calculate minimum required for ingress proofs
+            let config = ConsensusConfig::testing();
+            let ingress_reward_per_proof =
+                (term_fee * config.miner_fee_percentage.amount) / U256::from(10000);
+            let total_ingress_reward =
+                ingress_reward_per_proof * U256::from(config.number_of_ingress_proofs);
+            U256::from(1000000) + total_ingress_reward
+        });
+
+        let tx = signer
+            .create_publish_transaction(data, anchor, actual_perm_fee, term_fee)
+            .expect("Failed to create publish transaction");
+
+        // Modify the header to reflect the original perm_fee intent
+        let mut header = tx.header;
+        header.perm_fee = perm_fee;
+        header
+    }
+
+    fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
+        // Create proof hash
+        let proof = H256::from([12u8; 32]);
+        let chain_id = 1u64;
+
+        // Create the message that would be signed
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&proof.0);
+        hasher.update(&data_root.0);
+        hasher.update(&chain_id.to_be_bytes());
+        let prehash = hasher.finish();
+
+        // Sign the message with the signer's internal signing key
+        // Note: sign_prehash_recoverable is a method on k256::ecdsa::SigningKey
+        let signature: Signature = signer
+            .signer
+            .sign_prehash_recoverable(&prehash)
+            .unwrap()
+            .into();
+
+        IngressProof {
+            signature: IrysSignature::new(signature),
+            data_root,
+            proof,
+            chain_id,
+        }
+    }
+
+    #[test]
+    fn test_header_only() {
+        let config = ConsensusConfig::testing();
+        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_height = 101;
+        let reward_address = Address::from([20u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(2000000);
+        let mut publish_ledger = PublishLedgerWithTxs {
+            txs: vec![],
+            proofs: None,
+        };
+
+        // Create expected shadow transactions
+        let expected_shadow_txs: Vec<ShadowMetadata> = vec![ShadowMetadata {
+            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                BlockRewardIncrement {
+                    amount: reward_amount.into(),
+                },
+            )),
+            transaction_fee: 0,
+        }];
+
+        let generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &config,
+            &[],
+            &[],
+            &mut publish_ledger,
+            initial_treasury,
+        );
+
+        // Compare actual with expected
+        generator
+            .zip_eq(expected_shadow_txs.into_iter())
+            .for_each(|(actual, expected)| {
+                let actual = actual.expect("Should be Ok");
+                assert_eq!(actual, expected);
+            });
+    }
+
+    #[test]
+    fn test_three_commitments() {
+        let config = ConsensusConfig::testing();
+        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_height = 101;
+        let reward_address = Address::from([20u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(2000000);
+
+        let commitments = vec![
+            create_test_commitment(CommitmentType::Stake, U256::from(100000), 1000),
+            create_test_commitment(
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: 2,
+                },
+                U256::from(200000),
+                2000,
+            ),
+            create_test_commitment(CommitmentType::Unstake, U256::from(150000), 500),
+            create_test_commitment(
+                CommitmentType::Unpledge {
+                    pledge_count_before_executing: 1,
+                },
+                U256::from(180000),
+                1500,
+            ),
+        ];
+
+        let mut publish_ledger = PublishLedgerWithTxs {
+            txs: vec![],
+            proofs: None,
+        };
+
+        // Create expected shadow transactions for all commitment types
+        let expected_shadow_txs: Vec<ShadowMetadata> = vec![
+            // Block reward
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                    BlockRewardIncrement {
+                        amount: reward_amount.into(),
+                    },
+                )),
+                transaction_fee: 0,
+            },
+            // Stake
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
+                    amount: U256::from(101000).into(), // 100000 + 1000 fee
+                    target: commitments[0].signer,
+                    irys_ref: commitments[0].id.into(),
+                })),
+                transaction_fee: 1000,
+            },
+            // Pledge
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
+                    amount: U256::from(202000).into(), // 200000 + 2000 fee
+                    target: commitments[1].signer,
+                    irys_ref: commitments[1].id.into(),
+                })),
+                transaction_fee: 2000,
+            },
+            // Unstake (150000 - 500 fee = 149500 increment)
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unstake(
+                    EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
+                        amount: U256::from(149500).into(), // 150000 - 500 fee
+                        target: commitments[2].signer,
+                        irys_ref: commitments[2].id.into(),
+                    }),
+                )),
+                transaction_fee: 500,
+            },
+            // Unpledge (180000 - 1500 fee = 178500 increment)
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(
+                    EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
+                        amount: U256::from(178500).into(), // 180000 - 1500 fee
+                        target: commitments[3].signer,
+                        irys_ref: commitments[3].id.into(),
+                    }),
+                )),
+                transaction_fee: 1500,
+            },
+        ];
+
+        let generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &config,
+            &commitments,
+            &[],
+            &mut publish_ledger,
+            initial_treasury,
+        );
+
+        // Compare actual with expected
+        generator
+            .zip_eq(expected_shadow_txs.into_iter())
+            .for_each(|(actual, expected)| {
+                let actual = actual.expect("Should be Ok");
+                assert_eq!(actual, expected);
+            });
+    }
+
+    #[test]
+    fn test_one_submit_tx() {
+        let config = ConsensusConfig::testing();
+        let parent_block = IrysBlockHeader::new_mock_header();
+        let signer = IrysSigner::random_signer(&config);
+
+        let term_fee = U256::from(20000);
+        let submit_tx = create_data_tx_header(&signer, term_fee, None);
+        let submit_txs = vec![submit_tx.clone()];
+
+        let block_height = 101;
+        let reward_address = Address::from([20u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(2000000);
+        let mut publish_ledger = PublishLedgerWithTxs {
+            txs: vec![],
+            proofs: None,
+        };
+
+        // Calculate expected values
+        let term_charges = TermFeeCharges::new(term_fee, &config).unwrap();
+
+        // Create expected shadow transactions directly
+        let expected_shadow_txs: Vec<ShadowMetadata> = vec![
+            // Block reward
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                    BlockRewardIncrement {
+                        amount: reward_amount.into(),
+                    },
+                )),
+                transaction_fee: 0,
+            },
+            // Storage fee for the submit transaction
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
+                    BalanceDecrement {
+                        amount: submit_tx.total_cost().into(),
+                        target: submit_tx.signer,
+                        irys_ref: submit_tx.id.into(),
+                    },
+                )),
+                transaction_fee: term_charges.block_producer_reward.low_u128(),
+            },
+        ];
+
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &config,
+            &[],
+            &submit_txs,
+            &mut publish_ledger,
+            initial_treasury,
+        );
+
+        // Compare actual with expected
+        generator
+            .by_ref()
+            .zip_eq(expected_shadow_txs.into_iter())
+            .for_each(|(actual, expected)| {
+                let actual = actual.expect("Should be Ok");
+                assert_eq!(actual, expected);
+            });
+
+        // Verify treasury increased by the expected amount
+        let expected_treasury = initial_treasury + term_charges.term_fee_treasury;
+        assert_eq!(generator.treasury_balance(), expected_treasury);
+    }
+
+    #[test]
+    fn test_btreemap_maintains_sorted_order() {
+        // Quick test to verify BTreeMap maintains sorted order
+        let mut rewards_map: BTreeMap<Address, u32> = BTreeMap::new();
+
+        // Insert addresses in random order
+        let addr1 = Address::from([5u8; 20]);
+        let addr2 = Address::from([1u8; 20]);
+        let addr3 = Address::from([9u8; 20]);
+
+        rewards_map.insert(addr3, 3);
+        rewards_map.insert(addr1, 1);
+        rewards_map.insert(addr2, 2);
+
+        // Verify they come out sorted
+        let addresses: Vec<Address> = rewards_map.keys().copied().collect();
+        assert_eq!(addresses[0], addr2); // Smallest address first
+        assert_eq!(addresses[1], addr1);
+        assert_eq!(addresses[2], addr3); // Largest address last
+    }
+
+    #[test]
+    fn test_one_publish_tx_with_aggregated_proofs() {
+        let config = ConsensusConfig::testing();
+        let parent_block = IrysBlockHeader::new_mock_header();
+
+        // Calculate proper fees for publish transaction
+        let term_fee = U256::from(30000);
+        // We need to account for 4 proofs now
+        let ingress_reward_per_proof =
+            (term_fee * config.miner_fee_percentage.amount) / U256::from(10000);
+        let total_ingress_reward = ingress_reward_per_proof * U256::from(4); // 4 proofs total
+        let perm_fee = U256::from(1000000) + total_ingress_reward;
+
+        // Create transaction signer
+        let tx_signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
+        let submit_txs = vec![publish_tx.clone()];
+
+        // Create three different proof signers
+        let proof_signer1 = IrysSigner::random_signer(&config);
+        let proof_signer2 = IrysSigner::random_signer(&config);
+        let proof_signer3 = IrysSigner::random_signer(&config);
+
+        // Create 4 proofs - signer2 has 2 proofs to test aggregation
+        let proofs = vec![
+            create_test_ingress_proof(&proof_signer1, H256::from([10u8; 32])),
+            create_test_ingress_proof(&proof_signer2, H256::from([11u8; 32])),
+            create_test_ingress_proof(&proof_signer3, H256::from([12u8; 32])),
+            create_test_ingress_proof(&proof_signer2, H256::from([13u8; 32])), // Extra proof for signer2
+        ];
+
+        let block_height = 101;
+        let reward_address = Address::from([20u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(20000000);
+        let mut publish_ledger = PublishLedgerWithTxs {
+            txs: submit_txs.clone(),
+            proofs: Some(IngressProofsList(proofs.clone())),
+        };
+
+        // Calculate expected values
+        let term_charges = TermFeeCharges::new(term_fee, &config).unwrap();
+
+        // Since perm_fee was calculated with 4 proofs in mind
+        let publish_charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
+
+        // Calculate individual ingress rewards (4 proofs total)
+        let base_reward_per_proof = publish_charges.ingress_proof_reward / U256::from(4);
+        let remainder = publish_charges.ingress_proof_reward % U256::from(4);
+
+        // Calculate aggregated rewards per signer
+        // signer1: 1 proof = base_reward + remainder (first proof gets remainder)
+        // signer2: 2 proofs = base_reward * 2
+        // signer3: 1 proof = base_reward
+        let signer1_reward = base_reward_per_proof + remainder;
+        let signer2_reward = base_reward_per_proof * U256::from(2);
+        let signer3_reward = base_reward_per_proof;
+
+        // Sort signers by address for deterministic ordering
+        let mut signer_rewards = vec![
+            (proof_signer1.address(), signer1_reward),
+            (proof_signer2.address(), signer2_reward),
+            (proof_signer3.address(), signer3_reward),
+        ];
+        signer_rewards.sort_by_key(|(addr, _)| *addr);
+
+        // Create expected shadow transactions directly
+        let expected_shadow_txs: Vec<ShadowMetadata> = vec![
+            // Block reward
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                    BlockRewardIncrement {
+                        amount: reward_amount.into(),
+                    },
+                )),
+                transaction_fee: 0,
+            },
+            // Storage fee for the publish transaction
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
+                    BalanceDecrement {
+                        amount: publish_tx.total_cost().into(),
+                        target: publish_tx.signer,
+                        irys_ref: publish_tx.id.into(),
+                    },
+                )),
+                transaction_fee: term_charges.block_producer_reward.low_u128(),
+            },
+            // Ingress proof rewards (aggregated by signer, sorted by address)
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
+                    BalanceIncrement {
+                        amount: signer_rewards[0].1.into(),
+                        target: signer_rewards[0].0,
+                        irys_ref: H256::from(publish_tx.id.0).into(),
+                    },
+                )),
+                transaction_fee: 0,
+            },
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
+                    BalanceIncrement {
+                        amount: signer_rewards[1].1.into(),
+                        target: signer_rewards[1].0,
+                        irys_ref: H256::from(publish_tx.id.0).into(),
+                    },
+                )),
+                transaction_fee: 0,
+            },
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
+                    BalanceIncrement {
+                        amount: signer_rewards[2].1.into(),
+                        target: signer_rewards[2].0,
+                        irys_ref: H256::from(publish_tx.id.0).into(),
+                    },
+                )),
+                transaction_fee: 0,
+            },
+        ];
+
+        let generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &config,
+            &[],
+            &submit_txs,
+            &mut publish_ledger,
+            initial_treasury,
+        );
+
+        // Compare actual with expected
+        generator
+            .zip_eq(expected_shadow_txs.into_iter())
+            .for_each(|(actual, expected)| {
+                let actual = actual.expect("Should be Ok");
+                assert_eq!(actual, expected);
+            });
     }
 }

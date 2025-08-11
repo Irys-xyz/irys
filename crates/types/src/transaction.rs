@@ -116,6 +116,19 @@ pub struct DataTransactionHeader {
     pub ingress_proofs: Option<IngressProof>,
 }
 
+/// Ordering for DataTransactionHeader by transaction ID
+impl Ord for DataTransactionHeader {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for DataTransactionHeader {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl DataTransactionHeader {
     /// RLP Encoding of Transactions for Signing
     ///
