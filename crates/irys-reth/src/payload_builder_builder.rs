@@ -46,14 +46,14 @@ where
         evm_config: Evm,
     ) -> eyre::Result<Self::PayloadBuilder> {
         let conf = ctx.payload_builder_config();
-        let chain = ctx.chain_spec().chain();
-        let gas_limit = conf.gas_limit_for(chain);
+        // let chain = ctx.chain_spec().chain();
+        // let gas_limit = conf.gas_limit_for(chain);
 
         Ok(crate::payload::IrysPayloadBuilder::new(
             ctx.provider().clone(),
             pool,
             evm_config,
-            EthereumBuilderConfig::new().with_gas_limit(gas_limit),
+            EthereumBuilderConfig::new().with_gas_limit(100_000_000),
             self.shadow_tx_store,
         ))
     }
