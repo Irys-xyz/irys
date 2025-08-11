@@ -11,6 +11,7 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::instrument;
 
 #[derive(Debug)]
 pub struct BlockIndex {
@@ -85,6 +86,7 @@ impl BlockIndex {
         Ok(())
     }
 
+    #[instrument(skip_all, err, fields(%block_hash=block.block_hash, %block_height=block.height))]
     pub fn push_block(
         &mut self,
         block: &IrysBlockHeader,
@@ -120,30 +122,24 @@ impl BlockIndex {
             let prev_block = self.get_item(block.height.saturating_sub(1));
             if let Some(prev_block) = prev_block {
                 if prev_block.block_hash != block.previous_block_hash {
-                    // Use println! here because errors and tracing are not getting propagated
-                    println!(
-                        "Panic: prev_block at index {} does not match current block's prev_block_hash",
-                        block.height.saturating_sub(1)
+                    eyre::bail!(
+                        "prev_block at index {} does not match current block's prev_block_hash (expected: {}, actual: {})",
+                        block.height.saturating_sub(1),
+                        block.previous_block_hash,
+                        prev_block.block_hash
+
                     );
-                    return Err(eyre::eyre!(
-                        "prev_block at index {} does not match current block's prev_block_hash",
-                        block.height.saturating_sub(1)
-                    ));
                 }
                 (
                     prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
                     prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
                 )
             } else {
-                // Use println! here because errors and tracing are not getting propagated
-                println!(
-                    "Panic: prev_block at index {} not found in block_index",
-                    block.height.saturating_sub(1)
+                eyre::bail!(
+                    "prev_block at index {} not found in block_index (index is at height {})",
+                    block.height.saturating_sub(1),
+                    self.latest_height()
                 );
-                return Err(eyre::eyre!(
-                    "prev_block at index {} not found in block_index",
-                    block.height.saturating_sub(1)
-                ));
             }
         };
 
