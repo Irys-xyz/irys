@@ -244,7 +244,12 @@ async fn heavy_double_root_data_promotion_test() {
             .expect("Failed to get price");
 
         let tx = s
-            .create_publish_transaction(data, Some(block1.block_hash), price_info.perm_fee, price_info.term_fee)
+            .create_publish_transaction(
+                data,
+                Some(block1.block_hash),
+                price_info.perm_fee,
+                price_info.term_fee,
+            )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());

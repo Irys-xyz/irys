@@ -289,10 +289,37 @@ impl Inner {
             has_funds
         };
 
-        // Get a list of all recently confirmed commitment txids in the canonical chain
-        let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        // Get all necessary snapshots and canonical chain info in a single read operation
+        let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
+            let tree = self.block_tree_read_guard.read();
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block = canonical
+                .last()
+                .ok_or_eyre("Empty canonical chain")?
+                .clone();
 
-        let last_block = canonical.last().ok_or_eyre("Empty canonical chain")?;
+            // Get the tip block hash (should match last_block in canonical chain)
+            let tip = tree.tip;
+
+            // Get all snapshots for the tip block
+            let ema_snapshot = tree
+                .get_ema_snapshot(&tip)
+                .ok_or_else(|| eyre!("EMA snapshot not found for tip block"))?;
+            let epoch_snapshot = tree
+                .get_epoch_snapshot(&tip)
+                .ok_or_else(|| eyre!("Epoch snapshot not found for tip block"))?;
+            let commitment_snapshot = tree
+                .get_commitment_snapshot(&tip)
+                .map_err(|e| eyre!("Failed to get commitment snapshot: {}", e))?;
+
+            (
+                canonical,
+                last_block,
+                commitment_snapshot,
+                epoch_snapshot,
+                ema_snapshot,
+            )
+        };
 
         info!(
             head_height = last_block.height,
@@ -334,13 +361,7 @@ impl Inner {
 
         // Process sorted commitments
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
-        let mut simulation_commitment_snapshot = self
-            .block_tree_read_guard
-            .read()
-            .canonical_commitment_snapshot()
-            .as_ref()
-            .clone();
-        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+        let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
@@ -359,11 +380,6 @@ impl Inner {
 
             // signer stake status check
             if matches!(tx.commitment_type, CommitmentType::Stake) {
-                let epoch_snapshot = self
-                    .block_tree_read_guard
-                    .read()
-                    .get_epoch_snapshot(&last_block.block_hash)
-                    .expect("parent blocks epoch_snapshot should be retrievable");
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
                 debug!(
                     tx_id = ?tx.id,
@@ -457,6 +473,85 @@ impl Inner {
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
+            // Validate fees based on ledger type
+            if let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) {
+                match ledger {
+                    irys_types::DataLedger::Publish => {
+                        // For Publish ledger, validate both term and perm fees
+                        // Calculate expected fees based on current EMA
+                        let expected_term_fee =
+                            match self.calculate_term_storage_fee(tx.data_size, &ema_snapshot) {
+                                Ok(fee) => fee,
+                                Err(e) => {
+                                    trace!(
+                                        tx_id = ?tx.id,
+                                        error = ?e,
+                                        "Failed to calculate expected term fee"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                        let expected_perm_fee =
+                            match self.calculate_perm_storage_fee(tx.data_size, &ema_snapshot) {
+                                Ok(fee) => fee,
+                                Err(e) => {
+                                    trace!(
+                                        tx_id = ?tx.id,
+                                        error = ?e,
+                                        "Failed to calculate expected perm fee"
+                                    );
+                                    continue;
+                                }
+                            };
+
+                        // Validate term fee
+                        if tx.term_fee < expected_term_fee {
+                            trace!(
+                                tx_id = ?tx.id,
+                                actual_term_fee = ?tx.term_fee,
+                                expected_term_fee = ?expected_term_fee,
+                                "Skipping Publish tx: insufficient term_fee"
+                            );
+                            continue;
+                        }
+
+                        // Validate perm fee must be present for Publish ledger
+                        if let Some(perm_fee) = tx.perm_fee {
+                            if perm_fee < expected_perm_fee.amount {
+                                trace!(
+                                    tx_id = ?tx.id,
+                                    actual_perm_fee = ?perm_fee,
+                                    expected_perm_fee = ?expected_perm_fee.amount,
+                                    "Skipping Publish tx: insufficient perm_fee"
+                                );
+                                continue;
+                            }
+                        } else {
+                            // Missing perm_fee for Publish ledger transaction is invalid
+                            warn!(
+                                tx_id = ?tx.id,
+                                signer = ?tx.signer,
+                                "Invalid Publish tx: missing perm_fee - treating as unfunded"
+                            );
+                            // Skip this transaction - it will be filtered out by check_funding
+                            // since we treat missing perm_fee as equivalent to being unfunded
+                            continue;
+                        }
+                    }
+                    irys_types::DataLedger::Submit => {
+                        // todo: add to list of invalid txs because we don't support Submit txs
+                    }
+                }
+            } else {
+                trace!(
+                    tx_id = ?tx.id,
+                    ledger_id = tx.ledger_id,
+                    "Skipping tx: invalid ledger type"
+                );
+                continue;
+            }
+
             trace!(
                 tx_id = ?tx.id,
                 signer = ?tx.signer(),
@@ -876,18 +971,11 @@ impl Inner {
     pub fn calculate_perm_storage_fee(
         &self,
         bytes_to_store: u64,
+        ema: &Arc<irys_domain::EmaSnapshot>,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
-        // Get the latest EMA to use for pricing
-        let tree = self.block_tree_read_guard.read();
-        let tip = tree.tip;
-        let ema = tree.get_ema_snapshot(&tip).ok_or_else(|| {
-            TxIngressError::Other("tip block should still remain in state".to_string())
-        })?;
-        drop(tree);
-
         // Calculate the cost per GB (take into account replica count & cost per replica)
         let base_network_fee =
-            calculate_perm_storage_base_network_fee(bytes_to_store, &ema, &self.config)
+            calculate_perm_storage_base_network_fee(bytes_to_store, ema, &self.config)
                 .map_err(TxIngressError::other_display)?;
 
         Ok(base_network_fee)
@@ -896,7 +984,11 @@ impl Inner {
     /// Calculate the expected term fee for temporary storage
     /// This matches the calculation in the pricing API
     /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
-    pub fn calculate_term_storage_fee(&self, _bytes_to_store: u64) -> Result<U256, TxIngressError> {
+    pub fn calculate_term_storage_fee(
+        &self,
+        _bytes_to_store: u64,
+        _ema: &Arc<irys_domain::EmaSnapshot>,
+    ) -> Result<U256, TxIngressError> {
         // Placeholder implementation matching price.rs
         Ok(U256::from(1_000_000_000))
     }

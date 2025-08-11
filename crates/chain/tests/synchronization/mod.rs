@@ -74,7 +74,12 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .expect("Failed to get price");
 
     let tx = account1
-        .create_publish_transaction(data_bytes.clone(), None, price_info.perm_fee, price_info.term_fee)
+        .create_publish_transaction(
+            data_bytes.clone(),
+            None,
+            price_info.perm_fee,
+            price_info.term_fee,
+        )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
 

@@ -10,7 +10,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256, U256,
+    IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;
@@ -91,33 +91,27 @@ impl Inner {
         match ledger {
             DataLedger::Publish => {
                 // Publish ledger - permanent storage
-                // Calculate expected perm_fee based on data size
-                let expected_fee = self.calculate_perm_storage_fee(tx.data_size)?;
-                let expected_perm_fee = expected_fee.amount;
+                //
+                // IMPORTANT: We do NOT calculate or validate exact fee amounts here.
+                // The EMA (Exponential Moving Average) used for pricing can change between:
+                // 1. When the transaction was created by the client
+                // 2. When it arrives at this node for ingestion
+                //
+                // Additionally, different forks may have different EMA values, causing
+                // the same transaction to have different expected fees on different chains.
+                //
+                // Instead, we only validate that the fee structure can be properly
+                // reconstructed and distributed according to protocol rules.
 
-                // Validate perm_fee matches exactly the expected amount
-                let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
-                if actual_perm_fee != expected_perm_fee {
-                    return Err(TxIngressError::IncorrectProtocolFee {
-                        expected: expected_perm_fee,
-                        actual: actual_perm_fee,
-                    });
-                }
+                let actual_perm_fee = tx.perm_fee.ok_or(TxIngressError::Other(
+                    "Perm fee must be present".to_string(),
+                ))?;
 
-                // Validate term_fee matches exactly the expected calculation
-                let expected_term_fee = self.calculate_term_storage_fee(tx.data_size)?;
-                let actual_term_fee = U256::from(tx.term_fee);
-
-                // Term fee must be exactly the expected amount - deterministic pricing
-                if actual_term_fee != expected_term_fee {
-                    return Err(TxIngressError::IncorrectProtocolFee {
-                        expected: expected_term_fee,
-                        actual: actual_term_fee,
-                    });
-                }
+                let actual_term_fee = tx.term_fee;
 
                 // Validate that fee distribution objects can be created successfully
-                // This ensures the fee structure is internally consistent
+                // This ensures the fee structure is internally consistent and can be
+                // properly distributed to block producers, ingress proof providers, etc.
 
                 // Validate term fee distribution structure
                 TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
@@ -322,6 +316,7 @@ impl Inner {
     /// - Only examines blocks within the configured `anchor_expiry_depth`
     pub async fn get_pending_submit_ledger_txs(&self) -> Vec<DataTransactionHeader> {
         // Get the current canonical chain head to establish our starting point for block traversal
+        // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
         let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())
             .await
             .unwrap();

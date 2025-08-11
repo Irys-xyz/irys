@@ -25,9 +25,12 @@ use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::Amount;
 use irys_types::BlockHash;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
-    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256, U256,
+    app_state::DatabaseProvider,
+    calculate_difficulty, next_cumulative_diff,
+    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
+    validate_path, Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
+    PoaData, H256, U256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -1005,6 +1008,19 @@ pub fn calculate_perm_storage_base_network_fee(
     Ok(base_network_fee)
 }
 
+/// Helper function to calculate term storage fee using a specific EMA snapshot
+/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
+/// when term storage pricing is fully implemented
+pub fn calculate_term_storage_base_network_fee(
+    _bytes_to_store: u64,
+    _ema_snapshot: &EmaSnapshot,
+    _config: &Config,
+) -> eyre::Result<U256> {
+    // Placeholder implementation matching the mempool service
+    // Returns a fixed value until proper term fee calculation is implemented
+    Ok(U256::from(1_000_000_000))
+}
+
 /// Validates that data transactions in a block are correctly placed and have valid properties
 /// based on their ledger placement (Submit or Publish) and ingress proof availability
 /// TODO: All of the warnings below should actually be transformed to hard errors!
@@ -1151,21 +1167,51 @@ pub async fn data_txs_are_valid(
             tx.ledger_id
         );
 
-        // Calculate expected perm_fee based on data size using block's EMA
+        // Calculate expected fees based on data size using block's EMA
         let expected_perm_fee =
             calculate_perm_storage_base_network_fee(tx.data_size, &block_ema, config)?;
+        let expected_term_fee =
+            calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)?;
 
         // Validate perm_fee is at least the expected amount
-        let actual_perm_fee = U256::from(tx.perm_fee.unwrap_or(0));
+        let actual_perm_fee = tx.perm_fee.unwrap_or(U256::zero());
         ensure!(
             actual_perm_fee >= expected_perm_fee.amount,
             "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
             tx.id,
-            expected_perm_fee,
+            expected_perm_fee.amount,
             actual_perm_fee
         );
 
-        // TODO: validate term fee once we have support for them
+        // Validate term_fee is at least the expected amount
+        let actual_term_fee = tx.term_fee;
+        ensure!(
+            actual_term_fee >= expected_term_fee,
+            "Transaction {} has insufficient term_fee. Expected at least: {}, Actual: {}",
+            tx.id,
+            expected_term_fee,
+            actual_term_fee
+        );
+
+        // Validate fee distribution structures can be created successfully
+        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
+        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+            eyre::eyre!(
+                "Transaction {} has invalid term fee structure: {}",
+                tx.id,
+                e
+            )
+        })?;
+
+        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
+            |e| {
+                eyre::eyre!(
+                    "Transaction {} has invalid perm fee structure: {}",
+                    tx.id,
+                    e
+                )
+            },
+        )?;
 
         match current_ledger {
             DataLedger::Publish => {
@@ -1232,6 +1278,8 @@ pub async fn data_txs_are_valid(
             );
         }
     }
+
+    // TODO: validate that block.beneficiary is correctly updated
 
     debug!("Data transaction validation successful");
     Ok(())

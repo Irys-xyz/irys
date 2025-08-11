@@ -31,7 +31,7 @@ pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
-use eyre::{ensure, eyre};
+use eyre::{ensure, eyre, OptionExt};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
@@ -62,11 +62,12 @@ impl TermFeeCharges {
     pub fn new(term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
         // Calculate block producer reward using miner_fee_percentage from config
         let block_producer_reward =
-            mul_div(term_fee, config.miner_fee_percentage.amount, BPS_SCALE)
-                .unwrap_or(U256::from(0));
+            mul_div(term_fee, config.miner_fee_percentage.amount, BPS_SCALE)?;
 
         // The rest of the fee goes to the treasury
-        let term_fee_treasury = term_fee.saturating_sub(block_producer_reward);
+        let term_fee_treasury = term_fee
+            .checked_sub(block_producer_reward)
+            .ok_or_eyre("block producer reward larger than term fee")?;
 
         // Validate that the sum of all the fields equals term_fee
         ensure!(
@@ -221,10 +222,10 @@ impl PublishFeeCharges {
         }
 
         // Validate that we're distributing exactly what was allocated
-        let total_distributed: U256 = fee_charges
-            .iter()
-            .map(|fc| fc.amount)
-            .fold(U256::from(0), super::super::serialization::U256::saturating_add);
+        let total_distributed: U256 = fee_charges.iter().map(|fc| fc.amount).fold(
+            U256::from(0),
+            super::super::serialization::U256::saturating_add,
+        );
 
         ensure!(
             total_distributed == self.ingress_proof_reward,

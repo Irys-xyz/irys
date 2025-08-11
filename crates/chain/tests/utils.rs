@@ -1469,7 +1469,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("Failed to get price");
 
         let tx = signer
-            .create_publish_transaction(data, Some(anchor), price_info.perm_fee, price_info.term_fee)
+            .create_publish_transaction(
+                data,
+                Some(anchor),
+                price_info.perm_fee,
+                price_info.term_fee,
+            )
             .expect("Expect to create a storage transaction from the data");
         let tx = signer
             .sign_transaction(tx)

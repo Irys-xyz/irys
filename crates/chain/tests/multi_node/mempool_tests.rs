@@ -27,7 +27,6 @@ use reth::{
 };
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
-use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 use tracing::debug;
@@ -69,7 +68,8 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .await
         .expect("Failed to get price");
 
-    let tx = signer.create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)?;
+    let tx =
+        signer.create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)?;
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks

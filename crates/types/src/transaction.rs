@@ -87,8 +87,7 @@ pub struct DataTransactionHeader {
     pub data_size: u64,
 
     /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
-    #[serde(with = "string_u64")]
-    pub term_fee: u64,
+    pub term_fee: U256,
 
     /// Destination ledger for the transaction, default is 0 - Permanent Ledger
     pub ledger_id: u32,
@@ -106,8 +105,8 @@ pub struct DataTransactionHeader {
     pub bundle_format: Option<u64>,
 
     /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
-    #[serde(default, with = "optional_string_u64")]
-    pub perm_fee: Option<u64>,
+    #[serde(default)]
+    pub perm_fee: Option<U256>,
 
     /// INTERNAL: Signed ingress proofs used to promote this transaction to the Publish ledger
     /// TODO: put these somewhere else?
@@ -188,7 +187,7 @@ impl DataTransactionHeader {
             signer: Address::default(),
             data_root: H256::zero(),
             data_size: 0,
-            term_fee: 0,
+            term_fee: U256::zero(),
             perm_fee: None,
             ledger_id: 0,
             bundle_format: None,
@@ -520,7 +519,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
     }
 
     fn signer(&self) -> Address {
@@ -537,7 +536,8 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn user_fee(&self) -> U256 {
         // Return term_fee as the user fee for prioritization
-        U256::from(self.term_fee)
+        // todo: use TermFeeCharges to get the fee that will go to the miner
+        self.term_fee
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -880,8 +880,8 @@ mod tests {
             serde_json::from_str(json_current_format).expect("Failed to deserialize");
 
         // Verify fields
-        assert_eq!(deserialized.term_fee, 100);
-        assert_eq!(deserialized.perm_fee, Some(200));
+        assert_eq!(deserialized.term_fee, U256::from(100));
+        assert_eq!(deserialized.perm_fee, Some(U256::from(200)));
     }
 
     #[test]
@@ -967,8 +967,8 @@ mod tests {
             signer: Address::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
-            term_fee: 100,
-            perm_fee: Some(200),
+            term_fee: U256::from(100),
+            perm_fee: Some(U256::from(200)),
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,

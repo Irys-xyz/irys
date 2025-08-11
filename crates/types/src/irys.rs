@@ -48,8 +48,8 @@ impl IrysSigner {
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
-        transaction.header.perm_fee = Some(1);
-        transaction.header.term_fee = 1;
+        transaction.header.perm_fee = Some(U256::from(1));
+        transaction.header.term_fee = U256::from(1);
 
         // Fetch and set last_tx if not provided (primarily for testing).
         #[expect(clippy::manual_unwrap_or_default, reason = "TODO")]
@@ -75,15 +75,10 @@ impl IrysSigner {
     ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize)?;
 
-        // Set the provided fees, converting from U256 to u64
+        // Set the provided fees directly as U256
         transaction.header.ledger_id = ledger as u32;
-        transaction.header.term_fee = term_fee
-            .try_into()
-            .map_err(|_| eyre::eyre!("term_fee exceeds u64::MAX"))?;
-        transaction.header.perm_fee = perm_fee
-            .map(std::convert::TryInto::try_into)
-            .transpose()
-            .map_err(|_| eyre::eyre!("perm_fee exceeds u64::MAX"))?;
+        transaction.header.term_fee = term_fee;
+        transaction.header.perm_fee = perm_fee;
 
         // Fetch and set anchor if not provided
         let anchor = anchor.unwrap_or_default();

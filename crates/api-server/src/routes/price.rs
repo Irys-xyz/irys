@@ -111,6 +111,7 @@ fn cost_of_perm_storage(
 /// The fee distribution logic from fee_distribution.rs is applied here
 /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION
 fn calculate_term_fee(_bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
+    // todo: when doing the calculations, if the final fee is lower than $0.01 then we must round upwards
     U256::from(1_000_000_000)
 }
 
