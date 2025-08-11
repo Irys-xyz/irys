@@ -100,6 +100,14 @@ pub async fn prevalidate_block(
         "difficulty_is_valid",
     );
 
+    // Validate previous_cumulative_diff points to parent's cumulative_diff
+    previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "previous_cumulative_difficulty_is_valid",
+    );
+
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
@@ -321,6 +329,22 @@ pub fn cumulative_difficulty_is_valid(
             "Invalid cumulative_difficulty (expected {}, got {})",
             &cumulative_diff,
             &block.cumulative_diff
+        ))
+    }
+}
+
+/// Validates that the block's previous_cumulative_diff equals the parent's cumulative_diff
+pub fn previous_cumulative_difficulty_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    if block.previous_cumulative_diff == previous_block.cumulative_diff {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid previous_cumulative_diff (expected {} got {})",
+            previous_block.cumulative_diff,
+            block.previous_cumulative_diff
         ))
     }
 }
@@ -1745,6 +1769,34 @@ mod tests {
 
         assert!(
             last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_err()
+        );
+    }
+
+    #[test]
+    fn previous_cumulative_difficulty_validates_match() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.cumulative_diff = U256::from(12345);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.previous_cumulative_diff = prev.cumulative_diff;
+
+        assert!(
+            previous_cumulative_difficulty_is_valid(&block, &prev).is_ok(),
+            "expected previous_cumulative_diff to match parent's cumulative_diff"
+        );
+    }
+
+    #[test]
+    fn previous_cumulative_difficulty_detects_mismatch() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.cumulative_diff = U256::from(12345);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.previous_cumulative_diff = U256::from(9999);
+
+        assert!(
+            previous_cumulative_difficulty_is_valid(&block, &prev).is_err(),
+            "expected mismatch to be detected"
         );
     }
 }
