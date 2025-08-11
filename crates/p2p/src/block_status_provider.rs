@@ -166,6 +166,10 @@ impl BlockStatusProvider {
         let binding = self.block_index_read_guard.read();
         binding.get_latest_item().cloned()
     }
+
+    pub fn index_height(&self) -> u64 {
+        self.block_index_read_guard.read().latest_height()
+    }
 }
 
 /// Testing utilities for `BlockStatusProvider` to simulate different tree/index states.

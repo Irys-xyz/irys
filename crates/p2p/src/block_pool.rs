@@ -693,6 +693,17 @@ where
                 current_block_hash
             );
 
+            let latest_block_in_the_index = self.block_status_provider.index_height();
+
+            if current_block_height > latest_block_in_the_index + u64::from(self.config.consensus.block_migration_depth * 2) {
+                warn!(
+                    "Block pool: The block {:?} (height {}) is too far ahead of the latest block in the index (height {}). This might indicate a potential issue.",
+                    current_block_hash, current_block_height, latest_block_in_the_index
+                );
+
+                return Ok(());
+            }
+
             // Use the orphan processing service to request parent block (fire and forget)
             let _ = self.orphan_processing_sender.send(
                 OrphanBlockProcessingMessage::RequestParentBlock {
