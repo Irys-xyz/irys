@@ -905,16 +905,21 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // check balances in block b2
     // Only 1 Submit tx from node B should be in block b2
-    // The transaction fee includes term_fee + perm_fee (miner_fee has been removed)
+    // The transaction fee includes term_fee + perm_fee
     let peer_b_total_fee = peer_b_b2_submit_tx.header.term_fee
         + peer_b_b2_submit_tx.header.perm_fee.unwrap_or(U256::zero());
 
-    // Miner fees have been removed from the protocol
-    let peer_b_miner_fee = U256::from(0);
+    // Calculate block producer reward (5% of term_fee) that b_signer receives as the miner
+    let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+        peer_b_b2_submit_tx.header.term_fee,
+        &node_b.node_ctx.config.consensus,
+    )?;
+    let block_producer_reward = term_charges.block_producer_reward;
 
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
-        signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee + peer_b_miner_fee,
+        signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee
+            + block_producer_reward,
         "Address: {:?}",
         b_signer.address()
     );
@@ -926,12 +931,30 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     );
 
     // check balances in block b3
-    // The same Submit tx is promoted to Publish in block b3, no additional fee is charged
+    // The same Submit tx is promoted to Publish in block b3
+    // When a tx gets promoted to publish ledger, the node that gossips ingress proofs gets rewards
+    // Since b_signer posted the chunk AND mined the block, they get:
+    // 1. The ingress proof reward as the proof provider
+    // 2. Block producer continues to get the term fee reward from b2
+
+    // Calculate publish fee rewards if the transaction has perm_fee
+    let perm_fee = peer_b_b2_submit_tx.header.perm_fee.unwrap();
+    // Calculate publish fee charges for ingress proof rewards
+    let publish_charges = irys_types::transaction::fee_distribution::PublishFeeCharges::new(
+        perm_fee,
+        peer_b_b2_submit_tx.header.term_fee,
+        &node_b.node_ctx.config.consensus,
+    )?;
+    // b_signer gets the ingress proof reward as they posted the chunk
+    // The total ingress proof reward is distributed among proof providers
+    let publish_rewards = publish_charges.ingress_proof_reward;
+
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block3.evm_block_hash),
         signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
             - peer_b_total_fee
-            + peer_b_miner_fee,
+            + block_producer_reward
+            + publish_rewards,
         "Address: {:?}",
         b_signer.address()
     );
@@ -946,7 +969,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     //  Node A is now at block height 2
     //  Node B is now at block height 3
     //  Node C remains at block height 1
-    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - tx_fee * 2
+    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - peer_b_total_fee + block_producer_reward + publish_rewards
     //  Signer C balance remains at genesis balance
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
@@ -1153,17 +1176,37 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         // Calculate peer C's total fee (for the tx that was included in c_block4)
         let peer_c_total_fee = peer_c_b2_submit_tx.header.term_fee
             + peer_c_b2_submit_tx.header.perm_fee.unwrap_or(U256::zero());
-        let peer_c_miner_fee = U256::from(0);
+
+        // Calculate block producer reward for peer C's transaction (c_signer receives this as miner of c_block4)
+        let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+            peer_c_b2_submit_tx.header.term_fee,
+            &node_c.node_ctx.config.consensus,
+        )?;
+        let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
+
+        // Calculate publish fee rewards for peer C's transaction if it has perm_fee
+        let perm_fee = peer_c_b2_submit_tx.header.perm_fee.unwrap();
+        let peer_c_publish_charges =
+            irys_types::transaction::fee_distribution::PublishFeeCharges::new(
+                perm_fee,
+                peer_c_b2_submit_tx.header.term_fee,
+                &node_c.node_ctx.config.consensus,
+            )?;
+        // c_signer gets the ingress proof reward as they posted the chunk
+        let peer_c_publish_rewards = peer_c_publish_charges.ingress_proof_reward;
 
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
             signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
                 - peer_b_total_fee
-                + peer_b_miner_fee,
+                + block_producer_reward
+                + publish_rewards, // Include the publish rewards from b_block3
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash),
-            signer_c_genesis_balance + c_block4.reward_amount - peer_c_total_fee + peer_c_miner_fee,
+            signer_c_genesis_balance + c_block4.reward_amount - peer_c_total_fee
+                + peer_c_block_producer_reward
+                + peer_c_publish_rewards,
         );
     }
 

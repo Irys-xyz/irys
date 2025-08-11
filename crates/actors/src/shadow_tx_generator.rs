@@ -301,7 +301,10 @@ impl ShadowTxGenerator<'_> {
                 },
             )),
             // Block producer gets their reward via transaction_fee
-            transaction_fee: term_charges.block_producer_reward.low_u128(),
+            transaction_fee: term_charges
+                .block_producer_reward
+                .try_into()
+                .map_err(|_| eyre!("Block producer reward exceeds u128 max"))?,
         })
     }
 
@@ -457,7 +460,7 @@ mod tests {
         ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
         Signature, H256,
     };
-    use itertools::Itertools;
+    use itertools::Itertools as _;
     use openssl::sha;
 
     fn create_test_commitment(
@@ -468,13 +471,13 @@ mod tests {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
         CommitmentTransaction {
-            id: H256::from([7u8; 32]),
+            id: H256::from([7_u8; 32]),
             commitment_type,
-            anchor: H256::from([8u8; 32]),
+            anchor: H256::from([8_u8; 32]),
             signer: signer.address(),
             value,
             fee,
-            signature: IrysSignature::new(Signature::try_from([0u8; 65].as_slice()).unwrap()),
+            signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
             version: 1,
             chain_id: config.chain_id,
         }
@@ -485,8 +488,8 @@ mod tests {
         term_fee: U256,
         perm_fee: Option<U256>,
     ) -> DataTransactionHeader {
-        let data = vec![0u8; 1024];
-        let anchor = Some(H256::from([9u8; 32]));
+        let data = vec![0_u8; 1024];
+        let anchor = Some(H256::from([9_u8; 32]));
 
         // Always create with perm_fee for publish ledger (ledger_id = 0)
         // The tests simulate the actual usage where submit txs have been promoted to publish
@@ -512,8 +515,8 @@ mod tests {
 
     fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
         // Create proof hash
-        let proof = H256::from([12u8; 32]);
-        let chain_id = 1u64;
+        let proof = H256::from([12_u8; 32]);
+        let chain_id = 1_u64;
 
         // Create the message that would be signed
         let mut hasher = sha::Sha256::new();
@@ -543,7 +546,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20u8; 20]);
+        let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
         let mut publish_ledger = PublishLedgerWithTxs {
@@ -575,7 +578,7 @@ mod tests {
 
         // Compare actual with expected
         generator
-            .zip_eq(expected_shadow_txs.into_iter())
+            .zip_eq(expected_shadow_txs)
             .for_each(|(actual, expected)| {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
@@ -587,7 +590,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20u8; 20]);
+        let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
 
@@ -682,7 +685,7 @@ mod tests {
 
         // Compare actual with expected
         generator
-            .zip_eq(expected_shadow_txs.into_iter())
+            .zip_eq(expected_shadow_txs)
             .for_each(|(actual, expected)| {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
@@ -700,7 +703,7 @@ mod tests {
         let submit_txs = vec![submit_tx.clone()];
 
         let block_height = 101;
-        let reward_address = Address::from([20u8; 20]);
+        let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
         let mut publish_ledger = PublishLedgerWithTxs {
@@ -731,7 +734,10 @@ mod tests {
                         irys_ref: submit_tx.id.into(),
                     },
                 )),
-                transaction_fee: term_charges.block_producer_reward.low_u128(),
+                transaction_fee: term_charges
+                    .block_producer_reward
+                    .try_into()
+                    .expect("Block producer reward should fit in u128"),
             },
         ];
 
@@ -750,7 +756,7 @@ mod tests {
         // Compare actual with expected
         generator
             .by_ref()
-            .zip_eq(expected_shadow_txs.into_iter())
+            .zip_eq(expected_shadow_txs)
             .for_each(|(actual, expected)| {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
@@ -767,9 +773,9 @@ mod tests {
         let mut rewards_map: BTreeMap<Address, u32> = BTreeMap::new();
 
         // Insert addresses in random order
-        let addr1 = Address::from([5u8; 20]);
-        let addr2 = Address::from([1u8; 20]);
-        let addr3 = Address::from([9u8; 20]);
+        let addr1 = Address::from([5_u8; 20]);
+        let addr2 = Address::from([1_u8; 20]);
+        let addr3 = Address::from([9_u8; 20]);
 
         rewards_map.insert(addr3, 3);
         rewards_map.insert(addr1, 1);
@@ -807,19 +813,19 @@ mod tests {
 
         // Create 4 proofs - signer2 has 2 proofs to test aggregation
         let proofs = vec![
-            create_test_ingress_proof(&proof_signer1, H256::from([10u8; 32])),
-            create_test_ingress_proof(&proof_signer2, H256::from([11u8; 32])),
-            create_test_ingress_proof(&proof_signer3, H256::from([12u8; 32])),
-            create_test_ingress_proof(&proof_signer2, H256::from([13u8; 32])), // Extra proof for signer2
+            create_test_ingress_proof(&proof_signer1, H256::from([10_u8; 32])),
+            create_test_ingress_proof(&proof_signer2, H256::from([11_u8; 32])),
+            create_test_ingress_proof(&proof_signer3, H256::from([12_u8; 32])),
+            create_test_ingress_proof(&proof_signer2, H256::from([13_u8; 32])), // Extra proof for signer2
         ];
 
         let block_height = 101;
-        let reward_address = Address::from([20u8; 20]);
+        let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(20000000);
         let mut publish_ledger = PublishLedgerWithTxs {
             txs: submit_txs.clone(),
-            proofs: Some(IngressProofsList(proofs.clone())),
+            proofs: Some(IngressProofsList(proofs)),
         };
 
         // Calculate expected values
@@ -841,11 +847,9 @@ mod tests {
         let signer3_reward = base_reward_per_proof;
 
         // Sort signers by address for deterministic ordering
-        let mut signer_rewards = vec![
-            (proof_signer1.address(), signer1_reward),
+        let mut signer_rewards = [(proof_signer1.address(), signer1_reward),
             (proof_signer2.address(), signer2_reward),
-            (proof_signer3.address(), signer3_reward),
-        ];
+            (proof_signer3.address(), signer3_reward)];
         signer_rewards.sort_by_key(|(addr, _)| *addr);
 
         // Create expected shadow transactions directly
@@ -868,7 +872,10 @@ mod tests {
                         irys_ref: publish_tx.id.into(),
                     },
                 )),
-                transaction_fee: term_charges.block_producer_reward.low_u128(),
+                transaction_fee: term_charges
+                    .block_producer_reward
+                    .try_into()
+                    .expect("Block producer reward should fit in u128"),
             },
             // Ingress proof rewards (aggregated by signer, sorted by address)
             ShadowMetadata {
@@ -917,7 +924,7 @@ mod tests {
 
         // Compare actual with expected
         generator
-            .zip_eq(expected_shadow_txs.into_iter())
+            .zip_eq(expected_shadow_txs)
             .for_each(|(actual, expected)| {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);

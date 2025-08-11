@@ -716,7 +716,8 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     // TODO: Get treasury balance from previous block once it's tracked in block headers
-    let initial_treasury_balance = U256::zero();
+    // this is a value that will not result in underflows / overflows while we don't have a proper value
+    let initial_treasury_balance = U256::MAX / U256::from(2);
 
     let shadow_txs_vec = ShadowTxGenerator::new(
         &block.height,

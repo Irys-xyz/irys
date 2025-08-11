@@ -186,10 +186,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x4711922f3cdfceef856bde3e547611023bd8d29c19791a8ba4066d0383223215794693f4b1cc217e922d4ba4754451533c7dcc8818606f22ec7438ac30a370cb1b";
+    const SIG_HEX: &str = "0x551c1d5360361c8f02552b17fd33b7edb2ec8b65e7bc1bcee6539441fa7fce846ffb399cf3bd3ab29f2cb2b90d68520046b2f2cc1e0fa389a628546720a7b44e1c";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"7GkNTbXcpFAnWoYUtaTG5c6tUW5p4TjRtZ7UgiKmLCepmTJKrpJaoToSL4cfF7VFJAVcotcVLU5qTtFAnfG1D7YUr\"";
+        "\"8WcdA5FKZvQdi6m7c7UNhbVmFggA1rRzdrFxQaMCfq2sHXbZJDmkBEXbtNqGYtAdbj7aXkmkgHYrZpTH9PmUos9VM\"";
 
     // spellchecker:on
 

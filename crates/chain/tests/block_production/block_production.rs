@@ -118,17 +118,23 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             ZERO_BALANCE
         });
 
-    // The balance should decrease by the total cost
-    // The miner fee has been removed from the protocol
+    // The balance should decrease by the total cost plus block producer reward
     let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
-    let miner_fee = U256::ZERO;
-    let expected_spent_with_priority = expected_spent + miner_fee;
+    
+    // Calculate block producer reward using the same logic as shadow_tx_generator
+    let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+        tx.header.term_fee,
+        &node.node_ctx.config.consensus,
+    )?;
+    let block_producer_reward = U256::from_le_bytes(term_charges.block_producer_reward.to_le_bytes());
+    
+    let expected_spent_with_priority = expected_spent + block_producer_reward;
     let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
 
     assert_eq!(
         actual_spent, expected_spent_with_priority,
-        "Balance spent ({}) should equal expected ({}) = total_cost ({}) + priority_fee ({})",
-        actual_spent, expected_spent_with_priority, expected_spent, miner_fee
+        "Balance spent ({}) should equal expected ({}) = total_cost ({}) + block_producer_reward ({})",
+        actual_spent, expected_spent_with_priority, expected_spent, block_producer_reward
     );
 
     // ensure that the block reward has increased the block reward address balance
@@ -142,9 +148,9 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             tracing::warn!("Failed to get block reward address balance: {}", err);
             ZERO_BALANCE
         });
-    // The block reward recipient gets the block reward (miner fees have been removed)
+    // The block reward recipient gets the block reward plus the block producer reward from storage tx
     let expected_block_reward_balance =
-        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes());
+        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes()) + block_producer_reward;
     assert_eq!(block_reward_balance, expected_block_reward_balance);
 
     // ensure that block heights in reth and irys are the same
@@ -399,18 +405,27 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // 1. The total storage cost
     // 2. The gas costs for the EVM transaction
     // 3. The transfer amount
-    // (miner fees have been removed from the protocol)
+    // 4. The block producer reward (from term_fee as priority fee in shadow tx)
     let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
-    let miner_fee = U256::ZERO;
-    // The expected cost is now just storage fees + gas costs + transfer amount
-    let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT + miner_fee;
+
+    // Calculate block producer reward using the same logic as shadow_tx_generator
+    let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+        irys_tx.header.term_fee,
+        &node.node_ctx.config.consensus,
+    )?;
+    let block_producer_reward =
+        U256::from_le_bytes(term_charges.block_producer_reward.to_le_bytes());
+
+    // The expected cost includes the block producer reward as a priority fee
+    let expected_spent =
+        storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT + block_producer_reward;
 
     // Assert that the actual spent matches expected
     assert_eq!(
         actual_spent, expected_spent,
-        "Account1 balance should decrease by storage fees ({}) + gas costs ({}) + transfer ({}) + priority fee ({})",
-        storage_fees, gas_costs, EVM_TEST_TRANSFER_AMOUNT, miner_fee
+        "Account1 balance should decrease by storage fees ({}) + gas costs ({}) + transfer ({}) + block producer reward ({})",
+        storage_fees, gas_costs, EVM_TEST_TRANSFER_AMOUNT, block_producer_reward
     );
 
     node.stop().await;
@@ -634,8 +649,15 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
         .await?;
 
-    // The user needs the total cost (miner fees have been removed from the protocol)
-    let exact_required_balance = price_info.perm_fee;
+    // Calculate block producer reward using the same logic as shadow_tx_generator
+    let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+        price_info.term_fee,
+        &temp_node.node_ctx.config.consensus,
+    )?;
+    
+    // The user needs perm_fee + term_fee (total_cost) plus block producer reward (priority fee)
+    let total_cost = price_info.perm_fee + price_info.term_fee;
+    let exact_required_balance = total_cost + term_charges.block_producer_reward;
     temp_node.stop().await;
 
     // Now create the actual test node with the correct balance
@@ -669,11 +691,18 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .create_publish_data_tx(&user, data_bytes.clone())
         .await?;
 
+    // Calculate block producer reward for this transaction
+    let tx_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+        tx.header.term_fee,
+        &node.node_ctx.config.consensus,
+    )?;
+    let total_cost_with_priority = tx.header.total_cost() + tx_term_charges.block_producer_reward;
+    
     // Verify the transaction was accepted and cost is within the balance
     assert!(
-        tx.header.total_cost() <= exact_required_balance,
-        "Total cost ({}) should be less than or equal to the balance provided ({})",
-        tx.header.total_cost(),
+        total_cost_with_priority <= exact_required_balance,
+        "Total cost with priority fee ({}) should be less than or equal to the balance provided ({})",
+        total_cost_with_priority,
         exact_required_balance
     );
 
@@ -734,13 +763,14 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
             ZERO_BALANCE
         });
 
-    // User should have exactly zero balance after paying the exact required amount
+    // User should have exactly zero balance after paying the exact required amount (including priority fee)
     assert_eq!(
         user_balance,
         ZERO_BALANCE,
-        "User balance should be exactly zero after transaction with exact funds. Started with {}, paid {}, remaining: {}",
+        "User balance should be exactly zero after transaction with exact funds. Started with {}, paid {} (including priority fee {}), remaining: {}",
         exact_required_balance,
-        tx.header.total_cost(),
+        total_cost_with_priority,
+        tx_term_charges.block_producer_reward,
         user_balance
     );
 

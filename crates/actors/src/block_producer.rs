@@ -459,9 +459,10 @@ pub trait BlockProdStrategy {
         };
 
         // TODO: Get treasury balance from previous block once it's tracked in block headers
-        let initial_treasury_balance = U256::zero();
+        let initial_treasury_balance = U256::MAX / U256::from(2);
 
         // Generate expected shadow transactions using shared logic
+        let mut publish_ledger_mut = publish_ledger;
         let shadow_txs_iter = ShadowTxGenerator::new(
             &block_height,
             &self.inner().config.node_config.reward_address,
@@ -470,7 +471,7 @@ pub trait BlockProdStrategy {
             &self.inner().config.consensus,
             commitment_txs_to_bill,
             submit_txs,
-            &publish_ledger,
+            &mut publish_ledger_mut,
             initial_treasury_balance,
         )
         .map(|tx_result| {
