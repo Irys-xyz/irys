@@ -170,6 +170,7 @@ impl ValidationService {
 
         loop {
             if !self.inner.validation_enabled.load(Ordering::Relaxed) {
+                info!("Validation is disabled");
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
@@ -287,8 +288,6 @@ impl ValidationServiceInner {
         desired_step_number: u64,
         cancel: Arc<AtomicU8>,
     ) -> eyre::Result<()> {
-        debug!("Waiting for step");
-
         let retries_per_second = 20;
         loop {
             if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
@@ -300,6 +299,7 @@ impl ValidationServiceInner {
                 debug!("VDF Step is available");
                 return Ok(());
             }
+            debug!("Waiting for step");
             tokio::time::sleep(Duration::from_millis(1000 / retries_per_second)).await;
         }
     }
