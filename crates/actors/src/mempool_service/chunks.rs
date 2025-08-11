@@ -70,7 +70,7 @@ impl Inner {
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                 // Pre-header sanity checks to reduce DoS risk.
                 let chunk_size = self.config.consensus.chunk_size;
-                if (chunk.bytes.len() as u64) > chunk_size {
+                if u64::try_from(chunk.bytes.len()).unwrap_or(u64::MAX) > chunk_size {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
                         &chunk.data_root,
@@ -162,7 +162,7 @@ impl Inner {
 
         // Use data_size to identify and validate that only the last chunk
         // can be less than chunk_size
-        let chunk_len = chunk.bytes.len() as u64;
+        let chunk_len = u64::try_from(chunk.bytes.len()).unwrap_or(u64::MAX);
 
         // TODO: Mark the data_root as invalid if the chunk is an incorrect size
         // Someone may have created a data_root that seemed valid, but if the
@@ -432,7 +432,9 @@ pub fn generate_ingress_proof(
                 "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
             ))?
             .0;
-        data_size += chunk_bin.len() as u64;
+        let chunk_len =
+            u64::try_from(chunk_bin.len()).map_err(|_| eyre!("chunk length exceeds u64"))?;
+        data_size += chunk_len;
         chunk_count += 1;
 
         Ok(chunk_bin)
