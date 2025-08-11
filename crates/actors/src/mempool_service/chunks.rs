@@ -80,15 +80,16 @@ impl Inner {
                     );
                     return Ok(());
                 }
-                const PREHEADER_DATA_PATH_MAX_BYTES: usize = 64 * 1024;
+                let preheader_data_path_max_bytes =
+                    self.config.consensus.mempool.max_preheader_data_path_bytes;
                 const PREHEADER_CHUNKS_PER_ITEM_CAP: usize = 64;
-                if chunk.data_path.0.len() > PREHEADER_DATA_PATH_MAX_BYTES {
+                if chunk.data_path.0.len() > preheader_data_path_max_bytes {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
                         &chunk.data_root,
                         &chunk.tx_offset,
                         chunk.data_path.0.len(),
-                        PREHEADER_DATA_PATH_MAX_BYTES
+                        preheader_data_path_max_bytes
                     );
                     return Ok(());
                 }

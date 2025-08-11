@@ -478,6 +478,11 @@ pub struct MempoolConfig {
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
 
+    /// Maximum allowed pre-header data_path bytes for chunk proofs
+    /// Mitigates DoS on speculative chunk storage before header arrival
+    #[serde(default)]
+    pub max_preheader_data_path_bytes: usize,
+
     /// Maximum number of valid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_valid_items: usize,
@@ -607,6 +612,7 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -723,6 +729,7 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -1306,6 +1313,7 @@ mod tests {
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
+        max_preheader_data_path_bytes = 65536
         max_pending_anchor_items = 100
         max_invalid_items = 10000
         max_valid_items = 10000
