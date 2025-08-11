@@ -73,6 +73,14 @@ pub async fn prevalidate_block(
         "prev_output_is_valid",
     );
 
+    // Check block height continuity
+    height_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "height_is_valid",
+    );
+
     // Check block timestamp drift
     timestamp_is_valid(
         block.timestamp,
@@ -361,6 +369,46 @@ pub fn previous_solution_hash_is_valid(
             previous_block.solution_hash,
             block.previous_solution_hash
         ))
+    }
+}
+
+// Validates block height against previous block height + 1
+pub fn height_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    let expected = previous_block.height + 1;
+    if block.height == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid block height (expected {} got {})",
+            expected,
+            block.height
+        ))
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    #[test]
+    fn height_is_valid_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 10;
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 11;
+        assert!(height_is_valid(&block, &prev).is_ok());
+    }
+
+    #[test]
+    fn height_is_invalid_fails() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 10;
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 12;
+        assert!(height_is_valid(&block, &prev).is_err());
     }
 }
 
