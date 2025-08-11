@@ -68,6 +68,44 @@ impl Inner {
                 let mut mempool_state_write_guard = mempool_state.write().await;
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+                // Pre-header sanity checks to reduce DoS risk.
+                let chunk_size = self.config.consensus.chunk_size;
+                if (chunk.bytes.len() as u64) > chunk_size {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        chunk.bytes.len(),
+                        chunk_size
+                    );
+                    return Ok(());
+                }
+                const PREHEADER_DATA_PATH_MAX_BYTES: usize = 64 * 1024;
+                const PREHEADER_CHUNKS_PER_ITEM_CAP: usize = 64;
+                if chunk.data_path.0.len() > PREHEADER_DATA_PATH_MAX_BYTES {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        chunk.data_path.0.len(),
+                        PREHEADER_DATA_PATH_MAX_BYTES
+                    );
+                    return Ok(());
+                }
+                let preheader_chunks_per_item =
+                    std::cmp::min(max_chunks_per_item, PREHEADER_CHUNKS_PER_ITEM_CAP);
+                if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
+                    >= preheader_chunks_per_item
+                {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds pre-header capacity {}",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        *chunk.tx_offset,
+                        preheader_chunks_per_item
+                    );
+                    return Ok(());
+                }
                 if let Some(chunks_map) = mempool_state_write_guard
                     .pending_chunks
                     .get_mut(&chunk.data_root)
@@ -76,7 +114,7 @@ impl Inner {
                 } else {
                     // If there's no entry for this data_root yet, create one
                     let mut new_lru_cache = LruCache::new(
-                        NonZeroUsize::new(max_chunks_per_item)
+                        NonZeroUsize::new(preheader_chunks_per_item)
                             .expect("expected valid NonZeroUsize::new"),
                     );
                     new_lru_cache.put(chunk.tx_offset, chunk.clone());
