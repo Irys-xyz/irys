@@ -116,7 +116,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
 
     // Prepare a small single-chunk data payload
     let chunk_size = genesis_config.consensus_config().chunk_size as usize;
-    let data = vec![7u8; chunk_size];
+    let data = vec![7_u8; chunk_size];
 
     let tx = signer.create_transaction(data.clone(), None)?;
     let tx = signer.sign_transaction(tx)?;
@@ -128,13 +128,13 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     let app = genesis_node.start_public_api().await;
 
     // Build a pre-header chunk with an oversized data_path (> 64 KiB)
-    let oversized_path = vec![0u8; 70_000];
+    let oversized_path = vec![0_u8; 70_000];
     let chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
         data_path: Base64(oversized_path),
         bytes: Base64(data),
-        tx_offset: TxChunkOffset::from(0u32),
+        tx_offset: TxChunkOffset::from(0_u32),
     };
 
     // Post the chunk before the tx header
@@ -173,9 +173,9 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
 
     // Prepare bytes that exceed chunk_size by 1
     let chunk_size = genesis_config.consensus_config().chunk_size as usize;
-    let data = vec![9u8; chunk_size + 1];
+    let data = vec![9_u8; chunk_size + 1];
 
-    let tx = signer.create_transaction(vec![1u8; chunk_size], None)?;
+    let tx = signer.create_transaction(vec![1_u8; chunk_size], None)?;
     let tx = signer.sign_transaction(tx)?;
 
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
@@ -189,7 +189,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(data),
-        tx_offset: TxChunkOffset::from(0u32),
+        tx_offset: TxChunkOffset::from(0_u32),
     };
 
     // Post the chunk before the tx header
@@ -228,7 +228,7 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
 
     // Prepare a valid-sized chunk payload
     let chunk_size = genesis_config.consensus_config().chunk_size as usize;
-    let data = vec![5u8; chunk_size];
+    let data = vec![5_u8; chunk_size];
 
     let tx = signer.create_transaction(data.clone(), None)?;
     let tx = signer.sign_transaction(tx)?;
@@ -244,7 +244,7 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(data),
-        tx_offset: TxChunkOffset::from(64u32),
+        tx_offset: TxChunkOffset::from(64_u32),
     };
 
     // Post the chunk before the tx header
