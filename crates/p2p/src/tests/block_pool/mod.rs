@@ -1,13 +1,14 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
-use crate::{BlockStatusProvider, GetPeerListGuard};
+use crate::{BlockStatusProvider, GetPeerListGuard, OrphanBlockProcessingService};
 use actix::Actor as _;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
+use irys_actors::OrphanBlockProcessingMessage;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
@@ -128,6 +129,8 @@ struct MockedServices {
     mempool_stub: MempoolStub,
     vdf_state_stub: VdfStateReadonly,
     service_senders: ServiceSenders,
+    orphan_blocks_service_receiver:
+        tokio::sync::mpsc::UnboundedReceiver<OrphanBlockProcessingMessage>,
 }
 
 impl MockedServices {
@@ -224,6 +227,7 @@ impl MockedServices {
             mempool_stub,
             vdf_state_stub,
             service_senders,
+            orphan_blocks_service_receiver: service_receivers.orphan_block_processing,
         }
     }
 }
@@ -235,20 +239,21 @@ async fn should_process_block() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_data_guard,
+        peer_list_data_guard: _,
         db,
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
         service_senders,
+        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
 
     let sync_state = ChainSyncState::new(false, false);
     let service = BlockPool::new(
         db.clone(),
-        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
+        service_senders.orphan_block_processing.clone(),
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
@@ -336,6 +341,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
+        orphan_blocks_service_receiver,
     } = MockedServices::new(&config).await;
 
     let peer_list_guard = peer_list_data_guard.clone();
@@ -358,17 +364,24 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     let sync_state = ChainSyncState::new(false, false);
 
-    let block_pool = BlockPool::new(
+    let block_pool = Arc::new(BlockPool::new(
         db.clone(),
-        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
-        sync_state,
+        service_senders.orphan_block_processing.clone(),
+        sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         vdf_state_stub,
         config,
         service_senders,
+    ));
+
+    let orphan_service = OrphanBlockProcessingService::init(
+        orphan_blocks_service_receiver,
+        block_pool.clone(),
+        peer_list_guard.clone(),
+        sync_state.clone(),
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
@@ -410,6 +423,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("to get block3 message")
         .clone();
 
+    orphan_service.shutdown_signal.fire();
+
     assert_eq!(discovered_block2, block2);
     assert_eq!(discovered_block3, block3);
 }
@@ -421,21 +436,22 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_data_guard,
+        peer_list_data_guard: _,
         db,
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
         service_senders,
+        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
 
     let sync_state = ChainSyncState::new(false, false);
 
     let block_pool = BlockPool::new(
         db.clone(),
-        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
+        service_senders.orphan_block_processing.clone(),
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider,
@@ -501,6 +517,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
+        orphan_blocks_service_receiver,
     } = MockedServices::new(&config).await;
 
     let gossip_server = FakeGossipServer::new();
@@ -532,17 +549,24 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     let sync_state = ChainSyncState::new(false, false);
 
-    let block_pool = BlockPool::new(
+    let block_pool = Arc::new(BlockPool::new(
         db.clone(),
-        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub,
-        sync_state,
+        service_senders.orphan_block_processing.clone(),
+        sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         vdf_state_stub,
         config,
         service_senders,
+    ));
+
+    let orphan_service = OrphanBlockProcessingService::init(
+        orphan_blocks_service_receiver,
+        block_pool.clone(),
+        peer_list_guard.clone(),
+        sync_state.clone(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -572,19 +596,18 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     let bogus_block_parent_index = 1;
 
-    // Fresh block that t
-    let mut bogus_block =
+    // Fresh block that is trying to build on the old chain
+    let bogus_block =
         BlockStatusProvider::produce_mock_chain(1, old_blocks.get(bogus_block_parent_index))[0]
             .clone();
-    bogus_block.height = 15;
 
     let oldest_block = block_status_provider_mock.oldest_tree_height();
     assert_eq!(oldest_block, 5);
 
-    // Set the fake server to mimic get_data -> gossip_service sends message to block pool
+    // Set the fake server to mimic get_data -> gossip_service sends a message to block pool
     let block_pool_for_server = block_pool.clone();
     let blocks = mock_chain.clone();
-    let (errors_sender, error_receiver) = channel::<BlockPoolError>();
+    let (errors_sender, _error_receiver) = channel::<BlockPoolError>();
     gossip_server.set_on_block_data_request(move |block_hash| {
         let block = blocks
             .iter()
@@ -611,14 +634,21 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         }
     });
 
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let is_parent_in_the_tree =
+        block_status_provider_mock.is_block_in_the_tree(&bogus_block.previous_block_hash);
+    let is_parent_in_index = block_status_provider_mock.is_height_in_the_index(1);
+    assert!(!is_parent_in_the_tree);
+    assert!(is_parent_in_index);
+
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool.process_block(Arc::new(bogus_block), false).await;
 
-    assert!(res.is_ok());
-    let processing_error = error_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    orphan_service.shutdown_signal.fire();
+
     assert!(matches!(
-        processing_error,
-        BlockPoolError::TryingToReprocessFinalizedBlock(_)
+        res,
+        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
     ));
 }
 
@@ -629,21 +659,22 @@ async fn should_fast_track_block() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_data_guard,
+        peer_list_data_guard: _,
         db,
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
         service_senders,
+        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
 
     let sync_state = ChainSyncState::new(false, true);
 
     let service = BlockPool::new(
         db.clone(),
-        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
+        service_senders.orphan_block_processing.clone(),
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
@@ -690,20 +721,22 @@ async fn should_not_fast_track_block_already_in_index() {
     let MockedServices {
         block_status_provider_mock,
         block_discovery_stub,
-        peer_list_data_guard,
+        peer_list_data_guard: _,
         db,
         execution_payload_provider,
         mempool_stub,
         vdf_state_stub,
         service_senders,
+        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
 
     let sync_state = ChainSyncState::new(false, true);
+
     let service = BlockPool::new(
         db.clone(),
-        peer_list_data_guard,
         block_discovery_stub.clone(),
         mempool_stub.clone(),
+        service_senders.orphan_block_processing.clone(),
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
@@ -716,7 +749,7 @@ async fn should_not_fast_track_block_already_in_index() {
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 
-    // Inserting parent block header to the db, so the current block should go to the
+    // Inserting the parent block header to the db, so the current block should go to the
     //  block producer
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&test_header);

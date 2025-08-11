@@ -49,7 +49,7 @@ impl BlockStatusProvider {
         }
     }
 
-    fn is_block_in_the_tree(&self, block_hash: &H256) -> bool {
+    pub fn is_block_in_the_tree(&self, block_hash: &H256) -> bool {
         self.block_tree_read_guard
             .read()
             .get_block(block_hash)
@@ -313,13 +313,13 @@ impl BlockStatusProvider {
     }
 
     #[cfg(test)]
-    pub fn delete_mocked_blocks_older_than(&self, height: u64) {
+    pub fn delete_mocked_blocks_older_than(&self, cutoff: u64) {
         let mut latest_block = self.tree_tip();
         debug!("The tip is: {:?}", latest_block);
         let mut blocks_to_delete = vec![];
 
         while let Some(block) = self.get_block_from_tree(&latest_block) {
-            if block.height < height {
+            if block.height < cutoff {
                 blocks_to_delete.push(block.block_hash);
             }
 

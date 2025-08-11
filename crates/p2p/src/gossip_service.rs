@@ -164,13 +164,13 @@ impl P2PService {
         B: BlockDiscoveryFacade,
         A: ApiClient,
     {
-        debug!("Starting gossip service");
+        debug!("Starting the gossip service");
 
         let block_pool = BlockPool::new(
             db,
-            peer_list.clone(),
             block_discovery,
             mempool.clone(),
+            service_senders.orphan_block_processing.clone(),
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),

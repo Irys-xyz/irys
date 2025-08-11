@@ -40,7 +40,8 @@ use irys_domain::{
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
-    P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
+    OrphanBlockProcessingService, P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal,
+    SyncChainServiceFacade,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -1043,6 +1044,13 @@ impl IrysNode {
             service_senders.clone(),
         )?;
 
+        let orphan_blocks_processing_service_handle = OrphanBlockProcessingService::init(
+            receivers.orphan_block_processing,
+            block_pool.clone(),
+            peer_list_guard.clone(),
+            sync_state.clone(),
+        );
+
         // repair any missing payloads before triggering an FCU
         block_pool
             .repair_missing_payloads_if_any(Some(reth_service_actor.clone()))
@@ -1232,6 +1240,9 @@ impl IrysNode {
 
             // 5. Sync operations
             services.push(ArbiterEnum::TokioService(sync_service_handle));
+            services.push(ArbiterEnum::TokioService(
+                orphan_blocks_processing_service_handle,
+            ));
 
             // 6. Chain management
             services.push(ArbiterEnum::TokioService(block_tree_handle));

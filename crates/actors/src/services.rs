@@ -6,6 +6,7 @@ use crate::{
     },
     cache_service::CacheServiceAction,
     mempool_service::MempoolServiceMessage,
+    orphan_block_processing::OrphanBlockProcessingMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
 };
@@ -69,6 +70,7 @@ pub struct ServiceReceivers {
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
     pub block_discovery: UnboundedReceiver<BlockDiscoveryMessage>,
+    pub orphan_block_processing: UnboundedReceiver<OrphanBlockProcessingMessage>,
 }
 
 #[derive(Debug)]
@@ -88,6 +90,7 @@ pub struct ServiceSendersInner {
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
+    pub orphan_block_processing: UnboundedSender<OrphanBlockProcessingMessage>,
 }
 
 impl ServiceSendersInner {
@@ -119,6 +122,8 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
+        let (orphan_block_processing_sender, orphan_block_processing_receiver) =
+            unbounded_channel::<OrphanBlockProcessingMessage>();
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -136,6 +141,7 @@ impl ServiceSendersInner {
             block_state_events: block_state_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
+            orphan_block_processing: orphan_block_processing_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -153,6 +159,7 @@ impl ServiceSendersInner {
             block_state_events: block_state_receiver,
             peer_network: peer_network_receiver,
             block_discovery: block_discovery_receiver,
+            orphan_block_processing: orphan_block_processing_receiver,
         };
         (senders, receivers)
     }

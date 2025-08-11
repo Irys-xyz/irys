@@ -730,7 +730,7 @@ async fn handle_get_data(
                 warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(true)
             }
             GossipDataRequest::Chunk(chunk_hash) => {
                 warn!("Chunk request for hash {:?}", chunk_hash);
