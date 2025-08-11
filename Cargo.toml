@@ -195,6 +195,8 @@ reth-revm = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d01055
 reth-chain-state = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
 reth-errors = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
 reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+reth-cli-util = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0105597502988d0a25b1f2ed674c" }
+
 
 # just used (for local testing)
 
@@ -233,6 +235,7 @@ reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev 
 # reth-chain-state = { path = "./ext/reth/crates/chain-state" }
 # reth-errors = { path = "./ext/reth/crates/errors" }
 # reth-ethereum-payload-builder = { path = "./ext/reth/crates/ethereum/payload" }
+# reth-cli-util = { path = "./ext/reth/crates/cli/util" }
 
 # all deps + used
 
@@ -361,6 +364,11 @@ reth-ethereum-payload-builder = { git = "https://github.com/Irys-xyz/reth", rev 
 # # reth-ress-protocol = { path = "./ext/reth/crates/ress/protocol" }
 # # reth-ress-provider = { path = "./ext/reth/crates/ress/provider" }
 # # reth-stateless = { path = "./ext/reth/crates/stateless" }
+
+[profile.debug-release]
+inherits = "release"
+debug = true
+
 
 [profile.dev]
 panic = "unwind"

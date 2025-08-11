@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 
@@ -476,15 +476,18 @@ where
         Ok(())
     }
 
+    #[instrument(err, skip_all)]
     pub async fn repair_missing_payloads_if_any(
         &self,
         reth_service: Option<Addr<RethServiceActor>>,
     ) -> Result<(), BlockPoolError> {
         let Some(latest_block_in_index) = self.block_status_provider.latest_block_in_index() else {
+            debug!("No payloads to repair");
             return Ok(());
         };
 
         let mut block_hash = latest_block_in_index.block_hash;
+        debug!("Latest block in index: {}", &block_hash);
         let mut blocks_with_missing_payloads = vec![];
 
         loop {
@@ -505,15 +508,16 @@ where
             }
 
             block_hash = block.previous_block_hash;
+            debug!(
+                "Found block with missing payload: {} {} {}",
+                &block.block_hash, &block.height, &block.evm_block_hash
+            );
             blocks_with_missing_payloads.push(block);
         }
 
         // The last block in the list is the oldest block with a missing payload
         while let Some(block) = blocks_with_missing_payloads.pop() {
-            debug!(
-                "Block pool: Repairing missing payload for block {:?}",
-                block.block_hash
-            );
+            debug!("Repairing missing payload for block {:?}", block.block_hash);
             self.validate_and_submit_reth_payload(&block, reth_service.clone())
                 .await?;
         }
