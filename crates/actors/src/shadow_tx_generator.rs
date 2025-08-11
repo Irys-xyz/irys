@@ -157,8 +157,7 @@ impl ShadowTxGenerator<'_> {
 
             // Calculate fee distribution using PublishFeeCharges
             // PublishFeeCharges::new will return an error if perm_fee is insufficient
-            let publish_charges =
-                PublishFeeCharges::new(U256::from(perm_fee), U256::from(tx.term_fee), self.config)?;
+            let publish_charges = PublishFeeCharges::new(perm_fee, tx.term_fee, self.config)?;
 
             // Get fee charges for all ingress proofs
             let fee_charges = publish_charges.ingress_proof_rewards(proofs)?;
@@ -311,14 +310,12 @@ impl ShadowTxGenerator<'_> {
         self.index += 1;
 
         // Construct term fee charges
-        let term_charges = TermFeeCharges::new(U256::from(tx.term_fee), self.config)?;
+        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
 
         // Construct perm fee charges if applicable
         let perm_charges = tx
             .perm_fee
-            .map(|perm_fee| {
-                PublishFeeCharges::new(U256::from(perm_fee), U256::from(tx.term_fee), self.config)
-            })
+            .map(|perm_fee| PublishFeeCharges::new(perm_fee, tx.term_fee, self.config))
             .transpose()?;
 
         // Create shadow transaction

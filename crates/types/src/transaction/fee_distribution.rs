@@ -31,7 +31,7 @@ pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
-use eyre::{ensure, eyre, OptionExt};
+use eyre::{ensure, eyre, OptionExt as _};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 

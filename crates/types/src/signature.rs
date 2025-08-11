@@ -1,5 +1,5 @@
-use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, ruint::aliases::U256, Address, U256 as RethU256};
+use crate::{Arbitrary, Signature, U256};
+use alloy_primitives::{bytes, Address, U256 as RethU256};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
@@ -84,9 +84,11 @@ impl Compact for IrysSignature {
         // let sig_bit = bitflags & 1;
         // let (signature, buf2) = Signature::from_compact(buf, sig_bit);
 
-        let r = U256::from_le_slice(&buf[0..32]);
-        let s = U256::from_le_slice(&buf[32..64]);
-        let signature = Signature::new(r, s, buf[64] == 1);
+        let r_bytes: [u8; 32] = buf[0..32].try_into().expect("slice with incorrect length");
+        let s_bytes: [u8; 32] = buf[32..64].try_into().expect("slice with incorrect length");
+        let r = U256::from_le_bytes(r_bytes);
+        let s = U256::from_le_bytes(s_bytes);
+        let signature = Signature::new(r.into(), s.into(), buf[64] == 1);
         buf.advance(65);
         (Self::new(signature), buf)
     }
@@ -207,8 +209,8 @@ mod tests {
             signer: Address::ZERO,
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
-            term_fee: 100,
-            perm_fee: Some(1),
+            term_fee: U256::from(100_u64),
+            perm_fee: Some(U256::from(1_u64)),
             ledger_id: 0,
             bundle_format: Some(0),
             chain_id: testing_config.chain_id,
