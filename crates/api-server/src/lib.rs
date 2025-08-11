@@ -5,7 +5,7 @@ use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
-    web::{self, JsonConfig},
+    web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
@@ -48,6 +48,7 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
+        .route("/", web::get().to(index::info_route))
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
             "/block_index",
@@ -121,9 +122,9 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
                             .into()
                     }),
             )
+            // not a permanent redirect, so we can redirect to the highest API version
+            .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
-            //FIXME this default route is not behind a api version, should it be before 1.0 release?
-            .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
     .listen(listener)
