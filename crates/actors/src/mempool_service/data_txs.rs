@@ -107,7 +107,7 @@ impl Inner {
                 // Validate term_fee matches exactly the expected calculation
                 let expected_term_fee = self.calculate_term_storage_fee(tx.data_size)?;
                 let actual_term_fee = U256::from(tx.term_fee);
-                
+
                 // Term fee must be exactly the expected amount - deterministic pricing
                 if actual_term_fee != expected_term_fee {
                     return Err(TxIngressError::IncorrectProtocolFee {
@@ -118,11 +118,11 @@ impl Inner {
 
                 // Validate that fee distribution objects can be created successfully
                 // This ensures the fee structure is internally consistent
-                
+
                 // Validate term fee distribution structure
                 TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
                     .map_err(|e| TxIngressError::Other(format!("Invalid term fee structure: {}", e)))?;
-                
+
                 // Validate publish fee distribution structure
                 PublishFeeCharges::new(
                     actual_perm_fee,

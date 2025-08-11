@@ -224,7 +224,7 @@ impl PublishFeeCharges {
         let total_distributed: U256 = fee_charges
             .iter()
             .map(|fc| fc.amount)
-            .fold(U256::from(0), |acc, amount| acc.saturating_add(amount));
+            .fold(U256::from(0), super::super::serialization::U256::saturating_add);
 
         ensure!(
             total_distributed == self.ingress_proof_reward,
@@ -386,7 +386,7 @@ mod tests {
         let proof1 = generate_ingress_proof(
             &signer1,
             data_root,
-            vec![vec![0u8; 32]].into_iter().map(Ok),
+            vec![vec![0_u8; 32]].into_iter().map(Ok),
             config.chain_id,
         )
         .unwrap();
@@ -394,7 +394,7 @@ mod tests {
         let proof2 = generate_ingress_proof(
             &signer2,
             data_root,
-            vec![vec![0u8; 32]].into_iter().map(Ok),
+            vec![vec![0_u8; 32]].into_iter().map(Ok),
             config.chain_id,
         )
         .unwrap();
@@ -463,7 +463,7 @@ mod tests {
                 generate_ingress_proof(
                     signer,
                     data_root,
-                    vec![vec![0u8; 32]].into_iter().map(Ok),
+                    vec![vec![0_u8; 32]].into_iter().map(Ok),
                     config.chain_id,
                 )
                 .unwrap()

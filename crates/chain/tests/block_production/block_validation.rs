@@ -50,7 +50,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &(Vec<DataTransactionHeader>, Vec<irys_types::ingress::IngressProof>),
+            data_txs_with_proofs: &(
+                Vec<DataTransactionHeader>,
+                Vec<irys_types::ingress::IngressProof>,
+            ),
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {

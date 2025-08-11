@@ -86,7 +86,7 @@ enum Phase {
     Done,
 }
 
-impl<'a> Iterator for ShadowTxGenerator<'a> {
+impl Iterator for ShadowTxGenerator<'_> {
     type Item = Result<ShadowMetadata>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -123,7 +123,7 @@ impl<'a> Iterator for ShadowTxGenerator<'a> {
     }
 }
 
-impl<'a> ShadowTxGenerator<'a> {
+impl ShadowTxGenerator<'_> {
     /// Accumulates all rewards from ingress proofs into a map
     fn accumulate_ingress_rewards(&self) -> Result<HashMap<Address, (RewardAmount, RollingHash)>> {
         // HashMap to aggregate rewards by provider address and rolling hash

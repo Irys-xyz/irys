@@ -896,10 +896,7 @@ impl Inner {
     /// Calculate the expected term fee for temporary storage
     /// This matches the calculation in the pricing API
     /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
-    pub fn calculate_term_storage_fee(
-        &self,
-        _bytes_to_store: u64,
-    ) -> Result<U256, TxIngressError> {
+    pub fn calculate_term_storage_fee(&self, _bytes_to_store: u64) -> Result<U256, TxIngressError> {
         // Placeholder implementation matching price.rs
         Ok(U256::from(1_000_000_000))
     }
