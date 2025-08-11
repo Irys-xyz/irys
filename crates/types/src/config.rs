@@ -478,6 +478,11 @@ pub struct MempoolConfig {
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
 
+    /// Maximum number of pre-header chunks to keep per data root before the header arrives
+    /// Limits speculative storage window for out-of-order chunks
+    #[serde(default)]
+    pub max_preheader_chunks_per_item: usize,
+
     /// Maximum allowed pre-header data_path bytes for chunk proofs
     /// Mitigates DoS on speculative chunk storage before header arrival
     #[serde(default)]
@@ -612,6 +617,7 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
                 max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
@@ -729,6 +735,7 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
                 max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
@@ -1313,6 +1320,7 @@ mod tests {
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
+        max_preheader_chunks_per_item = 64
         max_preheader_data_path_bytes = 65536
         max_pending_anchor_items = 100
         max_invalid_items = 10000

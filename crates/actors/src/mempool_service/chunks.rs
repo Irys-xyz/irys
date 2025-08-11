@@ -82,7 +82,8 @@ impl Inner {
                 }
                 let preheader_data_path_max_bytes =
                     self.config.consensus.mempool.max_preheader_data_path_bytes;
-                const PREHEADER_CHUNKS_PER_ITEM_CAP: usize = 64;
+                let preheader_chunks_per_item_cap =
+                    self.config.consensus.mempool.max_preheader_chunks_per_item;
                 if chunk.data_path.0.len() > preheader_data_path_max_bytes {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
@@ -94,7 +95,7 @@ impl Inner {
                     return Ok(());
                 }
                 let preheader_chunks_per_item =
-                    std::cmp::min(max_chunks_per_item, PREHEADER_CHUNKS_PER_ITEM_CAP);
+                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
                 if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
                     >= preheader_chunks_per_item
                 {
