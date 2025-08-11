@@ -92,19 +92,20 @@ impl IrysSigner {
         Ok(transaction)
     }
 
-    /// Creates a publish transaction with the provided protocol fee
+    /// Creates a publish transaction with the provided perm and term fees
     pub fn create_publish_transaction(
         &self,
         data: Vec<u8>,
         anchor: Option<H256>,
-        protocol_fee: U256,
+        perm_price: U256,
+        term_price: U256,
     ) -> Result<DataTransaction> {
         self.create_transaction_with_fees(
             data,
             anchor,
             DataLedger::Publish,
-            U256::zero(),       // No term fee for publish
-            Some(protocol_fee), // Permanent storage fee
+            term_price,       // Term storage fee
+            Some(perm_price), // Permanent storage fee
         )
     }
 

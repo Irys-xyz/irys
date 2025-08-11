@@ -85,12 +85,13 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     let generate_tx_with_size = |a: &IrysSigner,
                                  data_size: usize,
-                                 price_value: irys_types::U256|
+                                 perm_fee: irys_types::U256,
+                                 term_fee: irys_types::U256|
      -> eyre::Result<(DataTransaction, Vec<u8>)> {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let tx = a.create_publish_transaction(data_bytes.clone(), None, price_value)?;
+        let tx = a.create_publish_transaction(data_bytes.clone(), None, perm_fee, term_fee)?;
         let tx = a.sign_transaction(tx)?;
         Ok((tx, data_bytes))
     };
@@ -109,7 +110,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
             .get_data_price(irys_types::DataLedger::Publish, data_size as u64)
             .await
             .expect("Failed to get price");
-        let tx_with_data = generate_tx_with_size(account, data_size, price_info.perm_fee)?;
+        let tx_with_data = generate_tx_with_size(account, data_size, price_info.perm_fee, price_info.term_fee)?;
         pending_txs.push((tx_with_data, 0));
     }
     upload_header(&pending_txs[0].0 .0).await.unwrap();
@@ -218,7 +219,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 .get_data_price(irys_types::DataLedger::Publish, new_data_size as u64)
                 .await
                 .expect("Failed to get price");
-            (*tx, *data_bytes) = generate_tx_with_size(a, new_data_size, new_price_info.perm_fee)
+            (*tx, *data_bytes) = generate_tx_with_size(a, new_data_size, new_price_info.perm_fee, new_price_info.term_fee)
                 .expect("Failed to generate tx");
 
             *num_chunks_uploaded = simple_rng

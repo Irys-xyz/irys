@@ -70,7 +70,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         .expect("Failed to get price");
 
     let tx = main_signer
-        .create_publish_transaction(data_bytes.clone(), None, price_info.perm_fee)
+        .create_publish_transaction(data_bytes.clone(), None, price_info.perm_fee, price_info.term_fee)
         .unwrap();
     let tx = main_signer.sign_transaction(tx).unwrap();
 
@@ -86,7 +86,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    debug!("Response body: {:#?}", body);
+    info!("Response body: {:#?}", body);
     assert_eq!(status, StatusCode::OK);
     info!("Transaction was posted");
 

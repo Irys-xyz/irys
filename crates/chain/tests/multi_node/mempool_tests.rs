@@ -69,7 +69,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         .await
         .expect("Failed to get price");
 
-    let tx = signer.create_publish_transaction(data, None, price_info.perm_fee)?;
+    let tx = signer.create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)?;
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
