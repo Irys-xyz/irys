@@ -90,7 +90,7 @@ fn cost_of_perm_storage(
 
     // Calculate the cost per GB (take into account replica count & cost per replica)
     // NOTE: this value can be memoised because it is deterministic based on the config
-    let cost_per_gb = state
+    let cost_per_gb_per_year = state
         .config
         .consensus
         .annual_cost_per_gb
@@ -101,8 +101,8 @@ fn cost_of_perm_storage(
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
     // calculate the base network fee (protocol cost)
-    let base_network_fee =
-        cost_per_gb.base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
+    let base_network_fee = cost_per_gb_per_year
+        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
     Ok(base_network_fee)
 }

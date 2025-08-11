@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
 #[test_log::test(actix_web::test)]

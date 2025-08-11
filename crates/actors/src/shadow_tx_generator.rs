@@ -847,9 +847,11 @@ mod tests {
         let signer3_reward = base_reward_per_proof;
 
         // Sort signers by address for deterministic ordering
-        let mut signer_rewards = [(proof_signer1.address(), signer1_reward),
+        let mut signer_rewards = [
+            (proof_signer1.address(), signer1_reward),
             (proof_signer2.address(), signer2_reward),
-            (proof_signer3.address(), signer3_reward)];
+            (proof_signer3.address(), signer3_reward),
+        ];
         signer_rewards.sort_by_key(|(addr, _)| *addr);
 
         // Create expected shadow transactions directly

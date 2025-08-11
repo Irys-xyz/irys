@@ -42,8 +42,9 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee matches expected and term_fee is calculated correctly
     assert_eq!(price_info.perm_fee, expected_base_fee.amount);
-    // Term fee should be calculated with base 0.001 ETH * size multiplier
-    assert!(price_info.term_fee > U256::zero());
+    // TODO: Update when term_fee calculation is properly implemented
+    // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
+    assert_eq!(price_info.term_fee, U256::from(1_000_000_000));
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, data_size_bytes);
     assert!(
@@ -93,14 +94,38 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee matches expected and term_fee is calculated correctly
     assert_eq!(price_info.perm_fee, expected_base_fee.amount);
-    // Term fee should be calculated with base 0.001 ETH * size multiplier
-    assert!(price_info.term_fee > U256::zero());
+    // TODO: Update when term_fee calculation is properly implemented
+    // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
+    assert_eq!(price_info.term_fee, U256::from(1_000_000_000));
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, ctx.node_ctx.config.consensus.chunk_size);
     assert!(
         data_size_bytes < ctx.node_ctx.config.consensus.chunk_size,
         "for the test to be accurate, the requested size must be smaller to the configs chunk size"
     );
+
+    ctx.node_ctx.stop().await;
+    Ok(())
+}
+
+#[test_log::test(actix::test)]
+async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
+    // setup
+    let ctx = IrysNodeTest::default_async().start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
+
+    // action - try to get price for Submit ledger
+    let mut response = price_endpoint_request(&address, DataLedger::Submit, data_size_bytes).await;
+
+    // assert - should return 400 error for Submit ledger
+    assert_eq!(response.status(), 400);
+    let body = response.body().await?;
+    let body_str = std::str::from_utf8(&body)?;
+    assert!(body_str.contains("Term ledger not supported"));
 
     ctx.node_ctx.stop().await;
     Ok(())
@@ -144,8 +169,9 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee matches expected and term_fee is calculated correctly
     assert_eq!(price_info.perm_fee, expected_base_fee.amount);
-    // Term fee should be calculated with base 0.001 ETH * size multiplier
-    assert!(price_info.term_fee > U256::zero());
+    // TODO: Update when term_fee calculation is properly implemented
+    // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
+    assert_eq!(price_info.term_fee, U256::from(1_000_000_000));
     assert_eq!(price_info.ledger, 0);
     assert_eq!(
         price_info.bytes,

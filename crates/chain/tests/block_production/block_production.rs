@@ -120,14 +120,15 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
 
     // The balance should decrease by the total cost plus block producer reward
     let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
-    
+
     // Calculate block producer reward using the same logic as shadow_tx_generator
     let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
         tx.header.term_fee,
         &node.node_ctx.config.consensus,
     )?;
-    let block_producer_reward = U256::from_le_bytes(term_charges.block_producer_reward.to_le_bytes());
-    
+    let block_producer_reward =
+        U256::from_le_bytes(term_charges.block_producer_reward.to_le_bytes());
+
     let expected_spent_with_priority = expected_spent + block_producer_reward;
     let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
 
@@ -149,8 +150,9 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             ZERO_BALANCE
         });
     // The block reward recipient gets the block reward plus the block producer reward from storage tx
-    let expected_block_reward_balance =
-        ZERO_BALANCE + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes()) + block_producer_reward;
+    let expected_block_reward_balance = ZERO_BALANCE
+        + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
+        + block_producer_reward;
     assert_eq!(block_reward_balance, expected_block_reward_balance);
 
     // ensure that block heights in reth and irys are the same
@@ -654,7 +656,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         price_info.term_fee,
         &temp_node.node_ctx.config.consensus,
     )?;
-    
+
     // The user needs perm_fee + term_fee (total_cost) plus block producer reward (priority fee)
     let total_cost = price_info.perm_fee + price_info.term_fee;
     let exact_required_balance = total_cost + term_charges.block_producer_reward;
@@ -697,7 +699,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         &node.node_ctx.config.consensus,
     )?;
     let total_cost_with_priority = tx.header.total_cost() + tx_term_charges.block_producer_reward;
-    
+
     // Verify the transaction was accepted and cost is within the balance
     assert!(
         total_cost_with_priority <= exact_required_balance,

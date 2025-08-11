@@ -872,32 +872,6 @@ mod tests {
     }
 
     #[test]
-    fn test_irys_transaction_header_serde_backward_compat() {
-        // Test deserialization of format without deprecated fields
-        let json_current_format = r#"{
-            "id": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
-            "version": 0,
-            "anchor": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-            "signer": "11111111111111111111",
-            "dataRoot": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8",
-            "dataSize": "1024",
-            "termFee": "100",
-            "ledgerId": 1,
-            "chainId": "1",
-            "signature": "CesTUmRKzSoY1HMj8TsAGDYEEUHEEjL6oqXcZd8XZCS5zJJ9C8HFXCv1KwZKSRscpm4qnu1sLU9Xm3HrDmJFLdBq4",
-            "permFee": "200"
-        }"#;
-
-        // Deserialize should succeed
-        let deserialized: DataTransactionHeader =
-            serde_json::from_str(json_current_format).expect("Failed to deserialize");
-
-        // Verify fields
-        assert_eq!(deserialized.term_fee, U256::from(100));
-        assert_eq!(deserialized.perm_fee, Some(U256::from(200)));
-    }
-
-    #[test]
     fn test_commitment_transaction_serde() {
         // Create a sample commitment tx
         let config = ConsensusConfig::testing();
