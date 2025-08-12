@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_types::{
     storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
@@ -32,10 +32,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &(
-                Vec<DataTransactionHeader>,
-                Vec<irys_types::ingress::IngressProof>,
-            ),
+            data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -188,10 +185,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &(
-                Vec<DataTransactionHeader>,
-                Vec<irys_types::ingress::IngressProof>,
-            ),
+            data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -281,10 +275,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &(
-                Vec<DataTransactionHeader>,
-                Vec<irys_types::ingress::IngressProof>,
-            ),
+            data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {

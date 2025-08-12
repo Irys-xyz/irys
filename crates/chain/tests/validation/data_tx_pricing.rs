@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, block_tree_service::BlockTreeServiceMessage, BlockProdStrategy,
-    BlockProducerInner, ProductionStrategy,
+    async_trait, block_tree_service::BlockTreeServiceMessage,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_types::ingress::IngressProof;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
     IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
@@ -54,14 +54,17 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            PublishLedgerWithTxs,
         )> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
             Ok((
                 vec![],
                 vec![],
                 vec![self.malicious_tx.clone()], // Submit ledger tx
-                (vec![], vec![]),                // No Publish ledger txs
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                }, // No Publish ledger txs
             ))
         }
     }

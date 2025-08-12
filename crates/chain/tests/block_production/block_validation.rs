@@ -12,11 +12,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     use crate::utils::solution_context;
     use irys_actors::{
-        async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
-        ProductionStrategy,
+        async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
+        BlockProdStrategy, BlockProducerInner, ProductionStrategy,
     };
     use irys_domain::EmaSnapshot;
-    use irys_types::ingress::IngressProof;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
         CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
@@ -50,10 +49,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &(
-                Vec<DataTransactionHeader>,
-                Vec<irys_types::ingress::IngressProof>,
-            ),
+            data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
         ) -> eyre::Result<EthBuiltPayload> {
@@ -75,7 +71,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             solution: SolutionContext,
             prev_block_header: &IrysBlockHeader,
             submit_txs: Vec<DataTransactionHeader>,
-            publish_txs: (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            publish_txs: PublishLedgerWithTxs,
             system_transaction_ledger: Vec<SystemTransactionLedger>,
             _current_timestamp: u128,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,

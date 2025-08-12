@@ -2,6 +2,7 @@ use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_validation::calculate_perm_storage_base_network_fee;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
+use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
@@ -15,6 +16,7 @@ use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
+use irys_types::IngressProofsList;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
@@ -600,7 +602,7 @@ impl Inner {
         info!(
             commitment_txs = commitment_tx.len(),
             data_txs = submit_tx.len(),
-            publish_txs = publish_txs_and_proofs.0.len(),
+            publish_txs = publish_txs_and_proofs.txs.len(),
             total_fee_collected = ?total_fee_collected,
             unfunded_addresses = unfunded_address.len(),
             "Mempool transaction selection completed"
@@ -637,9 +639,7 @@ impl Inner {
         })
     }
 
-    pub async fn get_publish_txs_and_proofs(
-        &self,
-    ) -> Result<(Vec<DataTransactionHeader>, Vec<IngressProof>), eyre::Error> {
+    pub async fn get_publish_txs_and_proofs(&self) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
@@ -732,7 +732,15 @@ impl Inner {
             .map(|h| h.id.0.to_base58())
             .collect::<Vec<_>>();
         debug!(?txs, "Publish transactions");
-        Ok((publish_txs, publish_proofs))
+
+        Ok(PublishLedgerWithTxs {
+            txs: publish_txs,
+            proofs: if publish_proofs.is_empty() {
+                None
+            } else {
+                Some(IngressProofsList::from(publish_proofs))
+            },
+        })
     }
 
     /// return block header from mempool, if found
@@ -1107,5 +1115,5 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
-    pub publish_tx: (Vec<DataTransactionHeader>, Vec<IngressProof>),
+    pub publish_tx: PublishLedgerWithTxs,
 }

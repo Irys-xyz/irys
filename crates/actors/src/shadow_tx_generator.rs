@@ -12,6 +12,7 @@ use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
 
 /// Structure holding publish ledger transactions with their proofs
+#[derive(Debug, Clone)]
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
     pub proofs: Option<IngressProofsList>,

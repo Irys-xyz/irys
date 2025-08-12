@@ -882,7 +882,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
     assert_eq!(
-        a1_b2_reorg_mempool_txs.publish_tx.0,
+        a1_b2_reorg_mempool_txs.publish_tx.txs,
         vec![a_blk1_tx1_published]
     );
 
@@ -959,8 +959,8 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // (nothing should be in the mempool)
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.0.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.1.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
     assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
     // get a_blk1_tx1 from a, it should have b_blk3's ingress proof
@@ -1255,8 +1255,8 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     // (nothing should be in the mempool)
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.0.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.1.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
     assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
     // tada!

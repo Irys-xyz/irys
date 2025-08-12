@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, block_tree_service::BlockTreeServiceMessage, BlockProdStrategy,
+    async_trait, block_tree_service::BlockTreeServiceMessage,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy,
     BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
-use irys_types::ingress::IngressProof;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
     SystemTransactionLedger, H256,
@@ -61,7 +61,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            PublishLedgerWithTxs,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -70,7 +70,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                 }],
                 vec![self.invalid_stake.clone()],
                 vec![],
-                (vec![], vec![]),
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
             ))
         }
     }
@@ -151,7 +154,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            PublishLedgerWithTxs,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -160,7 +163,10 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                 }],
                 vec![self.invalid_pledge.clone()],
                 vec![],
-                (vec![], vec![]),
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
             ))
         }
     }
@@ -241,7 +247,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            PublishLedgerWithTxs,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -250,7 +256,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                 }],
                 self.commitments.clone(),
                 vec![],
-                (vec![], vec![]),
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
             ))
         }
     }
@@ -341,7 +350,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            PublishLedgerWithTxs,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -350,7 +359,10 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                 }],
                 vec![self.wrong_commitment.clone()],
                 vec![],
-                (vec![], vec![]),
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
             ))
         }
     }
@@ -437,7 +449,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
             Vec<SystemTransactionLedger>,
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
-            (Vec<DataTransactionHeader>, Vec<IngressProof>),
+            PublishLedgerWithTxs,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -446,7 +458,10 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                 }],
                 vec![],
                 vec![],
-                (vec![], vec![]),
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
             ))
         }
     }

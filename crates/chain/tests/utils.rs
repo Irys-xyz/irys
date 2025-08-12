@@ -985,7 +985,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 submit_tx,
                 publish_tx,
             } = txs.clone();
-            prev = (submit_tx.len(), publish_tx.0.len(), commitment_tx.len());
+            prev = (submit_tx.len(), publish_tx.txs.len(), commitment_tx.len());
 
             if prev == expected {
                 break;
