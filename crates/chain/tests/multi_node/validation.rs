@@ -65,7 +65,6 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
     let peer_node = genesis_node
         .testing_peer_with_assignments(&peer_signer)
         .await;
@@ -119,7 +118,6 @@ async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
     let peer_node = genesis_node
         .testing_peer_with_assignments(&peer_signer)
         .await;
@@ -218,7 +216,6 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
     let peer_node = genesis_node
         .testing_peer_with_assignments(&peer_signer)
         .await;
@@ -312,7 +309,6 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
     let peer_node = genesis_node
         .testing_peer_with_assignments(&peer_signer)
         .await;

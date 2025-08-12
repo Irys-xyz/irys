@@ -644,7 +644,6 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     // Start a temporary node to query the price
     let temp_config = NodeConfig::testing();
     let temp_node = IrysNodeTest::new_genesis(temp_config).start().await;
-    temp_node.start_public_api().await;
 
     // Query the actual price for the data
     let price_info = temp_node
@@ -686,7 +685,6 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     ]);
 
     let node = node.start().await;
-    node.start_public_api().await;
 
     // Create and submit a transaction from the user
     let tx = node
@@ -796,7 +794,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
 
     // Initialize the peer with our keypair/signer
     let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
@@ -805,7 +802,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let peer_node = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER")
         .await;
-    peer_node.start_public_api().await;
 
     // Get initial balance of the peer signer
     let reth_context = genesis_node.node_ctx.reth_node_adapter.clone();
@@ -1095,7 +1091,6 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .await;
     // disable validation for this test
     node.node_ctx.set_validation_enabled(false);
-    node.start_public_api().await;
 
     // Create evil block production strategy
     let evil_strategy = EvilBlockProdStrategy {
@@ -1403,7 +1398,6 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _ = genesis_node.start_public_api().await;
 
     // create and post stake commitment tx
     let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());

@@ -164,7 +164,6 @@ async fn check_info_endpoint(
 async fn heavy_api_client_all_endpoints_should_work() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
-    ctx.start_public_api().await;
     ctx.wait_for_packing(20).await;
 
     let api_address = SocketAddr::new(

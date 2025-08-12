@@ -79,7 +79,6 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
     genesis_node.mine_block().await?;
 
     // Create a data transaction with insufficient perm_fee

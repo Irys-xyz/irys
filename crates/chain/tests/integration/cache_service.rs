@@ -48,8 +48,6 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     )
     .await?;
 
-    node.start_public_api().await;
-
     let http_url = format!(
         "http://127.0.0.1:{}",
         node.node_ctx.config.node_config.http.bind_port

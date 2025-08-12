@@ -64,7 +64,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         ),
     ]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    node.start_public_api().await;
 
     let http_url = format!(
         "http://127.0.0.1:{}",

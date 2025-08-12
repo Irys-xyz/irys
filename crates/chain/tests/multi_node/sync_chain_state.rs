@@ -185,7 +185,6 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
-    ctx_genesis_node.start_public_api().await;
 
     // retrieve block_migration_depth for use later
     let mut consensus = ctx_genesis_node.cfg.consensus.clone();
@@ -219,14 +218,12 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
         .await;
-    ctx_peer1_node.start_public_api().await;
 
     let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
     ctx_peer2_node.mode = NodeMode::TrustedPeerSync;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
         .await;
-    ctx_peer2_node.start_public_api().await;
 
     // disable vdf mining on the peers, as they can instead use VDF fast forward as blocks arrive
     // this does not directly contribute to the test but does reduce resource usage during test run

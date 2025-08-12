@@ -124,7 +124,6 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _ = genesis_node.start_public_api().await;
 
     // Create stake and pledge commitments for the signer
     let config = &genesis_node.node_ctx.config.consensus;
@@ -181,7 +180,6 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _ = genesis_node.start_public_api().await;
 
     // Create and post stake commitment for the signer
     let config = &genesis_node.node_ctx.config.consensus;
@@ -281,7 +279,6 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
     let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
@@ -291,12 +288,10 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
         .start_with_name("PEER1")
         .await;
-    peer1_node.start_public_api().await;
 
     let peer2_node = IrysNodeTest::new(peer2_config.clone())
         .start_with_name("PEER2")
         .await;
-    peer2_node.start_public_api().await;
 
     // Post stake + pledge commitments to peer1
     let peer1_stake_tx = peer1_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
@@ -1326,7 +1321,6 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis.start_public_api().await;
 
     // Setup Reth context for EVM transactions
     let genesis_reth_context = genesis.node_ctx.reth_node_adapter.clone();
@@ -1339,12 +1333,10 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let peer1 = IrysNodeTest::new(peer1_config.clone())
         .start_with_name("PEER1")
         .await;
-    peer1.start_public_api().await;
 
     let peer2 = IrysNodeTest::new(peer2_config.clone())
         .start_with_name("PEER2")
         .await;
-    peer2.start_public_api().await;
 
     // Setup Reth contexts for peers
     let peer1_reth_context = peer1.node_ctx.reth_node_adapter.clone();
@@ -1779,7 +1771,6 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    genesis_node.start_public_api().await;
 
     // create a signed data transaction
     let valid_tx = genesis_node

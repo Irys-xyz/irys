@@ -34,7 +34,6 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         ),
     ]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    node.start_public_api().await;
 
     // retrieve block_migration_depth for use later
     let mut consensus = node.cfg.consensus.clone();

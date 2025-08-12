@@ -450,6 +450,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    #[must_use]
     pub async fn start_public_api(
         &self,
     ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {

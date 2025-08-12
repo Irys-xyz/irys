@@ -110,7 +110,6 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
         .await;
-    ctx_peer1_node.start_public_api().await;
 
     // Wait for peer to sync
     let peer_sync_height = (total_blocks_mined as u64).saturating_sub(block_migration_depth as u64);
