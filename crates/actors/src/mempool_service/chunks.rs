@@ -287,8 +287,7 @@ impl Inner {
             let latest = canon_chain
                 .0
                 .last()
-                .ok_or(ChunkIngressError::ServiceUninitialized)
-                .unwrap();
+                .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
@@ -387,7 +386,7 @@ pub fn generate_ingress_proof(
     // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
     // if we have, we *must* error
     let mut set = HashSet::<H256>::new();
-    let expected_chunk_count = data_size_to_chunk_count(size, chunk_size).unwrap();
+    let expected_chunk_count = data_size_to_chunk_count(size, chunk_size)?;
 
     let mut chunk_count: u32 = 0;
     let mut data_size: u64 = 0;
