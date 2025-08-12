@@ -366,3 +366,56 @@ impl TryFrom<RelativeChunkOffset> for u32 {
 
 /// A chunks's data path
 pub type ChunkDataPath = Vec<u8>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Ensures zero-size data returns 0 and avoids underflow in end_byte_offset
+    #[test]
+    fn end_byte_offset_zero_size_returns_zero() {
+        let chunk = UnpackedChunk {
+            data_root: Default::default(),
+            data_size: 0,
+            data_path: Base64(Vec::new()),
+            bytes: Base64(Vec::new()),
+            tx_offset: TxChunkOffset(0),
+        };
+        assert_eq!(chunk.end_byte_offset(64), 0);
+    }
+    // Non-last chunk: end offset should be chunk_size - 1 for the first chunk
+    #[test]
+    fn end_byte_offset_full_chunk_non_last() {
+        let chunk = UnpackedChunk {
+            data_root: Default::default(),
+            data_size: 200,
+            data_path: Base64(Vec::new()),
+            bytes: Base64(vec![0; 64]),
+            tx_offset: TxChunkOffset(0),
+        };
+        assert_eq!(chunk.end_byte_offset(64), 64 - 1);
+    }
+    // Last (partial) chunk: end offset should equal total data_size
+    #[test]
+    fn end_byte_offset_last_chunk_trimmed() {
+        let chunk = UnpackedChunk {
+            data_root: Default::default(),
+            data_size: 200,
+            data_path: Base64(Vec::new()),
+            bytes: Base64(vec![0; 8]),
+            tx_offset: TxChunkOffset(3),
+        };
+        assert_eq!(chunk.end_byte_offset(64), 200);
+    }
+    // Last chunk exact multiple: end offset should equal total data_size (full chunk)
+    #[test]
+    fn end_byte_offset_exact_multiple_last_full() {
+        let chunk = UnpackedChunk {
+            data_root: Default::default(),
+            data_size: 128,
+            data_path: Base64(Vec::new()),
+            bytes: Base64(vec![0; 64]),
+            tx_offset: TxChunkOffset(1),
+        };
+        assert_eq!(chunk.end_byte_offset(64), 128);
+    }
+}
