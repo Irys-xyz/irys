@@ -55,7 +55,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         (
             user_account.address(),
             GenesisAccount {
-                balance: TEST_USER_BALANCE_ETH, // Use 1 ETH instead of 1000 wei to cover fees
+                balance: TEST_USER_BALANCE_ETH,
                 ..Default::default()
             },
         ),
@@ -698,10 +698,11 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     )?;
     let total_cost_with_priority = tx.header.total_cost() + tx_term_charges.block_producer_reward;
 
-    // Verify the transaction was accepted and cost is within the balance
-    assert!(
-        total_cost_with_priority <= exact_required_balance,
-        "Total cost with priority fee ({}) should be less than or equal to the balance provided ({})",
+    // Verify the transaction was accepted and cost is exactly the balance
+    assert_eq!(
+        total_cost_with_priority,
+        exact_required_balance,
+        "Total cost with priority fee ({}) should be exactly equal to the balance provided ({})",
         total_cost_with_priority,
         exact_required_balance
     );

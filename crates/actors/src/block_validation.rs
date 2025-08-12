@@ -1275,6 +1275,7 @@ pub async fn data_txs_are_valid(
                 eyre::eyre!("Transaction {} has invalid ingress proof: {}", tx.id, e)
             })?;
 
+            // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
             ensure!(
                 tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
                 "Ingress proof mismatch for transaction {}",
@@ -1283,7 +1284,7 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // TODO: validate that block.beneficiary is correctly updated
+    // TODO: validate that block.treasury is correctly updated
 
     debug!("Data transaction validation successful");
     Ok(())
