@@ -988,8 +988,10 @@ pub async fn commitment_txs_are_valid(
 }
 
 /// Helper function to calculate permanent storage fee using a specific EMA snapshot
-pub fn calculate_perm_storage_base_network_fee(
+/// This includes base network fee + ingress proof rewards
+pub fn calculate_perm_storage_total_fee(
     bytes_to_store: u64,
+    term_fee: U256,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
@@ -1009,7 +1011,15 @@ pub fn calculate_perm_storage_base_network_fee(
         ema_snapshot.ema_for_public_pricing(),
     )?;
 
-    Ok(base_network_fee)
+    // Add ingress proof rewards to the base network fee
+    // Total perm_fee = base network fee + (num_ingress_proofs × miner_fee_percentage × term_fee)
+    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
+        term_fee,
+        config.consensus.number_of_ingress_proofs,
+        config.consensus.miner_fee_percentage,
+    )?;
+
+    Ok(total_perm_fee)
 }
 
 /// Helper function to calculate term storage fee using a specific EMA snapshot
@@ -1172,10 +1182,11 @@ pub async fn data_txs_are_valid(
         );
 
         // Calculate expected fees based on data size using block's EMA
-        let expected_perm_fee =
-            calculate_perm_storage_base_network_fee(tx.data_size, &block_ema, config)?;
+        // Calculate term fee first as it's needed for perm fee calculation
         let expected_term_fee =
             calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)?;
+        let expected_perm_fee =
+            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)?;
 
         // Validate perm_fee is at least the expected amount
         let actual_perm_fee = tx.perm_fee.unwrap_or(U256::zero());

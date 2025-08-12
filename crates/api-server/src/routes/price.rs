@@ -55,15 +55,15 @@ pub async fn get_price(
 
     match data_ledger {
         DataLedger::Publish => {
-            // If the cost calculation fails, return 400 with the error text
-            let base_cost = cost_of_perm_storage(state.clone(), bytes_to_store)
-                .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
-
-            // Calculate term fee
+            // Calculate term fee first as it's needed for perm fee calculation
             let term_fee = calculate_term_fee(bytes_to_store, &state.config.consensus);
 
+            // If the cost calculation fails, return 400 with the error text
+            let total_perm_cost = cost_of_perm_storage(state, bytes_to_store, term_fee)
+                .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
+
             Ok(HttpResponse::Ok().json(PriceInfo {
-                perm_fee: base_cost.amount,
+                perm_fee: total_perm_cost.amount,
                 term_fee,
                 ledger,
                 bytes: bytes_to_store,
@@ -77,6 +77,7 @@ pub async fn get_price(
 fn cost_of_perm_storage(
     state: web::Data<ApiState>,
     bytes_to_store: u64,
+    term_fee: U256,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
     // get the latest EMA to use for pricing
     let tree = state.block_tree.read();
@@ -85,8 +86,6 @@ fn cost_of_perm_storage(
         .get_ema_snapshot(&tip)
         .ok_or_eyre("tip block should still remain in state")?;
     drop(tree);
-
-    // TODO: Review perm pricing!!!
 
     // Calculate the cost per GB (take into account replica count & cost per replica)
     // NOTE: this value can be memoised because it is deterministic based on the config
@@ -104,7 +103,15 @@ fn cost_of_perm_storage(
     let base_network_fee = cost_per_gb_per_year
         .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
-    Ok(base_network_fee)
+    // Add ingress proof rewards to the base network fee
+    // Total perm_fee = base network fee + (num_ingress_proofs × miner_fee_percentage × term_fee)
+    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
+        term_fee,
+        state.config.consensus.number_of_ingress_proofs,
+        state.config.consensus.miner_fee_percentage,
+    )?;
+
+    Ok(total_perm_fee)
 }
 
 /// Calculate term fee with base 0.001 ETH plus size-based adjustments

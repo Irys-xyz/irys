@@ -154,6 +154,7 @@ impl PublishFeeCharges {
             per_ingress_reward.saturating_mul(U256::from(num_ingress_proofs));
 
         // Validate that perm_fee is sufficient to cover ingress rewards
+        // According to business rules, perm_fee = base_permanent_storage_cost + ingress_proof_rewards
         ensure!(
             perm_fee >= ingress_proof_reward,
             "Permanent fee ({}) is insufficient to cover ingress proof rewards ({})",
@@ -161,9 +162,17 @@ impl PublishFeeCharges {
             ingress_proof_reward
         );
 
-        // The perm_fee already includes base perm fee + ingress rewards
-        // So the treasury gets: perm_fee - total_ingress_rewards
+        // The perm_fee should include base perm storage cost + ingress rewards
+        // Treasury gets the base permanent storage cost portion (perm_fee - ingress_rewards)
         let perm_fee_treasury = perm_fee.saturating_sub(ingress_proof_reward);
+
+        // Validate that treasury amount is non-zero (there should be base storage cost)
+        ensure!(
+            perm_fee_treasury > U256::from(0),
+            "Permanent fee ({}) must include base storage cost in addition to ingress proof rewards ({})",
+            perm_fee,
+            ingress_proof_reward
+        );
 
         // Validate that the sum of all fields equals perm_fee
         ensure!(
@@ -440,6 +449,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("insufficient to cover ingress proof rewards"));
+    }
+
+    #[test]
+    fn test_publish_fee_no_base_storage_cost() {
+        let mut config = ConsensusConfig::testing();
+        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.number_of_ingress_proofs = 3;
+
+        let term_fee = U256::from(1000);
+        // Exactly equal to ingress rewards (150), no base storage cost
+        let perm_fee = U256::from(150);
+
+        let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
+
+        // Should fail because there's no base storage cost
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must include base storage cost"));
     }
 
     #[test]

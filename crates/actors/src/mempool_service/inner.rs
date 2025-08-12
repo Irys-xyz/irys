@@ -1,5 +1,5 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::block_validation::calculate_perm_storage_base_network_fee;
+use crate::block_validation::calculate_perm_storage_total_fee;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -491,9 +491,11 @@ impl Inner {
                         continue;
                     };
 
-                    let Ok(expected_perm_fee) =
-                        self.calculate_perm_storage_fee(tx.data_size, &ema_snapshot)
-                    else {
+                    let Ok(expected_perm_fee) = self.calculate_perm_storage_fee(
+                        tx.data_size,
+                        expected_term_fee,
+                        &ema_snapshot,
+                    ) else {
                         continue;
                     };
 
@@ -955,19 +957,20 @@ impl Inner {
     }
 
     /// Calculate the expected protocol fee for permanent storage
-    /// This is the same calculation used by the pricing API
+    /// This includes base network fee + ingress proof rewards
     #[tracing::instrument(err)]
     pub fn calculate_perm_storage_fee(
         &self,
         bytes_to_store: u64,
+        term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
-        // Calculate the cost per GB (take into account replica count & cost per replica)
-        let base_network_fee =
-            calculate_perm_storage_base_network_fee(bytes_to_store, ema, &self.config)
+        // Calculate total perm fee including ingress proof rewards
+        let total_perm_fee =
+            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config)
                 .map_err(TxIngressError::other_display)?;
 
-        Ok(base_network_fee)
+        Ok(total_perm_fee)
     }
 
     /// Calculate the expected term fee for temporary storage

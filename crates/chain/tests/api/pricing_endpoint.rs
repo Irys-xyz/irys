@@ -3,7 +3,9 @@
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::price::PriceInfo;
-use irys_types::{DataLedger, U256};
+use irys_types::{
+    DataLedger, U256,
+};
 
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
@@ -14,6 +16,8 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
+
+    // Calculate the expected base storage fee
     let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
@@ -33,6 +37,14 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         )?
     };
 
+    // Calculate expected perm_fee using the same method as the API
+    let term_fee = U256::from(1_000_000_000); // Current placeholder value
+    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
+        term_fee,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.miner_fee_percentage,
+    )?;
+
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
@@ -40,11 +52,11 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     assert_eq!(response.content_type(), ContentType::json().to_string());
     let price_info = response.json::<PriceInfo>().await?;
-    // Check that perm_fee matches expected and term_fee is calculated correctly
-    assert_eq!(price_info.perm_fee, expected_base_fee.amount);
+    // Check that perm_fee includes both base fee and ingress rewards
+    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
     // TODO: Update when term_fee calculation is properly implemented
     // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, U256::from(1_000_000_000));
+    assert_eq!(price_info.term_fee, term_fee);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, data_size_bytes);
     assert!(
@@ -65,6 +77,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = 4_u64;
+
+    // Calculate the expected base storage fee
     let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
@@ -85,6 +99,14 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         )?
     };
 
+    // Calculate expected perm_fee using the same method as the API
+    let term_fee = U256::from(1_000_000_000); // Current placeholder value
+    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
+        term_fee,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.miner_fee_percentage,
+    )?;
+
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
@@ -92,11 +114,11 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     assert_eq!(response.content_type(), ContentType::json().to_string());
     let price_info = response.json::<PriceInfo>().await?;
-    // Check that perm_fee matches expected and term_fee is calculated correctly
-    assert_eq!(price_info.perm_fee, expected_base_fee.amount);
+    // Check that perm_fee includes both base fee and ingress rewards
+    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
     // TODO: Update when term_fee calculation is properly implemented
     // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, U256::from(1_000_000_000));
+    assert_eq!(price_info.term_fee, term_fee);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, ctx.node_ctx.config.consensus.chunk_size);
     assert!(
@@ -140,6 +162,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         ctx.node_ctx.config.node_config.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size + 1;
+
+    // Calculate the expected base storage fee
     let expected_base_fee = {
         let cost_per_gb = ctx
             .node_ctx
@@ -160,6 +184,14 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         )?
     };
 
+    // Calculate expected perm_fee using the same method as the API
+    let term_fee = U256::from(1_000_000_000); // Current placeholder value
+    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
+        term_fee,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.miner_fee_percentage,
+    )?;
+
     // action
     let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
@@ -167,11 +199,11 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     assert_eq!(response.status(), 200);
     assert_eq!(response.content_type(), ContentType::json().to_string());
     let price_info = response.json::<PriceInfo>().await?;
-    // Check that perm_fee matches expected and term_fee is calculated correctly
-    assert_eq!(price_info.perm_fee, expected_base_fee.amount);
+    // Check that perm_fee includes both base fee and ingress rewards
+    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
     // TODO: Update when term_fee calculation is properly implemented
     // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, U256::from(1_000_000_000));
+    assert_eq!(price_info.term_fee, term_fee);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(
         price_info.bytes,
