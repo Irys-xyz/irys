@@ -290,7 +290,7 @@ impl<T: ApiClient> ChainSyncService<T> {
             }
             Err(e) => {
                 warn!(
-                    "Periodic sync check: Failed to check if behind network: {}, running sync anyway",
+                    "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
                     e
                 );
                 match self.inner.sync_chain().await {
