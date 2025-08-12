@@ -276,14 +276,16 @@ mod tests {
     // Ensures zero-size input doesn't underflow and returns untrimmed data
     #[test]
     fn unpack_zero_size_no_underflow() {
-        let chunk_size = 8usize;
-        let entropy = vec![0u8; chunk_size];
-        let bytes = vec![1u8; chunk_size];
+        let chunk_size = 8_usize;
+        let entropy = vec![0_u8; chunk_size];
+        let bytes = vec![1_u8; chunk_size];
 
-        let mut pc = PackedChunk::default();
-        pc.data_size = 0;
-        pc.bytes = irys_types::Base64(bytes.clone());
-        pc.tx_offset = TxChunkOffset(0);
+        let pc = PackedChunk {
+            data_size: 0,
+            bytes: irys_types::Base64(bytes.clone()),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
 
         let out = unpack_with_entropy(&pc, entropy, chunk_size);
         assert_eq!(out, bytes);
@@ -292,15 +294,17 @@ mod tests {
     // Last chunk should be trimmed to the exact number of trailing bytes
     #[test]
     fn unpack_last_chunk_trims_to_trailing_bytes() {
-        let chunk_size = 8usize;
-        let data_size = 10u64; // 2 bytes in last chunk
-        let entropy = vec![0u8; chunk_size];
-        let bytes = vec![42u8; chunk_size];
+        let chunk_size = 8_usize;
+        let data_size = 10_u64; // 2 bytes in last chunk
+        let entropy = vec![0_u8; chunk_size];
+        let bytes = vec![42_u8; chunk_size];
 
-        let mut pc = PackedChunk::default();
-        pc.data_size = data_size;
-        pc.bytes = irys_types::Base64(bytes);
-        pc.tx_offset = TxChunkOffset(1); // last chunk for 2 chunks
+        let pc = PackedChunk {
+            data_size,
+            bytes: irys_types::Base64(bytes),
+            tx_offset: TxChunkOffset(1), // last chunk for 2 chunks
+            ..Default::default()
+        };
 
         let out = unpack_with_entropy(&pc, entropy, chunk_size);
         assert_eq!(out.len(), (data_size % chunk_size as u64) as usize);
@@ -309,15 +313,17 @@ mod tests {
     // Exact multiple of chunk_size should keep full last chunk (no trimming)
     #[test]
     fn unpack_last_chunk_full_size_when_exact_multiple() {
-        let chunk_size = 8usize;
-        let data_size = 16u64; // exact multiple
-        let entropy = vec![0u8; chunk_size];
-        let bytes = vec![7u8; chunk_size];
+        let chunk_size = 8_usize;
+        let data_size = 16_u64; // exact multiple
+        let entropy = vec![0_u8; chunk_size];
+        let bytes = vec![7_u8; chunk_size];
 
-        let mut pc = PackedChunk::default();
-        pc.data_size = data_size;
-        pc.bytes = irys_types::Base64(bytes);
-        pc.tx_offset = TxChunkOffset(1); // last chunk for 2 chunks
+        let pc = PackedChunk {
+            data_size,
+            bytes: irys_types::Base64(bytes),
+            tx_offset: TxChunkOffset(1), // last chunk for 2 chunks
+            ..Default::default()
+        };
 
         let out = unpack_with_entropy(&pc, entropy, chunk_size);
         assert_eq!(out.len(), chunk_size);
