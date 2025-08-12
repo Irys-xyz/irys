@@ -138,6 +138,14 @@ impl Iterator for ShadowTxGenerator<'_> {
 
 impl ShadowTxGenerator<'_> {
     /// Accumulates all rewards from ingress proofs into a map
+    ///
+    /// We accumulate the ingress rewards per miner address,
+    /// meaning, that a single miner will only have a single ingress proof shadow tx
+    /// for n ingress proofs. This is to save up space on the evm block.
+    ///
+    /// Rolling hash is a deterministic hash used by summing up all the tx ids that were a
+    /// part of computing the total ingress reward.
+    /// This rolling hash is later used as `irys_ref` variable for the shadow tx.
     fn accumulate_ingress_rewards(&self) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
         // BTreeMap to aggregate rewards by provider address and rolling hash (sorted by address)
         let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
