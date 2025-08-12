@@ -300,18 +300,15 @@ impl Inner {
                 .ok_or_eyre("Empty canonical chain")?
                 .clone();
 
-            // Get the tip block hash (should match last_block in canonical chain)
-            let tip = tree.tip;
-
             // Get all snapshots for the tip block
             let ema_snapshot = tree
-                .get_ema_snapshot(&tip)
+                .get_ema_snapshot(&last_block.block_hash)
                 .ok_or_else(|| eyre!("EMA snapshot not found for tip block"))?;
             let epoch_snapshot = tree
-                .get_epoch_snapshot(&tip)
+                .get_epoch_snapshot(&last_block.block_hash)
                 .ok_or_else(|| eyre!("Epoch snapshot not found for tip block"))?;
             let commitment_snapshot = tree
-                .get_commitment_snapshot(&tip)
+                .get_commitment_snapshot(&last_block.block_hash)
                 .map_err(|e| eyre!("Failed to get commitment snapshot: {}", e))?;
 
             (
@@ -455,7 +452,7 @@ impl Inner {
         let total_data_available = submit_ledger_txs.len();
 
         // Sort data transactions by fee (highest first) to maximize revenue
-        // user_fee() now returns term_fee for prioritization
+        // The miner will get proportionally higher rewards for higher term fee values
         submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
@@ -476,82 +473,65 @@ impl Inner {
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
             // Validate fees based on ledger type
-            if let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) {
-                match ledger {
-                    irys_types::DataLedger::Publish => {
-                        // For Publish ledger, validate both term and perm fees
-                        // Calculate expected fees based on current EMA
-                        let expected_term_fee =
-                            match self.calculate_term_storage_fee(tx.data_size, &ema_snapshot) {
-                                Ok(fee) => fee,
-                                Err(e) => {
-                                    trace!(
-                                        tx_id = ?tx.id,
-                                        error = ?e,
-                                        "Failed to calculate expected term fee"
-                                    );
-                                    continue;
-                                }
-                            };
-
-                        let expected_perm_fee =
-                            match self.calculate_perm_storage_fee(tx.data_size, &ema_snapshot) {
-                                Ok(fee) => fee,
-                                Err(e) => {
-                                    trace!(
-                                        tx_id = ?tx.id,
-                                        error = ?e,
-                                        "Failed to calculate expected perm fee"
-                                    );
-                                    continue;
-                                }
-                            };
-
-                        // Validate term fee
-                        if tx.term_fee < expected_term_fee {
-                            trace!(
-                                tx_id = ?tx.id,
-                                actual_term_fee = ?tx.term_fee,
-                                expected_term_fee = ?expected_term_fee,
-                                "Skipping Publish tx: insufficient term_fee"
-                            );
-                            continue;
-                        }
-
-                        // Validate perm fee must be present for Publish ledger
-                        if let Some(perm_fee) = tx.perm_fee {
-                            if perm_fee < expected_perm_fee.amount {
-                                trace!(
-                                    tx_id = ?tx.id,
-                                    actual_perm_fee = ?perm_fee,
-                                    expected_perm_fee = ?expected_perm_fee.amount,
-                                    "Skipping Publish tx: insufficient perm_fee"
-                                );
-                                continue;
-                            }
-                        } else {
-                            // Missing perm_fee for Publish ledger transaction is invalid
-                            warn!(
-                                tx_id = ?tx.id,
-                                signer = ?tx.signer,
-                                "Invalid Publish tx: missing perm_fee - treating as unfunded"
-                            );
-                            // Skip this transaction - it will be filtered out by check_funding
-                            // since we treat missing perm_fee as equivalent to being unfunded
-                            continue;
-                        }
-                    }
-                    irys_types::DataLedger::Submit => {
-                        // todo: add to list of invalid txs because we don't support Submit txs
-                    }
-                }
-            } else {
+            let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
                 trace!(
                     tx_id = ?tx.id,
                     ledger_id = tx.ledger_id,
                     "Skipping tx: invalid ledger type"
                 );
                 continue;
+            };
+            match ledger {
+                irys_types::DataLedger::Publish => {
+                    // For Publish ledger, validate both term and perm fees
+                    // Calculate expected fees based on current EMA
+                    let Ok(expected_term_fee) =
+                        self.calculate_term_storage_fee(tx.data_size, &ema_snapshot)
+                    else {
+                        continue;
+                    };
+
+                    let Ok(expected_perm_fee) =
+                        self.calculate_perm_storage_fee(tx.data_size, &ema_snapshot)
+                    else {
+                        continue;
+                    };
+
+                    // Validate term fee
+                    if tx.term_fee < expected_term_fee {
+                        trace!(
+                            tx_id = ?tx.id,
+                            actual_term_fee = ?tx.term_fee,
+                            expected_term_fee = ?expected_term_fee,
+                            "Skipping Publish tx: insufficient term_fee"
+                        );
+                        continue;
+                    }
+
+                    // Validate perm fee must be present for Publish ledger
+                    let Some(perm_fee) = tx.perm_fee else {
+                        // Missing perm_fee for Publish ledger transaction is invalid
+                        warn!(
+                            tx_id = ?tx.id,
+                            signer = ?tx.signer,
+                            "Invalid Publish tx: missing perm_fee"
+                        );
+                        // todo: add to list of invalid txs because all publish txs must have perm fee present
+                        continue;
+                    };
+                    if perm_fee < expected_perm_fee.amount {
+                        trace!(
+                            tx_id = ?tx.id,
+                            actual_perm_fee = ?perm_fee,
+                            expected_perm_fee = ?expected_perm_fee.amount,
+                            "Skipping Publish tx: insufficient perm_fee"
+                        );
+                        continue;
+                    }
+                }
+                irys_types::DataLedger::Submit => {
+                    // todo: add to list of invalid txs because we don't support Submit txs
+                }
             }
 
             trace!(
@@ -976,6 +956,7 @@ impl Inner {
 
     /// Calculate the expected protocol fee for permanent storage
     /// This is the same calculation used by the pricing API
+    #[tracing::instrument(err)]
     pub fn calculate_perm_storage_fee(
         &self,
         bytes_to_store: u64,
