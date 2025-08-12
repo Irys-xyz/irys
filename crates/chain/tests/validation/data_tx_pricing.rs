@@ -96,7 +96,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
         data,
         Some(H256::zero()),
         DataLedger::Publish,
-        U256::zero(),                // term_fee (can be non-zero but using 0 here)
+        price_info.term_fee,
         Some(insufficient_perm_fee), // Insufficient perm_fee!
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;

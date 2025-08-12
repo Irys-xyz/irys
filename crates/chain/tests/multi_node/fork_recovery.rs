@@ -903,8 +903,8 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     // check balances in block b2
     // Only 1 Submit tx from node B should be in block b2
     // The transaction fee includes term_fee + perm_fee
-    let peer_b_total_fee = peer_b_b2_submit_tx.header.term_fee
-        + peer_b_b2_submit_tx.header.perm_fee.unwrap_or(U256::zero());
+    let peer_b_total_fee =
+        peer_b_b2_submit_tx.header.term_fee + peer_b_b2_submit_tx.header.perm_fee.unwrap();
 
     // Calculate block producer reward (5% of term_fee) that b_signer receives as the miner
     let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
@@ -1171,8 +1171,8 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         );
         // assert final balances
         // Calculate peer C's total fee (for the tx that was included in c_block4)
-        let peer_c_total_fee = peer_c_b2_submit_tx.header.term_fee
-            + peer_c_b2_submit_tx.header.perm_fee.unwrap_or(U256::zero());
+        let peer_c_total_fee =
+            peer_c_b2_submit_tx.header.term_fee + peer_c_b2_submit_tx.header.perm_fee.unwrap();
 
         // Calculate block producer reward for peer C's transaction (c_signer receives this as miner of c_block4)
         let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
