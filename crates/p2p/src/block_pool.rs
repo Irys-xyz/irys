@@ -693,12 +693,15 @@ where
                 current_block_hash
             );
 
-            let latest_block_in_the_index = self.block_status_provider.index_height();
+            let canonical_height = self.block_status_provider.canonical_height();
 
-            if current_block_height > latest_block_in_the_index + u64::from(self.config.consensus.block_migration_depth * 2) {
+            if current_block_height
+                > canonical_height + u64::from(self.config.consensus.block_migration_depth * 2)
+            {
+                // IMPORTANT! If the node is just processing blocks slower than the network, the sync service should catch it up eventually.
                 warn!(
-                    "Block pool: The block {:?} (height {}) is too far ahead of the latest block in the index (height {}). This might indicate a potential issue.",
-                    current_block_hash, current_block_height, latest_block_in_the_index
+                    "Block pool: The block {:?} (height {}) is too far ahead of the latest canonical block (height {}). This might indicate a potential issue.",
+                    current_block_hash, current_block_height, canonical_height
                 );
 
                 return Ok(());

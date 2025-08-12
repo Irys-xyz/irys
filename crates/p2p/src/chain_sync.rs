@@ -1,12 +1,11 @@
 use crate::block_pool::BlockCacheGuard;
 use crate::{BlockPool, GossipError};
-use base58::ToBase58 as _;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
-use irys_types::{BlockIndexItem, BlockIndexQuery, NodeMode, TokioServiceHandle};
+use irys_types::{BlockIndexItem, BlockIndexQuery, Config, NodeMode, TokioServiceHandle};
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
@@ -15,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
-/// Sync service specific errors
+/// Sync service errors
 #[derive(Debug, thiserror::Error)]
 pub enum ChainSyncError {
     #[error("Network error: {0}")]
@@ -149,53 +148,12 @@ impl<T: ApiClient> ChainSyncServiceInner<T> {
         }
     }
 
-    /// Check if the local index is behind trusted peers
-    pub async fn check_if_local_index_is_behind_trusted_peers(&self) -> ChainSyncResult<bool> {
-        let migration_depth = u64::from(self.config.consensus.block_migration_depth);
-
-        let mut highest_trusted_peer_height = None;
-
-        let trusted_peers = self.peer_list.trusted_peers();
-        if trusted_peers.is_empty() {
-            return Err(ChainSyncError::Network(
-                "No trusted peers available".to_string(),
-            ));
-        }
-
-        for (_, peer) in trusted_peers.iter() {
-            debug!("Sync task: Trusted peer: {:?}", peer);
-            let node_info = match self.api_client.node_info(peer.address.api).await {
-                Ok(info) => info,
-                Err(err) => {
-                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
-                    continue;
-                }
-            };
-
-            let index_tip = node_info.block_index_height;
-
-            if let Some(peer_height) = highest_trusted_peer_height {
-                if index_tip > peer_height {
-                    highest_trusted_peer_height = Some(index_tip);
-                }
-            }
-        }
-
-        if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
-            Ok(self.block_index.read().latest_height() + migration_depth
-                < highest_trusted_peer_height)
-        } else {
-            Err(ChainSyncError::Network(
-                "Wasn't able to fetch node info from any of the trusted peers".to_string(),
-            ))
-        }
-    }
-
     /// Perform a sync operation
     async fn sync_chain(&self) -> ChainSyncResult<()> {
         let start_sync_from_height = self.block_index.read().latest_height();
         // Clear any pending blocks from the cache
         self.block_cache_guard.clear().await;
+
         sync_chain(
             self.sync_state.clone(),
             self.api_client.clone(),
@@ -290,7 +248,7 @@ impl<T: ApiClient> ChainSyncService<T> {
             SyncChainServiceMessage::InitialSync(sender) => {
                 let result = self.inner.sync_chain().await;
                 if let Err(e) = sender.send(result) {
-                    tracing::error!("Failed to send sync response: {:?}", e);
+                    tracing::error!("Failed to send a sync response: {e:?}");
                 }
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
@@ -307,17 +265,24 @@ impl<T: ApiClient> ChainSyncService<T> {
             return;
         }
 
+        debug!("Starting a periodic sync check routine");
         // Check if we're behind the network
-        match self
-            .inner
-            .check_if_local_index_is_behind_trusted_peers()
-            .await
+        match is_local_index_is_behind_trusted_peers(
+            &self.inner.config,
+            &self.inner.peer_list,
+            &self.inner.api_client,
+            &self.inner.block_index,
+        )
+        .await
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
                 match self.inner.sync_chain().await {
                     Ok(()) => info!("Periodic sync completed successfully"),
-                    Err(e) => error!("Periodic sync failed: {}", e),
+                    Err(e) => {
+                        error!("Periodic sync failed: {}", e);
+                        self.inner.sync_state.finish_sync();
+                    }
                 }
             }
             Ok(false) => {
@@ -325,16 +290,23 @@ impl<T: ApiClient> ChainSyncService<T> {
             }
             Err(e) => {
                 warn!(
-                    "Periodic sync check: Failed to check if behind network: {}",
+                    "Periodic sync check: Failed to check if behind network: {}, running sync anyway",
                     e
                 );
+                match self.inner.sync_chain().await {
+                    Ok(()) => info!("Periodic sync completed successfully"),
+                    Err(e) => {
+                        error!("Periodic sync failed: {}", e);
+                        self.inner.sync_state.finish_sync();
+                    }
+                }
             }
         }
     }
 }
 
 #[instrument(skip_all, err)]
-pub async fn sync_chain(
+async fn sync_chain(
     sync_state: ChainSyncState,
     api_client: impl ApiClient,
     peer_list: &PeerList,
@@ -356,10 +328,10 @@ pub async fn sync_chain(
     if start_sync_from_height == 0 {
         start_sync_from_height = 1;
     }
-    let trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
+    let is_trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
 
     sync_state.set_syncing_from(start_sync_from_height);
-    sync_state.set_trusted_sync(trusted_mode);
+    sync_state.set_trusted_sync(is_trusted_mode);
 
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
 
@@ -399,9 +371,7 @@ pub async fn sync_chain(
 
     debug!("Sync task: Syncing started");
 
-    if trusted_mode {
-        // We should enable full validation when the index nears the (tip - migration depth)
-        let migration_depth = config.consensus.block_migration_depth as usize;
+    if is_trusted_mode {
         let trusted_peers = peer_list.trusted_peers();
         if trusted_peers.is_empty() {
             return Err(ChainSyncError::Network(
@@ -409,64 +379,10 @@ pub async fn sync_chain(
             ));
         }
 
-        let mut switch_height_set = false;
-        let max_retries = 5;
-
-        for retry_attempt in 0..max_retries {
-            if retry_attempt > 0 {
-                debug!(
-                    "Sync task: Retry attempt {} for fetching node info from trusted peers",
-                    retry_attempt + 1
-                );
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-
-            for (_, peer) in trusted_peers.iter() {
-                debug!("Sync task: Trusted peer: {:?}", peer);
-                let node_info = match api_client.node_info(peer.address.api).await {
-                    Ok(info) => info,
-                    Err(err) => {
-                        warn!(
-                            "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
-                            peer.address.api, err
-                        );
-                        continue;
-                    }
-                };
-
-                let index_tip = node_info.block_index_height;
-                if index_tip > migration_depth as u64 {
-                    let switch_height = index_tip as usize - migration_depth;
-                    sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
-                    debug!(
-                        "Sync task: Setting switch to full validation at height {}",
-                        switch_height
-                    );
-                    switch_height_set = true;
-                    break; // Exit the inner loop as soon as we successfully get data from a peer
-                } else {
-                    warn!(
-                        "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
-                        index_tip, migration_depth
-                    );
-                    switch_height_set = true;
-                    break; // Exit the inner loop as we got valid data, even if we can't set switch height
-                }
-            }
-
-            if switch_height_set {
-                break; // Exit the outer retry loop if we successfully got data
-            }
-        }
-
-        if !switch_height_set {
-            return Err(ChainSyncError::Network(
-                "Failed to get node info from any trusted peer after 5 retry attempts".to_string(),
-            ));
-        }
+        check_and_update_full_validation_switch_height(config, peer_list, &api_client, &sync_state)
+            .await?;
     }
 
-    let mut block_queue = VecDeque::new();
     let block_index = match get_block_index(
         peer_list,
         &api_client,
@@ -495,8 +411,16 @@ pub async fn sync_chain(
     let mut target = sync_state.sync_target_height() + block_index.len();
 
     let mut blocks_to_request = block_index.len();
+
+    let mut block_queue = VecDeque::new();
     block_queue.extend(block_index);
-    let no_new_blocks_to_process = block_queue.is_empty();
+
+    // If no new blocks were added to the index, nothing is going to mark
+    //  the tip as processed
+    if block_queue.is_empty() {
+        debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
+        sync_state.mark_processed(sync_state.sync_target_height());
+    }
 
     while let Some(block) = block_queue.pop_front() {
         if sync_state.is_queue_full() {
@@ -504,15 +428,10 @@ pub async fn sync_chain(
             sync_state.wait_for_an_empty_queue_slot().await;
         }
 
-        debug!(
-            "Sync task: Requesting block {} (sync height is {}) from the network",
-            block.block_hash.0.to_base58(),
-            sync_state.sync_target_height()
-        );
-
         let peer_list_clone = peer_list.clone();
         let sync_state_clone = sync_state.clone();
         let block_hash = block.block_hash;
+
         tokio::spawn(async move {
             debug!(
                 "Sync task: Requesting block {:?} (sync height is {}) from the network",
@@ -544,6 +463,16 @@ pub async fn sync_chain(
 
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
+            if is_trusted_mode {
+                check_and_update_full_validation_switch_height(
+                    config,
+                    peer_list,
+                    &api_client,
+                    &sync_state,
+                )
+                .await?;
+            }
+
             let additional_index = get_block_index(
                 peer_list,
                 &api_client,
@@ -567,12 +496,6 @@ pub async fn sync_chain(
         }
     }
 
-    // If no new blocks were added to the index, nothing is going to mark
-    //  the tip as processed
-    if no_new_blocks_to_process {
-        debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
-        sync_state.mark_processed(sync_state.sync_target_height());
-    }
     debug!("Sync task: Block queue is empty, waiting for the highest processed block to reach the target sync height");
     sync_state
         .wait_for_processed_block_to_reach_target()
@@ -583,6 +506,80 @@ pub async fn sync_chain(
     Ok(())
 }
 
+async fn check_and_update_full_validation_switch_height(
+    config: &Config,
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    sync_state: &ChainSyncState,
+) -> ChainSyncResult<()> {
+    // We should enable full validation when the index nears the (tip - migration depth)
+    let migration_depth = config.consensus.block_migration_depth as usize;
+    let trusted_peers = peer_list.trusted_peers();
+    if trusted_peers.is_empty() {
+        return Err(ChainSyncError::Network(
+            "No trusted peers available".to_string(),
+        ));
+    }
+
+    let mut switch_height_set = false;
+    let max_retries = 5;
+
+    for retry_attempt in 0..max_retries {
+        if retry_attempt > 0 {
+            debug!(
+                "Sync task: Retry attempt {} for fetching node info from trusted peers",
+                retry_attempt + 1
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        for (_, peer) in trusted_peers.iter() {
+            debug!("Sync task: Trusted peer: {:?}", peer);
+            let node_info = match api_client.node_info(peer.address.api).await {
+                Ok(info) => info,
+                Err(err) => {
+                    warn!(
+                            "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                            peer.address.api, err
+                        );
+                    continue;
+                }
+            };
+
+            let index_tip = node_info.block_index_height;
+            if index_tip > migration_depth as u64 {
+                let switch_height = index_tip as usize - migration_depth;
+                sync_state.set_switch_to_full_validation_at_height(Some(switch_height));
+                debug!(
+                    "Sync task: Setting switch to full validation at height {}",
+                    switch_height
+                );
+                switch_height_set = true;
+                break; // Exit the inner loop as soon as we successfully get data from a peer
+            } else {
+                warn!(
+                    "Sync task: Not enough blocks in the index to switch to full validation, index tip: {}, migration depth: {}",
+                    index_tip, migration_depth
+                );
+                switch_height_set = true;
+                break; // Exit the inner loop as we got valid data, even if we can't set switch height
+            }
+        }
+
+        if switch_height_set {
+            break; // Exit the outer retry loop if we successfully got data
+        }
+    }
+
+    if !switch_height_set {
+        Err(ChainSyncError::Network(
+            "Failed to get node info from any trusted peer after 5 retry attempts".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 async fn get_block_index(
     peer_list: &PeerList,
     api_client: &impl ApiClient,
@@ -591,6 +588,10 @@ async fn get_block_index(
     retries: usize,
     fetch_from_the_trusted_peer: bool,
 ) -> ChainSyncResult<Vec<BlockIndexItem>> {
+    debug!(
+        "Fetching block index starting from height {} with limit {}",
+        start, limit
+    );
     let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         peer_list.trusted_peers()
     } else {
@@ -678,6 +679,52 @@ async fn get_block_index(
     Err(ChainSyncError::Network(
         "Failed to fetch block index from peer".to_string(),
     ))
+}
+
+/// Check if the local index is behind trusted peers. Returns true if behind, false if up to date.
+async fn is_local_index_is_behind_trusted_peers(
+    config: &Config,
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    block_index: &BlockIndexReadGuard,
+) -> ChainSyncResult<bool> {
+    let migration_depth = u64::from(config.consensus.block_migration_depth);
+
+    let mut highest_trusted_peer_height = None;
+
+    let trusted_peers = peer_list.trusted_peers();
+    if trusted_peers.is_empty() {
+        return Err(ChainSyncError::Network(
+            "No trusted peers available".to_string(),
+        ));
+    }
+
+    for (_, peer) in trusted_peers.iter() {
+        debug!("Sync task: Trusted peer: {:?}", peer);
+        let node_info = match api_client.node_info(peer.address.api).await {
+            Ok(info) => info,
+            Err(err) => {
+                warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
+                continue;
+            }
+        };
+
+        let index_tip = node_info.block_index_height;
+
+        if let Some(peer_height) = highest_trusted_peer_height {
+            if index_tip > peer_height {
+                highest_trusted_peer_height = Some(index_tip);
+            }
+        }
+    }
+
+    if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
+        Ok(block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
+    } else {
+        Err(ChainSyncError::Network(
+            "Wasn't able to fetch node info from any of the trusted peers".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -784,8 +831,8 @@ mod tests {
             let peer_list_guard = peer_service_addr
                 .send(GetPeerListGuard)
                 .await
-                .expect("to get peer list")
-                .expect("to get peer list");
+                .expect("to get a peer list")
+                .expect("to get a peer list");
 
             peer_list_guard.add_or_update_peer(
                 Address::repeat_byte(2),
