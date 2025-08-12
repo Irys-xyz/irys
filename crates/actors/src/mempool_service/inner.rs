@@ -1065,11 +1065,6 @@ pub enum TxIngressError {
     /// Invalid ledger type specified in transaction
     #[error("Invalid or unsupported ledger type: {0}")]
     InvalidLedger(u32),
-    /// Protocol fee doesn't match expected calculation
-    #[error("Incorrect protocol fee: expected {expected}, got {actual}")]
-    IncorrectProtocolFee { expected: U256, actual: U256 },
-    // /// Unknown anchor value (could be valid)
-    // PendingAnchor,
     /// Some database error occurred
     #[error("Database operation failed")]
     DatabaseError,

@@ -76,7 +76,7 @@ pub async fn post_commitment_tx(
                     commitment_validation_error
                 )))
             }
-            TxIngressError::InvalidLedger(_) | TxIngressError::IncorrectProtocolFee { .. } => {
+            TxIngressError::InvalidLedger(_) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
             }
         };
