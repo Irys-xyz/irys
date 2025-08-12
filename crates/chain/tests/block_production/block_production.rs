@@ -700,11 +700,9 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
 
     // Verify the transaction was accepted and cost is exactly the balance
     assert_eq!(
-        total_cost_with_priority,
-        exact_required_balance,
+        total_cost_with_priority, exact_required_balance,
         "Total cost with priority fee ({}) should be exactly equal to the balance provided ({})",
-        total_cost_with_priority,
-        exact_required_balance
+        total_cost_with_priority, exact_required_balance
     );
 
     // Mine a block - should contain block reward and storage fee transactions
