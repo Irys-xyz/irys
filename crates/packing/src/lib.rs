@@ -56,6 +56,10 @@ pub fn unpack_with_entropy(
 
     let data_size = packed_chunk.data_size;
     let num_chunks_in_tx = data_size.div_ceil(chunk_size_u64);
+    if num_chunks_in_tx == 0 {
+        // nothing to trim and avoid underflow when data_size == 0
+        return unpacked_data;
+    }
     // trim if this is the last chunk & if data_size isn't aligned to chunk_size
     if (*packed_chunk.tx_offset as u64) == num_chunks_in_tx - 1 {
         let trailing_bytes = data_size % chunk_size_u64;
