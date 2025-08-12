@@ -2,7 +2,6 @@ use crate::utils::IrysNodeTest;
 use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 use std::sync::Arc;
-use tracing::error;
 
 // Test verifies that EMA (Exponential Moving Average) price snapshots diverge correctly across chain forks.
 // Setup:
