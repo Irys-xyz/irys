@@ -13,7 +13,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::RwLock;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, instrument, warn};
 
 const PAYLOAD_CACHE_CAPACITY: usize = 1000;
 const PAYLOAD_RECEIVERS_CAPACITY: usize = 1000;
@@ -225,6 +225,7 @@ impl ExecutionPayloadCache {
         receiver.await.ok()
     }
 
+    #[instrument(skip(self))]
     pub async fn request_payload_from_the_network(
         &self,
         evm_block_hash: B256,

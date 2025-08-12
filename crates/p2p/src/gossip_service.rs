@@ -164,7 +164,7 @@ impl P2PService {
         B: BlockDiscoveryFacade,
         A: ApiClient,
     {
-        debug!("Staring gossip service");
+        debug!("Starting gossip service");
 
         let block_pool = BlockPool::new(
             db,
@@ -209,6 +209,8 @@ impl P2PService {
 
         let gossip_service_handle =
             spawn_watcher_task(server, server_handle, broadcast_task_handle, task_executor);
+
+        debug!("Started gossip service");
 
         Ok((gossip_service_handle, arc_pool))
     }
