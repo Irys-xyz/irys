@@ -322,8 +322,9 @@ pub fn validate_chunk(
 }
 
 /// Generates data chunks from which the calculation of root id starts.
+/// does NOT need to be passed in correctly sized data chunks
 pub fn generate_leaves(
-    data: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
     chunk_size: usize,
 ) -> Result<Vec<Node>, Error> {
     let data_chunks = ChunkedIterator::new(data, chunk_size);

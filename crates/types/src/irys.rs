@@ -36,15 +36,15 @@ impl IrysSigner {
         secret_key_to_address(&self.signer)
     }
 
-    /// Creates a transaction from a data buffer, optional anchor hash for the
-    /// transaction is supported. The txid will not be set until the transaction
-    /// is signed with [sign_transaction]
-    pub fn create_transaction(
+    /// Creates a transaction from a data iterator (which can yield any size Vec), with an optional anchor and flag for if the input data should be stored in the `data` field.
+    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    pub fn create_transaction_from_iter(
         &self,
-        data: Vec<u8>,
+        data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
         anchor: Option<H256>, //TODO!: more parameters as they are implemented
+        store_data: bool, // whether we should store the data from the iterator in the tx's `data` field
     ) -> Result<DataTransaction> {
-        let mut transaction = self.merklize(data, self.chunk_size as usize)?;
+        let mut transaction = self.merklize(data, self.chunk_size as usize, store_data)?;
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
@@ -62,6 +62,26 @@ impl IrysSigner {
         transaction.header.anchor = anchor;
 
         Ok(transaction)
+    }
+
+    /// Creates a transaction from a data buffer - which it stores in .data -  with an optional anchor.
+    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    pub fn create_transaction(
+        &self,
+        data: Vec<u8>,
+        anchor: Option<H256>,
+    ) -> Result<DataTransaction> {
+        self.create_transaction_from_iter(vec_to_chunk_iter(data), anchor, true)
+    }
+
+    /// Creates a transaction from a data buffer - which it DOES NOT store in .data - with an optional anchor.
+    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    pub fn create_transaction_discard_data(
+        &self,
+        data: Vec<u8>,
+        anchor: Option<H256>,
+    ) -> Result<DataTransaction> {
+        self.create_transaction_from_iter(vec_to_chunk_iter(data), anchor, false)
     }
 
     /// signs and sets signature and id.
@@ -129,10 +149,23 @@ impl IrysSigner {
     }
 
     /// Builds a merkle tree, with a root, including all the proofs for each
-    /// chunk.
-    fn merklize(&self, data: Vec<u8>, chunk_size: usize) -> Result<DataTransaction> {
-        // TODO: fix the `data` field so we can use "streaming" data sources & remove the clone
-        let chunks = generate_leaves(vec![data.clone()].into_iter().map(Ok), chunk_size)?;
+    /// chunk. The `data` vec does NOT need to yield correctly sized `Vec` chunks.
+    fn merklize(
+        &self,
+        data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
+        chunk_size: usize,
+        store_data: bool,
+    ) -> Result<DataTransaction> {
+        // TODO: fix the `data` field so we can use "streaming" data sources
+        let (data, chunks) = if store_data {
+            let data: eyre::Result<Vec<Vec<u8>>> = data.collect();
+            let data = data?;
+            let chunks = generate_leaves(data.clone().into_iter().map(Ok), chunk_size)?;
+            (Some(data.into_iter().flatten().collect()), chunks)
+        } else {
+            let chunks = generate_leaves(data, chunk_size)?;
+            (None, chunks)
+        };
         let root = generate_data_root(chunks.clone())?;
         let data_root = H256(root.id);
         let proofs = resolve_proofs(root, None)?;
@@ -145,11 +178,11 @@ impl IrysSigner {
 
         Ok(DataTransaction {
             header: DataTransactionHeader {
-                data_size: data.len() as u64,
+                data_size: chunks.last().unwrap().max_byte_range as u64,
                 data_root,
                 ..Default::default()
             },
-            data: Some(Base64(data)),
+            data: data.map(Base64),
             chunks,
             proofs,
         })
@@ -160,6 +193,10 @@ impl From<IrysSigner> for LocalSigner<SigningKey> {
     fn from(val: IrysSigner) -> Self {
         Self::from_signing_key(val.signer)
     }
+}
+
+pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>> {
+    std::iter::once(Ok(data))
 }
 
 #[cfg(test)]
