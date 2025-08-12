@@ -559,25 +559,25 @@ pub async fn shadow_transactions_are_valid(
     payload_provider: ExecutionPayloadCache,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
-    let payload = payload_provider
+    let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
     let engine_api_client = reth_adapter.inner.engine_http_client();
-    let ExecutionData { payload, sidecar } = payload;
+    let ExecutionData { payload, sidecar } = execution_data;
 
-    let ExecutionPayload::V3(payload) = payload else {
+    let ExecutionPayload::V3(payload_v3) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
     };
     ensure!(
-        payload.withdrawals().is_empty(),
+        payload_v3.withdrawals().is_empty(),
         "withdrawals must always be empty"
     );
 
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
-    let payload_timestamp: u128 = payload.timestamp().into();
+    let payload_timestamp: u128 = payload_v3.timestamp().into();
     let block_timestamp_sec = block.timestamp / 1000;
     ensure!(
             payload_timestamp == block_timestamp_sec,
@@ -589,21 +589,24 @@ pub async fn shadow_transactions_are_valid(
         .ok_or_eyre("version hashes must be present")?
         .clone();
     loop {
-        let payload = engine_api_client
+        let payload_status = engine_api_client
             .new_payload_v4(
-                payload.clone(),
+                payload_v3.clone(),
                 versioned_hashes.clone(),
                 block.previous_block_hash.into(),
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
             .await?;
-        match payload.status {
+        match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
                 return Err(eyre::Report::msg(validation_error))
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                tracing::debug!("syncing extra blocks to validate payload");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tracing::debug!(
+                    "syncing extra blocks to validate payload {:?}",
+                    payload_v3.payload_inner.payload_inner.block_num_hash()
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
@@ -616,7 +619,7 @@ pub async fn shadow_transactions_are_valid(
             }
         }
     }
-    let evm_block: Block = payload.try_into_block()?;
+    let evm_block: Block = payload_v3.try_into_block()?;
 
     // 2. Extract shadow transactions from the beginning of the block
     let mut expect_shadow_txs = true;
