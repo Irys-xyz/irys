@@ -101,8 +101,18 @@ impl Inner {
             return Err(ChunkIngressError::InvalidDataSize);
         }
 
-        // Next validate the data_path/proof for the chunk, linking
+        // Validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
+
+        if data_size == 0 {
+            error!(
+                "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
+                ChunkIngressError::InvalidDataSize,
+                chunk.data_root,
+            );
+            return Err(ChunkIngressError::InvalidDataSize);
+        }
+
         let root_hash = chunk.data_root.0;
         let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
         let path_buff = &chunk.data_path;
@@ -133,9 +143,19 @@ impl Inner {
         // chunks from that data_root should be ingressed.
         let chunk_size = self.config.consensus.chunk_size;
 
-        // Is this chunk index any of the chunks before the last in the tx?
+        // Validate that we will have chunks in the tx
         let num_chunks_in_tx = data_size.div_ceil(chunk_size);
-        if u64::from(*chunk.tx_offset) < num_chunks_in_tx - 1 {
+        if num_chunks_in_tx == 0 {
+            error!(
+                "Error: {:?}. Invalid data_size for data_root: {:?}",
+                ChunkIngressError::InvalidDataSize,
+                chunk.data_root,
+            );
+            return Err(ChunkIngressError::InvalidDataSize);
+        }
+        // Is this chunk index any of the chunks before the last in the tx?
+        let last_index = num_chunks_in_tx - 1;
+        if u64::from(*chunk.tx_offset) < last_index {
             // Ensure prefix chunks are all exactly chunk_size
             if chunk_len != chunk_size {
                 error!(
@@ -247,9 +267,19 @@ impl Inner {
             .map_err(|_| ChunkIngressError::DatabaseError)?
             .ok_or(ChunkIngressError::DatabaseError)?;
 
-        // data size is the offset of the last chunk
-        // add one as index is 0-indexed
-        let expected_chunk_count = data_size_to_chunk_count(data_size, chunk_size).unwrap();
+        // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
+        // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
+        let expected_chunk_count = match data_size_to_chunk_count(data_size, chunk_size) {
+            Ok(v) => v,
+            Err(_) => {
+                error!(
+                    "Error: {:?}. Invalid data_size for data_root: {:?}",
+                    ChunkIngressError::InvalidDataSize,
+                    chunk.data_root,
+                );
+                return Err(ChunkIngressError::InvalidDataSize);
+            }
+        };
 
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
@@ -260,8 +290,7 @@ impl Inner {
             let latest = canon_chain
                 .0
                 .last()
-                .ok_or(ChunkIngressError::ServiceUninitialized)
-                .unwrap();
+                .ok_or(ChunkIngressError::ServiceUninitialized)?;
 
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
@@ -360,7 +389,7 @@ pub fn generate_ingress_proof(
     // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
     // if we have, we *must* error
     let mut set = HashSet::<H256>::new();
-    let expected_chunk_count = data_size_to_chunk_count(size, chunk_size).unwrap();
+    let expected_chunk_count = data_size_to_chunk_count(size, chunk_size)?;
 
     let mut chunk_count: u32 = 0;
     let mut data_size: u64 = 0;
