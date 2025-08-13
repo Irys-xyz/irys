@@ -78,7 +78,7 @@ pub enum SyncChainServiceMessage {
 }
 
 /// Inner service containing the sync logic
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChainSyncServiceInner<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> {
     sync_state: ChainSyncState,
     api_client: T,
@@ -377,12 +377,15 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 response,
             } => {
                 debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
-                let result = self.inner.process_orphaned_ancestor(block_hash).await;
-                if let Some(sender) = response {
-                    if let Err(e) = sender.send(result) {
-                        tracing::error!("Failed to send response: {:?}", e);
+                let inner = self.inner.clone();
+                tokio::spawn(async move {
+                    let result = inner.process_orphaned_ancestor(block_hash).await;
+                    if let Some(sender) = response {
+                        if let Err(e) = sender.send(result) {
+                            tracing::error!("Failed to send response: {:?}", e);
+                        }
                     }
-                }
+                });
             }
             SyncChainServiceMessage::RequestParentBlock {
                 parent_block_hash,
@@ -392,12 +395,15 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     "SyncChainService: Received a request to fetch block {:?} from the network",
                     parent_block_hash
                 );
-                let result = self.inner.request_parent_block(parent_block_hash).await;
-                if let Some(sender) = response {
-                    if let Err(e) = sender.send(result) {
-                        tracing::error!("Failed to send response: {:?}", e);
+                let inner = self.inner.clone();
+                tokio::spawn(async move {
+                    let result = inner.request_parent_block(parent_block_hash).await;
+                    if let Some(sender) = response {
+                        if let Err(e) = sender.send(result) {
+                            tracing::error!("Failed to send response: {:?}", e);
+                        }
                     }
-                }
+                });
             }
         }
         Ok(())
