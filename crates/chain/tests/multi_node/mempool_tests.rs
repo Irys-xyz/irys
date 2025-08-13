@@ -107,6 +107,176 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
 }
 
 #[actix::test]
+async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    // Turn on tracing even before the nodes start
+    initialize_tracing();
+
+    // Configure a test network
+    let mut genesis_config = NodeConfig::testing();
+
+    // Create a signer (keypair) for transactions and fund it
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Prepare a small single-chunk data payload
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data = vec![7_u8; chunk_size];
+
+    let tx = signer.create_transaction(data.clone(), None)?;
+    let tx = signer.sign_transaction(tx)?;
+
+    // Start the node
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    // Build a pre-header chunk with an oversized data_path (> 64 KiB)
+    let oversized_path = vec![0_u8; 70_000];
+    let chunk = UnpackedChunk {
+        data_root: tx.header.data_root,
+        data_size: tx.header.data_size,
+        data_path: Base64(oversized_path),
+        bytes: Base64(data),
+        tx_offset: TxChunkOffset::from(0_u32),
+    };
+
+    // Post the chunk before the tx header
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ensure it did not get cached
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    // Post the tx header and confirm cache still empty
+    post_data_tx(&app, &tx).await;
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testing();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Prepare bytes that exceed chunk_size by 1
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data = vec![9_u8; chunk_size + 1];
+
+    let tx = signer.create_transaction(vec![1_u8; chunk_size], None)?;
+    let tx = signer.sign_transaction(tx)?;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    // Build a pre-header chunk with oversized bytes
+    let chunk = UnpackedChunk {
+        data_root: tx.header.data_root,
+        data_size: tx.header.data_size,
+        data_path: Base64(vec![]),
+        bytes: Base64(data),
+        tx_offset: TxChunkOffset::from(0_u32),
+    };
+
+    // Post the chunk before the tx header
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ensure it did not get cached
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    // Post the tx header and confirm cache still empty
+    post_data_tx(&app, &tx).await;
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testing();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Prepare a valid-sized chunk payload
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data = vec![5_u8; chunk_size];
+
+    let tx = signer.create_transaction(data.clone(), None)?;
+    let tx = signer.sign_transaction(tx)?;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    // Pre-header cap is min(max_chunks_per_item, 64) => default 64, so tx_offset >= 64 must be dropped
+    let chunk = UnpackedChunk {
+        data_root: tx.header.data_root,
+        data_size: tx.header.data_size,
+        data_path: Base64(vec![]),
+        bytes: Base64(data),
+        tx_offset: TxChunkOffset::from(64_u32),
+    };
+
+    // Post the chunk before the tx header
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ensure it did not get cached
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    // Post the tx header and confirm cache still empty
+    post_data_tx(&app, &tx).await;
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
 async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");

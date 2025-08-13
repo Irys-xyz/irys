@@ -68,6 +68,48 @@ impl Inner {
                 let mut mempool_state_write_guard = mempool_state.write().await;
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+                // Pre-header sanity checks to reduce DoS risk.
+                let chunk_size = self.config.consensus.chunk_size;
+                let chunk_len_u64 = u64::try_from(chunk.bytes.len())
+                    .map_err(|_| ChunkIngressError::PreHeaderOversizedBytes)?;
+                if chunk_len_u64 > chunk_size {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        chunk.bytes.len(),
+                        chunk_size
+                    );
+                    return Err(ChunkIngressError::PreHeaderOversizedBytes);
+                }
+                let preheader_data_path_max_bytes =
+                    self.config.consensus.mempool.max_preheader_data_path_bytes;
+                let preheader_chunks_per_item_cap =
+                    self.config.consensus.mempool.max_preheader_chunks_per_item;
+                if chunk.data_path.0.len() > preheader_data_path_max_bytes {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        chunk.data_path.0.len(),
+                        preheader_data_path_max_bytes
+                    );
+                    return Err(ChunkIngressError::PreHeaderOversizedDataPath);
+                }
+                let preheader_chunks_per_item =
+                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
+                if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
+                    >= preheader_chunks_per_item
+                {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds pre-header capacity {}",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        *chunk.tx_offset,
+                        preheader_chunks_per_item
+                    );
+                    return Err(ChunkIngressError::PreHeaderOffsetExceedsCap);
+                }
                 if let Some(chunks_map) = mempool_state_write_guard
                     .pending_chunks
                     .get_mut(&chunk.data_root)
@@ -75,8 +117,9 @@ impl Inner {
                     chunks_map.put(chunk.tx_offset, chunk.clone());
                 } else {
                     // If there's no entry for this data_root yet, create one
+                    // TODO: rework LRU logic to separate LRU/map https://github.com/Irys-xyz/irys/issues/632
                     let mut new_lru_cache = LruCache::new(
-                        NonZeroUsize::new(max_chunks_per_item)
+                        NonZeroUsize::new(preheader_chunks_per_item)
                             .expect("expected valid NonZeroUsize::new"),
                     );
                     new_lru_cache.put(chunk.tx_offset, chunk.clone());
@@ -134,7 +177,8 @@ impl Inner {
 
         // Use data_size to identify and validate that only the last chunk
         // can be less than chunk_size
-        let chunk_len = chunk.bytes.len() as u64;
+        let chunk_len =
+            u64::try_from(chunk.bytes.len()).map_err(|_| ChunkIngressError::InvalidChunkSize)?;
 
         // TODO: Mark the data_root as invalid if the chunk is an incorrect size
         // Someone may have created a data_root that seemed valid, but if the
@@ -345,6 +389,12 @@ pub enum ChunkIngressError {
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
+    /// Oversized chunk bytes submitted before header arrival
+    PreHeaderOversizedBytes,
+    /// Oversized data_path submitted before header arrival
+    PreHeaderOversizedDataPath,
+    /// tx_offset exceeds pre-header capacity bound
+    PreHeaderOffsetExceedsCap,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
@@ -423,7 +473,9 @@ pub fn generate_ingress_proof(
                 "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
             ))?
             .0;
-        data_size += chunk_bin.len() as u64;
+        let chunk_len =
+            u64::try_from(chunk_bin.len()).map_err(|_| eyre!("chunk length exceeds u64"))?;
+        data_size += chunk_len;
         chunk_count += 1;
 
         Ok(chunk_bin)
