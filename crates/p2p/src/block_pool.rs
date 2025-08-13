@@ -704,12 +704,12 @@ where
             }
 
             // Use the sync service to request parent block (fire and forget)
-            let _ = self
-                .sync_service_sender
-                .send(SyncChainServiceMessage::RequestBlockFromTheNetwork {
+            let _ = self.sync_service_sender.send(
+                SyncChainServiceMessage::RequestBlockFromTheNetwork {
                     block_hash: prev_block_hash,
                     response: None,
-                });
+                },
+            );
 
             return Ok(());
         }
