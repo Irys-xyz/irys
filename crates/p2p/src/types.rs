@@ -51,6 +51,10 @@ impl From<TxIngressError> for GossipError {
                 // Invalid anchor, decrease source reputation
                 Self::InvalidData(InvalidDataError::TransactionAnchor)
             }
+            TxIngressError::InvalidLedger(_) => {
+                // Invalid ledger type, decrease source reputation
+                Self::InvalidData(InvalidDataError::TransactionAnchor)
+            }
             // ==== Internal errors - shouldn't be communicated to outside
             TxIngressError::DatabaseError => Self::Internal(InternalGossipError::Database),
             TxIngressError::ServiceUninitialized => {
