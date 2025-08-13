@@ -26,11 +26,12 @@ use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, TERM_FEE};
 use irys_types::BlockHash;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, 
-    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges}, validate_path,
-    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DataTransactionLedger,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256, U256,
+    app_state::DatabaseProvider,
+    calculate_difficulty, next_cumulative_diff,
+    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
+    validate_path, Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
+    PoaData, H256, U256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -127,6 +128,10 @@ pub enum PreValidationError {
     VDFCheckpointsInvalid(String),
     #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
     VDFPreviousOutputMismatch { got: H256, expected: H256 },
+    #[error("Invalid block height (expected {expected} got {got})")]
+    HeightInvalid { expected: u64, got: u64 },
+    #[error("Invalid last_epoch_hash - expected {expected} got {got}")]
+    LastEpochHashMismatch { expected: BlockHash, got: BlockHash },
 }
 
 /// Full pre-validation steps for a block
@@ -487,7 +492,7 @@ pub fn last_epoch_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     blocks_in_epoch: u64,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     // if First block after an epoch boundary
     let expected = if block.height > 0 && block.height % blocks_in_epoch == 1 {
         previous_block.block_hash
@@ -498,11 +503,10 @@ pub fn last_epoch_hash_is_valid(
     if block.last_epoch_hash == expected {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid last_epoch_hash - expected {} got {}",
+        Err(PreValidationError::LastEpochHashMismatch {
             expected,
-            block.last_epoch_hash
-        ))
+            got: block.last_epoch_hash,
+        })
     }
 }
 
@@ -510,16 +514,15 @@ pub fn last_epoch_hash_is_valid(
 pub fn height_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let expected = previous_block.height + 1;
     if block.height == expected {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid block height (expected {} got {})",
+        Err(PreValidationError::HeightInvalid {
             expected,
-            block.height
-        ))
+            got: block.height,
+        })
     }
 }
 
