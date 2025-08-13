@@ -872,6 +872,34 @@ where
             .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
             .map(|block| block.map(Arc::new))
     }
+
+    /// Get orphaned block by parent hash - for orphan block processing
+    pub(crate) async fn get_orphaned_block_by_parent(
+        &self,
+        parent_hash: &BlockHash,
+    ) -> Option<Arc<IrysBlockHeader>> {
+        self.blocks_cache.orphaned_blocks_by_parent_cloned(parent_hash).await
+    }
+
+    /// Check if parent hash exists in block cache - for orphan block processing
+    pub(crate) async fn is_parent_hash_in_cache(&self, parent_hash: &BlockHash) -> bool {
+        self.blocks_cache.block_hash_to_parent_hash_contains(parent_hash).await
+    }
+
+    /// Mark the block as requested - for orphan block processing
+    pub(crate) async fn mark_block_as_requested(&self, block_hash: BlockHash) {
+        self.blocks_cache.mark_block_as_requested(block_hash).await;
+    }
+
+    /// Remove requested block - for orphan block processing
+    pub(crate) async fn remove_requested_block(&self, block_hash: &BlockHash) {
+        self.blocks_cache.remove_requested_block(block_hash).await;
+    }
+
+    /// Remove block from cache - for orphan block processing
+    pub(crate) async fn remove_block_from_cache(&self, block_hash: &BlockHash) {
+        self.blocks_cache.remove_block(block_hash).await;
+    }
 }
 
 fn check_block_status(
