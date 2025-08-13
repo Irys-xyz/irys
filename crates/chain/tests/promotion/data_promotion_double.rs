@@ -74,7 +74,16 @@ async fn slow_heavy_double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = if i == 2 { &signer2 } else { &signer };
-        let tx = s.create_transaction(data, None).unwrap();
+
+        // Get price from the API
+        let price_info = node
+            .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+            .await
+            .expect("Failed to get price");
+
+        let tx = s
+            .create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)
+            .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
         txs.push(tx);
@@ -227,7 +236,21 @@ async fn slow_heavy_double_root_data_promotion_test() {
         }
         // we have to use a different signer so we get a unique txid for each transaction, despite the identical data_root
         let s = &signer2;
-        let tx = s.create_transaction(data, Some(block1.block_hash)).unwrap();
+
+        // Get price from the API
+        let price_info = node
+            .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+            .await
+            .expect("Failed to get price");
+
+        let tx = s
+            .create_publish_transaction(
+                data,
+                Some(block1.block_hash),
+                price_info.perm_fee,
+                price_info.term_fee,
+            )
+            .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[2] {}", tx.header.id.as_bytes().to_base58());
         txs.push(tx);
