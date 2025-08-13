@@ -1063,7 +1063,7 @@ pub enum TxIngressError {
     #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
     /// Invalid ledger type specified in transaction
-    #[error("Invalid or unsupported ledger type: {0}")]
+    #[error("Invalid or unsupported ledger ID: {0}")]
     InvalidLedger(u32),
     /// Some database error occurred
     #[error("Database operation failed")]

@@ -60,9 +60,12 @@ pub struct TermFeeCharges {
 
 impl TermFeeCharges {
     pub fn new(term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
-        // Calculate block producer reward using miner_fee_percentage from config
-        let block_producer_reward =
-            mul_div(term_fee, config.miner_fee_percentage.amount, BPS_SCALE)?;
+        // Calculate block producer reward using immediate_tx_inclusion_reward_percent from config
+        let block_producer_reward = mul_div(
+            term_fee,
+            config.immediate_tx_inclusion_reward_percent.amount,
+            BPS_SCALE,
+        )?;
 
         // The rest of the fee goes to the treasury
         let term_fee_treasury = term_fee
@@ -143,8 +146,12 @@ pub struct PublishFeeCharges {
 impl PublishFeeCharges {
     pub fn new(perm_fee: U256, term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
         // Calculate the reward for each ingress proof (x% of term_fee)
-        let per_ingress_reward = mul_div(term_fee, config.miner_fee_percentage.amount, BPS_SCALE)
-            .unwrap_or(U256::from(0));
+        let per_ingress_reward = mul_div(
+            term_fee,
+            config.immediate_tx_inclusion_reward_percent.amount,
+            BPS_SCALE,
+        )
+        .unwrap_or(U256::from(0));
 
         // Number of ingress proofs required from config
         let num_ingress_proofs = config.number_of_ingress_proofs;
@@ -258,7 +265,8 @@ mod tests {
     fn test_term_fee_charges_new() {
         let mut config = ConsensusConfig::testing();
         // Set block producer fee to 5%
-        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
         let term_fee = U256::from(1000);
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
@@ -354,7 +362,8 @@ mod tests {
     fn test_publish_fee_charges_new() {
         let mut config = ConsensusConfig::testing();
         // Set ingress proof fee to 5%
-        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         config.number_of_ingress_proofs = 3;
 
         let term_fee = U256::from(1000);
@@ -381,7 +390,8 @@ mod tests {
         use crate::irys::IrysSigner;
 
         let mut config = ConsensusConfig::testing();
-        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
         let term_fee = U256::from(1000);
         let perm_fee = U256::from(10000);
@@ -435,7 +445,8 @@ mod tests {
     #[test]
     fn test_publish_fee_insufficient_perm_fee() {
         let mut config = ConsensusConfig::testing();
-        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         config.number_of_ingress_proofs = 3;
 
         let term_fee = U256::from(1000);
@@ -454,7 +465,8 @@ mod tests {
     #[test]
     fn test_publish_fee_no_base_storage_cost() {
         let mut config = ConsensusConfig::testing();
-        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         config.number_of_ingress_proofs = 3;
 
         let term_fee = U256::from(1000);
@@ -477,7 +489,8 @@ mod tests {
         use crate::irys::IrysSigner;
 
         let mut config = ConsensusConfig::testing();
-        config.miner_fee_percentage = Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
         let term_fee = U256::from(1003); // Not evenly divisible
         let perm_fee = U256::from(10000);

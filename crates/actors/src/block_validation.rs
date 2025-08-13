@@ -1062,11 +1062,11 @@ pub fn calculate_perm_storage_total_fee(
     )?;
 
     // Add ingress proof rewards to the base network fee
-    // Total perm_fee = base network fee + (num_ingress_proofs × miner_fee_percentage × term_fee)
+    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
         config.consensus.number_of_ingress_proofs,
-        config.consensus.miner_fee_percentage,
+        config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
     Ok(total_perm_fee)

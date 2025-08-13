@@ -104,11 +104,11 @@ fn cost_of_perm_storage(
         .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
     // Add ingress proof rewards to the base network fee
-    // Total perm_fee = base network fee + (num_ingress_proofs × miner_fee_percentage × term_fee)
+    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
         state.config.consensus.number_of_ingress_proofs,
-        state.config.consensus.miner_fee_percentage,
+        state.config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
     Ok(total_perm_fee)

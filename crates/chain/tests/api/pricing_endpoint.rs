@@ -40,7 +40,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         term_fee,
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx.config.consensus.miner_fee_percentage,
+        ctx.node_ctx.config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
     // action
@@ -102,7 +102,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         term_fee,
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx.config.consensus.miner_fee_percentage,
+        ctx.node_ctx.config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
     // action
@@ -187,7 +187,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         term_fee,
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx.config.consensus.miner_fee_percentage,
+        ctx.node_ctx.config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
     // action

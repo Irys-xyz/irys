@@ -164,13 +164,19 @@ pub struct ConsensusConfig {
     )]
     pub pledge_decay: Amount<Percentage>,
 
-    /// Minimum miner fee percentage that nodes require for transaction inclusion
-    /// This is a percentage of the protocol cost (perm_fee + term_fee)
+    /// This is the fee that is used for immediate tx inclusion fees:
+    /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    ///
+    /// This field is also used for immediate ingress proof rewards:
+    /// ingress proof producer receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    ///
+    /// Both of these reward distribution mechanisms are opaque to the user,
+    /// the user will only ever see `term_fee` and `perm_fee`.
     #[serde(
         deserialize_with = "serde_utils::percentage_amount",
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
-    pub miner_fee_percentage: Amount<Percentage>,
+    pub immediate_tx_inclusion_reward_percent: Amount<Percentage>,
 
     /// Maximum future drift
     #[serde(
@@ -675,7 +681,8 @@ impl ConsensusConfig {
             stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
             pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
-            miner_fee_percentage: Amount::percentage(dec!(0.05)).expect("valid percentage"),
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -784,7 +791,8 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
-            miner_fee_percentage: Amount::percentage(dec!(0.05)).expect("valid percentage"),
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -1261,7 +1269,7 @@ mod tests {
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9
-        miner_fee_percentage = 0.05
+        immediate_tx_inclusion_reward_percent = 0.05
 
         [reth]
         chain = 1270

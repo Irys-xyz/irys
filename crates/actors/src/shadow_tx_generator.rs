@@ -506,7 +506,7 @@ mod tests {
             // If no perm_fee specified, calculate minimum required for ingress proofs
             let config = ConsensusConfig::testing();
             let ingress_reward_per_proof =
-                (term_fee * config.miner_fee_percentage.amount) / U256::from(10000);
+                (term_fee * config.immediate_tx_inclusion_reward_percent.amount) / U256::from(10000);
             let total_ingress_reward =
                 ingress_reward_per_proof * U256::from(config.number_of_ingress_proofs);
             U256::from(1000000) + total_ingress_reward
@@ -806,7 +806,7 @@ mod tests {
         let term_fee = U256::from(30000);
         // We need to account for 4 proofs now
         let ingress_reward_per_proof =
-            (term_fee * config.miner_fee_percentage.amount) / U256::from(10000);
+            (term_fee * config.immediate_tx_inclusion_reward_percent.amount) / U256::from(10000);
         let total_ingress_reward = ingress_reward_per_proof * U256::from(4); // 4 proofs total
         let perm_fee = U256::from(1000000) + total_ingress_reward;
 
