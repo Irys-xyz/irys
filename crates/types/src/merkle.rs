@@ -541,7 +541,7 @@ pub fn hash_all_sha256(messages: Vec<&[u8]>) -> Result<[u8; 32], Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::ProofDeserialize;
+    use super::ProofDeserialize as _;
     use super::*;
 
     #[test]
@@ -550,11 +550,11 @@ mod tests {
         // Create two simple leaves using data roots to avoid chunked input complexity
         let leaves = generate_leaves_from_data_roots(&[
             DataRootLeave {
-                data_root: H256([1u8; HASH_SIZE]),
+                data_root: H256([1_u8; HASH_SIZE]),
                 tx_size: 5,
             },
             DataRootLeave {
-                data_root: H256([2u8; HASH_SIZE]),
+                data_root: H256([2_u8; HASH_SIZE]),
                 tx_size: 7,
             },
         ])
