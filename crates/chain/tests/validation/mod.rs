@@ -409,6 +409,113 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     Ok(())
 }
 
+// This test ensures that blocks with incorrect `last_epoch_hash` are rejected during validation.
+// Firstly verify rejection of malformed/incorrect last_epoch_hash
+// Secondly verify the first-after-epoch rule
+#[test_log::test(actix_web::test)]
+async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Mine an initial block so we can tamper with the next block
+    genesis_node.mine_block().await?;
+
+    let block_prod_strategy = ProductionStrategy {
+        inner: genesis_node.node_ctx.block_producer_inner.clone(),
+    };
+
+    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Tamper with last_epoch_hash to make it invalid
+    let mut irys_block = (*block).clone();
+    irys_block.last_epoch_hash = irys_block.previous_block_hash;
+    test_signer.sign_block_header(&mut irys_block)?;
+    block = Arc::new(irys_block);
+
+    // Send the malformed block for validation
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+
+    // Additionally verify the first-after-epoch rule (height % num_blocks_in_epoch == 1)
+    // Step 1: Mine up to the next epoch boundary (height % N == 0)
+    let current_height = genesis_node.get_canonical_chain_height().await;
+    let num_blocks_in_epoch_u64: u64 = num_blocks_in_epoch.try_into()?;
+    let blocks_until_boundary = (num_blocks_in_epoch_u64
+        - (current_height % num_blocks_in_epoch_u64))
+        % num_blocks_in_epoch_u64;
+    if blocks_until_boundary > 0 {
+        genesis_node
+            .mine_blocks(blocks_until_boundary as usize)
+            .await?;
+    }
+
+    // Step 2: Produce the first block after the epoch boundary
+    let block_prod_strategy = ProductionStrategy {
+        inner: genesis_node.node_ctx.block_producer_inner.clone(),
+    };
+
+    let (block_after_epoch, _adjustment_stats2, _eth_payload2) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // ensure we're testing the intended height
+    assert_eq!(
+        block_after_epoch.height % num_blocks_in_epoch_u64,
+        1,
+        "Must be first block after an epoch boundary"
+    );
+
+    // Step 3: Tamper with last_epoch_hash to be the previous block's last_epoch_hash
+    // (invalid for first-after-epoch; should be previous block's block_hash)
+    let prev = genesis_node
+        .get_block_by_hash(&block_after_epoch.previous_block_hash)
+        .expect("prev header");
+
+    let mut tampered = (*block_after_epoch).clone();
+    tampered.last_epoch_hash = prev.last_epoch_hash;
+    test_signer.sign_block_header(&mut tampered)?;
+    let block_after_epoch = Arc::new(tampered);
+
+    // Step 4: Send and expect rejection
+    send_block_to_block_tree(&genesis_node.node_ctx, block_after_epoch.clone(), vec![]).await?;
+
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block_after_epoch.block_hash).await;
+    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+
+    // Positive case: mine a valid first-after-epoch block and expect it to be stored
+    let valid_block_after_epoch = genesis_node.mine_block().await?;
+
+    // ensure we're still testing the intended height
+    assert_eq!(
+        valid_block_after_epoch.height % num_blocks_in_epoch_u64,
+        1,
+        "Must be first block after an epoch boundary"
+    );
+
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &valid_block_after_epoch.block_hash).await;
+    assert!(matches!(outcome, BlockValidationOutcome::StoredOnNode(_)));
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
 // This test creates a malicious block producer that omits expected commitments from an epoch block.
 // The assertion will fail (block will be discarded) because epoch blocks must contain all
 // commitments from the parent's snapshot.
