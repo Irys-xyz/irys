@@ -108,6 +108,8 @@ pub enum PreValidationError {
         "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
     )]
     PoADataPartitionExpired { partition_hash: H256 },
+    #[error("Invalid previous_cumulative_diff (expected {expected} got {got})")]
+    PreviousCumulativeDifficultyMismatch { expected: U256, got: U256 },
     #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
     PreviousSolutionHashMismatch { expected: H256, got: H256 },
     #[error("Reward curve error: {0}")]
@@ -463,15 +465,14 @@ pub fn cumulative_difficulty_is_valid(
 pub fn previous_cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     if block.previous_cumulative_diff == previous_block.cumulative_diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid previous_cumulative_diff (expected {} got {})",
-            previous_block.cumulative_diff,
-            block.previous_cumulative_diff
-        ))
+        Err(PreValidationError::PreviousCumulativeDifficultyMismatch {
+            expected: previous_block.cumulative_diff,
+            got: block.previous_cumulative_diff,
+        })
     }
 }
 
