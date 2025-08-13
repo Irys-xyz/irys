@@ -1,4 +1,4 @@
-use crate::{Arbitrary, Signature, U256};
+use crate::{Arbitrary, Signature};
 use alloy_primitives::{bytes, Address, U256 as RethU256};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
@@ -80,15 +80,10 @@ impl Compact for IrysSignature {
 
     #[inline]
     fn from_compact(mut buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        // let bitflags = buf.get_u8() as usize;
-        // let sig_bit = bitflags & 1;
-        // let (signature, buf2) = Signature::from_compact(buf, sig_bit);
-
-        let r_bytes: [u8; 32] = buf[0..32].try_into().expect("slice with incorrect length");
-        let s_bytes: [u8; 32] = buf[32..64].try_into().expect("slice with incorrect length");
-        let r = U256::from_le_bytes(r_bytes);
-        let s = U256::from_le_bytes(s_bytes);
-        let signature = Signature::new(r.into(), s.into(), buf[64] == 1);
+        use alloy_primitives::ruint::aliases::U256;
+        let r = U256::from_le_slice(&buf[0..32]);
+        let s = U256::from_le_slice(&buf[32..64]);
+        let signature = Signature::new(r, s, buf[64] == 1);
         buf.advance(65);
         (Self::new(signature), buf)
     }
@@ -173,7 +168,9 @@ impl alloy_rlp::Decodable for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
+    use crate::{
+        irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256, U256,
+    };
     use alloy_core::hex;
     use alloy_primitives::Address;
     use alloy_rlp::{Decodable as _, Encodable as _};
