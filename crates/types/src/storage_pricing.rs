@@ -29,6 +29,8 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
 const TAYLOR_TERMS: u32 = 30;
 
+pub const TERM_FEE: U256 = U256([1_000_000_000, 0, 0, 0]);
+
 /// `Amount<T>` represents a value stored as a U256.
 ///
 /// The actual scale is defined by the usage: pr

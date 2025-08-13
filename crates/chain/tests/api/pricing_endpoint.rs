@@ -3,7 +3,7 @@
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::price::PriceInfo;
-use irys_types::{DataLedger, U256};
+use irys_types::{storage_pricing::TERM_FEE, DataLedger, U256};
 
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
@@ -36,11 +36,13 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     };
 
     // Calculate expected perm_fee using the same method as the API
-    let term_fee = U256::from(1_000_000_000); // Current placeholder value
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        term_fee,
+        TERM_FEE, // Current placeholder value
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx.config.consensus.immediate_tx_inclusion_reward_percent,
+        ctx.node_ctx
+            .config
+            .consensus
+            .immediate_tx_inclusion_reward_percent,
     )?;
 
     // action
@@ -54,7 +56,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
     // TODO: Update when term_fee calculation is properly implemented
     // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, term_fee);
+    assert_eq!(price_info.term_fee, TERM_FEE);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, data_size_bytes);
     assert!(
@@ -98,11 +100,13 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     };
 
     // Calculate expected perm_fee using the same method as the API
-    let term_fee = U256::from(1_000_000_000); // Current placeholder value
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        term_fee,
+        TERM_FEE, // Current placeholder value
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx.config.consensus.immediate_tx_inclusion_reward_percent,
+        ctx.node_ctx
+            .config
+            .consensus
+            .immediate_tx_inclusion_reward_percent,
     )?;
 
     // action
@@ -116,7 +120,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
     // TODO: Update when term_fee calculation is properly implemented
     // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, term_fee);
+    assert_eq!(price_info.term_fee, TERM_FEE);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, ctx.node_ctx.config.consensus.chunk_size);
     assert!(
@@ -183,11 +187,13 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     };
 
     // Calculate expected perm_fee using the same method as the API
-    let term_fee = U256::from(1_000_000_000); // Current placeholder value
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        term_fee,
+        TERM_FEE, // Current placeholder value
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx.config.consensus.immediate_tx_inclusion_reward_percent,
+        ctx.node_ctx
+            .config
+            .consensus
+            .immediate_tx_inclusion_reward_percent,
     )?;
 
     // action
@@ -201,7 +207,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
     // TODO: Update when term_fee calculation is properly implemented
     // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, term_fee);
+    assert_eq!(price_info.term_fee, TERM_FEE);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(
         price_info.bytes,

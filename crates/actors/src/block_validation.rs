@@ -23,7 +23,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::Amount;
+use irys_types::storage_pricing::{Amount, TERM_FEE};
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
@@ -1082,7 +1082,7 @@ pub fn calculate_term_storage_base_network_fee(
 ) -> eyre::Result<U256> {
     // Placeholder implementation matching the mempool service
     // Returns a fixed value until proper term fee calculation is implemented
-    Ok(U256::from(1_000_000_000))
+    Ok(TERM_FEE)
 }
 
 /// Validates that data transactions in a block are correctly placed and have valid properties

@@ -7,7 +7,7 @@ use eyre::OptionExt as _;
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
-        Amount,
+        Amount, TERM_FEE,
     },
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
@@ -119,7 +119,7 @@ fn cost_of_perm_storage(
 /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION
 fn calculate_term_fee(_bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
     // todo: when doing the calculations, if the final fee is lower than $0.01 then we must round upwards
-    U256::from(1_000_000_000)
+    TERM_FEE
 }
 
 pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {

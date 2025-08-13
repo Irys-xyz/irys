@@ -1,4 +1,4 @@
-use eyre::{eyre, OptionExt as _, Result};
+use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
     ShadowTransaction, TransactionPacket,
@@ -168,7 +168,7 @@ impl ShadowTxGenerator<'_> {
             // CRITICAL: All publish ledger txs MUST have perm_fee
             let perm_fee = tx
                 .perm_fee
-                .ok_or_eyre("publish ledger tx missing perm_fee")?;
+                .ok_or_else(|| eyre::eyre!("publish ledger tx missing perm_fee {}", tx.id))?;
 
             // Calculate fee distribution using PublishFeeCharges
             // PublishFeeCharges::new will return an error if perm_fee is insufficient
@@ -202,8 +202,9 @@ impl ShadowTxGenerator<'_> {
                 if fee > commitment_value {
                     let amount = fee.checked_sub(commitment_value).ok_or_else(|| {
                         eyre::eyre!(
-                            "Underflow when calculating {} decrement amount",
-                            operation_type
+                            "Underflow when calculating {} decrement amount for {}",
+                            operation_type,
+                            tx.id
                         )
                     })?;
                     Ok(EitherIncrementOrDecrement::BalanceDecrement(
@@ -215,7 +216,11 @@ impl ShadowTxGenerator<'_> {
                     ))
                 } else {
                     let amount = commitment_value.checked_sub(fee).ok_or_else(|| {
-                        eyre::eyre!("Underflow when calculating {} amount", operation_type)
+                        eyre::eyre!(
+                            "Underflow when calculating {} amount for {}",
+                            operation_type,
+                            tx.id
+                        )
                     })?;
                     Ok(EitherIncrementOrDecrement::BalanceIncrement(
                         BalanceIncrement {
@@ -318,6 +323,7 @@ impl ShadowTxGenerator<'_> {
     }
 
     /// Process a single submit ledger transaction with clean error handling
+    #[tracing::instrument(skip_all, err)]
     fn try_process_submit_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
         if self.index >= self.submit_txs.len() {
             self.phase = Phase::PublishLedger;
@@ -357,6 +363,7 @@ impl ShadowTxGenerator<'_> {
     }
 
     /// Process commitments phase with clean error handling
+    #[tracing::instrument(skip_all, err)]
     fn try_process_commitments(&mut self) -> Result<Option<ShadowMetadata>> {
         if self.index >= self.commitment_txs.len() {
             self.phase = Phase::SubmitLedger;
@@ -368,10 +375,12 @@ impl ShadowTxGenerator<'_> {
         self.index += 1;
 
         // Process commitment transaction (no treasury impact currently)
+        // TODO: should commitment txs affect the treasury?
         Ok(Some(self.process_commitment_transaction(tx)?))
     }
 
     /// Process publish ledger phase with clean error handling
+    #[tracing::instrument(skip_all, err)]
     fn try_process_publish_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
         // On first entry to PublishLedger phase, prepare all rewards
         if self.current_publish_iter.is_none() {
@@ -505,8 +514,9 @@ mod tests {
         let actual_perm_fee = perm_fee.unwrap_or_else(|| {
             // If no perm_fee specified, calculate minimum required for ingress proofs
             let config = ConsensusConfig::testing();
-            let ingress_reward_per_proof =
-                (term_fee * config.immediate_tx_inclusion_reward_percent.amount) / U256::from(10000);
+            let ingress_reward_per_proof = (term_fee
+                * config.immediate_tx_inclusion_reward_percent.amount)
+                / U256::from(10000);
             let total_ingress_reward =
                 ingress_reward_per_proof * U256::from(config.number_of_ingress_proofs);
             U256::from(1000000) + total_ingress_reward
