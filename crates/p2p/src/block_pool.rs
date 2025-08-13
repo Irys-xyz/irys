@@ -613,12 +613,17 @@ where
         self.sync_state.mark_processed(block_height as usize);
         self.blocks_cache.remove_block(&block_hash).await;
         if process_ancestor {
-            let _ =
+            if let Err(send_err) =
                 self.sync_service_sender
                     .send(SyncChainServiceMessage::BlockProcessedByThePool {
                         block_hash,
                         response: None,
-                    });
+                    }) {
+                error!(
+                    "Block pool: Failed to send BlockProcessedByThePool message: {:?}",
+                    send_err
+                );
+            }
         }
         Ok(())
     }
@@ -704,12 +709,18 @@ where
             }
 
             // Use the sync service to request parent block (fire and forget)
-            let _ = self.sync_service_sender.send(
-                SyncChainServiceMessage::RequestBlockFromTheNetwork {
-                    block_hash: prev_block_hash,
-                    response: None,
-                },
-            );
+            if let Err(send_err) =
+                self.sync_service_sender
+                    .send(SyncChainServiceMessage::RequestBlockFromTheNetwork {
+                        block_hash: prev_block_hash,
+                        response: None,
+                    })
+            {
+                error!(
+                    "BlockPool: Failed to send RequestBlockFromTheNetwork message: {:?}",
+                    send_err
+                );
+            }
 
             return Ok(());
         }
@@ -760,12 +771,18 @@ where
             "Block pool: Notifying sync service to process orphaned ancestors of block {:?}",
             current_block_hash
         );
-        let _ = self
-            .sync_service_sender
-            .send(SyncChainServiceMessage::BlockProcessedByThePool {
-                block_hash: current_block_hash,
-                response: None,
-            });
+        if let Err(send_err) =
+            self.sync_service_sender
+                .send(SyncChainServiceMessage::BlockProcessedByThePool {
+                    block_hash: current_block_hash,
+                    response: None,
+                })
+        {
+            error!(
+                "Block pool: Failed to send BlockProcessedByThePool message: {:?}",
+                send_err
+            );
+        }
 
         Ok(())
     }
