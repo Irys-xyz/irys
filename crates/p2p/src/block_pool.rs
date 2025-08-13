@@ -618,7 +618,8 @@ where
                     .send(SyncChainServiceMessage::BlockProcessedByThePool {
                         block_hash,
                         response: None,
-                    }) {
+                    })
+            {
                 error!(
                     "Block pool: Failed to send BlockProcessedByThePool message: {:?}",
                     send_err
