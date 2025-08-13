@@ -59,7 +59,7 @@ pub enum PreValidationError {
     CumulativeDifficultyMismatch { expected: U256, got: U256 },
     #[error("Invalid difficulty (expected {expected} got {got})")]
     DifficultyMismatch { expected: U256, got: U256 },
-    #[error("Ema mismatch")]
+    #[error("Ema mismatch: recomputed EMA does not match Ema in block header")]
     EmaMismatch,
     #[error("EmaSnapshot creation error: {0}")]
     EmaSnapshotError(String),
