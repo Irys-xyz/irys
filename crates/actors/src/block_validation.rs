@@ -235,14 +235,15 @@ pub async fn prevalidate_block(
     );
 
     // Validate VDF seeds/next_seed against parent before any VDF-related processing
-    let vdf_reset_frequency: u64 = config.consensus.vdf.reset_frequency.try_into()?;
-    ensure!(
-        matches!(
-            is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
-            ValidationResult::Valid
-        ),
-        "Seed data is invalid"
-    );
+    let vdf_reset_frequency: u64 = config.consensus.vdf.reset_frequency as u64;
+    if !matches!(
+        is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
+        ValidationResult::Valid
+    ) {
+        return Err(PreValidationError::VDFCheckpointsInvalid(
+            "Seed data is invalid".to_string(),
+        ));
+    }
 
     // Ensure the last_epoch_hash field correctly references the most recent epoch block
     last_epoch_hash_is_valid(
