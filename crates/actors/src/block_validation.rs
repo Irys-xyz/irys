@@ -1337,6 +1337,7 @@ pub async fn data_txs_are_valid(
                 eyre::eyre!("Transaction {} has invalid ingress proof: {}", tx.id, e)
             })?;
 
+            // TODO: use `verify_ingress_proof` to verify all ingress proof chunks and data
             // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
             ensure!(
                 tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
