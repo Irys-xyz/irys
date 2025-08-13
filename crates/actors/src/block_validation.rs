@@ -2510,9 +2510,13 @@ mod tests {
         let mut block = IrysBlockHeader::new_mock_header();
         block.previous_cumulative_diff = U256::from(9999);
 
-        assert!(
-            previous_cumulative_difficulty_is_valid(&block, &prev).is_err(),
-            "expected mismatch to be detected"
-        );
+        if let Err(PreValidationError::PreviousCumulativeDifficultyMismatch { expected, got }) =
+            previous_cumulative_difficulty_is_valid(&block, &prev)
+        {
+            assert_eq!(expected, prev.cumulative_diff);
+            assert_eq!(got, block.previous_cumulative_diff);
+        } else {
+            panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
+        }
     }
 }
