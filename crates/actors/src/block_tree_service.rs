@@ -440,8 +440,7 @@ impl BlockTreeServiceInner {
             // Verify block isn't already finalized
             let binding = self.block_index_guard.clone();
             let bi = binding.read();
-            if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-                let finalized = bi.get_item(finalized_height).unwrap();
+            if let Some(finalized) = bi.get_item(finalized_height) {
                 if finalized.block_hash == finalized_hash {
                     return;
                 }
