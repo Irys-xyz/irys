@@ -1106,8 +1106,7 @@ pub async fn data_txs_are_valid(
         block,
         config.consensus.mempool.anchor_expiry_depth as u64,
         service_senders,
-    )
-    .await?;
+    )?;
 
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
@@ -1331,78 +1330,26 @@ enum TxInclusionState {
         ledger_current: DataLedger,
         ledger_historical: DataLedger,
     },
+    #[expect(dead_code)]
     Duplicate {
         ledger_historical: (DataLedger, BlockHash),
     },
 }
 
-async fn get_previous_tx_inclusions(
+fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
-    block: &IrysBlockHeader,
-    anchor_expiry_depth: u64,
-    service_senders: &ServiceSenders,
+    _block: &IrysBlockHeader,
+    _anchor_expiry_depth: u64,
+    _service_senders: &ServiceSenders,
 ) -> eyre::Result<()> {
     // Early return for empty input
     if tx_ids.is_empty() {
         return Ok(());
     }
 
-    let min_height = block.height.saturating_sub(anchor_expiry_depth);
+    // TODO: For every tx we have, we must check if it has been included in a past block.
+    // Currently it's not easy to do as we don't store the information about in which ledger the tx has last been seen in.
 
-    // Check mempool's prevalidated_blocks for recent blocks
-    // Get mempool data and release lock quickly
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetState(tx))?;
-    let mempool_state = rx.await?;
-    let mempool_guard = mempool_state.read().await;
-    mempool_guard
-        .prevalidated_blocks
-        .values()
-        .filter(|b| b.block_hash != block.block_hash)
-        .filter(|b| b.height >= min_height)
-        .try_for_each(|x| {
-            process_block_ledgers_with_states(&x.data_ledgers, x.block_hash, tx_ids)
-        })?;
-    // TODO: in case the anchor expiry is larger than the mempools list of prevalidated blocks, we should query the database!
-    Ok(())
-}
-
-/// Process ledgers and update transaction states
-/// Returns true if all transactions have been found
-fn process_block_ledgers_with_states(
-    ledgers: &[DataTransactionLedger],
-    block_hash: BlockHash,
-    tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
-) -> eyre::Result<()> {
-    for ledger in ledgers {
-        let ledger_type = DataLedger::try_from(ledger.ledger_id)?;
-
-        // Check each transaction in this ledger
-        for tx_id in &ledger.tx_ids.0 {
-            if let Some((_, state)) = tx_states.get_mut(tx_id) {
-                match state {
-                    TxInclusionState::Searching { ledger_current } => {
-                        // First time finding this transaction
-                        *state = TxInclusionState::Found {
-                            ledger_current: *ledger_current,
-                            ledger_historical: ledger_type,
-                        };
-                    }
-                    TxInclusionState::Found { .. } => {
-                        // Transaction already found once, this is a duplicate
-                        *state = TxInclusionState::Duplicate {
-                            ledger_historical: (ledger_type, block_hash),
-                        };
-                    }
-                    TxInclusionState::Duplicate { .. } => {
-                        // Already marked as duplicate, no need to update
-                    }
-                }
-            }
-        }
-    }
     Ok(())
 }
 
