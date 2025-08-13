@@ -6,8 +6,8 @@ use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     build_user_agent, Address, Config, DatabaseProvider, GossipDataRequest, PeerAddress,
-    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    RejectedResponse, RethPeerInfo, VersionRequest, PeerFilterMode,
+    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
+    PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest,
 };
 use rand::prelude::SliceRandom as _;
 use std::collections::{HashMap, HashSet};
@@ -435,8 +435,9 @@ where
         match peer_response {
             PeerResponse::Accepted(accepted_peers) => {
                 // Collect peer addresses for potential whitelist addition
-                let peer_addresses: Vec<SocketAddr> = accepted_peers.peers.iter().map(|p| p.api).collect();
-                
+                let peer_addresses: Vec<SocketAddr> =
+                    accepted_peers.peers.iter().map(|p| p.api).collect();
+
                 // Add peers to whitelist if this was a handshake with a trusted peer in TrustedAndHandshake mode
                 if is_trusted_peer && peer_filter_mode == PeerFilterMode::TrustedAndHandshake {
                     debug!(
@@ -444,7 +445,8 @@ where
                         peer_addresses.len(),
                         peer_addresses
                     );
-                    peer_list.add_peers_to_whitelist(peer_addresses.clone()).await;
+                    peer_list
+                        .add_peers_to_whitelist(peer_addresses.clone());
                 }
 
                 for peer in accepted_peers.peers {
@@ -469,6 +471,7 @@ where
         peer_list_service_address: Addr<Self>,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
+        peer_list: PeerList,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
@@ -481,6 +484,7 @@ where
             peer_list_service_address,
             is_trusted_peer,
             peer_filter_mode,
+            peer_list
         )
         .await
         {
@@ -585,6 +589,7 @@ where
             peer_service_addr,
             is_trusted_peer,
             self.config.node_config.peer_filter_mode,
+            self.peer_list.clone(),
         );
         ctx.spawn(handshake_task.into_actor(self));
         let reth_task = Self::add_reth_peer_task(self.reth_service_addr.clone(), reth_peer_info)
@@ -670,6 +675,7 @@ where
                 peer_service_addr,
                 is_trusted_peer,
                 self.config.node_config.peer_filter_mode,
+                self.peer_list.clone(),
             );
             ctx.spawn(handshake_task.into_actor(self));
         }
