@@ -164,6 +164,20 @@ pub struct ConsensusConfig {
     )]
     pub pledge_decay: Amount<Percentage>,
 
+    /// This is the fee that is used for immediate tx inclusion fees:
+    /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    ///
+    /// This field is also used for immediate ingress proof rewards:
+    /// ingress proof producer receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    ///
+    /// Both of these reward distribution mechanisms are opaque to the user,
+    /// the user will only ever see `term_fee` and `perm_fee`.
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub immediate_tx_inclusion_reward_percent: Amount<Percentage>,
+
     /// Maximum future drift
     #[serde(
         default = "default_max_future_timestamp_drift_millis",
@@ -251,9 +265,6 @@ pub struct NodeConfig {
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
 
-    /// Fee and pricing settings
-    pub pricing: PricingConfig,
-
     /// Reth node configuration
     pub reth: RethConfig,
 
@@ -320,20 +331,6 @@ impl ConsensusOptions {
 
         config
     }
-}
-
-/// # Pricing Configuration
-///
-/// Controls how the node calculates fees for storage and other services.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PricingConfig {
-    /// Additional fee percentage added by nodes to the base storage cost
-    /// This provides an incentive for nodes to participate in the network
-    #[serde(
-        deserialize_with = "serde_utils::percentage_amount",
-        serialize_with = "serde_utils::serializes_percentage_amount"
-    )]
-    pub fee_percentage: Amount<Percentage>,
 }
 
 /// # Oracle Configuration
@@ -684,6 +681,8 @@ impl ConsensusConfig {
             stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
             pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -792,6 +791,8 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -884,9 +885,6 @@ impl NodeConfig {
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             }],
-            pricing: PricingConfig {
-                fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
-            },
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -981,9 +979,6 @@ impl NodeConfig {
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
-            pricing: PricingConfig {
-                fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
-            },
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 8081,
@@ -1274,6 +1269,7 @@ mod tests {
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9
+        immediate_tx_inclusion_reward_percent = 0.05
 
         [reth]
         chain = 1270
