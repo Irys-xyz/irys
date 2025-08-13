@@ -152,6 +152,7 @@ pub async fn prevalidate_block(
             ValidationResult::Valid
         ),
         "Seed data is invalid"
+    );
 
     // Ensure the last_epoch_hash field correctly references the most recent epoch block
     last_epoch_hash_is_valid(
