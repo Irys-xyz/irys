@@ -4,7 +4,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    shadow_tx_generator::ShadowTxGenerator,
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use actix::prelude::*;
 use alloy_consensus::{
@@ -33,8 +33,8 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
     Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
-    H256List, IngressProofsList, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, TxIngressProof, VDFLimiterInfo, H256, U256,
+    H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -379,7 +379,7 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let (system_tx_ledger, commitment_txs_to_bill, submit_txs, publish_txs) =
+        let (system_tx_ledger, commitment_txs_to_bill, submit_txs, mut publish_txs) =
             self.get_mempool_txs(&prev_block_header).await?;
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
         let eth_built_payload = self
@@ -388,6 +388,7 @@ pub trait BlockProdStrategy {
                 &prev_evm_block,
                 &commitment_txs_to_bill,
                 &submit_txs,
+                &mut publish_txs,
                 block_reward,
                 current_timestamp,
             )
@@ -439,42 +440,50 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         commitment_txs_to_bill: &[CommitmentTransaction],
         submit_txs: &[DataTransactionHeader],
+        publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
+
+        // TODO: Get treasury balance from previous block once it's tracked in block headers
+        let initial_treasury_balance = U256::MAX / U256::from(2);
+
         // Generate expected shadow transactions using shared logic
-        let shadow_txs = ShadowTxGenerator::new(
+        let shadow_txs_iter = ShadowTxGenerator::new(
             &block_height,
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
-        );
-        let shadow_txs = shadow_txs
-            .generate_all(commitment_txs_to_bill, submit_txs)
-            .map(|tx_result| {
-                let metadata = tx_result?;
-                let mut tx_raw = compose_shadow_tx(
-                    self.inner().config.consensus.chain_id,
-                    &metadata.shadow_tx,
-                    metadata.transaction_fee,
-                );
-                let signature = local_signer
-                    .sign_transaction_sync(&mut tx_raw)
-                    .expect("shadow tx must always be signable");
-                let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
-                    .try_into_recovered()
-                    .expect("shadow tx must always be signable");
+            &self.inner().config.consensus,
+            commitment_txs_to_bill,
+            submit_txs,
+            publish_txs,
+            initial_treasury_balance,
+        )
+        .map(|tx_result| {
+            let metadata = tx_result?;
+            let mut tx_raw = compose_shadow_tx(
+                self.inner().config.consensus.chain_id,
+                &metadata.shadow_tx,
+                metadata.transaction_fee,
+            );
+            let signature = local_signer
+                .sign_transaction_sync(&mut tx_raw)
+                .expect("shadow tx must always be signable");
+            let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
+                .try_into_recovered()
+                .expect("shadow tx must always be signable");
 
-                Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
         self.build_and_submit_reth_payload(
             prev_block_header,
             timestamp_ms,
-            shadow_txs,
+            shadow_txs_iter,
             perv_evm_block.header.mix_hash,
         )
         .await
@@ -575,7 +584,7 @@ pub trait BlockProdStrategy {
         solution: SolutionContext,
         prev_block_header: &IrysBlockHeader,
         submit_txs: Vec<DataTransactionHeader>,
-        publish_txs: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+        publish_txs: PublishLedgerWithTxs,
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
@@ -591,15 +600,13 @@ pub trait BlockProdStrategy {
             return Ok(None);
         }
 
-        let (publish_txs, proofs) = publish_txs;
-
         // Publish Ledger Transactions
         let publish_chunks_added =
-            calculate_chunks_added(&publish_txs, self.inner().config.consensus.chunk_size);
+            calculate_chunks_added(&publish_txs.txs, self.inner().config.consensus.chunk_size);
         let publish_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Publish]
             .max_chunk_offset
             + publish_chunks_added;
-        let opt_proofs = (!proofs.is_empty()).then(|| IngressProofsList::from(proofs));
+        let opt_proofs = publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
         let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
@@ -695,8 +702,8 @@ pub trait BlockProdStrategy {
                 // Permanent Publish Ledger
                 DataTransactionLedger {
                     ledger_id: DataLedger::Publish.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs).0,
-                    tx_ids: H256List(publish_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
+                    tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs.txs).0,
+                    tx_ids: H256List(publish_txs.txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                     max_chunk_offset: publish_max_chunk_offset,
                     expires: None,
                     proofs: opt_proofs,
@@ -846,7 +853,7 @@ pub trait BlockProdStrategy {
         Vec<SystemTransactionLedger>,
         Vec<CommitmentTransaction>,
         Vec<DataTransactionHeader>,
-        (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+        PublishLedgerWithTxs,
     )> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()

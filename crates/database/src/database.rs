@@ -340,17 +340,18 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
 mod tests {
     use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
     use reth_db::Database as _;
+    use tempfile::tempdir;
 
     use crate::{
-        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir,
-        db::IrysDatabaseExt as _, insert_commitment_tx, tables::IrysTables,
+        block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _,
+        insert_commitment_tx, tables::IrysTables,
     };
 
     use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
-        let path = get_data_dir();
+        let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
         let tx_header = DataTransactionHeader::default();
