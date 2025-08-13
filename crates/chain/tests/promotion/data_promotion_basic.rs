@@ -57,7 +57,16 @@ async fn heavy_data_promotion_test() {
         for chunk in chunks {
             data.extend_from_slice(chunk);
         }
-        let tx = signer.create_transaction(data, None).unwrap();
+
+        // Get price from the API
+        let price_info = node
+            .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+            .await
+            .expect("Failed to get price");
+
+        let tx = signer
+            .create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)
+            .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
         txs.push(tx);
