@@ -118,6 +118,8 @@ pub enum PreValidationError {
     RewardMismatch { got: U256, expected: U256 },
     #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
     SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("Invalid solution_hash link - expected {expected} got {got}")]
+    SolutionHashLinkInvalid { expected: H256, got: H256 },
     #[error("system time error: {0}")]
     SystemTimeError(String),
     #[error("block timestamp {current} is older than parent block {parent}")]
@@ -234,6 +236,14 @@ pub async fn prevalidate_block(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
         "solution_hash_is_valid",
+    );
+
+    // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
+    solution_hash_link_is_valid(&block, &poa_chunk)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "solution_hash_link_is_valid",
     );
 
     // Check the previous solution hash references the parent correctly
@@ -504,6 +514,29 @@ pub fn solution_hash_is_valid(
         Err(PreValidationError::SolutionHashBelowDifficulty {
             expected: previous_block.diff,
             got: solution_diff,
+        })
+    }
+}
+
+/// Validates the cryptographic link between solution_hash and its inputs:
+/// PoA chunk bytes, partition_chunk_offset (little-endian), and the VDF seed (vdf_limiter_info.output)
+pub fn solution_hash_link_is_valid(
+    block: &IrysBlockHeader,
+    poa_chunk: &[u8],
+) -> Result<(), PreValidationError> {
+    let mut hasher = sha::Sha256::new();
+    hasher.update(poa_chunk);
+    hasher.update(&block.poa.partition_chunk_offset.to_le_bytes());
+    hasher.update(block.vdf_limiter_info.output.as_bytes());
+    let computed = hasher.finish();
+    let expected = H256::from(computed);
+
+    if block.solution_hash == expected {
+        Ok(())
+    } else {
+        Err(PreValidationError::SolutionHashLinkInvalid {
+            expected,
+            got: block.solution_hash,
         })
     }
 }
