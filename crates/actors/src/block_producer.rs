@@ -1,10 +1,13 @@
 use crate::{
-    block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
+    block_discovery::{
+        get_data_tx_in_parallel, BlockDiscoveryError, BlockDiscoveryFacade as _,
+        BlockDiscoveryFacadeImpl,
+    },
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, RollingHash, ShadowTxGenerator},
 };
 use actix::prelude::*;
 use alloy_consensus::{
@@ -17,9 +20,11 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
-use eyre::eyre;
+use eyre::{eyre, OptionExt};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
-use irys_domain::{BlockTreeReadGuard, EmaSnapshot, ExponentialMarketAvgCalculation};
+use irys_domain::{
+    BlockIndex, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExponentialMarketAvgCalculation,
+};
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
     compose_shadow_tx,
@@ -31,12 +36,13 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
-    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
-    H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
-    VDFLimiterInfo, H256, U256,
+    fee_distribution::TermFeeCharges, next_cumulative_diff, storage_pricing::Amount, Address,
+    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
+use itertools::Itertools;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -49,6 +55,7 @@ use reth::{
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -115,6 +122,8 @@ pub struct BlockProducerInner {
     pub reth_service: Addr<RethServiceActor>,
     /// Reth beacon engine handle
     pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
+    /// Block index
+    pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
 }
 
 impl BlockProducerService {
@@ -714,7 +723,13 @@ pub trait BlockProdStrategy {
                     tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                     tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                     max_chunk_offset: submit_max_chunk_offset,
-                    expires: Some(1622543200), // todo this should be updated `submit_ledger_epoch_length` from the config
+                    expires: Some(
+                        self.inner()
+                            .config
+                            .consensus
+                            .epoch
+                            .submit_ledger_epoch_length,
+                    ),
                     proofs: None,
                 },
             ],
@@ -855,6 +870,7 @@ pub trait BlockProdStrategy {
         Vec<DataTransactionHeader>,
         PublishLedgerWithTxs,
     )> {
+        let config = &self.inner().config;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()
             .service_senders
@@ -866,8 +882,7 @@ pub trait BlockProdStrategy {
             .expect("to send MempoolServiceMessage");
         let mempool_txs = rx.await.expect("to receive txns")?;
         let block_height = prev_block_header.height + 1;
-        let is_epoch_block =
-            block_height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0;
+        let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
         debug!(
             "get_best_mempool_txs for block height: {} returned: {:#?}",
             block_height,
@@ -880,6 +895,105 @@ pub trait BlockProdStrategy {
         let commitment_txs_to_bill;
         let system_transaction_ledger;
         if is_epoch_block {
+            let epoch_snapshot = self
+                .inner()
+                .block_tree_guard
+                .read()
+                .get_epoch_snapshot(&prev_block_header.block_hash)
+                .ok_or_eyre("parent blocks epoch snapshot must be available")?;
+            let mut ledgers = epoch_snapshot.ledgers.clone();
+            let partition_assignments = &epoch_snapshot.partition_assignments;
+            let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
+            let mut expired_submit_ledger_slot_indexes = HashMap::<u64, Vec<Address>, _>::new();
+            for expired_partition_hash in expired_partition_hashes {
+                let partition = partition_assignments
+                    .get_assignment(expired_partition_hash)
+                    .ok_or_eyre("could not get expired partition")?;
+
+                let ledger_id = partition
+                    .ledger_id
+                    .map(|id| DataLedger::try_from(id))
+                    .ok_or_eyre("ledger id must be present")??;
+                let slot_index = partition
+                    .slot_index
+                    .ok_or_eyre("slot index must be present")?
+                    as u64;
+                match ledger_id {
+                    DataLedger::Publish => eyre::bail!("publish ledger cannot expire"),
+                    DataLedger::Submit => {
+                        let entry = expired_submit_ledger_slot_indexes.entry(slot_index);
+                        entry
+                            .and_modify(|miners| {
+                                miners.push(partition.miner_address);
+                            })
+                            .or_insert(vec![partition.miner_address]);
+                    }
+                }
+            }
+
+            let mut blocks_with_expired_submit_ledgers = Vec::new();
+            for (slot_index, miners) in expired_submit_ledger_slot_indexes {
+                let start_offset = slot_index * config.consensus.num_chunks_in_partition;
+                let end_offset = start_offset + config.consensus.num_chunks_in_partition;
+                let block_index_read = self
+                    .inner()
+                    .block_index
+                    .read()
+                    .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
+                let miners = Arc::from_iter(miners.into_iter());
+                for chunk_offset in start_offset..end_offset {
+                    let (_idx, block_index_item) =
+                        block_index_read.get_block_index_item(DataLedger::Submit, chunk_offset)?;
+                    blocks_with_expired_submit_ledgers
+                        .push((block_index_item.block_hash, Arc::clone(&miners)));
+                }
+            }
+
+            let mut data_txs = Vec::<H256>::new();
+            let mut data_tx_miner_set = HashMap::new();
+            for (block_hash, miners) in blocks_with_expired_submit_ledgers {
+                let block = self.get_block_by_hash(block_hash).await?;
+
+                let get_data_ledger_tx_ids = block.get_data_ledger_tx_ids();
+                let data_txs_ids = get_data_ledger_tx_ids.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
+                for data_tx in data_txs_ids.iter() {
+                    data_tx_miner_set.insert(data_tx.clone(), Arc::clone(&miners));
+                }
+                data_txs.extend(data_txs_ids);
+            }
+
+            let mut data_txs = get_data_tx_in_parallel(
+                data_txs,
+                &self.inner().service_senders.mempool,
+                &self.inner().db,
+            )
+            .await?;
+            data_txs.sort();
+
+            let mut aggregated_miner_fees = HashMap::<Address, (U256, RollingHash), _>::new();
+            for data_tx in data_txs.iter() {
+                let miners_that_stored_this_tx = data_tx_miner_set
+                    .get(&data_tx.id)
+                    .expect("guaranteed to have the miner list");
+                let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
+                let fee_distribution_per_miner =
+                    fee_charges.distribution_on_expiry(&miners_that_stored_this_tx)?;
+                for (miner, fee) in miners_that_stored_this_tx
+                    .iter()
+                    .zip(fee_distribution_per_miner)
+                {
+                    aggregated_miner_fees
+                        .entry(*miner)
+                        .and_modify(|(current_fee, hash)| {
+                            *current_fee = current_fee.saturating_add(fee);
+                            hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
+                        })
+                        .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
+                }
+            }
+
+            // todo - if tx is of publish ledger and did not get promoted then we refund the perm fee
+
             // === EPOCH BLOCK: Rollup all commitments from the current epoch ===
             // Epoch blocks don't add new commitments - they summarize all commitments
             // that were validated throughout the epoch into a single rollup entry
@@ -999,6 +1113,26 @@ pub trait BlockProdStrategy {
             );
         }
         Ok(parent)
+    }
+
+    #[tracing::instrument(skip_all, fields(block_hash))]
+    async fn get_block_by_hash(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
+        let (tx, rx) = oneshot::channel();
+        self.inner()
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))
+            .expect("expected send to mempool to succeed");
+        let mempool_response = rx.await?;
+        let header = match mempool_response {
+            Some(h) => h,
+            None => self
+                .inner()
+                .db
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+                .ok_or_eyre("block not found in db")?,
+        };
+        return Ok(header);
     }
 }
 

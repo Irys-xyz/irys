@@ -1077,6 +1077,7 @@ impl IrysNode {
             receivers.block_producer,
             reth_node.provider.clone(),
             shadow_tx_store.clone(),
+            block_index,
             runtime_handle.clone(),
         );
 
@@ -1447,6 +1448,7 @@ impl IrysNode {
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
+        block_index: Arc<RwLock<BlockIndex>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
@@ -1464,6 +1466,7 @@ impl IrysNode {
             shadow_tx_store,
             reth_service: reth_service_actor,
             beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
+            block_index,
         });
 
         // Spawn the service and get the handle
