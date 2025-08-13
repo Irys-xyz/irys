@@ -1,6 +1,8 @@
 use crate::{
-    block_tree_service::BlockTreeServiceMessage, block_validation::prevalidate_block,
-    mempool_service::MempoolServiceMessage, services::ServiceSenders,
+    block_tree_service::BlockTreeServiceMessage,
+    block_validation::{prevalidate_block, PreValidationError},
+    mempool_service::MempoolServiceMessage,
+    services::ServiceSenders,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -54,7 +56,7 @@ pub struct BlockDiscoveryActor {
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
     #[error("Validation error: {0}")]
-    BlockValidationError(eyre::Report),
+    BlockValidationError(PreValidationError),
     #[error("Failed to get previous block header. Previous block hash: {previous_block_hash:?}")]
     PreviousBlockNotFound {
         /// The hash of the previous block that was not found
@@ -129,7 +131,7 @@ pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "eyre::Result<()>")]
+#[rtype(result = "Result<(), PreValidationError>")]
 pub struct BlockPreValidatedMessage(
     pub Arc<IrysBlockHeader>,
     pub Arc<Vec<DataTransactionHeader>>,
@@ -408,22 +410,18 @@ impl BlockDiscoveryServiceInner {
             let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
-                    return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                        "Ingress proofs missing"
-                    )));
+                    return Err(BlockDiscoveryError::BlockValidationError(
+                        PreValidationError::IngressProofsMissing,
+                    ));
                 }
             };
 
             // Pre-Validate the ingress-proof by verifying the signature
             for (i, tx_header) in publish_txs.iter().enumerate() {
-                let proof = &publish_proofs.0[i];
-
-                // Validate the ingress proof matches the transaction's data_root and has a valid signature
-                if let Err(e) = proof.pre_validate(&tx_header.data_root) {
-                    return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                        "Invalid ingress proof: {}",
-                        e
-                    )));
+                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
+                    return Err(BlockDiscoveryError::BlockValidationError(
+                        PreValidationError::IngressProofSignatureInvalid(e.to_string()),
+                    ));
                 }
             }
         }
@@ -663,12 +661,7 @@ impl BlockDiscoveryServiceInner {
                             e
                         ))
                     })?
-                    .map_err(|e| {
-                        BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                            "Block pre-validation failed: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(BlockDiscoveryError::BlockValidationError)?;
 
                 // Send the block to the gossip bus
                 tracing::trace!(

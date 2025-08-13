@@ -166,15 +166,14 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             &parent_ema_snapshot,
         )
         .await;
-        let err_msg = prevalidation_result
-            .expect_err("pre-validation should fail for future timestamp")
-            .to_string();
-        // FIXME: Relying on string based errors is going to make this test very brittle
-        //        A future PR should introduce enum error types to prevalidate_block() and similar fns/methods
-        assert!(
-            err_msg.contains("future"),
-            "error message should indicate the timestamp drift issue: {err_msg}"
-        );
+        let err =
+            prevalidation_result.expect_err("pre-validation should fail for future timestamp");
+        match err {
+            irys_actors::block_validation::PreValidationError::TimestampTooFarInFuture {
+                ..
+            } => {}
+            other => panic!("expected TimestampTooFarInFuture, got {:?}", other),
+        }
     }
 
     // ------------------------------------------------------------------
