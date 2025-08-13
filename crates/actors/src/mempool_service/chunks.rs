@@ -106,8 +106,9 @@ impl Inner {
 
         if data_size == 0 {
             error!(
-                "Error: {:?}. Invalid data_size for data_root: got 0 bytes",
+                "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 ChunkIngressError::InvalidDataSize,
+                data_root,
             );
             return Err(ChunkIngressError::InvalidDataSize);
         }
@@ -146,8 +147,9 @@ impl Inner {
         let num_chunks_in_tx = data_size.div_ceil(chunk_size);
         if num_chunks_in_tx == 0 {
             error!(
-                "Error: {:?}. Invalid data_size for data_root: got 0 bytes",
+                "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 ChunkIngressError::InvalidDataSize,
+                data_root,
             );
             return Err(ChunkIngressError::InvalidDataSize);
         }
@@ -271,8 +273,9 @@ impl Inner {
             Ok(v) => v,
             Err(_) => {
                 error!(
-                    "Error: {:?}. Invalid data_size for data_root: got 0 bytes",
+                    "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                     ChunkIngressError::InvalidDataSize,
+                    data_root,
                 );
                 return Err(ChunkIngressError::InvalidDataSize);
             }
