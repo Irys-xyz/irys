@@ -1,14 +1,14 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
+use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
-use crate::{BlockStatusProvider, GetPeerListGuard, OrphanBlockProcessingService};
+use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use async_trait::async_trait;
 use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
-use irys_actors::OrphanBlockProcessingMessage;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
@@ -129,8 +129,6 @@ struct MockedServices {
     mempool_stub: MempoolStub,
     vdf_state_stub: VdfStateReadonly,
     service_senders: ServiceSenders,
-    orphan_blocks_service_receiver:
-        tokio::sync::mpsc::UnboundedReceiver<OrphanBlockProcessingMessage>,
 }
 
 impl MockedServices {
@@ -227,7 +225,6 @@ impl MockedServices {
             mempool_stub,
             vdf_state_stub,
             service_senders,
-            orphan_blocks_service_receiver: service_receivers.orphan_block_processing,
         }
     }
 }
@@ -245,15 +242,17 @@ async fn should_process_block() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
-        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let sync_state = ChainSyncState::new(false, false);
     let service = BlockPool::new(
         db.clone(),
         block_discovery_stub.clone(),
         mempool_stub.clone(),
-        service_senders.orphan_block_processing.clone(),
+        sync_sender,
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
@@ -341,8 +340,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
-        orphan_blocks_service_receiver,
     } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let peer_list_guard = peer_list_data_guard.clone();
     // Set the mock client to return block2 when requested
@@ -368,20 +369,33 @@ async fn should_process_block_with_intermediate_block_in_api() {
         db.clone(),
         block_discovery_stub.clone(),
         mempool_stub.clone(),
-        service_senders.orphan_block_processing.clone(),
+        sync_sender,
         sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         vdf_state_stub,
-        config,
+        config.clone(),
         service_senders,
     ));
 
-    let orphan_service = OrphanBlockProcessingService::init(
-        orphan_blocks_service_receiver,
-        block_pool.clone(),
-        peer_list_guard.clone(),
+    let sync_service_inner = ChainSyncServiceInner::new_with_client(
         sync_state.clone(),
+        MockApiClient {
+            block_response: Some(CombinedBlockHeader {
+                irys: block2.clone(),
+                execution: Default::default(),
+            }),
+        },
+        peer_list_guard.clone(),
+        config.clone(),
+        block_status_provider_mock.block_index(),
+        block_pool.clone(),
+    );
+
+    let sync_service_handle = ChainSyncService::spawn_service(
+        sync_service_inner,
+        sync_receiver,
+        tokio::runtime::Handle::current(),
     );
 
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
@@ -423,7 +437,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("to get block3 message")
         .clone();
 
-    orphan_service.shutdown_signal.fire();
+    sync_service_handle.shutdown_signal.fire();
 
     assert_eq!(discovered_block2, block2);
     assert_eq!(discovered_block3, block3);
@@ -442,8 +456,10 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
-        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let sync_state = ChainSyncState::new(false, false);
 
@@ -451,7 +467,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         db.clone(),
         block_discovery_stub.clone(),
         mempool_stub.clone(),
-        service_senders.orphan_block_processing.clone(),
+        sync_sender,
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider,
@@ -517,8 +533,10 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
-        orphan_blocks_service_receiver,
     } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let gossip_server = FakeGossipServer::new();
     let (server_handle, fake_peer_gossip_addr) =
@@ -553,20 +571,30 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         db.clone(),
         block_discovery_stub.clone(),
         mempool_stub,
-        service_senders.orphan_block_processing.clone(),
+        sync_sender,
         sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
         vdf_state_stub,
-        config,
+        config.clone(),
         service_senders,
     ));
 
-    let orphan_service = OrphanBlockProcessingService::init(
-        orphan_blocks_service_receiver,
-        block_pool.clone(),
-        peer_list_guard.clone(),
+    let sync_service_inner = ChainSyncServiceInner::new_with_client(
         sync_state.clone(),
+        MockApiClient {
+            block_response: None,
+        },
+        peer_list_guard.clone(),
+        config.clone(),
+        block_status_provider_mock.block_index(),
+        block_pool.clone(),
+    );
+
+    let sync_service_handle = ChainSyncService::spawn_service(
+        sync_service_inner,
+        sync_receiver,
+        tokio::runtime::Handle::current(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
@@ -644,7 +672,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool.process_block(Arc::new(bogus_block), false).await;
 
-    orphan_service.shutdown_signal.fire();
+    sync_service_handle.shutdown_signal.fire();
 
     assert!(matches!(
         res,
@@ -665,8 +693,10 @@ async fn should_fast_track_block() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
-        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let sync_state = ChainSyncState::new(false, true);
 
@@ -674,7 +704,7 @@ async fn should_fast_track_block() {
         db.clone(),
         block_discovery_stub.clone(),
         mempool_stub.clone(),
-        service_senders.orphan_block_processing.clone(),
+        sync_sender,
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
@@ -727,8 +757,10 @@ async fn should_not_fast_track_block_already_in_index() {
         mempool_stub,
         vdf_state_stub,
         service_senders,
-        orphan_blocks_service_receiver: _,
     } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let sync_state = ChainSyncState::new(false, true);
 
@@ -736,7 +768,7 @@ async fn should_not_fast_track_block_already_in_index() {
         db.clone(),
         block_discovery_stub.clone(),
         mempool_stub.clone(),
-        service_senders.orphan_block_processing.clone(),
+        sync_sender,
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),

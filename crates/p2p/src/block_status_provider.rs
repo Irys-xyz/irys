@@ -175,6 +175,10 @@ impl BlockStatusProvider {
     pub fn index_height(&self) -> u64 {
         self.block_index_read_guard.read().latest_height()
     }
+
+    pub fn block_index(&self) -> BlockIndexReadGuard {
+        self.block_index_read_guard.clone()
+    }
 }
 
 /// Testing utilities for `BlockStatusProvider` to simulate different tree/index states.

@@ -1,11 +1,12 @@
 use crate::{BlockPool, GossipError};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_service::MempoolFacade;
-use irys_actors::orphan_block_processing::OrphanBlockProcessingError;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
-use irys_types::{BlockHash, BlockIndexItem, BlockIndexQuery, Config, NodeMode, TokioServiceHandle};
+use irys_types::{
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, NodeMode, TokioServiceHandle,
+};
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
@@ -65,14 +66,14 @@ pub enum SyncChainServiceMessage {
     /// Check if we need periodic sync (internal message)
     PeriodicSyncCheck,
     /// Process orphaned ancestor block
-    ProcessOrphanedAncestor {
+    BlockProcessedByThePool {
         block_hash: BlockHash,
-        response: Option<oneshot::Sender<Result<(), OrphanBlockProcessingError>>>,
+        response: Option<oneshot::Sender<ChainSyncResult<()>>>,
     },
-    /// Request parent block from network
+    /// Request parent block from the network
     RequestParentBlock {
         parent_block_hash: BlockHash,
-        response: Option<oneshot::Sender<Result<(), OrphanBlockProcessingError>>>,
+        response: Option<oneshot::Sender<ChainSyncResult<()>>>,
     },
 }
 
@@ -98,7 +99,7 @@ pub struct ChainSyncService<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFac
 /// Facade for interacting with the sync service
 #[derive(Debug, Clone)]
 pub struct SyncChainServiceFacade {
-    sender: mpsc::UnboundedSender<SyncChainServiceMessage>,
+    pub sender: mpsc::UnboundedSender<SyncChainServiceMessage>,
 }
 
 impl SyncChainServiceFacade {
@@ -112,76 +113,12 @@ impl SyncChainServiceFacade {
         self.sender
             .send(SyncChainServiceMessage::InitialSync(tx))
             .map_err(|_| {
-                ChainSyncError::ServiceCommunication("Failed to send sync request".to_string())
+                ChainSyncError::ServiceCommunication("Failed to send a sync request".to_string())
             })?;
 
         rx.await.map_err(|_| {
-            ChainSyncError::ServiceCommunication("Failed to receive sync response".to_string())
+            ChainSyncError::ServiceCommunication("Failed to receive a sync response".to_string())
         })?
-    }
-
-    /// Process orphaned ancestor block
-    pub async fn process_orphaned_ancestor(
-        &self,
-        block_hash: BlockHash,
-    ) -> Result<(), OrphanBlockProcessingError> {
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(SyncChainServiceMessage::ProcessOrphanedAncestor {
-                block_hash,
-                response: Some(tx),
-            })
-            .map_err(|_| {
-                OrphanBlockProcessingError::OtherInternal("Failed to send message".to_string())
-            })?;
-
-        rx.await.map_err(|_| {
-            OrphanBlockProcessingError::OtherInternal("Failed to receive response".to_string())
-        })?
-    }
-
-    /// Request parent block from network
-    pub async fn request_parent_block(
-        &self,
-        parent_block_hash: BlockHash,
-    ) -> Result<(), OrphanBlockProcessingError> {
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(SyncChainServiceMessage::RequestParentBlock {
-                parent_block_hash,
-                response: Some(tx),
-            })
-            .map_err(|_| {
-                OrphanBlockProcessingError::OtherInternal("Failed to send message".to_string())
-            })?;
-
-        rx.await.map_err(|_| {
-            OrphanBlockProcessingError::OtherInternal("Failed to receive response".to_string())
-        })?
-    }
-
-    /// Send orphan block processing message without waiting for response (fire-and-forget)
-    pub fn send_process_orphaned_ancestor(&self, block_hash: BlockHash) -> Result<(), OrphanBlockProcessingError> {
-        self.sender
-            .send(SyncChainServiceMessage::ProcessOrphanedAncestor {
-                block_hash,
-                response: None,
-            })
-            .map_err(|_| {
-                OrphanBlockProcessingError::OtherInternal("Failed to send message".to_string())
-            })
-    }
-
-    /// Send request parent block message without waiting for response (fire-and-forget)
-    pub fn send_request_parent_block(&self, parent_block_hash: BlockHash) -> Result<(), OrphanBlockProcessingError> {
-        self.sender
-            .send(SyncChainServiceMessage::RequestParentBlock {
-                parent_block_hash,
-                response: None,
-            })
-            .map_err(|_| {
-                OrphanBlockProcessingError::OtherInternal("Failed to send message".to_string())
-            })
     }
 }
 
@@ -224,28 +161,46 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
     }
 
     /// Perform a sync operation
-    async fn sync_chain(&self) -> ChainSyncResult<()> {
+    async fn spawn_chain_sync_task(&self, response: Option<oneshot::Sender<ChainSyncResult<()>>>) {
         let start_sync_from_height = self.block_index.read().latest_height();
         // Clear any pending blocks from the cache
         self.block_pool.block_cache_guard().clear().await;
 
-        sync_chain(
-            self.sync_state.clone(),
-            self.api_client.clone(),
-            &self.peer_list,
-            start_sync_from_height
-                .try_into()
-                .expect("Expected to be able to convert u64 to usize"),
-            &self.config,
-        )
-        .await
+        let config = self.config.clone();
+        let peer_list = self.peer_list.clone();
+        let sync_state = self.sync_state.clone();
+        let api_client = self.api_client.clone();
+
+        tokio::spawn(async move {
+            let res = sync_chain(
+                sync_state.clone(),
+                api_client,
+                &peer_list,
+                start_sync_from_height
+                    .try_into()
+                    .expect("Expected to be able to convert u64 to usize"),
+                &config,
+            )
+            .await;
+
+            match &res {
+                Ok(()) => info!("Sync task completed successfully"),
+                Err(e) => {
+                    error!("Sync task failed: {}", e);
+                    sync_state.finish_sync();
+                }
+            }
+
+            if let Some(response_sender) = response {
+                if let Err(e) = response_sender.send(res) {
+                    error!("Failed to send the sync response: {:?}", e);
+                }
+            }
+        });
     }
 
     /// Process orphaned ancestor block - moved from OrphanBlockProcessingService
-    async fn process_orphaned_ancestor_impl(
-        &self,
-        block_hash: BlockHash,
-    ) -> Result<(), OrphanBlockProcessingError> {
+    async fn process_orphaned_ancestor(&self, block_hash: BlockHash) -> Result<(), ChainSyncError> {
         let maybe_orphaned_block = self
             .block_pool
             .get_orphaned_block_by_parent(&block_hash)
@@ -260,12 +215,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             self.block_pool
                 .process_block(orphaned_block, false)
                 .await
-                .map_err(|e| {
-                    OrphanBlockProcessingError::OtherInternal(format!(
-                        "Block processing error: {:?}",
-                        e
-                    ))
-                })
+                .map_err(|e| ChainSyncError::Internal(format!("Block processing error: {:?}", e)))
         } else {
             info!(
                 "No orphaned ancestor block found for block: {:?}",
@@ -276,10 +226,10 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
     }
 
     /// Request parent block from network - moved from OrphanBlockProcessingService
-    async fn request_parent_block_impl(
+    async fn request_parent_block(
         &self,
         parent_block_hash: BlockHash,
-    ) -> Result<(), OrphanBlockProcessingError> {
+    ) -> Result<(), ChainSyncError> {
         let parent_is_already_in_the_pool = self
             .block_pool
             .is_parent_hash_in_cache(&parent_block_hash)
@@ -305,10 +255,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
     async fn request_block_from_the_network(
         &self,
         block_hash: BlockHash,
-    ) -> Result<(), OrphanBlockProcessingError> {
-        self.block_pool
-            .mark_block_as_requested(block_hash)
-            .await;
+    ) -> Result<(), ChainSyncError> {
+        self.block_pool.mark_block_as_requested(block_hash).await;
         match self
             .peer_list
             .request_block_from_the_network(
@@ -326,11 +274,9 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             }
             Err(error) => {
                 error!("Error while trying to fetch parent block {:?}: {:?}. Removing the block from the pool", block_hash, error);
-                self.block_pool
-                    .remove_requested_block(&block_hash)
-                    .await;
+                self.block_pool.remove_requested_block(&block_hash).await;
                 self.block_pool.remove_block_from_cache(&block_hash).await;
-                Err(OrphanBlockProcessingError::OtherInternal(format!(
+                Err(ChainSyncError::Internal(format!(
                     "Network error: {:?}",
                     error
                 )))
@@ -397,6 +343,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
 
                 // Handle commands
                 cmd = self.msg_rx.recv() => {
+                    debug!("SyncChainService: Received a command from the channel");
                     match cmd {
                         Some(cmd) => {
                             self.handle_message(cmd).await?;
@@ -417,20 +364,20 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
     #[tracing::instrument(skip_all)]
     async fn handle_message(&self, msg: SyncChainServiceMessage) -> ChainSyncResult<()> {
         match msg {
-            SyncChainServiceMessage::InitialSync(sender) => {
-                let result = self.inner.sync_chain().await;
-                if let Err(e) = sender.send(result) {
-                    tracing::error!("Failed to send a sync response: {e:?}");
-                }
+            SyncChainServiceMessage::InitialSync(response_sender) => {
+                self.inner
+                    .spawn_chain_sync_task(Some(response_sender))
+                    .await;
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
                 self.handle_periodic_sync_check().await;
             }
-            SyncChainServiceMessage::ProcessOrphanedAncestor {
+            SyncChainServiceMessage::BlockProcessedByThePool {
                 block_hash,
                 response,
             } => {
-                let result = self.inner.process_orphaned_ancestor_impl(block_hash).await;
+                debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
+                let result = self.inner.process_orphaned_ancestor(block_hash).await;
                 if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
                         tracing::error!("Failed to send response: {:?}", e);
@@ -441,10 +388,11 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 parent_block_hash,
                 response,
             } => {
-                let result = self
-                    .inner
-                    .request_parent_block_impl(parent_block_hash)
-                    .await;
+                debug!(
+                    "SyncChainService: Received a request to fetch block {:?} from the network",
+                    parent_block_hash
+                );
+                let result = self.inner.request_parent_block(parent_block_hash).await;
                 if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
                         tracing::error!("Failed to send response: {:?}", e);
@@ -474,13 +422,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
-                match self.inner.sync_chain().await {
-                    Ok(()) => info!("Periodic sync completed successfully"),
-                    Err(e) => {
-                        error!("Periodic sync failed: {}", e);
-                        self.inner.sync_state.finish_sync();
-                    }
-                }
+                self.inner.spawn_chain_sync_task(None).await;
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");
@@ -490,13 +432,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
                     e
                 );
-                match self.inner.sync_chain().await {
-                    Ok(()) => info!("Periodic sync completed successfully"),
-                    Err(e) => {
-                        error!("Periodic sync failed: {}", e);
-                        self.inner.sync_state.finish_sync();
-                    }
-                }
+                self.inner.spawn_chain_sync_task(None).await;
             }
         }
     }
