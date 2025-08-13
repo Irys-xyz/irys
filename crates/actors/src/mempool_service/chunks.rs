@@ -115,6 +115,7 @@ impl Inner {
                     chunks_map.put(chunk.tx_offset, chunk.clone());
                 } else {
                     // If there's no entry for this data_root yet, create one
+                    // TODO: rework LRU logic to separate LRU/map https://github.com/Irys-xyz/irys/issues/632
                     let mut new_lru_cache = LruCache::new(
                         NonZeroUsize::new(preheader_chunks_per_item)
                             .expect("expected valid NonZeroUsize::new"),
