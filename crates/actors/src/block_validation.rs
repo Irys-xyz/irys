@@ -144,6 +144,18 @@ pub async fn prevalidate_block(
         "previous_solution_hash_is_valid",
     );
 
+    // Ensure the last_epoch_hash field correctly references the most recent epoch block
+    last_epoch_hash_is_valid(
+        &block,
+        &previous_block,
+        config.consensus.epoch.num_blocks_in_epoch,
+    )?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "last_epoch_hash_is_valid",
+    );
+
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
 
@@ -377,6 +389,30 @@ pub fn previous_solution_hash_is_valid(
             "Invalid previous_solution_hash - expected {} got {}",
             previous_block.solution_hash,
             block.previous_solution_hash
+        ))
+    }
+}
+
+/// Validates the `last_epoch_hash` field against the previous block and epoch rules.
+pub fn last_epoch_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    blocks_in_epoch: u64,
+) -> eyre::Result<()> {
+    // if First block after an epoch boundary
+    let expected = if block.height > 0 && block.height % blocks_in_epoch == 1 {
+        previous_block.block_hash
+    } else {
+        previous_block.last_epoch_hash
+    };
+
+    if block.last_epoch_hash == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid last_epoch_hash - expected {} got {}",
+            expected,
+            block.last_epoch_hash
         ))
     }
 }
@@ -656,7 +692,7 @@ pub async fn shadow_transactions_are_valid(
             .await?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error))
+                return Err(eyre::Report::msg(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
                 tracing::debug!(
