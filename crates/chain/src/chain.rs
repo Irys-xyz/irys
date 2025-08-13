@@ -411,10 +411,21 @@ impl IrysNode {
         let difficulty = calculate_initial_difficulty(&self.config.consensus, storage_module_count)
             .expect("valid calculated initial difficulty");
 
-        // Create timestamp for genesis block
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let timestamp = now.as_millis();
+        // Create timestamp for genesis block (prefer configured value if provided)
+        let configured_ts = self.config.consensus.genesis.timestamp_millis;
+        let timestamp = if configured_ts != 0 {
+            configured_ts
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
         genesis_block.diff = difficulty;
+        // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
+        if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
+            genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
+        }
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;
 
