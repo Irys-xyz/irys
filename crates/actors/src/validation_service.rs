@@ -10,7 +10,9 @@
 //! 3. **Concurrent Validation**: Three concurrent stages (recall, POA, reth state)
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
-use crate::{block_tree_service::ReorgEvent, block_validation::is_seed_data_valid, services::ServiceSenders};
+use crate::{
+    block_tree_service::ReorgEvent, block_validation::is_seed_data_valid, services::ServiceSenders,
+};
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::{bail, ensure};
