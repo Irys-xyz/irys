@@ -61,6 +61,8 @@ pub enum PreValidationError {
     DifficultyMismatch { expected: U256, got: U256 },
     #[error("Ema mismatch")]
     EmaMismatch,
+    #[error("EmaSnapshot creation error: {0}")]
+    EmaSnapshotError(String),
     #[error("Ingress proofs missing")]
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
@@ -112,8 +114,6 @@ pub enum PreValidationError {
     RewardCurveError(String),
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
-    #[error("Snapshot creation error: {0}")]
-    SnapshotError(String),
     #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
     SolutionHashBelowDifficulty { expected: U256, got: U256 },
     #[error("system time error: {0}")]

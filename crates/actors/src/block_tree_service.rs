@@ -529,7 +529,7 @@ impl BlockTreeServiceInner {
         let ema_snapshot = parent_block_entry
             .ema_snapshot
             .next_snapshot(&block, &parent_block_entry.block, &self.config.consensus)
-            .map_err(|e| PreValidationError::SnapshotError(e.to_string()))?;
+            .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
 
         let add_result = cache.add_block(
             &block,
