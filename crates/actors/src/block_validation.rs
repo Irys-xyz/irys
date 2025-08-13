@@ -159,6 +159,14 @@ pub async fn prevalidate_block(
         "prev_output_is_valid",
     );
 
+    // Check block height continuity
+    height_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "height_is_valid",
+    );
+
     // Check block timestamp drift
     timestamp_is_valid(
         block.timestamp,
@@ -211,6 +219,18 @@ pub async fn prevalidate_block(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
         "previous_solution_hash_is_valid",
+    );
+
+    // Ensure the last_epoch_hash field correctly references the most recent epoch block
+    last_epoch_hash_is_valid(
+        &block,
+        &previous_block,
+        config.consensus.epoch.num_blocks_in_epoch,
+    )?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "last_epoch_hash_is_valid",
     );
 
     // We only check last_step_checkpoints during pre-validation
@@ -451,6 +471,70 @@ pub fn previous_solution_hash_is_valid(
             expected: previous_block.solution_hash,
             got: block.previous_solution_hash,
         })
+    }
+}
+
+/// Validates the `last_epoch_hash` field against the previous block and epoch rules.
+pub fn last_epoch_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    blocks_in_epoch: u64,
+) -> eyre::Result<()> {
+    // if First block after an epoch boundary
+    let expected = if block.height > 0 && block.height % blocks_in_epoch == 1 {
+        previous_block.block_hash
+    } else {
+        previous_block.last_epoch_hash
+    };
+
+    if block.last_epoch_hash == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid last_epoch_hash - expected {} got {}",
+            expected,
+            block.last_epoch_hash
+        ))
+    }
+}
+
+// Validates block height against previous block height + 1
+pub fn height_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    let expected = previous_block.height + 1;
+    if block.height == expected {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Invalid block height (expected {} got {})",
+            expected,
+            block.height
+        ))
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    #[test]
+    fn height_is_valid_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 10;
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 11;
+        assert!(height_is_valid(&block, &prev).is_ok());
+    }
+
+    #[test]
+    fn height_is_invalid_fails() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 10;
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 12;
+        assert!(height_is_valid(&block, &prev).is_err());
     }
 }
 
@@ -696,7 +780,7 @@ pub async fn shadow_transactions_are_valid(
             .await?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error))
+                return Err(eyre::Report::msg(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
                 tracing::debug!(
