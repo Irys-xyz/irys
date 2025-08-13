@@ -460,7 +460,7 @@ impl GossipServiceTestFixture {
             service_senders,
             gossip_receiver: Some(service_receivers.gossip_broadcast),
             sync_tx,
-            sync_rx: Some(sync_rx),
+            _sync_rx: Some(sync_rx),
         }
     }
 
