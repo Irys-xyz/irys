@@ -46,7 +46,93 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use thiserror::Error;
 use tracing::{debug, error, info};
+
+#[derive(Debug, Error)]
+pub enum PreValidationError {
+    #[error("Failed to get block bounds: {0}")]
+    BlockBoundsLookupError(String),
+    #[error("block signature is not valid")]
+    BlockSignatureInvalid,
+    #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
+    CumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error("Invalid difficulty (expected {expected} got {got})")]
+    DifficultyMismatch { expected: U256, got: U256 },
+    #[error("Ema mismatch: recomputed EMA does not match Ema in block header")]
+    EmaMismatch,
+    #[error("EmaSnapshot creation error: {0}")]
+    EmaSnapshotError(String),
+    #[error("Ingress proofs missing")]
+    IngressProofsMissing,
+    #[error("Invalid ingress proof signature: {0}")]
+    IngressProofSignatureInvalid(String),
+    #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
+    LastDiffTimestampMismatch { expected: u128, got: u128 },
+    #[error("Invalid ledger id {ledger_id}")]
+    LedgerIdInvalid { ledger_id: u32 },
+    #[error("Invalid merkle proof: {0}")]
+    MerkleProofInvalid(String),
+    #[error("Oracle price invalid")]
+    OraclePriceInvalid,
+    #[error("PoA capacity chunk mismatch entropy_first={entropy_first:?} poa_first={poa_first:?}")]
+    PoACapacityChunkMismatch {
+        entropy_first: Option<u8>,
+        poa_first: Option<u8>,
+    },
+    #[error("PoA chunk hash mismatch: expected {expected:?}, got {got:?}, ledger_id={ledger_id:?}, ledger_chunk_offset={ledger_chunk_offset:?}")]
+    PoAChunkHashMismatch {
+        expected: H256,
+        got: H256,
+        ledger_id: Option<u32>,
+        ledger_chunk_offset: Option<u64>,
+    },
+    #[error("Missing PoA chunk to be pre validated")]
+    PoAChunkMissing,
+    #[error("PoA chunk offset out of tx's data chunks bounds")]
+    PoAChunkOffsetOutOfDataChunksBounds,
+    #[error("PoA chunk offset out of block bounds")]
+    PoAChunkOffsetOutOfBlockBounds,
+    #[error("PoA chunk offset out of tx bounds")]
+    PoAChunkOffsetOutOfTxBounds,
+    #[error("Missing partition assignment for partition hash {partition_hash}")]
+    PartitionAssignmentMissing { partition_hash: H256 },
+    #[error("Partition assignment for partition hash {partition_hash} is missing slot index")]
+    PartitionAssignmentSlotIndexMissing { partition_hash: H256 },
+    #[error("Partition assignment slot index too large for u64: {slot_index} (partition {partition_hash})")]
+    PartitionAssignmentSlotIndexTooLarge {
+        partition_hash: H256,
+        slot_index: usize,
+    },
+    #[error(
+        "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
+    )]
+    PoADataPartitionExpired { partition_hash: H256 },
+    #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
+    PreviousSolutionHashMismatch { expected: H256, got: H256 },
+    #[error("Reward curve error: {0}")]
+    RewardCurveError(String),
+    #[error("Reward mismatch: got {got}, expected {expected}")]
+    RewardMismatch { got: U256, expected: U256 },
+    #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
+    SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("system time error: {0}")]
+    SystemTimeError(String),
+    #[error("block timestamp {current} is older than parent block {parent}")]
+    TimestampOlderThanParent { current: u128, parent: u128 },
+    #[error("block timestamp {current} too far in the future (now {now})")]
+    TimestampTooFarInFuture { current: u128, now: u128 },
+    #[error("Validation service unreachable")]
+    ValidationServiceUnreachable,
+    #[error("last_step_checkpoints validation failed: {0}")]
+    VDFCheckpointsInvalid(String),
+    #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
+    VDFPreviousOutputMismatch { got: H256, expected: H256 },
+    #[error("Invalid block height (expected {expected} got {got})")]
+    HeightInvalid { expected: u64, got: u64 },
+    #[error("Invalid last_epoch_hash - expected {expected} got {got}")]
+    LastEpochHashMismatch { expected: BlockHash, got: BlockHash },
+}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -56,7 +142,7 @@ pub async fn prevalidate_block(
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -65,13 +151,17 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
+        None => return Err(PreValidationError::PoAChunkMissing),
     };
 
-    if block.chunk_hash != sha::sha256(&poa_chunk).into() {
-        return Err(eyre::eyre!(
-            "Invalid block: chunk hash distinct from PoA chunk hash"
-        ));
+    let block_poa_hash: H256 = sha::sha256(&poa_chunk).into();
+    if block.chunk_hash != block_poa_hash {
+        return Err(PreValidationError::PoAChunkHashMismatch {
+            expected: block.chunk_hash,
+            got: block_poa_hash,
+            ledger_id: None,
+            ledger_chunk_offset: None,
+        });
     }
 
     // Check prev_output (vdf)
@@ -157,7 +247,9 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf)
+        .await
+        .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
@@ -165,7 +257,9 @@ pub async fn prevalidate_block(
         previous_block.oracle_irys_price,
         config.consensus.token_price_safe_range,
     );
-    ensure!(oracle_price_valid, "Oracle price must be valid");
+    if !oracle_price_valid {
+        return Err(PreValidationError::OraclePriceInvalid);
+    }
 
     // Check that the EMA has been correctly calculated
     let ema_valid = {
@@ -179,26 +273,33 @@ pub async fn prevalidate_block(
             .ema;
         res == block.ema_irys_price
     };
-    ensure!(ema_valid, "EMA must be valid");
+    if !ema_valid {
+        return Err(PreValidationError::EmaMismatch);
+    }
 
     // Check valid curve price
-    let reward = reward_curve.reward_between(
-        // adjust ms to sec
-        previous_block.timestamp.saturating_div(1000),
-        block.timestamp.saturating_div(1000),
-    )?;
-    let encoded_reward = block.reward_amount;
-    ensure!(
-        reward.amount == block.reward_amount,
-        "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
-    );
+    let reward = reward_curve
+        .reward_between(
+            // adjust ms to sec
+            previous_block.timestamp.saturating_div(1000),
+            block.timestamp.saturating_div(1000),
+        )
+        .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+    if reward.amount != block.reward_amount {
+        return Err(PreValidationError::RewardMismatch {
+            got: block.reward_amount,
+            expected: reward.amount,
+        });
+    }
 
     // After pre-validating a bunch of quick checks we validate the signature
     // TODO: We may want to further check if the signer is a staked address
     // this is a little more advanced though as it requires knowing what the
     // commitment states looked like when this block was produced. For now
     // we just accept any valid signature.
-    ensure!(block.is_signature_valid(), "block signature is not valid");
+    if !block.is_signature_valid() {
+        return Err(PreValidationError::BlockSignatureInvalid);
+    }
 
     Ok(())
 }
@@ -206,15 +307,14 @@ pub async fn prevalidate_block(
 pub fn prev_output_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "vdf_limiter.prev_output ({}) does not match previous blocks vdf_limiter.output ({})",
-            &block.vdf_limiter_info.prev_output,
-            &previous_block.vdf_limiter_info.output
-        ))
+        Err(PreValidationError::VDFPreviousOutputMismatch {
+            got: block.vdf_limiter_info.prev_output,
+            expected: previous_block.vdf_limiter_info.output,
+        })
     }
 }
 
@@ -222,27 +322,27 @@ pub fn prev_output_is_valid(
 // errors if the block has a lower timestamp than the parent block
 // compares timestamps of block against current system time
 // errors on drift more than MAX_TIMESTAMP_DRIFT_SECS into future
-pub fn timestamp_is_valid(current: u128, parent: u128, allowed_drift: u128) -> eyre::Result<()> {
+pub fn timestamp_is_valid(
+    current: u128,
+    parent: u128,
+    allowed_drift: u128,
+) -> Result<(), PreValidationError> {
     if current < parent {
-        return Err(eyre::eyre!(
-            "block timestamp {} is older than parent block {}",
-            current,
-            parent
-        ));
+        return Err(PreValidationError::TimestampOlderThanParent { current, parent });
     }
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| eyre::eyre!("system time error: {e}"))?
+        .map_err(|e| PreValidationError::SystemTimeError(e.to_string()))?
         .as_millis();
 
     let max_future = now_ms + allowed_drift;
 
     if current > max_future {
-        return Err(eyre::eyre!(
-            "block timestamp {} too far in the future (now {now_ms})",
-            current
-        ));
+        return Err(PreValidationError::TimestampTooFarInFuture {
+            current,
+            now: now_ms,
+        });
     }
 
     Ok(())
@@ -255,7 +355,7 @@ pub fn difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let block_height = block.height;
     let current_timestamp = block.timestamp;
     let last_diff_timestamp = previous_block.last_diff_timestamp;
@@ -272,11 +372,10 @@ pub fn difficulty_is_valid(
     if diff == block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid difficulty (expected {} got {})",
-            &diff,
-            &block.diff
-        ))
+        Err(PreValidationError::DifficultyMismatch {
+            expected: diff,
+            got: block.diff,
+        })
     }
 }
 
@@ -289,7 +388,7 @@ pub fn last_diff_timestamp_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
     let expected = if block.height % blocks_between_adjustments == 0 {
         block.timestamp
@@ -300,11 +399,10 @@ pub fn last_diff_timestamp_is_valid(
     if block.last_diff_timestamp == expected {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid last_diff_timestamp (expected {} got {})",
+        Err(PreValidationError::LastDiffTimestampMismatch {
             expected,
-            block.last_diff_timestamp
-        ))
+            got: block.last_diff_timestamp,
+        })
     }
 }
 
@@ -312,7 +410,7 @@ pub fn last_diff_timestamp_is_valid(
 pub fn check_poa_data_expiration(
     poa: &PoaData,
     epoch_snapshot: Arc<EpochSnapshot>,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let is_data_partition_assigned = epoch_snapshot
         .partition_assignments
         .data_partitions
@@ -324,9 +422,9 @@ pub fn check_poa_data_expiration(
         && poa.ledger_id.is_some()
         && !is_data_partition_assigned
     {
-        return Err(eyre::eyre!(
-            "Invalid data PoA, partition hash is not a data partition, it may have expired"
-        ));
+        return Err(PreValidationError::PoADataPartitionExpired {
+            partition_hash: poa.partition_hash,
+        });
     };
     Ok(())
 }
@@ -338,7 +436,7 @@ pub fn check_poa_data_expiration(
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let previous_cumulative_diff = previous_block.cumulative_diff;
     let new_diff = block.diff;
 
@@ -346,11 +444,10 @@ pub fn cumulative_difficulty_is_valid(
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid cumulative_difficulty (expected {}, got {})",
-            &cumulative_diff,
-            &block.cumulative_diff
-        ))
+        Err(PreValidationError::CumulativeDifficultyMismatch {
+            expected: cumulative_diff,
+            got: block.cumulative_diff,
+        })
     }
 }
 
@@ -361,19 +458,17 @@ pub fn cumulative_difficulty_is_valid(
 pub fn solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
     if solution_diff >= previous_block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
-            &previous_block.diff,
-            &solution_diff,
-            &previous_block.diff.abs_diff(solution_diff)
-        ))
+        Err(PreValidationError::SolutionHashBelowDifficulty {
+            expected: previous_block.diff,
+            got: solution_diff,
+        })
     }
 }
 
@@ -381,15 +476,14 @@ pub fn solution_hash_is_valid(
 pub fn previous_solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     if block.previous_solution_hash == previous_block.solution_hash {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid previous_solution_hash - expected {} got {}",
-            previous_block.solution_hash,
-            block.previous_solution_hash
-        ))
+        Err(PreValidationError::PreviousSolutionHashMismatch {
+            expected: previous_block.solution_hash,
+            got: block.previous_solution_hash,
+        })
     }
 }
 
@@ -398,7 +492,7 @@ pub fn last_epoch_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     blocks_in_epoch: u64,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     // if First block after an epoch boundary
     let expected = if block.height > 0 && block.height % blocks_in_epoch == 1 {
         previous_block.block_hash
@@ -409,11 +503,10 @@ pub fn last_epoch_hash_is_valid(
     if block.last_epoch_hash == expected {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid last_epoch_hash - expected {} got {}",
+        Err(PreValidationError::LastEpochHashMismatch {
             expected,
-            block.last_epoch_hash
-        ))
+            got: block.last_epoch_hash,
+        })
     }
 }
 
@@ -421,16 +514,15 @@ pub fn last_epoch_hash_is_valid(
 pub fn height_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let expected = previous_block.height + 1;
     if block.height == expected {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid block height (expected {} got {})",
+        Err(PreValidationError::HeightInvalid {
             expected,
-            block.height
-        ))
+            got: block.height,
+        })
     }
 }
 
@@ -519,11 +611,11 @@ pub fn poa_is_valid(
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &Address,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
+        None => return Err(PreValidationError::PoAChunkMissing),
     };
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
@@ -532,25 +624,35 @@ pub fn poa_is_valid(
         // partition data -> ledger data
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(poa.partition_hash)
-            .ok_or_else(|| eyre::eyre!("Missing partition assignment for the provided hash"))?;
+            .ok_or(PreValidationError::PartitionAssignmentMissing {
+                partition_hash: poa.partition_hash,
+            })?;
 
+        let slot_index = partition_assignment.slot_index.ok_or(
+            PreValidationError::PartitionAssignmentSlotIndexMissing {
+                partition_hash: poa.partition_hash,
+            },
+        )?;
+        let slot_index_u64 = u64::try_from(slot_index).map_err(|_| {
+            PreValidationError::PartitionAssignmentSlotIndexTooLarge {
+                partition_hash: poa.partition_hash,
+                slot_index,
+            }
+        })?;
         let ledger_chunk_offset =
-            u64::try_from(partition_assignment.slot_index.ok_or_else(|| {
-                eyre::eyre!("Partition assignment for the provided hash is missing slot index")
-            })?)
-            .expect("Partition assignment slot index should fit into a u64")
-                * config.num_partitions_per_slot
-                * config.num_chunks_in_partition
+            slot_index_u64 * config.num_partitions_per_slot * config.num_chunks_in_partition
                 + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
-        let ledger = DataLedger::try_from(ledger_id)?;
+        let ledger = DataLedger::try_from(ledger_id)
+            .map_err(|_| PreValidationError::LedgerIdInvalid { ledger_id })?;
 
         let bb = block_index_guard
             .read()
-            .get_block_bounds(ledger, ledger_chunk_offset)?;
+            .get_block_bounds(ledger, ledger_chunk_offset)
+            .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
-            return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
+            return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
@@ -560,26 +662,25 @@ pub fn poa_is_valid(
             bb.tx_root.0,
             &tx_path,
             block_chunk_offset * (config.chunk_size as u128),
-        )?;
+        )
+        .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
+            return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
         }
 
         let tx_chunk_offset =
             block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
 
         // data_path validation
-        let data_path_result =
-            validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)?;
+        let data_path_result = validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)
+            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!(
-                "PoA chunk offset out of tx's data chunks bounds"
-            ));
+            return Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds);
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -607,13 +708,12 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(eyre::eyre!(
-                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
-                poa_chunk,
-                data_path_result.leaf_hash,
-                ledger_id,
-                ledger_chunk_offset
-            ));
+            return Err(PreValidationError::PoAChunkHashMismatch {
+                expected: data_path_result.leaf_hash.into(),
+                got: poa_chunk_hash.into(),
+                ledger_id: Some(ledger_id),
+                ledger_chunk_offset: Some(ledger_chunk_offset),
+            });
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -631,11 +731,10 @@ pub fn poa_is_valid(
                 debug!("Chunk PoA:{:?}", poa_chunk);
                 debug!("Entropy  :{:?}", entropy_chunk);
             }
-            return Err(eyre::eyre!(
-                "PoA capacity chunk mismatch {:?} /= {:?}",
-                entropy_chunk.first(),
-                poa_chunk.first()
-            ));
+            return Err(PreValidationError::PoACapacityChunkMismatch {
+                entropy_first: entropy_chunk.first().copied(),
+                poa_first: poa_chunk.first().copied(),
+            });
         }
     }
     Ok(())
@@ -2185,7 +2284,33 @@ mod tests {
             &context.miner_address,
         );
 
-        assert!(poa_valid.is_err(), "PoA should be invalid");
+        match poa_valid {
+            Err(PreValidationError::PoAChunkHashMismatch {
+                ledger_id,
+                ledger_chunk_offset,
+                expected,
+                got,
+            }) => {
+                assert!(ledger_id.is_some(), "expected ledger_id context");
+                assert!(
+                    ledger_chunk_offset.is_some(),
+                    "expected ledger_chunk_offset context"
+                );
+                assert_ne!(expected, got, "expected and got hashes should differ");
+            }
+            Err(PreValidationError::MerkleProofInvalid(msg)) => {
+                assert!(
+                    msg.contains("hash mismatch"),
+                    "expected hash mismatch merkle proof error, got: {}",
+                    msg
+                );
+            }
+            Err(other) => panic!(
+                "expected PoAChunkHashMismatch or MerkleProofInvalid, got {:?}",
+                other
+            ),
+            Ok(_) => panic!("expected invalid PoA, but validation succeeded"),
+        }
     }
 
     #[test]
@@ -2247,11 +2372,38 @@ mod tests {
             previous_ts,
             consensus_config.max_future_timestamp_drift_millis,
         );
-        // Expect an error due to block timestamp being too far in the future
-        assert!(
-            result.is_err(),
-            "Expected an error for future timestamp drift"
+        match result {
+            Err(super::PreValidationError::TimestampTooFarInFuture { current, now }) => {
+                assert!(
+                    current > now,
+                    "current should be greater than now for future drift"
+                );
+            }
+            other => panic!("expected TimestampTooFarInFuture, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timestamp_older_than_parent_is_invalid() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let parent_ts = now_ms;
+        let current_ts = parent_ts.saturating_sub(1);
+        let result = timestamp_is_valid(
+            current_ts,
+            parent_ts,
+            consensus_config.max_future_timestamp_drift_millis,
         );
+        match result {
+            Err(super::PreValidationError::TimestampOlderThanParent { current, parent }) => {
+                assert_eq!(current, current_ts);
+                assert_eq!(parent, parent_ts);
+            }
+            other => panic!("expected TimestampOlderThanParent, got {:?}", other),
+        }
     }
 
     #[test]
