@@ -65,14 +65,14 @@ pub enum SyncChainServiceMessage {
     InitialSync(oneshot::Sender<ChainSyncResult<()>>),
     /// Check if we need periodic sync (internal message)
     PeriodicSyncCheck,
-    /// Process orphaned ancestor block
+    /// The block has been processed by the BlockPool, check for unprocessed descendants
     BlockProcessedByThePool {
         block_hash: BlockHash,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
     },
     /// Request parent block from the network
-    RequestParentBlock {
-        parent_block_hash: BlockHash,
+    RequestBlockFromTheNetwork {
+        block_hash: BlockHash,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
     },
 }
@@ -387,8 +387,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     }
                 });
             }
-            SyncChainServiceMessage::RequestParentBlock {
-                parent_block_hash,
+            SyncChainServiceMessage::RequestBlockFromTheNetwork {
+                block_hash: parent_block_hash,
                 response,
             } => {
                 debug!(
