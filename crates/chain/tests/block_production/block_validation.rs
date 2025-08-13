@@ -186,7 +186,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 #[actix_web::test]
 async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     use crate::utils::solution_context;
-    use irys_actors::{BlockProdStrategy, ProductionStrategy};
+    use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 
     // 1. Start node
     let genesis_config = NodeConfig::testing();
