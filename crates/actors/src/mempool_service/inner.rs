@@ -477,7 +477,7 @@ impl Inner {
                 trace!(
                     tx_id = ?tx.id,
                     ledger_id = tx.ledger_id,
-                    "Skipping tx: invalid ledger type"
+                    "Skipping tx: invalid ledger ID"
                 );
                 continue;
             };
