@@ -40,7 +40,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     config.consensus.extend_genesis_accounts(vec![(
         main_signer.address(),
         GenesisAccount {
-            balance: U256::from(10_000_000_000_000_000_000_u128), // 10 ETH worth
+            balance: U256::from(10_000_000_000_000_000_000_u128), // 10 IRYS worth
             ..Default::default()
         },
     )]);

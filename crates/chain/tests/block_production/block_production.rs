@@ -37,7 +37,7 @@ const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 // Test account balances
 const ZERO_BALANCE: U256 = U256::ZERO;
-const TEST_USER_BALANCE_ETH: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 ETH
+const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
 
 #[test_log::test(actix::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -55,7 +55,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         (
             user_account.address(),
             GenesisAccount {
-                balance: TEST_USER_BALANCE_ETH,
+                balance: TEST_USER_BALANCE_IRYS,
                 ..Default::default()
             },
         ),
@@ -130,7 +130,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         U256::from_le_bytes(term_charges.block_producer_reward.to_le_bytes());
 
     let expected_spent_with_priority = expected_spent + block_producer_reward;
-    let actual_spent = TEST_USER_BALANCE_ETH - signer_balance;
+    let actual_spent = TEST_USER_BALANCE_IRYS - signer_balance;
 
     assert_eq!(
         actual_spent, expected_spent_with_priority,
@@ -317,7 +317,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
     let recipient = IrysSigner::random_signer(&config.consensus_config());
-    let initial_balance = TEST_USER_BALANCE_ETH;
+    let initial_balance = TEST_USER_BALANCE_IRYS;
     config.consensus.extend_genesis_accounts(vec![(
         account1.address(),
         GenesisAccount {

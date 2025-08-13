@@ -1309,7 +1309,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis_config.consensus.extend_genesis_accounts(vec![(
         rich_account.address(),
         GenesisAccount {
-            balance: U256::from(1000000000000000000_u128), // 1 ETH
+            balance: U256::from(1000000000000000000_u128), // 1 IRYS
             ..Default::default()
         },
     )]);

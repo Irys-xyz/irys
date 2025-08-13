@@ -114,7 +114,7 @@ fn cost_of_perm_storage(
     Ok(total_perm_fee)
 }
 
-/// Calculate term fee with base 0.001 ETH plus size-based adjustments
+/// Calculate term fee with base 0.001 IRYS plus size-based adjustments
 /// The fee distribution logic from fee_distribution.rs is applied here
 /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION
 fn calculate_term_fee(_bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
