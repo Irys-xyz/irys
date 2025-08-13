@@ -437,7 +437,7 @@ pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
     Ok(Node {
         id,
         data_hash: None,
-        min_byte_range: left.max_byte_range,
+        min_byte_range: left.min_byte_range,
         max_byte_range: right.max_byte_range,
         left_child: Some(Box::new(left)),
         right_child: Some(Box::new(right)),
@@ -496,14 +496,14 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
         // Branch
         Node {
             data_hash: None,
-            min_byte_range,
+            min_byte_range: _,
             left_child: Some(left_child),
             right_child: Some(right_child),
             ..
         } => {
             proof.proof.extend(left_child.id);
             proof.proof.extend(right_child.id);
-            proof.proof.extend(min_byte_range.to_note_vec());
+            proof.proof.extend(left_child.max_byte_range.to_note_vec());
 
             let mut left_proof = resolve_proofs(*left_child, Some(proof.clone()))?;
             let right_proof = resolve_proofs(*right_child, Some(proof))?;
