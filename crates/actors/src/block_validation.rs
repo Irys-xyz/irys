@@ -135,6 +135,16 @@ pub async fn prevalidate_block(
         "previous_solution_hash_is_valid",
     );
 
+    // Validate VDF seeds/next_seed against parent before any VDF-related processing
+    let vdf_reset_frequency: u64 = config.consensus.vdf.reset_frequency.try_into()?;
+    ensure!(
+        matches!(
+            is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
+            ValidationResult::Valid
+        ),
+        "Seed data is invalid"
+    );
+
     // We only check last_step_checkpoints during pre-validation
     last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
 
