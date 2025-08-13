@@ -7,7 +7,7 @@ use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     build_user_agent, Address, Config, DatabaseProvider, GossipDataRequest, PeerAddress,
     PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    RejectedResponse, RethPeerInfo, VersionRequest,
+    RejectedResponse, RethPeerInfo, VersionRequest, PeerFilterMode,
 };
 use rand::prelude::SliceRandom as _;
 use std::collections::{HashMap, HashSet};
@@ -393,6 +393,9 @@ where
         api_address: SocketAddr,
         version_request: VersionRequest,
         peer_service_address: Addr<Self>,
+        is_trusted_peer: bool,
+        peer_filter_mode: PeerFilterMode,
+        peer_list: PeerList,
     ) -> Result<(), PeerListServiceError> {
         let peer_response_result = api_client
             .post_version(api_address, version_request)
@@ -431,6 +434,19 @@ where
 
         match peer_response {
             PeerResponse::Accepted(accepted_peers) => {
+                // Collect peer addresses for potential whitelist addition
+                let peer_addresses: Vec<SocketAddr> = accepted_peers.peers.iter().map(|p| p.api).collect();
+                
+                // Add peers to whitelist if this was a handshake with a trusted peer in TrustedAndHandshake mode
+                if is_trusted_peer && peer_filter_mode == PeerFilterMode::TrustedAndHandshake {
+                    debug!(
+                        "Adding {} peers from trusted peer handshake to whitelist: {:?}",
+                        peer_addresses.len(),
+                        peer_addresses
+                    );
+                    peer_list.add_peers_to_whitelist(peer_addresses.clone()).await;
+                }
+
                 for peer in accepted_peers.peers {
                     send_message_and_print_error(
                         NewPotentialPeer::new(peer.api),
@@ -451,6 +467,8 @@ where
         api_address: SocketAddr,
         version_request: VersionRequest,
         peer_list_service_address: Addr<Self>,
+        is_trusted_peer: bool,
+        peer_filter_mode: PeerFilterMode,
     ) {
         debug!(
             "Announcing yourself to address {} with version request: {:?}",
@@ -461,6 +479,8 @@ where
             api_address,
             version_request,
             peer_list_service_address,
+            is_trusted_peer,
+            peer_filter_mode,
         )
         .await
         {
@@ -557,11 +577,14 @@ where
         let peer_service_addr = ctx.address();
 
         let version_request = self.create_version_request();
+        let is_trusted_peer = self.peer_list.is_trusted_peer(&peer_api_addr);
         let handshake_task = Self::announce_yourself_to_address_task(
             self.irys_api_client.clone(),
             peer_api_addr,
             version_request,
             peer_service_addr,
+            is_trusted_peer,
+            self.config.node_config.peer_filter_mode,
         );
         ctx.spawn(handshake_task.into_actor(self));
         let reth_task = Self::add_reth_peer_task(self.reth_service_addr.clone(), reth_peer_info)
@@ -609,6 +632,15 @@ where
             return;
         }
 
+        // Check peer whitelist based on filter mode
+        if !self.peer_list.is_peer_allowed(&msg.api_address) {
+            debug!(
+                "Peer {:?} is not in whitelist, ignoring based on filter mode: {:?}",
+                msg.api_address, self.config.node_config.peer_filter_mode
+            );
+            return;
+        }
+
         if self.successful_announcements.contains_key(&msg.api_address) && !msg.force_announce {
             debug!("Already announced to peer {:?}", msg.api_address);
             return;
@@ -630,11 +662,14 @@ where
             self.currently_running_announcements.insert(msg.api_address);
             let version_request = self.create_version_request();
             let peer_service_addr = ctx.address();
+            let is_trusted_peer = self.peer_list.is_trusted_peer(&msg.api_address);
             let handshake_task = Self::announce_yourself_to_address_task(
                 self.irys_api_client.clone(),
                 msg.api_address,
                 version_request,
                 peer_service_addr,
+                is_trusted_peer,
+                self.config.node_config.peer_filter_mode,
             );
             ctx.spawn(handshake_task.into_actor(self));
         }
