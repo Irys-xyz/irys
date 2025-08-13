@@ -100,7 +100,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 // The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
 // (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
 #[test_log::test(actix_web::test)]
-async fn heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
+async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
