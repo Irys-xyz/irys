@@ -78,7 +78,7 @@ impl Inner {
                         chunk.bytes.len(),
                         chunk_size
                     );
-                    return Ok(());
+                    return Err(ChunkIngressError::PreHeaderOversizedBytes);
                 }
                 let preheader_data_path_max_bytes =
                     self.config.consensus.mempool.max_preheader_data_path_bytes;
@@ -92,7 +92,7 @@ impl Inner {
                         chunk.data_path.0.len(),
                         preheader_data_path_max_bytes
                     );
-                    return Ok(());
+                    return Err(ChunkIngressError::PreHeaderOversizedDataPath);
                 }
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
@@ -106,7 +106,7 @@ impl Inner {
                         *chunk.tx_offset,
                         preheader_chunks_per_item
                     );
-                    return Ok(());
+                    return Err(ChunkIngressError::PreHeaderOffsetExceedsCap);
                 }
                 if let Some(chunks_map) = mempool_state_write_guard
                     .pending_chunks
@@ -356,6 +356,12 @@ pub enum ChunkIngressError {
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
+    /// Oversized chunk bytes submitted before header arrival
+    PreHeaderOversizedBytes,
+    /// Oversized data_path submitted before header arrival
+    PreHeaderOversizedDataPath,
+    /// tx_offset exceeds pre-header capacity bound
+    PreHeaderOffsetExceedsCap,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
