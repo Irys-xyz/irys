@@ -113,6 +113,6 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
 
     assert!(matches!(
         res,
-        Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)
+        Err(PreValidationError::MerkleProofInvalid(_))
     ));
 }
