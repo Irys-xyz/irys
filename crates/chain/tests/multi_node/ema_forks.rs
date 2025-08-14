@@ -33,7 +33,6 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     let node_1 = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    node_1.start_public_api().await;
     let mut peer_config = node_1.testing_peer_with_signer(&peer_signer);
     peer_config.oracle = OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.01)).unwrap(),

@@ -365,6 +365,10 @@ reth-cli-util = { git = "https://github.com/Irys-xyz/reth", rev = "5ab0d995399d0
 # # reth-ress-provider = { path = "./ext/reth/crates/ress/provider" }
 # # reth-stateless = { path = "./ext/reth/crates/stateless" }
 
+
+[profile.release]
+overflow-checks = true
+
 [profile.debug-release]
 inherits = "release"
 debug = true
@@ -372,14 +376,15 @@ debug = true
 
 [profile.dev]
 panic = "unwind"
-
 # below inspired from https://github.com/oxidecomputer/omicron/blob/main/Cargo.toml
-
 # See https://github.com/oxidecomputer/omicron/issues/4009 for some background context here.
 # By reducing the debug level (though keeping enough to have meaningful
 # backtraces), we reduce incremental build time and binary size significantly.
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+
+# build overrides
 
 [profile.dev.build-override]
 debug = "line-tables-only"
@@ -400,9 +405,6 @@ opt-level = 3
 [profile.dev.package.openssl]
 opt-level = 3
 
-[profile.fast-dev]
-inherits = "dev"
-opt-level = 3
 
 [workspace.lints]
 # to enable in the future

@@ -1,19 +1,18 @@
 #![allow(clippy::manual_div_ceil, clippy::assign_op_pattern)]
 
-use crate::{Arbitrary, IrysSignature};
-use alloy_primitives::{bytes, Address, FixedBytes};
+use crate::ingress::IngressProof;
+use crate::Arbitrary;
+use alloy_primitives::{bytes, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58 as _};
 use derive_more::Deref;
 use eyre::Error;
-use openssl::sha;
 use rand::RngCore as _;
 use reth_codecs::Compact;
 use reth_db::table::{Compress, Decompress};
 use reth_db_api::table::{Decode, Encode};
 use reth_db_api::DatabaseError;
-use reth_primitives::transaction::recover_signer;
 use serde::{
     de::{self, Error as _},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -295,41 +294,6 @@ impl Decodable for H256 {
     }
 }
 
-//==============================================================================
-// TxIngressProof
-//------------------------------------------------------------------------------
-#[derive(
-    Clone,
-    Default,
-    Compact,
-    Eq,
-    PartialEq,
-    Debug,
-    Arbitrary,
-    RlpEncodable,
-    RlpDecodable,
-    Serialize,
-    Deserialize,
-)]
-pub struct TxIngressProof {
-    pub proof: H256,
-    pub signature: IrysSignature,
-}
-
-impl TxIngressProof {
-    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
-        let mut hasher = sha::Sha256::new();
-        hasher.update(&self.proof.0);
-        hasher.update(&data_root.0);
-        let prehash = hasher.finish();
-
-        let sig = self.signature.as_bytes();
-        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
-
-        Ok(recovered_address)
-    }
-}
-
 #[derive(
     Debug,
     Clone,
@@ -344,10 +308,10 @@ impl TxIngressProof {
     RlpEncodable,
     Deref,
 )]
-pub struct IngressProofsList(pub Vec<TxIngressProof>);
+pub struct IngressProofsList(pub Vec<IngressProof>);
 
-impl From<Vec<TxIngressProof>> for IngressProofsList {
-    fn from(proofs: Vec<TxIngressProof>) -> Self {
+impl From<Vec<IngressProof>> for IngressProofsList {
+    fn from(proofs: Vec<IngressProof>) -> Self {
         Self(proofs)
     }
 }

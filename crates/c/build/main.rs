@@ -1,7 +1,6 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
 mod capacity;
-mod vdf;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -13,9 +12,6 @@ fn main() {
     let pkgconfig_dir = lib_dir.join("pkgconfig");
     // tell pkgconfig to discover our vendored openssl build
     env::set_var("PKG_CONFIG_PATH", pkgconfig_dir);
-
-    vdf::build_vdf(&c_src, &include_dir);
-    vdf::bind_vdf(&c_src);
 
     capacity::build_capacity(&c_src, &include_dir);
     capacity::bind_capacity(&c_src);

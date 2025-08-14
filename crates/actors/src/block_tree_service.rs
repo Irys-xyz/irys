@@ -1,5 +1,6 @@
 use crate::{
     block_index_service::BlockIndexService,
+    block_validation::PreValidationError,
     broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolServiceMessage,
@@ -10,7 +11,7 @@ use crate::{
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::{eyre, Context as _};
+use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
@@ -42,7 +43,7 @@ pub enum BlockTreeServiceMessage {
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-        response: oneshot::Sender<eyre::Result<()>>,
+        response: oneshot::Sender<Result<(), PreValidationError>>,
     },
     BlockValidationFinished {
         block_hash: H256,
@@ -490,7 +491,7 @@ impl BlockTreeServiceInner {
         &mut self,
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-    ) -> eyre::Result<()> {
+    ) -> Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
         let mut cache = self.cache.write().expect("cache lock poisoned");
 
@@ -525,11 +526,10 @@ impl BlockTreeServiceInner {
         );
 
         // Create ema snapshot for this block
-        let ema_snapshot = parent_block_entry.ema_snapshot.next_snapshot(
-            &block,
-            &parent_block_entry.block,
-            &self.config.consensus,
-        )?;
+        let ema_snapshot = parent_block_entry
+            .ema_snapshot
+            .next_snapshot(&block, &parent_block_entry.block, &self.config.consensus)
+            .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
 
         let add_result = cache.add_block(
             &block,
@@ -545,7 +545,7 @@ impl BlockTreeServiceInner {
                 .send(ValidationServiceMessage::ValidateBlock {
                     block: block.clone(),
                 })
-                .context("validation service unreachable!")?;
+                .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
 
             if cache
                 .mark_block_as_validation_scheduled(block_hash)

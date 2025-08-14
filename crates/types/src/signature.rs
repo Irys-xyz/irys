@@ -1,5 +1,5 @@
 use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, ruint::aliases::U256, Address, U256 as RethU256};
+use alloy_primitives::{bytes, Address, U256 as RethU256};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
@@ -80,10 +80,7 @@ impl Compact for IrysSignature {
 
     #[inline]
     fn from_compact(mut buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        // let bitflags = buf.get_u8() as usize;
-        // let sig_bit = bitflags & 1;
-        // let (signature, buf2) = Signature::from_compact(buf, sig_bit);
-
+        use alloy_primitives::ruint::aliases::U256;
         let r = U256::from_le_slice(&buf[0..32]);
         let s = U256::from_le_slice(&buf[32..64]);
         let signature = Signature::new(r, s, buf[64] == 1);
@@ -171,7 +168,9 @@ impl alloy_rlp::Decodable for IrysSignature {
 mod tests {
     use super::*;
 
-    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
+    use crate::{
+        irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256, U256,
+    };
     use alloy_core::hex;
     use alloy_primitives::Address;
     use alloy_rlp::{Decodable as _, Encodable as _};
@@ -184,10 +183,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x090fc65dab8667ab4d8fd0989a6a8faebd7a73d9e9d7c7b705e84904b84b839052eb0a266525e1f8cb6811669e6dc459997da4dc2d4c6002483b77442af58ea91c";
+    const SIG_HEX: &str = "0x551c1d5360361c8f02552b17fd33b7edb2ec8b65e7bc1bcee6539441fa7fce846ffb399cf3bd3ab29f2cb2b90d68520046b2f2cc1e0fa389a628546720a7b44e1c";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"oP2QpwKkSS6JB3mSBKQh5ULmp1fZHQdjmPApCRcPn32YFK1iMCi12TpEJnmP1njRT5SsNgEewZb3umjraoxcDTv3\"";
+        "\"8WcdA5FKZvQdi6m7c7UNhbVmFggA1rRzdrFxQaMCfq2sHXbZJDmkBEXbtNqGYtAdbj7aXkmkgHYrZpTH9PmUos9VM\"";
 
     // spellchecker:on
 
@@ -207,8 +206,8 @@ mod tests {
             signer: Address::ZERO,
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
-            term_fee: 100,
-            perm_fee: Some(1),
+            term_fee: U256::from(100_u64),
+            perm_fee: Some(U256::from(1_u64)),
             ledger_id: 0,
             bundle_format: Some(0),
             chain_id: testing_config.chain_id,

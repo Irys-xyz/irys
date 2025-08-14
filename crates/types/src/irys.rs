@@ -1,7 +1,7 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
-    VersionRequest, H256,
+    DataLedger, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
+    VersionRequest, H256, U256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -48,8 +48,8 @@ impl IrysSigner {
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
-        transaction.header.perm_fee = Some(1);
-        transaction.header.term_fee = 1;
+        transaction.header.perm_fee = Some(U256::from(1));
+        transaction.header.term_fee = U256::from(1);
 
         // Fetch and set last_tx if not provided (primarily for testing).
         #[expect(clippy::manual_unwrap_or_default, reason = "TODO")]
@@ -62,6 +62,46 @@ impl IrysSigner {
         transaction.header.anchor = anchor;
 
         Ok(transaction)
+    }
+
+    /// Creates a transaction with explicit fee and ledger parameters
+    pub fn create_transaction_with_fees(
+        &self,
+        data: Vec<u8>,
+        anchor: Option<H256>,
+        ledger: DataLedger,
+        term_fee: U256,
+        perm_fee: Option<U256>,
+    ) -> Result<DataTransaction> {
+        let mut transaction = self.merklize(data, self.chunk_size as usize)?;
+
+        // Set the provided fees directly as U256
+        transaction.header.ledger_id = ledger as u32;
+        transaction.header.term_fee = term_fee;
+        transaction.header.perm_fee = perm_fee;
+
+        // Fetch and set anchor if not provided
+        let anchor = anchor.unwrap_or_default();
+        transaction.header.anchor = anchor;
+
+        Ok(transaction)
+    }
+
+    /// Creates a publish transaction with the provided perm and term fees
+    pub fn create_publish_transaction(
+        &self,
+        data: Vec<u8>,
+        anchor: Option<H256>,
+        perm_price: U256,
+        term_price: U256,
+    ) -> Result<DataTransaction> {
+        self.create_transaction_with_fees(
+            data,
+            anchor,
+            DataLedger::Publish,
+            term_price,       // Term storage fee
+            Some(perm_price), // Permanent storage fee
+        )
     }
 
     /// signs and sets signature and id.

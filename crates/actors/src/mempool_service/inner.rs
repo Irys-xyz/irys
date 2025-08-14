@@ -1,6 +1,8 @@
 use crate::block_discovery::get_data_tx_in_parallel_inner;
+use crate::block_validation::calculate_perm_storage_total_fee;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
+use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
@@ -13,13 +15,19 @@ use irys_domain::{
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
+use irys_types::ingress::IngressProof;
+use irys_types::IngressProofsList;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
 };
 use irys_types::{
+    storage_pricing::{
+        phantoms::{Irys, NetworkFee},
+        Amount,
+    },
     Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, MempoolConfig, TxChunkOffset, TxIngressProof, UnpackedChunk,
+    DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -283,10 +291,34 @@ impl Inner {
             has_funds
         };
 
-        // Get a list of all recently confirmed commitment txids in the canonical chain
-        let (canonical, _) = self.block_tree_read_guard.read().get_canonical_chain();
+        // Get all necessary snapshots and canonical chain info in a single read operation
+        let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
+            let tree = self.block_tree_read_guard.read();
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block = canonical
+                .last()
+                .ok_or_eyre("Empty canonical chain")?
+                .clone();
 
-        let last_block = canonical.last().ok_or_eyre("Empty canonical chain")?;
+            // Get all snapshots for the tip block
+            let ema_snapshot = tree
+                .get_ema_snapshot(&last_block.block_hash)
+                .ok_or_else(|| eyre!("EMA snapshot not found for tip block"))?;
+            let epoch_snapshot = tree
+                .get_epoch_snapshot(&last_block.block_hash)
+                .ok_or_else(|| eyre!("Epoch snapshot not found for tip block"))?;
+            let commitment_snapshot = tree
+                .get_commitment_snapshot(&last_block.block_hash)
+                .map_err(|e| eyre!("Failed to get commitment snapshot: {}", e))?;
+
+            (
+                canonical,
+                last_block,
+                commitment_snapshot,
+                epoch_snapshot,
+                ema_snapshot,
+            )
+        };
 
         info!(
             head_height = last_block.height,
@@ -328,13 +360,7 @@ impl Inner {
 
         // Process sorted commitments
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
-        let mut simulation_commitment_snapshot = self
-            .block_tree_read_guard
-            .read()
-            .canonical_commitment_snapshot()
-            .as_ref()
-            .clone();
-        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+        let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
@@ -353,11 +379,6 @@ impl Inner {
 
             // signer stake status check
             if matches!(tx.commitment_type, CommitmentType::Stake) {
-                let epoch_snapshot = self
-                    .block_tree_read_guard
-                    .read()
-                    .get_epoch_snapshot(&last_block.block_hash)
-                    .expect("parent blocks epoch_snapshot should be retrievable");
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
                 debug!(
                     tx_id = ?tx.id,
@@ -428,10 +449,10 @@ impl Inner {
 
         // Prepare data transactions for inclusion after commitments
         let mut submit_ledger_txs = self.get_pending_submit_ledger_txs().await;
-
-        // Sort data transactions by fee (highest first) to maximize revenue
         let total_data_available = submit_ledger_txs.len();
 
+        // Sort data transactions by fee (highest first) to maximize revenue
+        // The miner will get proportionally higher rewards for higher term fee values
         submit_ledger_txs.sort_by(|a, b| match b.user_fee().cmp(&a.user_fee()) {
             std::cmp::Ordering::Equal => a.id.cmp(&b.id),
             fee_ordering => fee_ordering,
@@ -451,6 +472,70 @@ impl Inner {
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
+            // Validate fees based on ledger type
+            let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
+                trace!(
+                    tx_id = ?tx.id,
+                    ledger_id = tx.ledger_id,
+                    "Skipping tx: invalid ledger ID"
+                );
+                continue;
+            };
+            match ledger {
+                irys_types::DataLedger::Publish => {
+                    // For Publish ledger, validate both term and perm fees
+                    // Calculate expected fees based on current EMA
+                    let Ok(expected_term_fee) =
+                        self.calculate_term_storage_fee(tx.data_size, &ema_snapshot)
+                    else {
+                        continue;
+                    };
+
+                    let Ok(expected_perm_fee) = self.calculate_perm_storage_fee(
+                        tx.data_size,
+                        expected_term_fee,
+                        &ema_snapshot,
+                    ) else {
+                        continue;
+                    };
+
+                    // Validate term fee
+                    if tx.term_fee < expected_term_fee {
+                        trace!(
+                            tx_id = ?tx.id,
+                            actual_term_fee = ?tx.term_fee,
+                            expected_term_fee = ?expected_term_fee,
+                            "Skipping Publish tx: insufficient term_fee"
+                        );
+                        continue;
+                    }
+
+                    // Validate perm fee must be present for Publish ledger
+                    let Some(perm_fee) = tx.perm_fee else {
+                        // Missing perm_fee for Publish ledger transaction is invalid
+                        warn!(
+                            tx_id = ?tx.id,
+                            signer = ?tx.signer,
+                            "Invalid Publish tx: missing perm_fee"
+                        );
+                        // todo: add to list of invalid txs because all publish txs must have perm fee present
+                        continue;
+                    };
+                    if perm_fee < expected_perm_fee.amount {
+                        trace!(
+                            tx_id = ?tx.id,
+                            actual_perm_fee = ?perm_fee,
+                            expected_perm_fee = ?expected_perm_fee.amount,
+                            "Skipping Publish tx: insufficient perm_fee"
+                        );
+                        continue;
+                    }
+                }
+                irys_types::DataLedger::Submit => {
+                    // todo: add to list of invalid txs because we don't support Submit txs
+                }
+            }
+
             trace!(
                 tx_id = ?tx.id,
                 signer = ?tx.signer(),
@@ -499,7 +584,7 @@ impl Inner {
         info!(
             commitment_txs = commitment_tx.len(),
             data_txs = submit_tx.len(),
-            publish_txs = publish_txs_and_proofs.0.len(),
+            publish_txs = publish_txs_and_proofs.txs.len(),
             total_fee_collected = ?total_fee_collected,
             unfunded_addresses = unfunded_address.len(),
             "Mempool transaction selection completed"
@@ -536,11 +621,9 @@ impl Inner {
         })
     }
 
-    pub async fn get_publish_txs_and_proofs(
-        &self,
-    ) -> Result<(Vec<DataTransactionHeader>, Vec<TxIngressProof>), eyre::Error> {
+    pub async fn get_publish_txs_and_proofs(&self) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
-        let mut publish_proofs: Vec<TxIngressProof> = Vec::new();
+        let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
         {
             let read_tx = self
@@ -605,16 +688,13 @@ impl Inner {
                     match proofs.first() {
                         Some((_data_root, proof)) => {
                             let mut tx_header = tx_header.clone();
-                            let proof = TxIngressProof {
-                                proof: proof.proof.proof,
-                                signature: proof.proof.signature,
-                            };
+                            let ingress_proof = proof.proof.clone();
                             debug!(
                                 "Got ingress proof {} for publish candidate {}",
                                 &tx_header.data_root, &tx_header.id
                             );
-                            publish_proofs.push(proof.clone());
-                            tx_header.ingress_proofs = Some(proof);
+                            publish_proofs.push(ingress_proof.clone());
+                            tx_header.ingress_proofs = Some(ingress_proof);
                             publish_txs.push(tx_header)
                         }
                         None => {
@@ -634,7 +714,15 @@ impl Inner {
             .map(|h| h.id.0.to_base58())
             .collect::<Vec<_>>();
         debug!(?txs, "Publish transactions");
-        Ok((publish_txs, publish_proofs))
+
+        Ok(PublishLedgerWithTxs {
+            txs: publish_txs,
+            proofs: if publish_proofs.is_empty() {
+                None
+            } else {
+                Some(IngressProofsList::from(publish_proofs))
+            },
+        })
     }
 
     /// return block header from mempool, if found
@@ -867,6 +955,35 @@ impl Inner {
 
         Ok(latest.height)
     }
+
+    /// Calculate the expected protocol fee for permanent storage
+    /// This includes base network fee + ingress proof rewards
+    #[tracing::instrument(err)]
+    pub fn calculate_perm_storage_fee(
+        &self,
+        bytes_to_store: u64,
+        term_fee: U256,
+        ema: &Arc<irys_domain::EmaSnapshot>,
+    ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
+        // Calculate total perm fee including ingress proof rewards
+        let total_perm_fee =
+            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config)
+                .map_err(TxIngressError::other_display)?;
+
+        Ok(total_perm_fee)
+    }
+
+    /// Calculate the expected term fee for temporary storage
+    /// This matches the calculation in the pricing API
+    /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
+    pub fn calculate_term_storage_fee(
+        &self,
+        _bytes_to_store: u64,
+        _ema: &Arc<irys_domain::EmaSnapshot>,
+    ) -> Result<U256, TxIngressError> {
+        // Placeholder implementation matching price.rs
+        Ok(U256::from(1_000_000_000))
+    }
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -945,8 +1062,9 @@ pub enum TxIngressError {
     /// Invalid anchor value (unknown or too old)
     #[error("Anchor is either unknown or has expired")]
     InvalidAnchor,
-    // /// Unknown anchor value (could be valid)
-    // PendingAnchor,
+    /// Invalid ledger type specified in transaction
+    #[error("Invalid or unsupported ledger ID: {0}")]
+    InvalidLedger(u32),
     /// Some database error occurred
     #[error("Database operation failed")]
     DatabaseError,
@@ -976,5 +1094,5 @@ impl TxIngressError {
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
-    pub publish_tx: (Vec<DataTransactionHeader>, Vec<TxIngressProof>),
+    pub publish_tx: PublishLedgerWithTxs,
 }

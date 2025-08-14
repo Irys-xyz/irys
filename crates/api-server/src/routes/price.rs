@@ -7,7 +7,7 @@ use eyre::OptionExt as _;
 use irys_types::{
     storage_pricing::{
         phantoms::{Irys, NetworkFee},
-        Amount,
+        Amount, TERM_FEE,
     },
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
@@ -20,7 +20,10 @@ use crate::ApiState;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
-    pub cost_in_irys: U256,
+    // Protocol-enforced permanent storage cost
+    pub perm_fee: U256,
+    // Term storage fee with base fee + size-based calculation
+    pub term_fee: U256,
     pub ledger: u32,
     pub bytes: u64,
 }
@@ -29,7 +32,7 @@ pub struct PriceInfo {
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentPriceInfo {
     pub value: U256,
-    pub fee: u64,
+    pub fee: U256,
     pub user_address: Option<Address>,
 }
 
@@ -52,16 +55,21 @@ pub async fn get_price(
 
     match data_ledger {
         DataLedger::Publish => {
+            // Calculate term fee first as it's needed for perm fee calculation
+            let term_fee = calculate_term_fee(bytes_to_store, &state.config.consensus);
+
             // If the cost calculation fails, return 400 with the error text
-            let perm_storage_price = cost_of_perm_storage(state, bytes_to_store)
+            let total_perm_cost = cost_of_perm_storage(state, bytes_to_store, term_fee)
                 .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
-                cost_in_irys: perm_storage_price.amount,
+                perm_fee: total_perm_cost.amount,
+                term_fee,
                 ledger,
                 bytes: bytes_to_store,
             }))
         }
+        // TODO: support other term ledgers here
         DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
     }
 }
@@ -69,6 +77,7 @@ pub async fn get_price(
 fn cost_of_perm_storage(
     state: web::Data<ApiState>,
     bytes_to_store: u64,
+    term_fee: U256,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
     // get the latest EMA to use for pricing
     let tree = state.block_tree.read();
@@ -80,7 +89,7 @@ fn cost_of_perm_storage(
 
     // Calculate the cost per GB (take into account replica count & cost per replica)
     // NOTE: this value can be memoised because it is deterministic based on the config
-    let cost_per_gb = state
+    let cost_per_gb_per_year = state
         .config
         .consensus
         .annual_cost_per_gb
@@ -90,12 +99,27 @@ fn cost_of_perm_storage(
         )?
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
-    // calculate the cost of storing the bytes
-    let price_with_network_reward = cost_per_gb
-        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?
-        .add_multiplier(state.config.node_config.pricing.fee_percentage)?;
+    // calculate the base network fee (protocol cost)
+    let base_network_fee = cost_per_gb_per_year
+        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
 
-    Ok(price_with_network_reward)
+    // Add ingress proof rewards to the base network fee
+    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
+    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
+        term_fee,
+        state.config.consensus.number_of_ingress_proofs,
+        state.config.consensus.immediate_tx_inclusion_reward_percent,
+    )?;
+
+    Ok(total_perm_fee)
+}
+
+/// Calculate term fee with base 0.001 IRYS plus size-based adjustments
+/// The fee distribution logic from fee_distribution.rs is applied here
+/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION
+fn calculate_term_fee(_bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
+    // todo: when doing the calculations, if the final fee is lower than $0.01 then we must round upwards
+    TERM_FEE
 }
 
 pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
@@ -104,7 +128,7 @@ pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResp
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: stake_value.amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: None,
     }))
 }
@@ -115,7 +139,7 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: stake_value.amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: None,
     }))
 }
@@ -148,7 +172,7 @@ pub async fn get_pledge_price(
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: pledge_value,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
 }
@@ -180,7 +204,7 @@ pub async fn get_unpledge_price(
 
     Ok(HttpResponse::Ok().json(CommitmentPriceInfo {
         value: refund_amount,
-        fee: commitment_fee,
+        fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
 }

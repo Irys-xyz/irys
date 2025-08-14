@@ -469,7 +469,7 @@ async fn post_stake_commitment(
     let stake_tx = CommitmentTransaction {
         commitment_type: CommitmentType::Stake,
         anchor: H256::default(),
-        fee: price_info.fee,
+        fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
         ..CommitmentTransaction::new(consensus)
     };
@@ -502,7 +502,7 @@ async fn post_pledge_commitment(
             pledge_count_before_executing: 0, // First pledge
         },
         anchor,
-        fee: price_info.fee,
+        fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
         ..CommitmentTransaction::new(consensus)
     };

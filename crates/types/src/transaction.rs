@@ -1,12 +1,15 @@
+pub use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod fee_distribution;
 
 pub type IrysTransactionId = H256;
 
@@ -83,9 +86,8 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub data_size: u64,
 
-    /// Funds the storage of the transaction data during the storage term
-    #[serde(with = "string_u64")]
-    pub term_fee: u64,
+    /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
+    pub term_fee: U256,
 
     /// Destination ledger for the transaction, default is 0 - Permanent Ledger
     pub ledger_id: u32,
@@ -102,16 +104,29 @@ pub struct DataTransactionHeader {
     #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
-    /// Funds the storage of the transaction for the next 200+ years
-    #[serde(default, with = "optional_string_u64")]
-    pub perm_fee: Option<u64>,
+    /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
+    #[serde(default)]
+    pub perm_fee: Option<U256>,
 
     /// INTERNAL: Signed ingress proofs used to promote this transaction to the Publish ledger
     /// TODO: put these somewhere else?
     #[rlp(skip)]
     #[rlp(default)]
     #[serde(skip)]
-    pub ingress_proofs: Option<TxIngressProof>,
+    pub ingress_proofs: Option<IngressProof>,
+}
+
+/// Ordering for DataTransactionHeader by transaction ID
+impl Ord for DataTransactionHeader {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for DataTransactionHeader {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl DataTransactionHeader {
@@ -185,7 +200,7 @@ impl DataTransactionHeader {
             signer: Address::default(),
             data_root: H256::zero(),
             data_size: 0,
-            term_fee: 0,
+            term_fee: U256::zero(),
             perm_fee: None,
             ledger_id: 0,
             bundle_format: None,
@@ -517,7 +532,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
     }
 
     fn signer(&self) -> Address {
@@ -533,7 +548,9 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        // Return term_fee as the user fee for prioritization
+        // todo: use TermFeeCharges to get the fee that will go to the miner
+        self.term_fee
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -937,8 +954,8 @@ mod tests {
             signer: Address::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
-            term_fee: 100,
-            perm_fee: Some(200),
+            term_fee: U256::from(100),
+            perm_fee: Some(U256::from(200)),
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,

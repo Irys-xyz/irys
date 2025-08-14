@@ -40,7 +40,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     config.consensus.extend_genesis_accounts(vec![(
         main_signer.address(),
         GenesisAccount {
-            balance: U256::from(1000),
+            balance: U256::from(10_000_000_000_000_000_000_u128), // 10 IRYS worth
             ..Default::default()
         },
     )]);
@@ -63,9 +63,19 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     rand::thread_rng().fill(&mut data_bytes[..]);
 
     // Create a new Irys API instance & a signed transaction
+    // First, get the price from the API endpoint
+    let price_info = node
+        .get_data_price(irys_types::DataLedger::Publish, data_size as u64)
+        .await
+        .expect("Failed to get price");
 
     let tx = main_signer
-        .create_transaction(data_bytes.clone(), None)
+        .create_publish_transaction(
+            data_bytes.clone(),
+            None,
+            price_info.perm_fee,
+            price_info.term_fee,
+        )
         .unwrap();
     let tx = main_signer.sign_transaction(tx).unwrap();
 
@@ -81,7 +91,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let resp = test::call_service(&app, req).await;
     let status = resp.status();
     let body = test::read_body(resp).await;
-    debug!("Response body: {:#?}", body);
+    info!("Response body: {:#?}", body);
     assert_eq!(status, StatusCode::OK);
     info!("Transaction was posted");
 
@@ -149,7 +159,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     attempts = 1;
 
     let mut missing_chunks = vec![1, 0];
-    let ledger = 1; // Submit ledger
+    let ledger = 0; // Publish ledger
 
     // polls for chunk being available
     while attempts < max_attempts {

@@ -1,13 +1,9 @@
 use crate::utils::IrysNodeTest;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
-    std::env::set_var("RUST_LOG", "debug");
-    initialize_tracing();
-
     // Default test node config
     let seconds_to_wait = 10;
     let num_blocks_in_epoch = 8;

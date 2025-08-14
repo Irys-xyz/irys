@@ -20,7 +20,6 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
 
     // Initialize the peer with our keypair/signer
     let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
@@ -29,7 +28,6 @@ async fn heavy_peer_mining_test() -> eyre::Result<()> {
     let peer_node = IrysNodeTest::new(peer_config.clone())
         .start_with_name("PEER")
         .await;
-    peer_node.start_public_api().await;
 
     // Post stake + pledge commitments to the peer
     let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
