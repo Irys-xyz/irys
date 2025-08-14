@@ -687,7 +687,7 @@ pub fn poa_is_valid(
             .read()
             .get_block_bounds(ledger, ledger_chunk_offset)
             .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
-        if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
+        if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
 
