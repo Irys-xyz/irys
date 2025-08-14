@@ -105,6 +105,15 @@ where
                     ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
                         InvalidDataError::ChunkInvalidDataSize,
                     )),
+                    ChunkIngressError::PreHeaderOversizedBytes => Err(GossipError::InvalidData(
+                        InvalidDataError::ChunkInvalidChunkSize,
+                    )),
+                    ChunkIngressError::PreHeaderOversizedDataPath => Err(GossipError::InvalidData(
+                        InvalidDataError::ChunkInvalidProof,
+                    )),
+                    ChunkIngressError::PreHeaderOffsetExceedsCap => Err(GossipError::InvalidData(
+                        InvalidDataError::ChunkInvalidChunkSize,
+                    )),
                     // ===== Internal errors
                     ChunkIngressError::DatabaseError => {
                         Err(GossipError::Internal(InternalGossipError::Database))

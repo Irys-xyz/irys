@@ -4,7 +4,7 @@ use crate::{
         phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
-    PeerAddress, RethPeerInfo,
+    PeerAddress, RethPeerInfo, H256,
 };
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
@@ -85,6 +85,9 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_token_amount"
     )]
     pub genesis_price: Amount<(IrysPrice, Usd)>,
+
+    /// Genesis-specific config values
+    pub genesis: GenesisConfig,
 
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
@@ -185,6 +188,34 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::u128_millis_to_u64"
     )]
     pub max_future_timestamp_drift_millis: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisConfig {
+    /// The timestamp in milliseconds used for the genesis block
+    #[serde(
+        deserialize_with = "serde_utils::u128_millis_from_u64",
+        serialize_with = "serde_utils::u128_millis_to_u64"
+    )]
+    pub timestamp_millis: u128,
+
+    /// Address that signs the genesis block
+    pub miner_address: Address,
+
+    /// Address that receives the genesis block reward
+    pub reward_address: Address,
+
+    /// The initial last_epoch_hash used by the genesis block
+    pub last_epoch_hash: H256,
+
+    /// The initial VDF seed used by the genesis block
+    /// Must be explicitly set for deterministic VDF output at genesis.
+    pub vdf_seed: H256,
+
+    /// The initial next VDF seed used after the first reset boundary.
+    /// If not set in config, defaults to the same value as `vdf_seed`.
+    #[serde(default)]
+    pub vdf_next_seed: Option<H256>,
 }
 
 // removed erroneous derive on helper function
@@ -475,6 +506,16 @@ pub struct MempoolConfig {
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
 
+    /// Maximum number of pre-header chunks to keep per data root before the header arrives
+    /// Limits speculative storage window for out-of-order chunks
+    #[serde(default)]
+    pub max_preheader_chunks_per_item: usize,
+
+    /// Maximum allowed pre-header data_path bytes for chunk proofs
+    /// Mitigates DoS on speculative chunk storage before header arrival
+    #[serde(default)]
+    pub max_preheader_data_path_bytes: usize,
+
     /// Maximum number of valid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_valid_items: usize,
@@ -594,6 +635,14 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            genesis: GenesisConfig {
+                timestamp_millis: 0,
+                miner_address: Address::ZERO,
+                reward_address: Address::ZERO,
+                last_epoch_hash: H256::zero(),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
@@ -604,6 +653,8 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -702,6 +753,14 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            genesis: GenesisConfig {
+                timestamp_millis: 0,
+                miner_address: Address::ZERO,
+                reward_address: Address::ZERO,
+                last_epoch_hash: H256::zero(),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 51_872_000,
@@ -722,6 +781,8 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -859,9 +920,12 @@ impl NodeConfig {
     pub fn testing_with_signer(signer: &IrysSigner) -> Self {
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
+        let mut consensus = ConsensusConfig::testing();
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
         Self {
             mode: NodeMode::Genesis,
-            consensus: ConsensusOptions::Custom(ConsensusConfig::testing()),
+            consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
             oracle: OracleConfig::Mock {
@@ -943,7 +1007,7 @@ impl NodeConfig {
                 .expect("valid hex"),
         )
         .expect("valid key");
-        let consensus = ConsensusConfig::testnet();
+        let mut consensus = ConsensusConfig::testnet();
         let signer = IrysSigner {
             signer: mining_key,
             chain_id: consensus.chain_id,
@@ -952,6 +1016,8 @@ impl NodeConfig {
 
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
         Self {
             mode: NodeMode::PeerSync,
             consensus: ConsensusOptions::Custom(consensus),
@@ -1271,6 +1337,15 @@ mod tests {
         pledge_decay = 0.9
         immediate_tx_inclusion_reward_percent = 0.05
 
+        [genesis]
+        miner_address = "0x0000000000000000000000000000000000000000"
+        reward_address = "0x0000000000000000000000000000000000000000"
+        last_epoch_hash = "11111111111111111111111111111111"
+        vdf_seed = "11111111111111111111111111111111"
+        # Optional: if omitted, defaults to vdf_seed
+        # vdf_next_seed = "22222222222222222222222222222222"
+        timestamp_millis = 0
+
         [reth]
         chain = 1270
 
@@ -1302,6 +1377,8 @@ mod tests {
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
+        max_preheader_chunks_per_item = 64
+        max_preheader_data_path_bytes = 65536
         max_pending_anchor_items = 100
         max_invalid_items = 10000
         max_valid_items = 10000

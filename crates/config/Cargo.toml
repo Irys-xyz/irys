@@ -18,6 +18,7 @@ alloy-core.workspace = true
 alloy-eips.workspace = true
 alloy-genesis.workspace = true
 reth-primitives-traits.workspace = true
+alloy-primitives.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
