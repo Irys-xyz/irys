@@ -1,16 +1,10 @@
-use irys_actors::block_validation::{poa_is_valid, previous_solution_hash_is_valid, PreValidationError};
+use irys_actors::block_validation::{
+    poa_is_valid, previous_solution_hash_is_valid, PreValidationError,
+};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
-    partition::PartitionAssignment,
-    Base64,
-    BlockIndexItem,
-    ConsensusConfig,
-    DataLedger,
-    IrysBlockHeader,
-    LedgerIndexItem,
-    PoaData,
-    Address,
-    H256,
+    partition::PartitionAssignment, Address, Base64, BlockIndexItem, ConsensusConfig, DataLedger,
+    IrysBlockHeader, LedgerIndexItem, PoaData, H256,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -41,24 +35,42 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
             block_hash: H256::zero(),
             num_ledgers: 2,
             ledgers: vec![
-                LedgerIndexItem { max_chunk_offset: 0, tx_root: H256::zero() },
-                LedgerIndexItem { max_chunk_offset: 0, tx_root: H256::zero() },
+                LedgerIndexItem {
+                    max_chunk_offset: 0,
+                    tx_root: H256::zero(),
+                },
+                LedgerIndexItem {
+                    max_chunk_offset: 0,
+                    tx_root: H256::zero(),
+                },
             ],
         },
         BlockIndexItem {
             block_hash: H256::zero(),
             num_ledgers: 2,
             ledgers: vec![
-                LedgerIndexItem { max_chunk_offset: 10, tx_root: H256::zero() },
-                LedgerIndexItem { max_chunk_offset: 10, tx_root: H256::zero() },
+                LedgerIndexItem {
+                    max_chunk_offset: 10,
+                    tx_root: H256::zero(),
+                },
+                LedgerIndexItem {
+                    max_chunk_offset: 10,
+                    tx_root: H256::zero(),
+                },
             ],
         },
         BlockIndexItem {
             block_hash: H256::zero(),
             num_ledgers: 2,
             ledgers: vec![
-                LedgerIndexItem { max_chunk_offset: 20, tx_root: H256::zero() },
-                LedgerIndexItem { max_chunk_offset: 20, tx_root: H256::zero() },
+                LedgerIndexItem {
+                    max_chunk_offset: 20,
+                    tx_root: H256::zero(),
+                },
+                LedgerIndexItem {
+                    max_chunk_offset: 20,
+                    tx_root: H256::zero(),
+                },
             ],
         },
     ];
@@ -71,18 +83,15 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
 
     let mut epoch_snapshot = EpochSnapshot::default();
     let partition_hash = H256::zero();
-    epoch_snapshot
-        .partition_assignments
-        .data_partitions
-        .insert(
+    epoch_snapshot.partition_assignments.data_partitions.insert(
+        partition_hash,
+        PartitionAssignment {
             partition_hash,
-            PartitionAssignment {
-                partition_hash,
-                miner_address: Address::ZERO,
-                ledger_id: Some(DataLedger::Publish as u32),
-                slot_index: Some(0),
-            },
-        );
+            miner_address: Address::ZERO,
+            ledger_id: Some(DataLedger::Publish as u32),
+            slot_index: Some(0),
+        },
+    );
 
     let poa = PoaData {
         recall_chunk_index: 0,
@@ -102,5 +111,8 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &Address::ZERO,
     );
 
-    assert!(matches!(res, Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)));
+    assert!(matches!(
+        res,
+        Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)
+    ));
 }
