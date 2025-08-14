@@ -4,13 +4,13 @@ use actix_web::{
     web::{self, Json},
     Result,
 };
-use base58::FromBase58 as _;
+use base58::{FromBase58 as _, ToBase58 as _};
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
+use std::{fmt::Display, str::FromStr};
 use tokio::sync::oneshot;
 
 pub async fn get_block(
@@ -134,6 +134,7 @@ async fn get_block_by_hash(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum BlockParam {
     Latest,
     Pending,
@@ -159,6 +160,18 @@ impl FromStr for BlockParam {
                     Err(_) => Err("Invalid block tag parameter".to_string()),
                 }
             }
+        }
+    }
+}
+
+impl Display for BlockParam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Latest => write!(f, "latest"),
+            Self::Pending => write!(f, "pending"),
+            Self::Finalized => write!(f, "finalized"),
+            Self::BlockHeight(height) => write!(f, "{}", height),
+            Self::Hash(hash) => write!(f, "{}", hash.0.to_base58()),
         }
     }
 }

@@ -162,7 +162,7 @@ pub fn validate_path(
             left_bound = offset;
         }
 
-        println!(
+        debug!(
             "BranchProof: left: {}{}, right: {}{},offset: {} => path_hash: {}",
             if is_right_of_offset { "" } else { "✅" },
             base64_url::encode(&branch_proof.left_id),
@@ -235,7 +235,7 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
             left_bound = offset;
         }
 
-        println!(
+        debug!(
             "BranchProof: left: {}{}, right: {}{},offset: {} => path_hash: {}",
             if is_right_of_offset { "" } else { "✅" },
             base64_url::encode(&branch_proof.left_id),
@@ -245,7 +245,7 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
             base64_url::encode(&path_hash)
         );
     }
-    println!(
+    debug!(
         "  LeafProof: data_hash: {:?}, offset: {}",
         base64_url::encode(&leaf_proof.data_hash),
         usize::from_be_bytes(leaf_proof.offset)

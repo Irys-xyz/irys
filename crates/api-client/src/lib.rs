@@ -9,6 +9,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+pub mod ext;
+pub use ext::ApiClientExt;
+
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[expect(clippy::upper_case_acronyms, reason = "Canonical HTTP method names")]
@@ -85,13 +88,13 @@ impl IrysApiClient {
         }
     }
 
-    async fn make_request<T: DeserializeOwned, B: Serialize>(
+    async fn make_request<RESBODY: DeserializeOwned, REQBODY: Serialize>(
         &self,
         peer: SocketAddr,
         method: Method,
         path: &str,
-        body: Option<&B>,
-    ) -> Result<Option<T>> {
+        body: Option<&REQBODY>,
+    ) -> Result<Option<RESBODY>> {
         let url = format!("http://{}/v1{}", peer, path);
 
         let mut request = match method {
@@ -108,10 +111,12 @@ impl IrysApiClient {
 
         match status {
             StatusCode::OK => {
-                if response.content_length().unwrap_or(0) == 0 {
+                let text = response.text().await?;
+                if text.trim().is_empty() {
                     return Ok(None);
                 }
-                let body = response.json::<T>().await?;
+                let body: RESBODY = serde_json::from_str(&text)
+                    .map_err(|e| eyre::eyre!("Failed to parse JSON: {} - Response: {}", e, text))?;
                 Ok(Some(body))
             }
             StatusCode::NOT_FOUND => Ok(None),

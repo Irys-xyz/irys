@@ -5,6 +5,7 @@ use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
+    middleware,
     web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
@@ -48,6 +49,8 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
+        .app_data(web::JsonConfig::default().limit(10 * 1024 * 1024))
+        .wrap(middleware::Logger::default())
         .route("/", web::get().to(index::info_route))
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(

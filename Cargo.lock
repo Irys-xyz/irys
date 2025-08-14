@@ -4836,9 +4836,11 @@ dependencies = [
  "async-trait",
  "base58",
  "eyre",
+ "irys-api-server",
  "irys-types",
  "reqwest 0.12.15",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

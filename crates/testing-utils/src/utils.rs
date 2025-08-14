@@ -22,6 +22,9 @@ pub fn initialize_tracing() {
 }
 
 pub fn initialize_tracing_with_backtrace() {
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
+    }
     let _ = SubscriberBuilder::default()
         .with_env_filter(EnvFilter::from_default_env())
         .with_span_events(fmt::format::FmtSpan::NONE)
