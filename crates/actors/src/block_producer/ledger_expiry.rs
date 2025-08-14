@@ -66,7 +66,7 @@ use irys_types::{
     BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
     LedgerChunkRange, H256, U256,
 };
-use nodit::interval::ii;
+use nodit::{interval::ii, InclusiveInterval};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
@@ -223,63 +223,66 @@ fn find_block_range(
     ledger_type: DataLedger,
 ) -> eyre::Result<BlockRange> {
     let mut blocks_with_expired_ledgers = HashMap::new();
-    let mut min_block_index_item = Option::<BoundaryBlock>::None;
-    let mut max_block_index_item = Option::<BoundaryBlock>::None;
 
+    // Collect all chunk ranges and find the global min/max
+    let mut all_ranges = Vec::new();
     for (slot_index, miners) in expired_slots {
         let chunk_range = slot_index.compute_chunk_range(config.consensus.num_chunks_in_partition);
-
-        let block_index_read = block_index
-            .read()
-            .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-
-        let miners = Arc::new(miners);
-
-        for chunk_offset in *chunk_range.start()..=*chunk_range.end() {
-            let (idx, block_index_item) =
-                block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
-
-            blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::clone(&miners));
-
-            let block_height = idx;
-
-            // Update min/max block index items
-            if let Some(ref mut min_item) = min_block_index_item {
-                if min_item.height > block_height {
-                    *min_item = BoundaryBlock {
-                        height: block_height,
-                        item: block_index_item.clone(),
-                        chunk_range,
-                    };
-                }
-            } else {
-                min_block_index_item = Some(BoundaryBlock {
-                    height: block_height,
-                    item: block_index_item.clone(),
-                    chunk_range,
-                });
-            }
-
-            if let Some(ref mut max_item) = max_block_index_item {
-                if max_item.height < block_height {
-                    *max_item = BoundaryBlock {
-                        height: block_height,
-                        item: block_index_item.clone(),
-                        chunk_range,
-                    };
-                }
-            } else {
-                max_block_index_item = Some(BoundaryBlock {
-                    height: block_height,
-                    item: block_index_item.clone(),
-                    chunk_range,
-                });
-            }
-        }
+        all_ranges.push((chunk_range, Arc::new(miners)));
     }
 
-    let min_block = min_block_index_item.ok_or_eyre("No minimum block found")?;
-    let max_block = max_block_index_item.ok_or_eyre("No maximum block found")?;
+    // Find the overall min and max chunk offsets
+    let min_chunk = all_ranges
+        .iter()
+        .map(|(r, _)| r.start())
+        .min()
+        .ok_or_eyre("No chunk ranges found")?;
+    let max_chunk = all_ranges
+        .iter()
+        .map(|(r, _)| r.end())
+        .max()
+        .ok_or_eyre("No chunk ranges found")?;
+
+    let block_index_read = block_index
+        .read()
+        .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
+
+    // Get the blocks at the boundary offsets
+    let (min_height, min_item) = block_index_read.get_block_index_item(ledger_type, *min_chunk)?;
+    let (max_height, max_item) = block_index_read.get_block_index_item(ledger_type, *max_chunk)?;
+
+    // Find which range the min/max blocks belong to
+    let min_range = all_ranges
+        .iter()
+        .find(|(r, _)| r.contains_point(min_chunk))
+        .map(|(r, _)| *r)
+        .ok_or_eyre("Min chunk not in any range")?;
+    let max_range = all_ranges
+        .iter()
+        .find(|(r, _)| r.contains_point(max_chunk))
+        .map(|(r, _)| *r)
+        .ok_or_eyre("Max chunk not in any range")?;
+
+    let min_block = BoundaryBlock {
+        height: min_height,
+        item: min_item.clone(),
+        chunk_range: min_range,
+    };
+
+    let max_block = BoundaryBlock {
+        height: max_height,
+        item: max_item.clone(),
+        chunk_range: max_range,
+    };
+
+    // Collect all blocks in the ranges
+    for (chunk_range, miners) in all_ranges {
+        for chunk_offset in *chunk_range.start()..=*chunk_range.end() {
+            let (_, block_index_item) =
+                block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
+            blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::clone(&miners));
+        }
+    }
 
     // Ensure min and max blocks are different to avoid duplicate processing
     eyre::ensure!(
