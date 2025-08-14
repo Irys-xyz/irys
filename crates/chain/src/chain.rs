@@ -467,9 +467,6 @@ impl IrysNode {
             .await
             .expect("Must be able to read genesis commitment tx from trusted peer");
 
-        // Note: When fetching from a trusted peer, the genesis_block already has the treasury field set
-        // from the remote peer, so we don't need to recalculate it
-
         (genesis_block, commitments)
     }
 

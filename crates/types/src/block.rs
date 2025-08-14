@@ -249,7 +249,7 @@ pub struct IrysBlockHeader {
     /// This is what the protocol uses for different pricing calculation purposes.
     pub ema_irys_price: IrysTokenPrice,
 
-    /// Treasury balance tracking fees collected and rewards paid
+    /// Treasury balance tracking
     pub treasury: U256,
 }
 
