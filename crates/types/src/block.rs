@@ -406,7 +406,6 @@ fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interva
 #[serde(rename_all = "camelCase")]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
-    pub recall_chunk_index: u32,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
     pub chunk: Option<Base64>,
@@ -549,7 +548,7 @@ impl IrysBlockHeader {
                 chunk: Some(Base64::from_str("").unwrap()),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
-                recall_chunk_index: 0,
+
                 ledger_id: None,
             },
             reward_address: Address::ZERO,
@@ -799,7 +798,8 @@ impl BlockIndexItem {
 
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, NodeConfig, TxIngressProof};
+    use crate::ingress::IngressProof;
+    use crate::{validate_path, Config, NodeConfig};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -813,7 +813,6 @@ mod tests {
     fn test_poa_data_rlp_round_trip() {
         // setup
         let data = PoaData {
-            recall_chunk_index: 123,
             partition_chunk_offset: 321,
             partition_hash: H256::random(),
             chunk: Some(Base64(vec![42; 16])),
@@ -886,9 +885,11 @@ mod tests {
             tx_ids: H256List(vec![]),
             max_chunk_offset: 55,
             expires: None,
-            proofs: Some(IngressProofsList(vec![TxIngressProof {
+            proofs: Some(IngressProofsList(vec![IngressProof {
                 proof: H256::random(),
                 signature: IrysSignature::new(Signature::test_signature()),
+                data_root: H256::random(),
+                chain_id: 1,
             }])),
         };
 

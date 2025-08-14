@@ -1506,7 +1506,7 @@ mod tests {
         );
 
         // Create pledge transaction with a smaller amount to ensure it's less than initial balance
-        let pledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 ETH
+        let pledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
         let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
             amount: pledge_amount,
             target: target_address,
@@ -1550,7 +1550,7 @@ mod tests {
         );
 
         // Now create unpledge transaction
-        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 ETH
+        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
         let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
             shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
                 amount: unpledge_amount,
@@ -1679,7 +1679,7 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create unpledge transaction for non-existent account
-        let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 ETH
+        let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 IRYS
         let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
             shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
                 amount: unpledge_amount,
