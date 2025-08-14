@@ -299,6 +299,45 @@ impl Inner {
             .read_tx()
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
+        // Update DataRootLRU so partial data_roots are prunable
+        // Use latest canonical height; preserve existing ingress_proof flag if present
+        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+        let latest_height = match canon_chain.0.last() {
+            Some(h) => h.height,
+            None => {
+                error!("Service uninitialized: missing canonical chain head while updating DataRootLRU");
+                return Err(ChunkIngressError::ServiceUninitialized);
+            }
+        };
+        self.irys_db
+            .update(|write_tx| {
+                let ingress_proof_flag = match write_tx.get::<DataRootLRU>(chunk.data_root)? {
+                    Some(e) => e.ingress_proof,
+                    None => false,
+                };
+                write_tx.put::<DataRootLRU>(
+                    chunk.data_root,
+                    DataRootLRUEntry {
+                        last_height: latest_height,
+                        ingress_proof: ingress_proof_flag,
+                    },
+                )
+            })
+            .map_err(|e| {
+                error!(
+                    "Error updating DataRootLRU for {} - {}",
+                    &chunk.data_root, &e
+                );
+                ChunkIngressError::DatabaseError
+            })?
+            .map_err(|e| {
+                error!(
+                    "Error updating DataRootLRU for {} - {}",
+                    &chunk.data_root, &e
+                );
+                ChunkIngressError::DatabaseError
+            })?;
+
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
             .map_err(|_| ChunkIngressError::DatabaseError)?;
