@@ -1,5 +1,4 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
-use crate::SyncState;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -8,6 +7,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::{ExecutionPayloadCache, PeerList};
@@ -24,7 +24,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 
@@ -69,13 +69,13 @@ where
     /// Database provider for accessing transaction headers and related data.
     db: DatabaseProvider,
 
-    blocks_cache: BlockCache,
+    blocks_cache: BlockCacheGuard,
 
     block_discovery: B,
     mempool: M,
     peer_list: PeerList,
 
-    sync_state: SyncState,
+    sync_state: ChainSyncState,
 
     block_status_provider: BlockStatusProvider,
     execution_payload_provider: ExecutionPayloadCache,
@@ -94,11 +94,11 @@ struct BlockCacheInner {
 }
 
 #[derive(Clone, Debug)]
-struct BlockCache {
+pub(crate) struct BlockCacheGuard {
     inner: Arc<RwLock<BlockCacheInner>>,
 }
 
-impl BlockCache {
+impl BlockCacheGuard {
     fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(BlockCacheInner::new())),
@@ -176,6 +176,14 @@ impl BlockCache {
             .requested_blocks
             .contains(block_hash)
     }
+
+    /// Internal crate method to clear cache
+    pub(crate) async fn clear(&self) {
+        let mut guard = self.inner.write().await;
+        guard.orphaned_blocks_by_parent.clear();
+        guard.block_hash_to_parent_hash.clear();
+        guard.requested_blocks.clear();
+    }
 }
 
 impl BlockCacheInner {
@@ -229,7 +237,7 @@ where
         peer_list: PeerList,
         block_discovery: B,
         mempool: M,
-        sync_state: SyncState,
+        sync_state: ChainSyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadCache,
         vdf_state: VdfStateReadonly,
@@ -238,7 +246,7 @@ where
     ) -> Self {
         Self {
             db,
-            blocks_cache: BlockCache::new(),
+            blocks_cache: BlockCacheGuard::new(),
             peer_list,
             block_discovery,
             mempool,
@@ -468,15 +476,18 @@ where
         Ok(())
     }
 
+    #[instrument(err, skip_all)]
     pub async fn repair_missing_payloads_if_any(
         &self,
         reth_service: Option<Addr<RethServiceActor>>,
     ) -> Result<(), BlockPoolError> {
         let Some(latest_block_in_index) = self.block_status_provider.latest_block_in_index() else {
+            debug!("No payloads to repair");
             return Ok(());
         };
 
         let mut block_hash = latest_block_in_index.block_hash;
+        debug!("Latest block in index: {}", &block_hash);
         let mut blocks_with_missing_payloads = vec![];
 
         loop {
@@ -497,15 +508,16 @@ where
             }
 
             block_hash = block.previous_block_hash;
+            debug!(
+                "Found block with missing payload: {} {} {}",
+                &block.block_hash, &block.height, &block.evm_block_hash
+            );
             blocks_with_missing_payloads.push(block);
         }
 
         // The last block in the list is the oldest block with a missing payload
         while let Some(block) = blocks_with_missing_payloads.pop() {
-            debug!(
-                "Block pool: Repairing missing payload for block {:?}",
-                block.block_hash
-            );
+            debug!("Repairing missing payload for block {:?}", block.block_hash);
             self.validate_and_submit_reth_payload(&block, reth_service.clone())
                 .await?;
         }
@@ -790,6 +802,11 @@ where
                 .block_status(block_height, block_hash)
                 .is_processed()
         }
+    }
+
+    /// Internal method for the p2p services to get direct access to the cache
+    pub(crate) fn block_cache_guard(&self) -> BlockCacheGuard {
+        self.blocks_cache.clone()
     }
 
     async fn process_orphaned_ancestor(&self, block_hash: BlockHash) -> Result<(), BlockPoolError> {

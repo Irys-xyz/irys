@@ -7,18 +7,22 @@
 //! Uses a single preemptible task slot to prevent thread overutilisation
 //!
 //! ## Stage 2: Concurrent Validation (execute_concurrent)
-//! Three concurrent validation stages:
+//! Six concurrent validation stages:
 //! - **Recall Range**: Async data recall and storage proof verification
 //! - **POA**: Blocking cryptographic proof-of-access validation
 //! - **Shadow Transactions**: Async Reth integration validation
+//! - **Seeds**: Validates VDF seed data
+//! - **Commitment Ordering**: Validates commitment transaction ordering
+//! - **Data Transaction Fees**: Validates data transaction fees using block's EMA
 //!
-//! ## Stage 3: Parent Dependency Resolution  
+//! ## Stage 3: Parent Dependency Resolution
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::block_validation::{
-    is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
+    commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
+    recall_recall_range_is_valid, shadow_transactions_are_valid,
 };
 use crate::validation_service::active_validations::BlockPriorityMeta;
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
@@ -160,6 +164,7 @@ impl BlockValidationTask {
                 break;
             } else {
                 // Parent not ready, yield and try again when polled later
+                debug!("Waiting for parent...");
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -217,6 +222,7 @@ impl BlockValidationTask {
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
         let block = &self.block;
+
         // Recall range validation
         let recall_task = async move {
             recall_recall_range_is_valid(
@@ -297,17 +303,66 @@ impl BlockValidationTask {
             is_seed_data_valid(&self.block, previous_block, vdf_reset_frequency)
         };
 
-        // Wait for all three tasks to complete
-        let (recall_result, poa_result, shadow_tx_result, seeds_validation_result) =
-            tokio::join!(recall_task, poa_task, shadow_tx_task, seeds_validation_task);
+        // Commitment transaction ordering validation
+        let commitment_ordering_task = async move {
+            commitment_txs_are_valid(
+                config,
+                service_senders,
+                block,
+                &self.service_inner.db,
+                &self.block_tree_guard,
+            )
+            .instrument(tracing::info_span!("commitment_ordering_validation"))
+            .await
+            .inspect_err(|err| tracing::error!(?err, "commitment ordering validation failed"))
+            .map(|()| ValidationResult::Valid)
+            .unwrap_or(ValidationResult::Invalid)
+        };
+
+        // Data transaction fee validation
+        let data_txs_validation_task = async move {
+            data_txs_are_valid(
+                config,
+                service_senders,
+                block,
+                &self.service_inner.db,
+                &self.block_tree_guard,
+            )
+            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
+            .await
+            .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
+            .map(|()| ValidationResult::Valid)
+            .unwrap_or(ValidationResult::Invalid)
+        };
+
+        // Wait for all validation tasks to complete
+        let (
+            recall_result,
+            poa_result,
+            shadow_tx_result,
+            seeds_validation_result,
+            commitment_ordering_result,
+            data_txs_result,
+        ) = tokio::join!(
+            recall_task,
+            poa_task,
+            shadow_tx_task,
+            seeds_validation_task,
+            commitment_ordering_task,
+            data_txs_validation_task
+        );
 
         match (
             recall_result,
             poa_result,
             shadow_tx_result,
             seeds_validation_result,
+            commitment_ordering_result,
+            data_txs_result,
         ) {
             (
+                ValidationResult::Valid,
+                ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,

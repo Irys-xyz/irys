@@ -30,7 +30,6 @@ irys-api-client.workspace = true
 irys-reward-curve.workspace = true
 irys-primitives.workspace = true
 base58.workspace = true
-color-eyre.workspace = true
 tracing-error.workspace = true
 eyre.workspace = true
 rand.workspace = true
@@ -66,6 +65,7 @@ alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 reth-tracing.workspace = true
 alloy-contract.workspace = true
+reth-cli-util = { workspace = true, features = ["jemalloc"] }
 
 [dev-dependencies]
 assert_matches = "1.5.0"

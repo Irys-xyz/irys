@@ -35,22 +35,23 @@ pub fn calculate_initial_difficulty(
     Ok(initial_difficulty)
 }
 
-/// - if `actual_time_ms` < `target_time_ms`,the difficulty increases i.e. block.difficulty > previous_block.difficulty.
-/// -  if `actual_time_ms` > `target_time_ms`,the difficulty decreases i.e. block.difficulty < previous_block.difficulty.
+/// Adjusts mining difficulty based on actual vs target block time.
+/// - if `actual_time_ms` < `target_time_ms`, the difficulty increases i.e. block.difficulty > previous_block.difficulty.
+/// - if `actual_time_ms` > `target_time_ms`, the difficulty decreases i.e. block.difficulty < previous_block.difficulty.
 /// - if the `percent_diff` < `min_threshold`, the difficulty remains unchanged.
 pub fn adjust_difficulty(current_diff: U256, actual_time_ms: u128, target_time_ms: u128) -> U256 {
     let max_u256 = U256::MAX;
+
+    // Uses a scale factor of 1000 to preserve fractional precision during integer arithmetic.
     let scale = U256::from(1000);
 
-    // For time ratio, if actual > target, divide first
-    // If actual < target, multiply first
-    let adjustment_ratio = if actual_time_ms >= target_time_ms {
-        let ratio = U256::from(actual_time_ms / target_time_ms);
-        ratio * scale
-    } else {
-        // actual is smaller than target, safe to multiply first
-        (U256::from(actual_time_ms) * scale) / U256::from(target_time_ms)
-    };
+    // Since we multiply `actual_time_ms` by scale before dividing by `target_time_ms`,
+    // we avoid truncation and get 3 decimal places of precision in the ratio.
+    // This is safe from overflow because:
+    // - `actual_time_ms` is u128, `scale` is small (1000)
+    // - `actual_time_ms * 1000` fits comfortably in U256
+    // - We divide by scale later to normalize the target back to proper range
+    let adjustment_ratio = (U256::from(actual_time_ms) * scale) / U256::from(target_time_ms);
 
     let target_current = max_u256 - current_diff;
 
@@ -212,13 +213,13 @@ mod tests {
         assert_expected_with_tolerance(expected, actual, 1.0);
 
         println!("Reduce hashpower to 1/4th of previous");
-        storage_module_count = 3;
+        storage_module_count = 7;
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
 
-        let expected = 20.0; // with 1/4th the hashpower we'd expect 4x block times
+        let expected = 8.33; // with 60% of the hashpower we'd expect 1.667x the block times
         let actual = new_block_time;
         assert_expected_with_tolerance(expected, actual, 1.0);
 

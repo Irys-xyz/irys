@@ -172,9 +172,9 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     info!(
         "got ingress proof for data root {}",
-        &ingress_proof.data_root
+        &ingress_proof.proof.data_root
     );
-    assert_eq!(&ingress_proof.data_root, &recv_tx.data_root);
+    assert_eq!(&ingress_proof.proof.data_root, &recv_tx.data_root);
 
     let id: String = tx_id.as_bytes().to_base58();
 

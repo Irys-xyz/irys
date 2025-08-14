@@ -662,6 +662,17 @@ impl From<DataLedger> for u32 {
     }
 }
 
+impl TryFrom<DataLedger> for usize {
+    type Error = eyre::Report;
+
+    fn try_from(value: DataLedger) -> Result<Self, Self::Error> {
+        match value {
+            DataLedger::Publish => Ok(0),
+            DataLedger::Submit => Ok(1),
+        }
+    }
+}
+
 impl TryFrom<u32> for DataLedger {
     type Error = eyre::Report;
 
@@ -788,7 +799,8 @@ impl BlockIndexItem {
 
 #[cfg(test)]
 mod tests {
-    use crate::{validate_path, Config, NodeConfig, TxIngressProof};
+    use crate::ingress::IngressProof;
+    use crate::{validate_path, Config, NodeConfig};
 
     use super::*;
     use alloy_primitives::Signature;
@@ -875,9 +887,11 @@ mod tests {
             tx_ids: H256List(vec![]),
             max_chunk_offset: 55,
             expires: None,
-            proofs: Some(IngressProofsList(vec![TxIngressProof {
+            proofs: Some(IngressProofsList(vec![IngressProof {
                 proof: H256::random(),
                 signature: IrysSignature::new(Signature::test_signature()),
+                data_root: H256::random(),
+                chain_id: 1,
             }])),
         };
 

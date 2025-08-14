@@ -3066,17 +3066,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive-syn-parse"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d65d7ce8132b7c0e54497a4d9a55a1c2a0912a0d786cf894472ba818fba45762"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.101",
-]
-
-[[package]]
 name = "derive-where"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4800,6 +4789,7 @@ dependencies = [
  "async-trait",
  "base58",
  "eyre",
+ "fastrand",
  "futures",
  "irys-api-client",
  "irys-config",
@@ -4822,6 +4812,7 @@ dependencies = [
  "openssl",
  "priority-queue",
  "rand 0.8.5",
+ "reqwest 0.12.15",
  "reth",
  "reth-db",
  "reth-ethereum-primitives",
@@ -4864,7 +4855,6 @@ dependencies = [
  "irys-actors",
  "irys-database",
  "irys-domain",
- "irys-p2p",
  "irys-reth-node-bridge",
  "irys-testing-utils",
  "irys-types",
@@ -4913,7 +4903,6 @@ dependencies = [
  "assert_matches",
  "awc",
  "base58",
- "color-eyre",
  "core_affinity",
  "eyre",
  "futures",
@@ -4939,6 +4928,7 @@ dependencies = [
  "modular-bitfield",
  "rand 0.8.5",
  "reth",
+ "reth-cli-util",
  "reth-db",
  "reth-tracing",
  "rstest",
@@ -4984,6 +4974,7 @@ dependencies = [
  "alloy-core",
  "alloy-eips",
  "alloy-genesis",
+ "alloy-primitives",
  "eyre",
  "irys-types",
  "reth-chainspec",
@@ -5066,24 +5057,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "irys-macros"
-version = "0.1.0"
-dependencies = [
- "derive-syn-parse",
- "proc-macro2",
- "quote",
- "syn 2.0.101",
- "toml",
-]
-
-[[package]]
 name = "irys-p2p"
 version = "0.1.0"
 dependencies = [
  "actix",
  "actix-rt",
  "actix-web",
- "alloy-core",
  "async-trait",
  "base58",
  "eyre",
@@ -5098,6 +5077,7 @@ dependencies = [
  "irys-types",
  "irys-vdf",
  "lru 0.14.0",
+ "moka",
  "rand 0.8.5",
  "reqwest 0.11.27",
  "reth",
@@ -5142,6 +5122,7 @@ dependencies = [
  "eyre",
  "modular-bitfield",
  "reth-codecs",
+ "rstest",
  "ruint",
  "serde",
  "test-fuzz",
@@ -5263,6 +5244,7 @@ dependencies = [
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "color-eyre",
  "tempfile",
  "tracing",
