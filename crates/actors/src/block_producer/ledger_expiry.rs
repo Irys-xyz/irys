@@ -1,3 +1,60 @@
+//! # Ledger Expiry Fee Distribution
+//!
+//! This module calculates and distributes fees to miners when data ledgers expire at epoch boundaries.
+//! The primary challenge is handling transactions that span partition boundaries, requiring careful
+//! filtering to ensure miners are compensated only for data they actually store.
+//!
+//! ## The Partition Boundary Problem
+//!
+//! Transactions don't align perfectly with partition boundaries. When a transaction's data size
+//! doesn't divide evenly into the partition's chunk capacity, it can span multiple partitions:
+//!
+//! ```text
+//! Partition A (chunks 0-99)     |    Partition B (chunks 100-199)
+//! ----------------------------- | ------------------------------
+//! [Tx1: chunks 0-49]            |
+//! [Tx2: chunks 50-97]           |
+//! [Tx3: chunks 98-104] <--------|-------- Spans both partitions!
+//!                               | [Tx4: chunks 105-150]
+//! ```
+//!
+//! When Partition A expires, we must:
+//! - Include Tx1 and Tx2 (fully within partition)
+//! - Include Tx3 (overlaps with partition)
+//! - Exclude Tx4 (entirely outside partition)
+//!
+//! ## Detection Strategy
+//!
+//! 1. **Identify Boundary Blocks**: Find the earliest and latest blocks containing chunks
+//!    from the expired partition. These blocks may contain transactions that extend beyond
+//!    the partition boundaries.
+//!
+//! 2. **Track Middle Blocks**: All blocks between the boundaries contain only transactions
+//!    fully within the partition range - these can be included wholesale.
+//!
+//! ## Filtering Logic
+//!
+//! ### Earliest Block
+//! - Skip transactions that end before the partition starts
+//! - Include the first transaction that overlaps the partition start
+//! - Include all subsequent transactions in the block
+//!
+//! ### Latest Block
+//! - Include all transactions until one starts outside the partition
+//! - Stop processing when a transaction begins after the partition end
+//!
+//! ### Middle Blocks
+//! - Include all transactions (guaranteed to be within partition range)
+//!
+//! ## Algorithm Steps
+//!
+//! 1. **Collect Expired Partitions**: Identify which partitions have expired and their miners
+//! 2. **Find Block Range**: Determine earliest, latest, and middle blocks containing partition data
+//! 3. **Process Boundary Blocks**: Filter transactions at partition boundaries
+//! 4. **Process Middle Blocks**: Include all transactions from middle blocks
+//! 5. **Fetch Transaction Data**: Retrieve full transaction details
+//! 6. **Calculate Fees**: Distribute fees proportionally among miners who stored the data
+
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_service::MempoolServiceMessage;
 use crate::shadow_tx_generator::RollingHash;
@@ -271,7 +328,13 @@ fn get_previous_max_offset(
     }
 }
 
-/// Processes transactions from a boundary block (first or last)
+/// Processes transactions from a boundary block (first or last).
+///
+/// Boundary blocks require special handling because they may contain transactions
+/// that extend beyond the partition boundaries. This function:
+/// 1. Fetches the block's transactions
+/// 2. Sorts them to match their on-chain order
+/// 3. Applies filtering based on whether it's the earliest or latest block
 async fn process_boundary_block(
     boundary: &BoundaryBlock,
     block_hash: H256,
@@ -325,7 +388,20 @@ async fn process_boundary_block(
     Ok(filtered_txs)
 }
 
-/// Filters transactions based on their chunk positions relative to partition boundaries
+/// Filters transactions based on their chunk positions relative to partition boundaries.
+///
+/// This is the core logic for handling transaction overlaps at partition boundaries.
+/// Transactions are processed sequentially, tracking their cumulative chunk positions.
+///
+/// # Boundary Handling
+///
+/// - **Earliest block**: Skips transactions until finding one that overlaps the partition start,
+///   then includes all remaining transactions
+/// - **Latest block**: Includes transactions until finding one that starts outside the partition
+///
+/// # Returns
+///
+/// Tuple of (transaction IDs to include, mapping of tx ID to miners who stored it)
 fn filter_transactions_by_chunk_range(
     transactions: Vec<DataTransactionHeader>,
     prev_max_offset: ChunkOffset,
