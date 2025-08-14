@@ -231,7 +231,7 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
         Ok(Some((
             meta.clone(),
             tx.get::<CachedChunks>(meta.chunk_path_hash)?
-                .expect("Chunk has an index entry but no data entry"),
+                .ok_or_else(|| eyre::eyre!("Chunk has an index entry but no data entry"))?,
         )))
     } else {
         Ok(None)
