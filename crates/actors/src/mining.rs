@@ -210,7 +210,7 @@ impl PartitionMiningActor {
                 let solution = SolutionContext {
                     partition_hash,
                     chunk_offset: *partition_chunk_offset,
-                    recall_chunk_index: index as u32,
+
                     mining_address: self.config.node_config.miner_address(),
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
