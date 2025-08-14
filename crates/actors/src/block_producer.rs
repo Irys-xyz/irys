@@ -37,9 +37,10 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     fee_distribution::TermFeeCharges, next_cumulative_diff, storage_pricing::Amount, Address,
-    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    AdjustmentStats, Base64, BlockIndexItem, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
+    IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -900,7 +901,7 @@ pub trait BlockProdStrategy {
                 .read()
                 .get_epoch_snapshot(&prev_block_header.block_hash)
                 .ok_or_eyre("parent blocks epoch snapshot must be available")?;
-            
+
             // Calculate fees for expired ledgers
             let _aggregated_miner_fees = self
                 .calculate_expired_ledger_fees(&epoch_snapshot, block_height)
@@ -1050,7 +1051,7 @@ pub trait BlockProdStrategy {
     }
 
     /// Calculates the aggregated fees owed to miners when data ledgers expire.
-    /// 
+    ///
     /// This function processes expired partitions at epoch boundaries, determines which miners
     /// stored the data, and calculates the appropriate fee distributions based on the term fees
     /// paid by users when submitting transactions.
@@ -1066,11 +1067,11 @@ pub trait BlockProdStrategy {
         let config = &self.inner().config;
         let mut ledgers = epoch_snapshot.ledgers.clone();
         let partition_assignments = &epoch_snapshot.partition_assignments;
-        
+
         // Step 1: Get expired partitions and map them to miners
         let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
         let mut expired_submit_ledger_slot_indexes = HashMap::<u64, Vec<Address>>::new();
-        
+
         for expired_partition_hash in expired_partition_hashes {
             let partition = partition_assignments
                 .get_assignment(expired_partition_hash)
@@ -1082,9 +1083,8 @@ pub trait BlockProdStrategy {
                 .ok_or_eyre("ledger id must be present")??;
             let slot_index = partition
                 .slot_index
-                .ok_or_eyre("slot index must be present")?
-                as u64;
-            
+                .ok_or_eyre("slot index must be present")? as u64;
+
             match ledger_id {
                 DataLedger::Publish => eyre::bail!("publish ledger cannot expire"),
                 DataLedger::Submit => {
@@ -1099,7 +1099,9 @@ pub trait BlockProdStrategy {
         }
 
         // Step 2: Find blocks containing data in the expired chunk ranges
-        let mut blocks_with_expired_submit_ledgers = Vec::new();
+        let mut blocks_with_expired_submit_ledgers = HashMap::new();
+        let mut min_block_index_item = Option::<(u64, BlockIndexItem, u64, u64)>::None;
+        let mut max_block_index_item = Option::<(u64, BlockIndexItem, u64, u64)>::None;
         for (slot_index, miners) in expired_submit_ledger_slot_indexes {
             let start_offset = slot_index * config.consensus.num_chunks_in_partition;
             let end_offset = start_offset + config.consensus.num_chunks_in_partition;
@@ -1110,12 +1112,75 @@ pub trait BlockProdStrategy {
                 .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
             let miners = Arc::from_iter(miners.into_iter());
             for chunk_offset in start_offset..end_offset {
-                let (_idx, block_index_item) =
+                let (idx, block_index_item) =
                     block_index_read.get_block_index_item(DataLedger::Submit, chunk_offset)?;
                 blocks_with_expired_submit_ledgers
-                    .push((block_index_item.block_hash, Arc::clone(&miners)));
+                    .insert(block_index_item.block_hash, Arc::clone(&miners));
+
+                // check if we need to update the min/max block index item
+                if let Some(min_item) = &mut min_block_index_item {
+                    if min_item.0 < idx {
+                        *min_item = (idx, block_index_item.clone(), start_offset, end_offset);
+                    }
+                } else {
+                    min_block_index_item =
+                        Some((idx, block_index_item.clone(), start_offset, end_offset));
+                }
+                if let Some(max_item) = &mut max_block_index_item {
+                    if max_item.0 > idx {
+                        *max_item = (idx, block_index_item.clone(), start_offset, end_offset);
+                    }
+                } else {
+                    max_block_index_item =
+                        Some((idx, block_index_item.clone(), start_offset, end_offset));
+                }
             }
         }
+
+        // Step 2.1: Remove min block index item and max block index item
+        let min_block_index_item = min_block_index_item.unwrap();
+        let max_block_index_item = max_block_index_item.unwrap();
+        let min_block_miners = blocks_with_expired_submit_ledgers
+            .remove(&min_block_index_item.1.block_hash)
+            .unwrap();
+        let max_block_miners = blocks_with_expired_submit_ledgers
+            .remove(&max_block_index_item.1.block_hash)
+            .unwrap();
+
+        // Step 2.2: handle earliest and last block by figuring out which txs need to be included
+        let earliest_block = self
+            .get_block_by_hash(min_block_index_item.1.block_hash)
+            .await?;
+        let latest_block = self
+            .get_block_by_hash(max_block_index_item.1.block_hash)
+            .await?;
+        let data_txs_earliest = earliest_block.get_data_ledger_tx_ids();
+        let data_txs_latest = latest_block.get_data_ledger_tx_ids();
+        let submit_txs_earliest = data_txs_earliest.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
+        let submit_txs_latest = data_txs_latest.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
+        let mut submit_data_txs_earliest = get_data_tx_in_parallel(
+            submit_txs_earliest.into_iter().map(|x| *x).collect(),
+            &self.inner().service_senders.mempool,
+            &self.inner().db,
+        )
+        .await?;
+        let mut submit_data_txs_latest = get_data_tx_in_parallel(
+            submit_txs_latest.into_iter().map(|x| *x).collect(),
+            &self.inner().service_senders.mempool,
+            &self.inner().db,
+        )
+        .await?;
+        // for each txid you visit, look at it's size, compute the number of chunks it
+        // would consume in the ledger, check to see if the start chunk is contained in
+        // the lower bound for the slot? if not, move to the next txid and do the same
+        for tx in submit_data_txs_earliest {
+            // todo - compute how many chunks is the current tx taking up
+            // todo - correlate this with max_chunk_offset form DataIndexItem.ledgers[Submit].max_chunk_offset
+            // todo - currently only print a log  if it must be included
+        }
+
+        // todo do the same for `latest` block txs, except here we only include all the txs up to
+        // the point of the first one that exceeds the bounds
 
         // Step 3: Collect transaction IDs and their associated miners
         let mut data_txs = Vec::<H256>::new();
@@ -1133,7 +1198,7 @@ pub trait BlockProdStrategy {
 
         // Step 4: Fetch the actual data transactions
         let mut data_txs = get_data_tx_in_parallel(
-            data_txs,
+            data_txs_ids.into_iter().map(|x| *x).collect(),
             &self.inner().service_senders.mempool,
             &self.inner().db,
         )
