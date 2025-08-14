@@ -268,7 +268,12 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
-    Ok((chunk_count as u64, chunk_count as u64 * chunk_size))
+    let chunk_count_u64 = u64::try_from(chunk_count)
+        .map_err(|_| eyre::eyre!("Cache size chunk_count does not fit into u64"))?;
+    let total_size = chunk_count_u64
+        .checked_mul(chunk_size)
+        .ok_or_else(|| eyre::eyre!("Cache size calculation overflow"))?;
+    Ok((chunk_count_u64, total_size))
 }
 
 pub fn insert_peer_list_item<T: DbTxMut>(
