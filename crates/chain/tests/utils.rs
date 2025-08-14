@@ -2050,12 +2050,12 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     node_ctx.start_vdf().await?;
 
     // Wait until we have at least two new VDF steps so we can derive checkpoints and seed
-    let max_wait_retries = 20;
+    let max_wait_retries = 1000;
     let mut i = 1;
     let initial_step_num = vdf_steps_guard.read().global_step;
     let mut step_num: u64 = 0;
     while i < max_wait_retries && step_num < initial_step_num + 2 {
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_millis(20)).await;
         step_num = vdf_steps_guard.read().global_step;
         i += 1;
     }
@@ -2101,7 +2101,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         // Refresh latest global step
         let current_step = vdf_steps_guard.read().global_step;
         if current_step < 2 {
-            sleep(Duration::from_secs(1)).await;
+            sleep(Duration::from_millis(20)).await;
             continue;
         }
 
@@ -2115,7 +2115,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         let steps: H256List = match get_steps {
             Ok(s) => s,
             Err(_) => {
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_millis(20)).await;
                 continue;
             }
         };
