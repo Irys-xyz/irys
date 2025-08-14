@@ -635,7 +635,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 unconfirmed_txs.pop();
             };
             drop(ro_tx);
-            mine_blocks(&self.node_ctx, 1).await.unwrap();
+            self.mine_block().await.unwrap();
             sleep(delay).await;
         }
         Err(eyre::eyre!(
