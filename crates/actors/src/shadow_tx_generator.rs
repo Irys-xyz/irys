@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon as _, U256,
+    IrysBlockHeader, IrysTransactionCommon as _, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -454,18 +454,18 @@ impl RewardAmount {
 
 /// Newtype for rolling hash to prevent mixing with other U256 values
 #[derive(Debug, Clone, Copy, Default)]
-struct RollingHash(U256);
+pub struct RollingHash(pub U256);
 
 impl RollingHash {
     fn zero() -> Self {
         Self(U256::zero())
     }
 
-    fn xor_assign(&mut self, value: U256) {
+    pub fn xor_assign(&mut self, value: U256) {
         self.0 ^= value;
     }
 
-    fn to_bytes(self) -> [u8; 32] {
+    pub fn to_bytes(self) -> [u8; 32] {
         self.0.to_be_bytes()
     }
 }

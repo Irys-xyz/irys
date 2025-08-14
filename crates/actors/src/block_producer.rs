@@ -42,7 +42,6 @@ use irys_types::{
     SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
-use itertools::Itertools;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -55,7 +54,7 @@ use reth::{
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -901,96 +900,11 @@ pub trait BlockProdStrategy {
                 .read()
                 .get_epoch_snapshot(&prev_block_header.block_hash)
                 .ok_or_eyre("parent blocks epoch snapshot must be available")?;
-            let mut ledgers = epoch_snapshot.ledgers.clone();
-            let partition_assignments = &epoch_snapshot.partition_assignments;
-            let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
-            let mut expired_submit_ledger_slot_indexes = HashMap::<u64, Vec<Address>, _>::new();
-            for expired_partition_hash in expired_partition_hashes {
-                let partition = partition_assignments
-                    .get_assignment(expired_partition_hash)
-                    .ok_or_eyre("could not get expired partition")?;
-
-                let ledger_id = partition
-                    .ledger_id
-                    .map(|id| DataLedger::try_from(id))
-                    .ok_or_eyre("ledger id must be present")??;
-                let slot_index = partition
-                    .slot_index
-                    .ok_or_eyre("slot index must be present")?
-                    as u64;
-                match ledger_id {
-                    DataLedger::Publish => eyre::bail!("publish ledger cannot expire"),
-                    DataLedger::Submit => {
-                        let entry = expired_submit_ledger_slot_indexes.entry(slot_index);
-                        entry
-                            .and_modify(|miners| {
-                                miners.push(partition.miner_address);
-                            })
-                            .or_insert(vec![partition.miner_address]);
-                    }
-                }
-            }
-
-            let mut blocks_with_expired_submit_ledgers = Vec::new();
-            for (slot_index, miners) in expired_submit_ledger_slot_indexes {
-                let start_offset = slot_index * config.consensus.num_chunks_in_partition;
-                let end_offset = start_offset + config.consensus.num_chunks_in_partition;
-                let block_index_read = self
-                    .inner()
-                    .block_index
-                    .read()
-                    .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-                let miners = Arc::from_iter(miners.into_iter());
-                for chunk_offset in start_offset..end_offset {
-                    let (_idx, block_index_item) =
-                        block_index_read.get_block_index_item(DataLedger::Submit, chunk_offset)?;
-                    blocks_with_expired_submit_ledgers
-                        .push((block_index_item.block_hash, Arc::clone(&miners)));
-                }
-            }
-
-            let mut data_txs = Vec::<H256>::new();
-            let mut data_tx_miner_set = HashMap::new();
-            for (block_hash, miners) in blocks_with_expired_submit_ledgers {
-                let block = self.get_block_by_hash(block_hash).await?;
-
-                let get_data_ledger_tx_ids = block.get_data_ledger_tx_ids();
-                let data_txs_ids = get_data_ledger_tx_ids.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
-                for data_tx in data_txs_ids.iter() {
-                    data_tx_miner_set.insert(data_tx.clone(), Arc::clone(&miners));
-                }
-                data_txs.extend(data_txs_ids);
-            }
-
-            let mut data_txs = get_data_tx_in_parallel(
-                data_txs,
-                &self.inner().service_senders.mempool,
-                &self.inner().db,
-            )
-            .await?;
-            data_txs.sort();
-
-            let mut aggregated_miner_fees = HashMap::<Address, (U256, RollingHash), _>::new();
-            for data_tx in data_txs.iter() {
-                let miners_that_stored_this_tx = data_tx_miner_set
-                    .get(&data_tx.id)
-                    .expect("guaranteed to have the miner list");
-                let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
-                let fee_distribution_per_miner =
-                    fee_charges.distribution_on_expiry(&miners_that_stored_this_tx)?;
-                for (miner, fee) in miners_that_stored_this_tx
-                    .iter()
-                    .zip(fee_distribution_per_miner)
-                {
-                    aggregated_miner_fees
-                        .entry(*miner)
-                        .and_modify(|(current_fee, hash)| {
-                            *current_fee = current_fee.saturating_add(fee);
-                            hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
-                        })
-                        .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
-                }
-            }
+            
+            // Calculate fees for expired ledgers
+            let _aggregated_miner_fees = self
+                .calculate_expired_ledger_fees(&epoch_snapshot, block_height)
+                .await?;
 
             // todo - if tx is of publish ledger and did not get promoted then we refund the perm fee
 
@@ -1133,6 +1047,123 @@ pub trait BlockProdStrategy {
                 .ok_or_eyre("block not found in db")?,
         };
         return Ok(header);
+    }
+
+    /// Calculates the aggregated fees owed to miners when data ledgers expire.
+    /// 
+    /// This function processes expired partitions at epoch boundaries, determines which miners
+    /// stored the data, and calculates the appropriate fee distributions based on the term fees
+    /// paid by users when submitting transactions.
+    ///
+    /// # Returns
+    /// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
+    #[tracing::instrument(skip_all, fields(block_height))]
+    async fn calculate_expired_ledger_fees(
+        &self,
+        epoch_snapshot: &EpochSnapshot,
+        block_height: u64,
+    ) -> eyre::Result<HashMap<Address, (U256, RollingHash)>> {
+        let config = &self.inner().config;
+        let mut ledgers = epoch_snapshot.ledgers.clone();
+        let partition_assignments = &epoch_snapshot.partition_assignments;
+        
+        // Step 1: Get expired partitions and map them to miners
+        let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
+        let mut expired_submit_ledger_slot_indexes = HashMap::<u64, Vec<Address>>::new();
+        
+        for expired_partition_hash in expired_partition_hashes {
+            let partition = partition_assignments
+                .get_assignment(expired_partition_hash)
+                .ok_or_eyre("could not get expired partition")?;
+
+            let ledger_id = partition
+                .ledger_id
+                .map(|id| DataLedger::try_from(id))
+                .ok_or_eyre("ledger id must be present")??;
+            let slot_index = partition
+                .slot_index
+                .ok_or_eyre("slot index must be present")?
+                as u64;
+            
+            match ledger_id {
+                DataLedger::Publish => eyre::bail!("publish ledger cannot expire"),
+                DataLedger::Submit => {
+                    let entry = expired_submit_ledger_slot_indexes.entry(slot_index);
+                    entry
+                        .and_modify(|miners| {
+                            miners.push(partition.miner_address);
+                        })
+                        .or_insert(vec![partition.miner_address]);
+                }
+            }
+        }
+
+        // Step 2: Find blocks containing data in the expired chunk ranges
+        let mut blocks_with_expired_submit_ledgers = Vec::new();
+        for (slot_index, miners) in expired_submit_ledger_slot_indexes {
+            let start_offset = slot_index * config.consensus.num_chunks_in_partition;
+            let end_offset = start_offset + config.consensus.num_chunks_in_partition;
+            let block_index_read = self
+                .inner()
+                .block_index
+                .read()
+                .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
+            let miners = Arc::from_iter(miners.into_iter());
+            for chunk_offset in start_offset..end_offset {
+                let (_idx, block_index_item) =
+                    block_index_read.get_block_index_item(DataLedger::Submit, chunk_offset)?;
+                blocks_with_expired_submit_ledgers
+                    .push((block_index_item.block_hash, Arc::clone(&miners)));
+            }
+        }
+
+        // Step 3: Collect transaction IDs and their associated miners
+        let mut data_txs = Vec::<H256>::new();
+        let mut data_tx_miner_set = HashMap::new();
+        for (block_hash, miners) in blocks_with_expired_submit_ledgers {
+            let block = self.get_block_by_hash(block_hash).await?;
+
+            let get_data_ledger_tx_ids = block.get_data_ledger_tx_ids();
+            let data_txs_ids = get_data_ledger_tx_ids.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
+            for data_tx in data_txs_ids.iter() {
+                data_tx_miner_set.insert(data_tx.clone(), Arc::clone(&miners));
+            }
+            data_txs.extend(data_txs_ids);
+        }
+
+        // Step 4: Fetch the actual data transactions
+        let mut data_txs = get_data_tx_in_parallel(
+            data_txs,
+            &self.inner().service_senders.mempool,
+            &self.inner().db,
+        )
+        .await?;
+        data_txs.sort();
+
+        // Step 5: Calculate and aggregate fees for each miner
+        let mut aggregated_miner_fees = HashMap::<Address, (U256, RollingHash)>::new();
+        for data_tx in data_txs.iter() {
+            let miners_that_stored_this_tx = data_tx_miner_set
+                .get(&data_tx.id)
+                .expect("guaranteed to have the miner list");
+            let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
+            let fee_distribution_per_miner =
+                fee_charges.distribution_on_expiry(&miners_that_stored_this_tx)?;
+            for (miner, fee) in miners_that_stored_this_tx
+                .iter()
+                .zip(fee_distribution_per_miner)
+            {
+                aggregated_miner_fees
+                    .entry(*miner)
+                    .and_modify(|(current_fee, hash)| {
+                        *current_fee = current_fee.saturating_add(fee);
+                        hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
+                    })
+                    .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
+            }
+        }
+
+        Ok(aggregated_miner_fees)
     }
 }
 
