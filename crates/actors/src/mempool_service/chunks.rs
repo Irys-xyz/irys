@@ -309,19 +309,32 @@ impl Inner {
                 return Err(ChunkIngressError::ServiceUninitialized);
             }
         };
+        // Conditionally write only if an insert is needed or last_height increases
         self.irys_db
             .update(|write_tx| {
-                let ingress_proof_flag = match write_tx.get::<DataRootLRU>(chunk.data_root)? {
-                    Some(e) => e.ingress_proof,
-                    None => false,
-                };
-                write_tx.put::<DataRootLRU>(
-                    chunk.data_root,
-                    DataRootLRUEntry {
-                        last_height: latest_height,
-                        ingress_proof: ingress_proof_flag,
-                    },
-                )
+                match write_tx.get::<DataRootLRU>(chunk.data_root)? {
+                    Some(existing) => {
+                        // Only update if the height advances (avoid redundant writes)
+                        if existing.last_height < latest_height {
+                            write_tx.put::<DataRootLRU>(
+                                chunk.data_root,
+                                DataRootLRUEntry {
+                                    last_height: latest_height,
+                                    ingress_proof: existing.ingress_proof,
+                                },
+                            )
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    None => write_tx.put::<DataRootLRU>(
+                        chunk.data_root,
+                        DataRootLRUEntry {
+                            last_height: latest_height,
+                            ingress_proof: false,
+                        },
+                    ),
+                }
             })
             .map_err(|e| {
                 error!(
@@ -390,14 +403,25 @@ impl Inner {
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
+                // Conditionally set ingress_proof=true and/or advance height to avoid redundant writes
                 db.update(|wtx| {
-                    wtx.put::<DataRootLRU>(
-                        root_hash,
-                        DataRootLRUEntry {
-                            last_height: latest_height,
-                            ingress_proof: true,
-                        },
-                    )
+                    let needs_update = match wtx.get::<DataRootLRU>(root_hash)? {
+                        Some(existing) => {
+                            (existing.last_height < latest_height) || !existing.ingress_proof
+                        }
+                        None => true,
+                    };
+                    if needs_update {
+                        wtx.put::<DataRootLRU>(
+                            root_hash,
+                            DataRootLRUEntry {
+                                last_height: latest_height,
+                                ingress_proof: true,
+                            },
+                        )
+                    } else {
+                        Ok(())
+                    }
                 })
                 .unwrap()
                 .unwrap();
