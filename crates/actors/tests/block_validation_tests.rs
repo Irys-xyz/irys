@@ -94,7 +94,6 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     );
 
     let poa = PoaData {
-        recall_chunk_index: 0,
         partition_chunk_offset: 10,
         partition_hash,
         chunk: Some(Base64(vec![0; config.chunk_size as usize])),
