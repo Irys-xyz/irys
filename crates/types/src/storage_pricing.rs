@@ -29,6 +29,8 @@ const BPS_SCALE_NATIVE: u64 = 1_000_000;
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
 const TAYLOR_TERMS: u32 = 30;
 
+pub const TERM_FEE: U256 = U256([1_000_000_000, 0, 0, 0]);
+
 /// `Amount<T>` represents a value stored as a U256.
 ///
 /// The actual scale is defined by the usage: pr
@@ -367,6 +369,39 @@ impl Amount<(NetworkFee, Irys)> {
         // total = amount * (1 + percentage) / SCALE
         let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
         let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        Ok(Self {
+            amount: total,
+            _t: PhantomData,
+        })
+    }
+
+    /// Add ingress proof rewards to the base network fee.
+    ///
+    /// According to business rules:
+    /// - Each ingress proof gets a reward of (fee_percentage × term_fee)
+    /// - Total ingress rewards = num_ingress_proofs × (fee_percentage × term_fee)
+    /// - Final perm_fee = base_network_fee + total_ingress_rewards
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn add_ingress_proof_rewards(
+        self,
+        term_fee: U256,
+        num_ingress_proofs: u64,
+        fee_percentage: Amount<Percentage>,
+    ) -> Result<Self> {
+        // Calculate reward per ingress proof (fee_percentage × term_fee)
+        let per_ingress_reward = mul_div(term_fee, fee_percentage.amount, BPS_SCALE)?;
+
+        // Calculate total ingress rewards
+        let total_ingress_rewards =
+            per_ingress_reward.saturating_mul(U256::from(num_ingress_proofs));
+
+        // Add ingress rewards to base network fee
+        let total = self.amount.saturating_add(total_ingress_rewards);
+
         Ok(Self {
             amount: total,
             _t: PhantomData,
@@ -980,6 +1015,92 @@ mod tests {
 
             let result = original.sub_multiplier(above_one);
             assert!(result.is_err(), "Expected error for sub > 100%");
+        }
+
+        #[test]
+        fn test_add_ingress_proof_rewards_normal_case() -> Result<()> {
+            // Base network fee = 100 IRYS
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(100.0))?;
+            // Term fee = 10 IRYS
+            let term_fee = Amount::<Irys>::token(dec!(10.0))?.amount;
+            // 5% miner fee
+            let five_percent = Amount::<Percentage>::percentage(dec!(0.05))?;
+            // 3 ingress proofs
+            let num_proofs = 3;
+
+            // Action
+            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, five_percent)?;
+
+            // Convert to decimal for comparison
+            let actual = result.token_to_decimal()?;
+            // Expected: 100 + (3 * 10 * 0.05) = 100 + 1.5 = 101.5
+            let expected = dec!(101.5);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_add_ingress_proof_rewards_zero_proofs() -> Result<()> {
+            // Base network fee = 50 IRYS
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(50.0))?;
+            let term_fee = Amount::<Irys>::token(dec!(10.0))?.amount;
+            let five_percent = Amount::<Percentage>::percentage(dec!(0.05))?;
+            let num_proofs = 0;
+
+            // Action
+            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, five_percent)?;
+
+            // Convert to decimal for comparison
+            let actual = result.token_to_decimal()?;
+            // Expected: 50 + (0 * 10 * 0.05) = 50
+            let expected = dec!(50.0);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_add_ingress_proof_rewards_zero_percentage() -> Result<()> {
+            // Base network fee = 75 IRYS
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(75.0))?;
+            let term_fee = Amount::<Irys>::token(dec!(20.0))?.amount;
+            let zero_percent = Amount::<Percentage>::percentage(dec!(0.0))?;
+            let num_proofs = 5;
+
+            // Action
+            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, zero_percent)?;
+
+            // Convert to decimal for comparison
+            let actual = result.token_to_decimal()?;
+            // Expected: 75 + (5 * 20 * 0.0) = 75
+            let expected = dec!(75.0);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
+        }
+
+        #[test]
+        fn test_add_ingress_proof_rewards_large_values() -> Result<()> {
+            // Base network fee = 1000 IRYS
+            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(1000.0))?;
+            // Term fee = 100 IRYS
+            let term_fee = Amount::<Irys>::token(dec!(100.0))?.amount;
+            // 10% fee
+            let ten_percent = Amount::<Percentage>::percentage(dec!(0.10))?;
+            // 10 ingress proofs
+            let num_proofs = 10;
+
+            // Action
+            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, ten_percent)?;
+
+            // Convert to decimal for comparison
+            let actual = result.token_to_decimal()?;
+            // Expected: 1000 + (10 * 100 * 0.10) = 1000 + 100 = 1100
+            let expected = dec!(1100.0);
+
+            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
+            Ok(())
         }
     }
 

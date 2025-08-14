@@ -170,6 +170,7 @@ where
                 use_trusted_peers_only,
                 response,
             } => {
+                debug!("Requesting {:?} from network", &data_request);
                 ctx.spawn(
                     async move {
                         match address

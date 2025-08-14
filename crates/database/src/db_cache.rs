@@ -167,6 +167,42 @@ impl Compact for CachedChunkIndexEntry {
 
 /// converts a size (in bytes) to the number of chunks, rounding up (size 0 -> illegal state, size 1 -> 1, size 262144 -> 1, 262145 -> 2 )
 pub fn data_size_to_chunk_count(data_size: u64, chunk_size: u64) -> eyre::Result<u32> {
-    assert_ne!(data_size, 0, "tx data_size 0 is illegal");
+    if data_size == 0 {
+        return Err(eyre::eyre!("tx data_size 0 is illegal"));
+    }
     Ok(data_size.div_ceil(chunk_size).try_into()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::data_size_to_chunk_count;
+
+    // Zero-size should return an error (no panic), as it is an illegal state
+    #[test]
+    fn data_size_zero_returns_error() {
+        assert!(data_size_to_chunk_count(0, 64).is_err());
+    }
+
+    // Exact multiple of chunk_size should return a single chunk
+    #[test]
+    fn exact_chunk_size_returns_one() {
+        assert_eq!(data_size_to_chunk_count(64, 64).unwrap(), 1);
+    }
+
+    // Ceil rounding behavior for small sizes across a single boundary
+    #[test]
+    fn round_up_behavior_small() {
+        assert_eq!(data_size_to_chunk_count(1, 64).unwrap(), 1);
+        assert_eq!(data_size_to_chunk_count(65, 64).unwrap(), 2);
+        assert_eq!(data_size_to_chunk_count(128, 64).unwrap(), 2);
+    }
+
+    // Ceil rounding for varied chunk sizes including boundary crossing
+    #[test]
+    fn round_up_behavior_varied_chunk_sizes() {
+        assert_eq!(data_size_to_chunk_count(100, 64).unwrap(), 2);
+        assert_eq!(data_size_to_chunk_count(129, 128).unwrap(), 2);
+        assert_eq!(data_size_to_chunk_count(256, 128).unwrap(), 2);
+        assert_eq!(data_size_to_chunk_count(257, 128).unwrap(), 3);
+    }
 }

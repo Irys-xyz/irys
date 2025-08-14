@@ -44,7 +44,7 @@ async fn heavy_test_mine_tx() {
     config.consensus.extend_genesis_accounts(vec![(
         account.address(),
         GenesisAccount {
-            balance: U256::from(1000),
+            balance: U256::from(1_000_000_000_000_000_000_u64),
             ..Default::default()
         },
     )]);
@@ -54,7 +54,7 @@ async fn heavy_test_mine_tx() {
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
     let tx = irys_node
-        .create_submit_data_tx(&account, data)
+        .create_publish_data_tx(&account, data)
         .await
         .unwrap();
     irys_node.mine_block().await.unwrap();
