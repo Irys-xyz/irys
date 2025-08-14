@@ -2045,15 +2045,167 @@ pub async fn mine_block(
 
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    let config = &node_ctx.config;
+
     node_ctx.start_vdf().await?;
-    let poa_solution = capacity_chunk_solution(
-        node_ctx.config.node_config.miner_address(),
-        vdf_steps_guard.clone(),
-        &node_ctx.config,
-    )
-    .await;
+
+    // Wait until we have at least two new VDF steps so we can derive checkpoints and seed
+    let max_wait_retries = 20;
+    let mut i = 1;
+    let initial_step_num = vdf_steps_guard.read().global_step;
+    let mut step_num: u64 = 0;
+    while i < max_wait_retries && step_num < initial_step_num + 2 {
+        sleep(Duration::from_secs(1)).await;
+        step_num = vdf_steps_guard.read().global_step;
+        i += 1;
+    }
+
+    // Try multiple VDF steps, brute-forcing chunk offsets within the recall range
+    // until we find a solution hash that satisfies the previous block difficulty.
+    let max_step_attempts = 20;
+    let miner_addr = node_ctx.config.node_config.miner_address();
+    let partition_hash = H256::zero();
+
+    // Helper to compute last-step checkpoints for the given step
+    let compute_last_step_checkpoints = |step_number: u64| {
+        let mut hasher = Sha256::new();
+        let mut salt = irys_types::U256::from(step_number_to_salt_number(
+            &config.consensus.vdf,
+            step_number - 1_u64,
+        ));
+        let mut seed = H256List(
+            vdf_steps_guard
+                .read()
+                .get_steps(ii(step_number - 1, step_number))
+                .expect("Not enough vdf steps")
+                .0,
+        )[0];
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            config.consensus.vdf.num_checkpoints_in_vdf_step,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        H256List(checkpoints)
+    };
+
+    let mut found: Option<SolutionContext> = None;
+
+    'outer: for _ in 0..max_step_attempts {
+        // Refresh latest global step
+        let current_step = vdf_steps_guard.read().global_step;
+        if current_step < 2 {
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        let get_steps = {
+            vdf_steps_guard
+                .read()
+                .get_steps(ii(current_step - 1, current_step))
+        };
+
+        // Steps [prev, current]
+        let steps: H256List = match get_steps {
+            Ok(s) => s,
+            Err(_) => {
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        // Determine recall range for this step
+        let recall_range_idx = block_validation::get_recall_range(
+            current_step,
+            &config.consensus,
+            &vdf_steps_guard,
+            &partition_hash,
+        )
+        .expect("valid recall range");
+
+        // Previous block difficulty target
+        let (chain, _not_onchain) = get_canonical_chain(node_ctx.block_tree_guard.clone())
+            .await
+            .unwrap();
+        let prev_block = chain.last().unwrap();
+        let prev_diff = {
+            let guard = node_ctx.block_tree_guard.read();
+            let header = guard
+                .get_block(&prev_block.block_hash)
+                .expect("previous block header must exist")
+                .clone();
+            header.diff
+        };
+
+        // Brute force chunk offsets within the recall range
+        let start_chunk_offset =
+            recall_range_idx as u64 * config.consensus.num_chunks_in_recall_range;
+        for j in 0..config.consensus.num_chunks_in_recall_range {
+            let candidate_offset = start_chunk_offset + j;
+
+            // Compute deterministic entropy chunk for the candidate offset
+            let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);
+            compute_entropy_chunk(
+                miner_addr,
+                candidate_offset,
+                partition_hash.into(),
+                config.consensus.entropy_packing_iterations,
+                config.consensus.chunk_size as usize,
+                &mut entropy_chunk,
+                config.consensus.chain_id,
+            );
+
+            // Compute solution hash = sha256(chunk || offset_le || seed)
+            let mut hasher = Sha256::new();
+            hasher.update(&entropy_chunk);
+            hasher.update((candidate_offset as u32).to_le_bytes());
+            hasher.update(steps[1].as_bytes());
+            let digest = hasher.finalize();
+            let mut digest_arr = [0_u8; 32];
+            digest_arr.copy_from_slice(&digest);
+            let solution_hash = H256::from(digest_arr);
+
+            // Check difficulty
+            let solution_num = U256::from_little_endian(solution_hash.as_bytes());
+            if solution_num >= prev_diff {
+                // Build a valid SolutionContext
+                let poa_solution = SolutionContext {
+                    partition_hash,
+                    chunk_offset: candidate_offset as u32,
+                    recall_chunk_index: (j as u32),
+                    mining_address: miner_addr,
+                    tx_path: None,
+                    data_path: None,
+                    chunk: entropy_chunk,
+                    vdf_step: current_step,
+                    checkpoints: compute_last_step_checkpoints(current_step),
+                    seed: Seed(steps[1]),
+                    solution_hash,
+                };
+                found = Some(poa_solution);
+                break 'outer;
+            }
+        }
+
+        // Try next VDF step
+        sleep(Duration::from_secs(1)).await;
+    }
+
     node_ctx.stop_vdf().await?;
-    Ok(poa_solution)
+
+    if let Some(sol) = found {
+        Ok(sol)
+    } else {
+        Err(eyre!(
+            "Failed to find valid mining solution within recall range and attempts"
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
