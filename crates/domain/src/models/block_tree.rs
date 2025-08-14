@@ -14,7 +14,7 @@ use tracing::debug;
 
 use crate::{
     create_ema_snapshot_from_chain_history, BlockIndexReadGuard, BlockTreeReadGuard,
-    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot, PrioritizedCommitment,
+    CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
 };
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ pub struct BlockMetadata {
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
-    epoch_snapshot: Arc<EpochSnapshot>,
+    pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,
 }
@@ -1338,7 +1338,7 @@ fn load_commitment_transactions(
         }
     }
 
-    txs.sort_by(|a, b| PrioritizedCommitment(a).cmp(&PrioritizedCommitment(b)));
+    txs.sort();
 
     Ok(txs)
 }

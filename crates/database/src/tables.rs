@@ -5,10 +5,9 @@ use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
     submodule::tables::{ChunkOffsets, ChunkPathHashes},
 };
-use irys_types::{
-    ingress::IngressProof, ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader, H256,
-};
+use irys_types::ingress::CachedIngressProof;
 use irys_types::{Address, Base64, CommitmentTransaction, PeerListItem};
+use irys_types::{ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader, H256};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
 use reth_db::{TableType, TableViewer};
@@ -79,6 +78,8 @@ add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
 
+add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
+
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
     CompactTxHeader,
@@ -93,7 +94,8 @@ impl_compression_for_compact!(
     RelativeStartOffsets,
     DataRootLRUEntry,
     GlobalChunkOffset,
-    CompactBase64
+    CompactBase64,
+    CompactCachedIngressProof
 );
 
 use paste::paste;
@@ -147,7 +149,8 @@ table CachedChunks {
 /// Indexes Ingress proofs by their data_root
 table IngressProofs {
     type Key = DataRoot;
-    type Value = IngressProof;
+    type Value = CompactCachedIngressProof;
+    type SubKey = Address;
 }
 
 /// Maps an ingress proof (by data_root) to the latest possible height it could be used at, given known transactions.

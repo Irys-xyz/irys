@@ -1,5 +1,6 @@
 use alloy_primitives::{Address, ChainId};
 use alloy_signer::Signature;
+use arbitrary::Arbitrary;
 use eyre::OptionExt as _;
 use openssl::sha;
 use reth_codecs::Compact;
@@ -13,12 +14,68 @@ use crate::irys::IrysSigner;
 use crate::{
     generate_data_root, generate_ingress_leaves, ChunkBytes, DataRoot, IrysSignature, Node, H256,
 };
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact)]
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
+
+pub struct CachedIngressProof {
+    pub address: Address, // subkey
+    pub proof: IngressProof,
+}
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Compact,
+    Arbitrary,
+    alloy_rlp::RlpEncodable,
+    alloy_rlp::RlpDecodable,
+)]
 pub struct IngressProof {
     pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
     pub chain_id: ChainId,
+}
+
+impl IngressProof {
+    /// Generates the prehash for signing/verification
+    /// Combines proof, data_root, and chain_id into a single digest
+    pub fn generate_prehash(proof: &H256, data_root: &H256, chain_id: ChainId) -> [u8; 32] {
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&proof.0);
+        hasher.update(&data_root.0);
+        hasher.update(&chain_id.to_be_bytes());
+        hasher.finish()
+    }
+
+    /// Recovers the signer address from the ingress proof signature
+    pub fn recover_signer(&self) -> eyre::Result<Address> {
+        // Recreate the prehash that was signed
+        let prehash = Self::generate_prehash(&self.proof, &self.data_root, self.chain_id);
+
+        // Recover the signer from the signature
+        let sig = self.signature.as_bytes();
+        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
+
+        Ok(recovered_address)
+    }
+
+    /// Validates that the proof matches the provided data_root and recovers the signer address
+    /// This method ensures the proof is for the correct data_root before validating the signature
+    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
+        // Validate that the data_root matches
+        if self.data_root != *data_root {
+            return Err(eyre::eyre!("Ingress proof data_root mismatch"));
+        }
+
+        // Recover and return the signer address
+        self.recover_signer()
+    }
 }
 
 impl Compress for IngressProof {
@@ -49,27 +106,23 @@ pub fn generate_ingress_proof_tree(
 }
 
 pub fn generate_ingress_proof(
-    signer: IrysSigner,
+    signer: &IrysSigner,
     data_root: DataRoot,
     chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
     chain_id: u64,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
-    let proof: [u8; 32] = root.id;
+    let proof = H256(root.id);
 
-    // Combine proof, data_root, and chain_id into a single digest to sign
-    let mut hasher = sha::Sha256::new();
-    hasher.update(&proof);
-    hasher.update(&data_root.0);
-    hasher.update(&chain_id.to_be_bytes());
-    let prehash = hasher.finish();
+    // Use the shared prehash generation function
+    let prehash = IngressProof::generate_prehash(&proof, &data_root, chain_id);
 
     let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
     Ok(IngressProof {
         signature: signature.into(),
         data_root,
-        proof: H256(root.id),
+        proof,
         chain_id,
     })
 }
@@ -83,11 +136,7 @@ pub fn verify_ingress_proof(
         return Ok(false); // Chain ID mismatch
     }
 
-    let mut hasher = sha::Sha256::new();
-    hasher.update(&proof.proof.0);
-    hasher.update(&proof.data_root.0);
-    hasher.update(&proof.chain_id.to_be_bytes());
-    let prehash = hasher.finish();
+    let prehash = IngressProof::generate_prehash(&proof.proof, &proof.data_root, proof.chain_id);
 
     let sig = proof.signature.as_bytes();
 
@@ -103,11 +152,8 @@ pub fn verify_ingress_proof(
     );
 
     // re-compute the prehash (combining data_root, proof, and chain_id)
-    let mut hasher = sha::Sha256::new();
-    hasher.update(&proof_root.id);
-    hasher.update(&data_root.0);
-    hasher.update(&proof.chain_id.to_be_bytes());
-    let new_prehash = hasher.finish();
+    let new_prehash =
+        IngressProof::generate_prehash(&H256(proof_root.id), &data_root, proof.chain_id);
 
     // make sure they match
     Ok(new_prehash == prehash)
@@ -175,7 +221,7 @@ mod tests {
             .collect();
         let chain_id = 1; // Example chain_id for testing
         let proof = generate_ingress_proof(
-            signer,
+            &signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
             chain_id,
@@ -224,7 +270,7 @@ mod tests {
         // Generate proof for testnet (chain_id = 1)
         let testnet_chain_id = 1;
         let testnet_proof = generate_ingress_proof(
-            signer.clone(),
+            &signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
             testnet_chain_id,
@@ -233,7 +279,7 @@ mod tests {
         // Generate proof for mainnet (chain_id = 2)
         let mainnet_chain_id = 2;
         let mainnet_proof = generate_ingress_proof(
-            signer,
+            &signer,
             data_root,
             chunks.clone().into_iter().map(Ok),
             mainnet_chain_id,

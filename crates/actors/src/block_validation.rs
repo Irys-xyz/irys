@@ -4,17 +4,17 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
-    shadow_tx_generator::ShadowTxGenerator,
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
+use irys_database::db::IrysDatabaseExt as _;
+use irys_database::{block_header_by_hash, SystemLedger};
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
-    PrioritizedCommitment,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -22,10 +22,16 @@ use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTIN
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
+use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
+use irys_types::storage_pricing::{Amount, TERM_FEE};
+use irys_types::BlockHash;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_difficulty, next_cumulative_diff, validate_path,
-    Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DifficultyAdjustmentConfig, IrysBlockHeader, PoaData, H256,
+    app_state::DatabaseProvider,
+    calculate_difficulty, next_cumulative_diff,
+    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
+    validate_path, Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
+    PoaData, H256, U256,
 };
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
@@ -33,9 +39,102 @@ use itertools::*;
 use openssl::sha;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
+use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use thiserror::Error;
 use tracing::{debug, error, info};
+
+#[derive(Debug, Error)]
+pub enum PreValidationError {
+    #[error("Failed to get block bounds: {0}")]
+    BlockBoundsLookupError(String),
+    #[error("block signature is not valid")]
+    BlockSignatureInvalid,
+    #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
+    CumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error("Invalid difficulty (expected {expected} got {got})")]
+    DifficultyMismatch { expected: U256, got: U256 },
+    #[error("Ema mismatch: recomputed EMA does not match Ema in block header")]
+    EmaMismatch,
+    #[error("EmaSnapshot creation error: {0}")]
+    EmaSnapshotError(String),
+    #[error("Ingress proofs missing")]
+    IngressProofsMissing,
+    #[error("Invalid ingress proof signature: {0}")]
+    IngressProofSignatureInvalid(String),
+    #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
+    LastDiffTimestampMismatch { expected: u128, got: u128 },
+    #[error("Invalid ledger id {ledger_id}")]
+    LedgerIdInvalid { ledger_id: u32 },
+    #[error("Invalid merkle proof: {0}")]
+    MerkleProofInvalid(String),
+    #[error("Oracle price invalid")]
+    OraclePriceInvalid,
+    #[error("PoA capacity chunk mismatch entropy_first={entropy_first:?} poa_first={poa_first:?}")]
+    PoACapacityChunkMismatch {
+        entropy_first: Option<u8>,
+        poa_first: Option<u8>,
+    },
+    #[error("PoA chunk hash mismatch: expected {expected:?}, got {got:?}, ledger_id={ledger_id:?}, ledger_chunk_offset={ledger_chunk_offset:?}")]
+    PoAChunkHashMismatch {
+        expected: H256,
+        got: H256,
+        ledger_id: Option<u32>,
+        ledger_chunk_offset: Option<u64>,
+    },
+    #[error("Missing PoA chunk to be pre validated")]
+    PoAChunkMissing,
+    #[error("PoA chunk offset out of tx's data chunks bounds")]
+    PoAChunkOffsetOutOfDataChunksBounds,
+    #[error("PoA chunk offset out of block bounds")]
+    PoAChunkOffsetOutOfBlockBounds,
+    #[error("PoA chunk offset out of tx bounds")]
+    PoAChunkOffsetOutOfTxBounds,
+    #[error("Missing partition assignment for partition hash {partition_hash}")]
+    PartitionAssignmentMissing { partition_hash: H256 },
+    #[error("Partition assignment for partition hash {partition_hash} is missing slot index")]
+    PartitionAssignmentSlotIndexMissing { partition_hash: H256 },
+    #[error("Partition assignment slot index too large for u64: {slot_index} (partition {partition_hash})")]
+    PartitionAssignmentSlotIndexTooLarge {
+        partition_hash: H256,
+        slot_index: usize,
+    },
+    #[error(
+        "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
+    )]
+    PoADataPartitionExpired { partition_hash: H256 },
+    #[error("Invalid previous_cumulative_diff (expected {expected} got {got})")]
+    PreviousCumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
+    PreviousSolutionHashMismatch { expected: H256, got: H256 },
+    #[error("Reward curve error: {0}")]
+    RewardCurveError(String),
+    #[error("Reward mismatch: got {got}, expected {expected}")]
+    RewardMismatch { got: U256, expected: U256 },
+    #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
+    SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("system time error: {0}")]
+    SystemTimeError(String),
+    #[error("block timestamp {current} is older than parent block {parent}")]
+    TimestampOlderThanParent { current: u128, parent: u128 },
+    #[error("block timestamp {current} too far in the future (now {now})")]
+    TimestampTooFarInFuture { current: u128, now: u128 },
+    #[error("Validation service unreachable")]
+    ValidationServiceUnreachable,
+    #[error("last_step_checkpoints validation failed: {0}")]
+    VDFCheckpointsInvalid(String),
+    #[error("vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})")]
+    VDFPreviousOutputMismatch { got: H256, expected: H256 },
+    #[error("Invalid block height (expected {expected} got {got})")]
+    HeightInvalid { expected: u64, got: u64 },
+    #[error("Invalid last_epoch_hash - expected {expected} got {got}")]
+    LastEpochHashMismatch { expected: BlockHash, got: BlockHash },
+}
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
@@ -45,7 +144,7 @@ pub async fn prevalidate_block(
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     debug!(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
@@ -54,13 +153,17 @@ pub async fn prevalidate_block(
 
     let poa_chunk: Vec<u8> = match &block.poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be pre validated")),
+        None => return Err(PreValidationError::PoAChunkMissing),
     };
 
-    if block.chunk_hash != sha::sha256(&poa_chunk).into() {
-        return Err(eyre::eyre!(
-            "Invalid block: chunk hash distinct from PoA chunk hash"
-        ));
+    let block_poa_hash: H256 = sha::sha256(&poa_chunk).into();
+    if block.chunk_hash != block_poa_hash {
+        return Err(PreValidationError::PoAChunkHashMismatch {
+            expected: block.chunk_hash,
+            got: block_poa_hash,
+            ledger_id: None,
+            ledger_chunk_offset: None,
+        });
     }
 
     // Check prev_output (vdf)
@@ -71,8 +174,30 @@ pub async fn prevalidate_block(
         "prev_output_is_valid",
     );
 
+    // Check block height continuity
+    height_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "height_is_valid",
+    );
+
+    // Check block timestamp drift
+    timestamp_is_valid(
+        block.timestamp,
+        previous_block.timestamp,
+        config.consensus.max_future_timestamp_drift_millis,
+    )?;
+
     // Check the difficulty
     difficulty_is_valid(
+        &block,
+        &previous_block,
+        &config.consensus.difficulty_adjustment,
+    )?;
+
+    // Validate the last_diff_timestamp field
+    last_diff_timestamp_is_valid(
         &block,
         &previous_block,
         &config.consensus.difficulty_adjustment,
@@ -82,6 +207,14 @@ pub async fn prevalidate_block(
         block_hash = ?block.block_hash.0.to_base58(),
         ?block.height,
         "difficulty_is_valid",
+    );
+
+    // Validate previous_cumulative_diff points to parent's cumulative_diff
+    previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "previous_cumulative_difficulty_is_valid",
     );
 
     // Check the cumulative difficulty
@@ -103,8 +236,41 @@ pub async fn prevalidate_block(
         "solution_hash_is_valid",
     );
 
+    // Check the previous solution hash references the parent correctly
+    previous_solution_hash_is_valid(&block, &previous_block)?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "previous_solution_hash_is_valid",
+    );
+
+    // Validate VDF seeds/next_seed against parent before any VDF-related processing
+    let vdf_reset_frequency: u64 = config.consensus.vdf.reset_frequency as u64;
+    if !matches!(
+        is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
+        ValidationResult::Valid
+    ) {
+        return Err(PreValidationError::VDFCheckpointsInvalid(
+            "Seed data is invalid".to_string(),
+        ));
+    }
+
+    // Ensure the last_epoch_hash field correctly references the most recent epoch block
+    last_epoch_hash_is_valid(
+        &block,
+        &previous_block,
+        config.consensus.epoch.num_blocks_in_epoch,
+    )?;
+    debug!(
+        block_hash = ?block.block_hash.0.to_base58(),
+        ?block.height,
+        "last_epoch_hash_is_valid",
+    );
+
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf).await?;
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.consensus.vdf)
+        .await
+        .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
@@ -112,7 +278,9 @@ pub async fn prevalidate_block(
         previous_block.oracle_irys_price,
         config.consensus.token_price_safe_range,
     );
-    ensure!(oracle_price_valid, "Oracle price must be valid");
+    if !oracle_price_valid {
+        return Err(PreValidationError::OraclePriceInvalid);
+    }
 
     // Check that the EMA has been correctly calculated
     let ema_valid = {
@@ -126,26 +294,33 @@ pub async fn prevalidate_block(
             .ema;
         res == block.ema_irys_price
     };
-    ensure!(ema_valid, "EMA must be valid");
+    if !ema_valid {
+        return Err(PreValidationError::EmaMismatch);
+    }
 
     // Check valid curve price
-    let reward = reward_curve.reward_between(
-        // adjust ms to sec
-        previous_block.timestamp.saturating_div(1000),
-        block.timestamp.saturating_div(1000),
-    )?;
-    let encoded_reward = block.reward_amount;
-    ensure!(
-        reward.amount == block.reward_amount,
-        "reward amount mismatch, expected {reward:}, got {encoded_reward:}"
-    );
+    let reward = reward_curve
+        .reward_between(
+            // adjust ms to sec
+            previous_block.timestamp.saturating_div(1000),
+            block.timestamp.saturating_div(1000),
+        )
+        .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+    if reward.amount != block.reward_amount {
+        return Err(PreValidationError::RewardMismatch {
+            got: block.reward_amount,
+            expected: reward.amount,
+        });
+    }
 
     // After pre-validating a bunch of quick checks we validate the signature
     // TODO: We may want to further check if the signer is a staked address
     // this is a little more advanced though as it requires knowing what the
     // commitment states looked like when this block was produced. For now
     // we just accept any valid signature.
-    ensure!(block.is_signature_valid(), "block signature is not valid");
+    if !block.is_signature_valid() {
+        return Err(PreValidationError::BlockSignatureInvalid);
+    }
 
     Ok(())
 }
@@ -153,16 +328,45 @@ pub async fn prevalidate_block(
 pub fn prev_output_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "vdf_limiter.prev_output ({}) does not match previous blocks vdf_limiter.output ({})",
-            &block.vdf_limiter_info.prev_output,
-            &previous_block.vdf_limiter_info.output
-        ))
+        Err(PreValidationError::VDFPreviousOutputMismatch {
+            got: block.vdf_limiter_info.prev_output,
+            expected: previous_block.vdf_limiter_info.output,
+        })
     }
+}
+
+// compares block timestamp against parent block
+// errors if the block has a lower timestamp than the parent block
+// compares timestamps of block against current system time
+// errors on drift more than MAX_TIMESTAMP_DRIFT_SECS into future
+pub fn timestamp_is_valid(
+    current: u128,
+    parent: u128,
+    allowed_drift: u128,
+) -> Result<(), PreValidationError> {
+    if current < parent {
+        return Err(PreValidationError::TimestampOlderThanParent { current, parent });
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| PreValidationError::SystemTimeError(e.to_string()))?
+        .as_millis();
+
+    let max_future = now_ms + allowed_drift;
+
+    if current > max_future {
+        return Err(PreValidationError::TimestampTooFarInFuture {
+            current,
+            now: now_ms,
+        });
+    }
+
+    Ok(())
 }
 
 /// Validates if a block's difficulty matches the expected difficulty calculated
@@ -172,7 +376,7 @@ pub fn difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let block_height = block.height;
     let current_timestamp = block.timestamp;
     let last_diff_timestamp = previous_block.last_diff_timestamp;
@@ -189,11 +393,37 @@ pub fn difficulty_is_valid(
     if diff == block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid difficulty (expected {} got {})",
-            &diff,
-            &block.diff
-        ))
+        Err(PreValidationError::DifficultyMismatch {
+            expected: diff,
+            got: block.diff,
+        })
+    }
+}
+
+/// Validates the `last_diff_timestamp` field in the block.
+///
+/// The value should equal the previous block's `last_diff_timestamp` unless the
+/// current block triggers a difficulty adjustment, in which case it must be set
+/// to the block's own timestamp.
+pub fn last_diff_timestamp_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    difficulty_config: &DifficultyAdjustmentConfig,
+) -> Result<(), PreValidationError> {
+    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
+    let expected = if block.height % blocks_between_adjustments == 0 {
+        block.timestamp
+    } else {
+        previous_block.last_diff_timestamp
+    };
+
+    if block.last_diff_timestamp == expected {
+        Ok(())
+    } else {
+        Err(PreValidationError::LastDiffTimestampMismatch {
+            expected,
+            got: block.last_diff_timestamp,
+        })
     }
 }
 
@@ -201,7 +431,7 @@ pub fn difficulty_is_valid(
 pub fn check_poa_data_expiration(
     poa: &PoaData,
     epoch_snapshot: Arc<EpochSnapshot>,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let is_data_partition_assigned = epoch_snapshot
         .partition_assignments
         .data_partitions
@@ -213,9 +443,9 @@ pub fn check_poa_data_expiration(
         && poa.ledger_id.is_some()
         && !is_data_partition_assigned
     {
-        return Err(eyre::eyre!(
-            "Invalid data PoA, partition hash is not a data partition, it may have expired"
-        ));
+        return Err(PreValidationError::PoADataPartitionExpired {
+            partition_hash: poa.partition_hash,
+        });
     };
     Ok(())
 }
@@ -227,7 +457,7 @@ pub fn check_poa_data_expiration(
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let previous_cumulative_diff = previous_block.cumulative_diff;
     let new_diff = block.diff;
 
@@ -235,11 +465,25 @@ pub fn cumulative_difficulty_is_valid(
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid cumulative_difficulty (expected {}, got {})",
-            &cumulative_diff,
-            &block.cumulative_diff
-        ))
+        Err(PreValidationError::CumulativeDifficultyMismatch {
+            expected: cumulative_diff,
+            got: block.cumulative_diff,
+        })
+    }
+}
+
+/// Validates that the block's previous_cumulative_diff equals the parent's cumulative_diff
+pub fn previous_cumulative_difficulty_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    if block.previous_cumulative_diff == previous_block.cumulative_diff {
+        Ok(())
+    } else {
+        Err(PreValidationError::PreviousCumulativeDifficultyMismatch {
+            expected: previous_block.cumulative_diff,
+            got: block.previous_cumulative_diff,
+        })
     }
 }
 
@@ -250,19 +494,94 @@ pub fn cumulative_difficulty_is_valid(
 pub fn solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
 
     if solution_diff >= previous_block.diff {
         Ok(())
     } else {
-        Err(eyre::eyre!(
-            "Invalid solution_hash - expected difficulty >={}, got {} (diff: {})",
-            &previous_block.diff,
-            &solution_diff,
-            &previous_block.diff.abs_diff(solution_diff)
-        ))
+        Err(PreValidationError::SolutionHashBelowDifficulty {
+            expected: previous_block.diff,
+            got: solution_diff,
+        })
+    }
+}
+
+/// Checks if the `previous_solution_hash` equals the previous block's `solution_hash`
+pub fn previous_solution_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    if block.previous_solution_hash == previous_block.solution_hash {
+        Ok(())
+    } else {
+        Err(PreValidationError::PreviousSolutionHashMismatch {
+            expected: previous_block.solution_hash,
+            got: block.previous_solution_hash,
+        })
+    }
+}
+
+/// Validates the `last_epoch_hash` field against the previous block and epoch rules.
+pub fn last_epoch_hash_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+    blocks_in_epoch: u64,
+) -> Result<(), PreValidationError> {
+    // if First block after an epoch boundary
+    let expected = if block.height > 0 && block.height % blocks_in_epoch == 1 {
+        previous_block.block_hash
+    } else {
+        previous_block.last_epoch_hash
+    };
+
+    if block.last_epoch_hash == expected {
+        Ok(())
+    } else {
+        Err(PreValidationError::LastEpochHashMismatch {
+            expected,
+            got: block.last_epoch_hash,
+        })
+    }
+}
+
+// Validates block height against previous block height + 1
+pub fn height_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    let expected = previous_block.height + 1;
+    if block.height == expected {
+        Ok(())
+    } else {
+        Err(PreValidationError::HeightInvalid {
+            expected,
+            got: block.height,
+        })
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+
+    #[test]
+    fn height_is_valid_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 10;
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 11;
+        assert!(height_is_valid(&block, &prev).is_ok());
+    }
+
+    #[test]
+    fn height_is_invalid_fails() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 10;
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 12;
+        assert!(height_is_valid(&block, &prev).is_err());
     }
 }
 
@@ -328,11 +647,11 @@ pub fn poa_is_valid(
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &Address,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
         Some(chunk) => chunk.clone().into(),
-        None => return Err(eyre::eyre!("Missing PoA chunk to be validated")),
+        None => return Err(PreValidationError::PoAChunkMissing),
     };
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
@@ -341,21 +660,35 @@ pub fn poa_is_valid(
         // partition data -> ledger data
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(poa.partition_hash)
-            .unwrap();
+            .ok_or(PreValidationError::PartitionAssignmentMissing {
+                partition_hash: poa.partition_hash,
+            })?;
 
-        let ledger_chunk_offset = partition_assignment.slot_index.unwrap() as u64
-            * config.num_partitions_per_slot
-            * config.num_chunks_in_partition
-            + poa.partition_chunk_offset as u64;
+        let slot_index = partition_assignment.slot_index.ok_or(
+            PreValidationError::PartitionAssignmentSlotIndexMissing {
+                partition_hash: poa.partition_hash,
+            },
+        )?;
+        let slot_index_u64 = u64::try_from(slot_index).map_err(|_| {
+            PreValidationError::PartitionAssignmentSlotIndexTooLarge {
+                partition_hash: poa.partition_hash,
+                slot_index,
+            }
+        })?;
+        let ledger_chunk_offset =
+            slot_index_u64 * config.num_partitions_per_slot * config.num_chunks_in_partition
+                + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
-        let ledger = DataLedger::try_from(ledger_id).unwrap();
+        let ledger = DataLedger::try_from(ledger_id)
+            .map_err(|_| PreValidationError::LedgerIdInvalid { ledger_id })?;
 
         let bb = block_index_guard
             .read()
-            .get_block_bounds(ledger, ledger_chunk_offset);
+            .get_block_bounds(ledger, ledger_chunk_offset)
+            .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
         if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
-            return Err(eyre::eyre!("PoA chunk offset out of block bounds"));
+            return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
@@ -365,26 +698,25 @@ pub fn poa_is_valid(
             bb.tx_root.0,
             &tx_path,
             block_chunk_offset * (config.chunk_size as u128),
-        )?;
+        )
+        .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(tx_path_result.left_bound..=tx_path_result.right_bound)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
-            return Err(eyre::eyre!("PoA chunk offset out of tx bounds"));
+            return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
         }
 
         let tx_chunk_offset =
             block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
 
         // data_path validation
-        let data_path_result =
-            validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)?;
+        let data_path_result = validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)
+            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
         {
-            return Err(eyre::eyre!(
-                "PoA chunk offset out of tx's data chunks bounds"
-            ));
+            return Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds);
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -412,13 +744,12 @@ pub fn poa_is_valid(
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(eyre::eyre!(
-                "PoA chunk hash mismatch\n{:?}\nleaf_hash: {:?}\nledger_id: {}\nledger_chunk_offset: {}",
-                poa_chunk,
-                data_path_result.leaf_hash,
-                ledger_id,
-                ledger_chunk_offset
-            ));
+            return Err(PreValidationError::PoAChunkHashMismatch {
+                expected: data_path_result.leaf_hash.into(),
+                got: poa_chunk_hash.into(),
+                ledger_id: Some(ledger_id),
+                ledger_chunk_offset: Some(ledger_chunk_offset),
+            });
         }
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -436,11 +767,10 @@ pub fn poa_is_valid(
                 debug!("Chunk PoA:{:?}", poa_chunk);
                 debug!("Entropy  :{:?}", entropy_chunk);
             }
-            return Err(eyre::eyre!(
-                "PoA capacity chunk mismatch {:?} /= {:?}",
-                entropy_chunk.first(),
-                poa_chunk.first()
-            ));
+            return Err(PreValidationError::PoACapacityChunkMismatch {
+                entropy_first: entropy_chunk.first().copied(),
+                poa_first: poa_chunk.first().copied(),
+            });
         }
     }
     Ok(())
@@ -457,42 +787,54 @@ pub async fn shadow_transactions_are_valid(
     payload_provider: ExecutionPayloadCache,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
-    let payload = payload_provider
+    let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
     let engine_api_client = reth_adapter.inner.engine_http_client();
-    let ExecutionData { payload, sidecar } = payload;
+    let ExecutionData { payload, sidecar } = execution_data;
 
-    let ExecutionPayload::V3(payload) = payload else {
+    let ExecutionPayload::V3(payload_v3) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
     };
     ensure!(
-        payload.withdrawals().is_empty(),
+        payload_v3.withdrawals().is_empty(),
         "withdrawals must always be empty"
     );
+
+    // ensure the execution payload timestamp matches the block timestamp
+    // truncated to full seconds
+    let payload_timestamp: u128 = payload_v3.timestamp().into();
+    let block_timestamp_sec = block.timestamp / 1000;
+    ensure!(
+            payload_timestamp == block_timestamp_sec,
+            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+        );
 
     let versioned_hashes = sidecar
         .versioned_hashes()
         .ok_or_eyre("version hashes must be present")?
         .clone();
     loop {
-        let payload = engine_api_client
+        let payload_status = engine_api_client
             .new_payload_v4(
-                payload.clone(),
+                payload_v3.clone(),
                 versioned_hashes.clone(),
                 block.previous_block_hash.into(),
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
             .await?;
-        match payload.status {
+        match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error))
+                return Err(eyre::Report::msg(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                tracing::debug!("syncing extra blocks to validate payload");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tracing::debug!(
+                    "syncing extra blocks to validate payload {:?}",
+                    payload_v3.payload_inner.payload_inner.block_num_hash()
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
@@ -505,7 +847,7 @@ pub async fn shadow_transactions_are_valid(
             }
         }
     }
-    let evm_block: Block = payload.try_into_block()?;
+    let evm_block: Block = payload_v3.try_into_block()?;
 
     // 2. Extract shadow transactions from the beginning of the block
     let mut expect_shadow_txs = true;
@@ -591,19 +933,30 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
 
     // Lookup data txs
-    let data_txs = extract_data_txs(service_senders, block, db).await?;
+    let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
 
-    let shadow_txs = ShadowTxGenerator::new(
+    // Lookup publish ledger for term fee rewards
+    let mut publish_ledger_with_txs =
+        extract_publish_ledger_with_txs(service_senders, block, db).await?;
+
+    // TODO: Get treasury balance from previous block once it's tracked in block headers
+    // this is a value that will not result in underflows / overflows while we don't have a proper value
+    let initial_treasury_balance = U256::MAX / U256::from(2);
+
+    let shadow_txs_vec = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
         &prev_block,
-    );
-    let shadow_txs = shadow_txs
-        .generate_all(&commitment_txs, &data_txs)
-        .map(|result| result.map(|metadata| metadata.shadow_tx))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(shadow_txs)
+        &config.consensus,
+        &commitment_txs,
+        &data_txs,
+        &mut publish_ledger_with_txs,
+        initial_treasury_balance,
+    )
+    .map(|result| result.map(|metadata| metadata.shadow_tx))
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok(shadow_txs_vec)
 }
 
 async fn extract_commitment_txs(
@@ -624,7 +977,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
                     .await?
             }
             [] => {
@@ -638,29 +991,37 @@ async fn extract_commitment_txs(
     Ok(commitment_txs)
 }
 
-async fn extract_data_txs(
+async fn extract_submit_ledger_txs(
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
-    let txs = match &block.data_ledgers[..] {
-        [publish_ledger, submit_ledger] => {
-            ensure!(
-                publish_ledger.ledger_id == DataLedger::Publish,
-                "Publish ledger must be the first ledger in the data ledgers"
-            );
-            ensure!(
-                submit_ledger.ledger_id == DataLedger::Submit,
-                "Submit ledger must be the second ledger in the data ledgers"
-            );
-            // we only access the submit ledger data. Publish ledger does not require billing the user extra
-            get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-                .await?
-        }
-        // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
-        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
-    };
+    let (_publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
+    // we only access the submit ledger data. Publish ledger does not require billing the user extra
+    let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+        .await?;
     Ok(txs)
+}
+
+/// Extracts publish ledger with transactions and ingress proofs for term fee reward distribution
+async fn extract_publish_ledger_with_txs(
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+) -> Result<PublishLedgerWithTxs, eyre::Error> {
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
+
+    // Fetch the actual transactions for the publish ledger
+    let txs = get_data_tx_in_parallel(
+        publish_ledger.tx_ids.0.clone(),
+        &service_senders.mempool,
+        db,
+    )
+    .await?;
+    Ok(PublishLedgerWithTxs {
+        txs,
+        proofs: publish_ledger.proofs.clone(),
+    })
 }
 
 /// Validates  the actual shadow transactions match the expected ones
@@ -717,7 +1078,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -730,17 +1091,12 @@ pub async fn commitment_txs_are_valid(
         .system_ledgers
         .iter()
         .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| &ledger.tx_ids.0)
-        .filter(|ids| !ids.is_empty());
-
-    let Some(block_tx_ids) = block_tx_ids else {
-        debug!("No commitment transactions in block");
-        return Ok(());
-    };
+        .map(|ledger| ledger.tx_ids.0.as_slice())
+        .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids.clone(), &service_senders.mempool, db).await?;
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -766,6 +1122,8 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        tracing::error!(?expected_commitments, "validation");
+        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments
@@ -819,9 +1177,9 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
-    // Sort using PrioritizedCommitment to get expected order
+    // Sort to get expected order
     let mut expected_order = stake_and_pledge_txs.clone();
-    expected_order.sort_by_key(|tx| PrioritizedCommitment(*tx));
+    expected_order.sort();
 
     // Compare actual order vs expected order
     for (idx, pair) in stake_and_pledge_txs
@@ -847,6 +1205,457 @@ pub async fn commitment_txs_are_valid(
     }
 
     debug!("Commitment transaction ordering is valid");
+    Ok(())
+}
+
+/// Helper function to calculate permanent storage fee using a specific EMA snapshot
+/// This includes base network fee + ingress proof rewards
+pub fn calculate_perm_storage_total_fee(
+    bytes_to_store: u64,
+    term_fee: U256,
+    ema_snapshot: &EmaSnapshot,
+    config: &Config,
+) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+    // Calculate the cost per GB (take into account replica count & cost per replica)
+    let cost_per_gb = config
+        .consensus
+        .annual_cost_per_gb
+        .cost_per_replica(
+            config.consensus.safe_minimum_number_of_years,
+            config.consensus.decay_rate,
+        )?
+        .replica_count(config.consensus.number_of_ingress_proofs)?;
+
+    // Calculate the base network fee (protocol cost) using the provided EMA snapshot
+    let base_network_fee = cost_per_gb.base_network_fee(
+        U256::from(bytes_to_store),
+        ema_snapshot.ema_for_public_pricing(),
+    )?;
+
+    // Add ingress proof rewards to the base network fee
+    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
+    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
+        term_fee,
+        config.consensus.number_of_ingress_proofs,
+        config.consensus.immediate_tx_inclusion_reward_percent,
+    )?;
+
+    Ok(total_perm_fee)
+}
+
+/// Helper function to calculate term storage fee using a specific EMA snapshot
+/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
+/// when term storage pricing is fully implemented
+pub fn calculate_term_storage_base_network_fee(
+    _bytes_to_store: u64,
+    _ema_snapshot: &EmaSnapshot,
+    _config: &Config,
+) -> eyre::Result<U256> {
+    // Placeholder implementation matching the mempool service
+    // Returns a fixed value until proper term fee calculation is implemented
+    Ok(TERM_FEE)
+}
+
+/// Validates that data transactions in a block are correctly placed and have valid properties
+/// based on their ledger placement (Submit or Publish) and ingress proof availability
+/// TODO: All of the warnings below should actually be transformed to hard errors!
+#[tracing::instrument(skip_all, err)]
+pub async fn data_txs_are_valid(
+    config: &Config,
+    service_senders: &ServiceSenders,
+    block: &IrysBlockHeader,
+    db: &DatabaseProvider,
+    block_tree_guard: &BlockTreeReadGuard,
+) -> eyre::Result<()> {
+    // Get the block's EMA snapshot for fee calculations
+    let block_ema = block_tree_guard
+        .read()
+        .get_ema_snapshot(&block.block_hash)
+        .ok_or_eyre("Block EMA snapshot not found")?;
+
+    // Extract data transactions from both ledgers
+    let (publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
+
+    // Get transactions from both ledgers
+    let publish_txs = get_data_tx_in_parallel(
+        publish_ledger.tx_ids.0.clone(),
+        &service_senders.mempool,
+        db,
+    )
+    .await?;
+
+    let submit_txs =
+        get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
+            .await?;
+
+    // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
+    let submit_ids: HashSet<H256> = submit_txs.iter().map(|tx| tx.id).collect();
+    let publish_ids: HashSet<H256> = publish_txs.iter().map(|tx| tx.id).collect();
+    let same_block_promotions = submit_ids
+        .intersection(&publish_ids)
+        .copied()
+        .collect::<HashSet<_>>();
+
+    // Log same-block promotions for debugging
+    for tx_id in &same_block_promotions {
+        debug!(
+            "Transaction {} promoted from Submit to Publish in same block",
+            tx_id
+        );
+    }
+    // Collect all tx_ids we need to check for previous inclusions
+    let mut txs_to_check = publish_txs
+        .iter()
+        .map(|x| (x, DataLedger::Publish))
+        .chain(submit_txs.iter().map(|x| (x, DataLedger::Submit)))
+        .map(|(tx, ledger_current)| {
+            let state = if same_block_promotions.contains(&tx.id) {
+                TxInclusionState::Found {
+                    ledger_current: DataLedger::Publish,
+                    ledger_historical: DataLedger::Submit,
+                }
+            } else {
+                TxInclusionState::Searching { ledger_current }
+            };
+            (tx.id, (tx, state))
+        })
+        .collect::<HashMap<_, _>>();
+
+    // Step 3: Check past inclusions only for non-promoted txs
+    get_previous_tx_inclusions(
+        &mut txs_to_check,
+        block,
+        config.consensus.mempool.anchor_expiry_depth as u64,
+        service_senders,
+        db,
+    )
+    .await?;
+
+    // Step 4: Validate based on ledger rules
+    for (tx, past_inclusion) in txs_to_check.values() {
+        match past_inclusion {
+            TxInclusionState::Searching { ledger_current } => {
+                match ledger_current {
+                    DataLedger::Publish => {
+                        // Publish tx with no past inclusion - INVALID
+                        tracing::warn!(
+                            "Transaction {} in Publish ledger must have prior Submit ledger inclusion",
+                            tx.id
+                        );
+                    }
+                    DataLedger::Submit => {
+                        // Submit tx with no past inclusion - VALID (new transaction)
+                        debug!("Transaction {} is new in Submit ledger", tx.id);
+                    }
+                }
+            }
+            TxInclusionState::Found {
+                ledger_current,
+                ledger_historical,
+            } => {
+                match (ledger_current, ledger_historical) {
+                    (DataLedger::Publish, DataLedger::Submit) => {
+                        // OK: Transaction promoted from past Submit to current Publish
+                        debug!(
+                            "Transaction {} promoted from past Submit to current Publish ledger",
+                            tx.id
+                        );
+                    }
+                    (DataLedger::Publish, DataLedger::Publish) => {
+                        tracing::warn!(
+                            "Transaction {} already included in previous Publish ledger",
+                            tx.id
+                        );
+                    }
+                    (DataLedger::Submit, _) => {
+                        // Submit tx should not have any past inclusion
+                        tracing::warn!(
+                            "Transaction {} in Submit ledger was already included in past {:?} ledger",
+                            tx.id, ledger_historical
+                        );
+                    }
+                }
+            }
+            TxInclusionState::Duplicate { ledger_historical } => {
+                // Transaction found in multiple past blocks - this is always invalid
+                tracing::warn!(
+                    "Transaction {} found in multiple previous blocks. First occurrence in {:?} ledger at block {}",
+                    tx.id, ledger_historical.0, ledger_historical.1
+                );
+            }
+        }
+    }
+
+    // Step 5: Validate all transactions (including same-block promotions)
+    let all_txs = publish_txs
+        .iter()
+        .map(|tx| (tx, DataLedger::Publish))
+        .chain(submit_txs.iter().map(|tx| (tx, DataLedger::Submit)));
+
+    for (tx, current_ledger) in all_txs {
+        // All data transactions must have ledger_id set to Publish
+        // TODO: support other term ledgers here
+        ensure!(
+            tx.ledger_id == DataLedger::Publish as u32,
+            "Transaction {} has invalid ledger_id. Expected: {}, Actual: {}",
+            tx.id,
+            DataLedger::Publish as u32,
+            tx.ledger_id
+        );
+
+        // Calculate expected fees based on data size using block's EMA
+        // Calculate term fee first as it's needed for perm fee calculation
+        let expected_term_fee =
+            calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)?;
+        let expected_perm_fee =
+            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)?;
+
+        // Validate perm_fee is at least the expected amount
+        let actual_perm_fee = tx.perm_fee.unwrap_or(U256::zero());
+        ensure!(
+            actual_perm_fee >= expected_perm_fee.amount,
+            "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
+            tx.id,
+            expected_perm_fee.amount,
+            actual_perm_fee
+        );
+
+        // Validate term_fee is at least the expected amount
+        let actual_term_fee = tx.term_fee;
+        ensure!(
+            actual_term_fee >= expected_term_fee,
+            "Transaction {} has insufficient term_fee. Expected at least: {}, Actual: {}",
+            tx.id,
+            expected_term_fee,
+            actual_term_fee
+        );
+
+        // Validate fee distribution structures can be created successfully
+        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
+        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+            eyre::eyre!(
+                "Transaction {} has invalid term fee structure: {}",
+                tx.id,
+                e
+            )
+        })?;
+
+        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
+            |e| {
+                eyre::eyre!(
+                    "Transaction {} has invalid perm fee structure: {}",
+                    tx.id,
+                    e
+                )
+            },
+        )?;
+
+        match current_ledger {
+            DataLedger::Publish => {
+                // no special publish-ledger-only asserts here
+            }
+            DataLedger::Submit => {
+                // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+                // (they're waiting for proofs to arrive)
+                if tx.ingress_proofs.is_none() {
+                    tracing::warn!(
+                        "Transaction {} in Submit ledger should not have ingress proofs",
+                        tx.id
+                    );
+                }
+            }
+        }
+    }
+
+    ensure!(
+        publish_ledger
+            .proofs
+            .as_ref()
+            .map(|x| x.0.len())
+            .unwrap_or_default()
+            == publish_txs.len(),
+        "the length of publish ledger proofs in a block does not match the count of publish txs"
+    );
+
+    // Validate ingress proofs list matches Publish ledger transactions
+    if let Some(proofs_list) = &publish_ledger.proofs {
+        ensure!(
+            proofs_list.len() == publish_txs.len(),
+            "Ingress proofs count mismatch. Expected: {}, Actual: {}",
+            publish_txs.len(),
+            proofs_list.len()
+        );
+
+        // Validate each proof corresponds to the correct transaction
+        for item in publish_txs.iter().zip_longest(proofs_list.iter()) {
+            let EitherOrBoth::Both(tx, proof) = item else {
+                tracing::warn!("publish tx and proof length mismatch, cannot validate publish ledger transaction proofs");
+                break;
+            };
+
+            // Validate ingress proofs are present
+            let Some(tx_proof) = tx.ingress_proofs.as_ref() else {
+                tracing::warn!(
+                    "Transaction {} in Publish ledger missing ingress proofs",
+                    tx.id
+                );
+                continue;
+            };
+
+            // Validate ingress proof signature and data_root match
+            // The proof signature should be valid for the transaction's data_root
+            let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
+                eyre::eyre!("Transaction {} has invalid ingress proof: {}", tx.id, e)
+            })?;
+
+            // TODO: use `verify_ingress_proof` to verify all ingress proof chunks and data
+            // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
+            ensure!(
+                tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
+                "Ingress proof mismatch for transaction {}",
+                tx.id
+            );
+        }
+    }
+
+    // TODO: validate that block.treasury is correctly updated
+
+    debug!("Data transaction validation successful");
+    Ok(())
+}
+
+fn extract_data_ledgers(
+    block: &IrysBlockHeader,
+) -> eyre::Result<(&DataTransactionLedger, &DataTransactionLedger)> {
+    let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
+        [publish_ledger, submit_ledger] => {
+            ensure!(
+                publish_ledger.ledger_id == DataLedger::Publish,
+                "Publish ledger must be the first ledger in the data ledgers"
+            );
+            ensure!(
+                submit_ledger.ledger_id == DataLedger::Submit,
+                "Submit ledger must be the second ledger in the data ledgers"
+            );
+            (publish_ledger, submit_ledger)
+        }
+        [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
+    };
+    Ok((publish_ledger, submit_ledger))
+}
+
+/// State for tracking transaction inclusion search
+#[derive(Clone, Copy, Debug)]
+enum TxInclusionState {
+    Searching {
+        ledger_current: DataLedger,
+    },
+    Found {
+        ledger_current: DataLedger,
+        ledger_historical: DataLedger,
+    },
+    Duplicate {
+        ledger_historical: (DataLedger, BlockHash),
+    },
+}
+
+#[tracing::instrument(skip_all, fields(block_under_validation = ?block_under_validation.block_hash))]
+async fn get_previous_tx_inclusions(
+    tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
+    block_under_validation: &IrysBlockHeader,
+    anchor_expiry_depth: u64,
+    service_senders: &ServiceSenders,
+    db: &DatabaseProvider,
+) -> eyre::Result<()> {
+    // Early return for empty input
+    if tx_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Get mempool data and release lock quickly
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    service_senders
+        .mempool
+        .send(MempoolServiceMessage::GetState(tx))?;
+    let mempool_state = rx.await?;
+    let mempool_guard = mempool_state.read().await;
+
+    let min_anchor_height = block_under_validation
+        .height
+        .saturating_sub(anchor_expiry_depth);
+
+    let mut block = (
+        block_under_validation.block_hash,
+        block_under_validation.height,
+    );
+    while block.1 >= min_anchor_height {
+        // Stop if we've reached the genesis block
+        if block.1 == 0 {
+            break;
+        }
+
+        let mut update_states = |header: &IrysBlockHeader| {
+            if header.block_hash == block_under_validation.block_hash {
+                // don't process the states for a block we're putting under full validation
+                return Ok(());
+            }
+            process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
+        };
+        // Move to the parent block and continue the traversal backwards
+        block = match mempool_guard.prevalidated_blocks.get(&block.0) {
+            Some(header) => {
+                update_states(header)?;
+                (header.previous_block_hash, header.height.saturating_sub(1))
+            }
+            None => {
+                let header = db
+                    .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
+                    .unwrap()
+                    .unwrap()
+                    .expect("to find the parent block header in the database");
+                update_states(&header)?;
+                (header.previous_block_hash, header.height.saturating_sub(1))
+            }
+        };
+    }
+
+    Ok(())
+}
+
+/// Process ledgers and update transaction states
+/// Returns true if all transactions have been found
+fn process_block_ledgers_with_states(
+    ledgers: &[DataTransactionLedger],
+    block_hash: BlockHash,
+    tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
+) -> eyre::Result<()> {
+    for ledger in ledgers {
+        let ledger_type = DataLedger::try_from(ledger.ledger_id)?;
+
+        // Check each transaction in this ledger
+        for tx_id in &ledger.tx_ids.0 {
+            if let Some((_, state)) = tx_states.get_mut(tx_id) {
+                match state {
+                    TxInclusionState::Searching { ledger_current } => {
+                        // First time finding this transaction
+                        *state = TxInclusionState::Found {
+                            ledger_current: *ledger_current,
+                            ledger_historical: ledger_type,
+                        };
+                    }
+                    TxInclusionState::Found { .. } => {
+                        // Transaction already found once, this is a duplicate
+                        *state = TxInclusionState::Duplicate {
+                            ledger_historical: (ledger_type, block_hash),
+                        };
+                    }
+                    TxInclusionState::Duplicate { .. } => {
+                        // Already marked as duplicate, no need to update
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -919,14 +1728,19 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let block_index = Arc::new(RwLock::new(BlockIndex::new(&node_config).await.unwrap()));
+        let block_index = Arc::new(RwLock::new(
+            BlockIndex::new(&node_config)
+                .await
+                .expect("Expected to create block index"),
+        ));
 
         let block_index_actor =
             BlockIndexService::new(block_index.clone(), &consensus_config).start();
         SystemRegistry::set(block_index_actor.clone());
 
         let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
+                .expect("Expected to load storage submodules config");
 
         // Create an epoch snapshot for the genesis block
         let epoch_snapshot = EpochSnapshot::new(
@@ -952,7 +1766,7 @@ mod tests {
 
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(partition_hash)
-            .unwrap();
+            .expect("Expected to get partition assignment");
 
         debug!("Partition assignment {:?}", partition_assignment);
 
@@ -991,8 +1805,12 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
+            let tx = signer
+                .create_transaction(data, None)
+                .expect("Expected to create a transaction");
+            let tx = signer
+                .sign_transaction(tx)
+                .expect("Expected to sign the transaction");
             txs.push(tx);
         }
 
@@ -1022,8 +1840,12 @@ mod tests {
         let mut txs: Vec<DataTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
-        let tx = signer.create_transaction(data.clone(), None).unwrap();
-        let tx = signer.sign_transaction(tx).unwrap();
+        let tx = signer
+            .create_transaction(data.clone(), None)
+            .expect("Expected to create a transaction");
+        let tx = signer
+            .sign_transaction(tx)
+            .expect("Expected to sign the transaction");
         txs.push(tx);
 
         let poa_tx_num = 0;
@@ -1112,7 +1934,11 @@ mod tests {
         // Initialize genesis block at height 0
         let height: u64;
         {
-            height = context.block_index.read().unwrap().num_blocks();
+            height = context
+                .block_index
+                .read()
+                .expect("Expected to be able to read block index")
+                .num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -1203,9 +2029,13 @@ mod tests {
             .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
-            .unwrap();
+            .expect("Failed to get block index guard");
 
-        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = context
+            .partition_assignment
+            .slot_index
+            .expect("Expected to have a slot index in the assignment")
+            as u64
             * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
@@ -1219,7 +2049,8 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
@@ -1260,8 +2091,12 @@ mod tests {
             for chunk in chunks {
                 data.extend_from_slice(chunk);
             }
-            let tx = signer.create_transaction(data, None).unwrap();
-            let tx = signer.sign_transaction(tx).unwrap();
+            let tx = signer
+                .create_transaction(data, None)
+                .expect("Expected to create a transaction");
+            let tx = signer
+                .sign_transaction(tx)
+                .expect("Expected to sign the transaction");
             txs.push(tx);
         }
 
@@ -1298,7 +2133,11 @@ mod tests {
         // Initialize genesis block at height 0
         let height: u64;
         {
-            height = context.block_index.read().unwrap().num_blocks();
+            height = context
+                .block_index
+                .read()
+                .expect("To read block index")
+                .num_blocks();
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -1344,7 +2183,7 @@ mod tests {
 
         // Trim to actual data size for hash calculation (chunk_size might be larger)
         let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
-        let entropy_packed_hash = hash_sha256(trimmed_hacked).unwrap();
+        let entropy_packed_hash = hash_sha256(trimmed_hacked).expect("Expected to hash data");
 
         // Calculate the correct offset for this chunk position
         let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
@@ -1444,9 +2283,12 @@ mod tests {
             .block_index_actor
             .send(GetBlockIndexGuardMessage)
             .await
-            .unwrap();
+            .expect("Expected to get block index guard");
 
-        let ledger_chunk_offset = context.partition_assignment.slot_index.unwrap() as u64
+        let ledger_chunk_offset = context
+            .partition_assignment
+            .slot_index
+            .expect("Expected to get slot index") as u64
             * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
@@ -1460,7 +2302,8 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset);
+            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
@@ -1477,6 +2320,214 @@ mod tests {
             &context.miner_address,
         );
 
-        assert!(poa_valid.is_err(), "PoA should be invalid");
+        match poa_valid {
+            Err(PreValidationError::PoAChunkHashMismatch {
+                ledger_id,
+                ledger_chunk_offset,
+                expected,
+                got,
+            }) => {
+                assert!(ledger_id.is_some(), "expected ledger_id context");
+                assert!(
+                    ledger_chunk_offset.is_some(),
+                    "expected ledger_chunk_offset context"
+                );
+                assert_ne!(expected, got, "expected and got hashes should differ");
+            }
+            Err(PreValidationError::MerkleProofInvalid(msg)) => {
+                assert!(
+                    msg.contains("hash mismatch"),
+                    "expected hash mismatch merkle proof error, got: {}",
+                    msg
+                );
+            }
+            Err(other) => panic!(
+                "expected PoAChunkHashMismatch or MerkleProofInvalid, got {:?}",
+                other
+            ),
+            Ok(_) => panic!("expected invalid PoA, but validation succeeded"),
+        }
+    }
+
+    #[test]
+    /// unit test for acceptable block clock drift into future
+    fn test_timestamp_is_valid_future() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let future_ts = now_ms + consensus_config.max_future_timestamp_drift_millis - 1_000; // MAX DRIFT - 1 seconds in the future
+        let previous_ts = now_ms - 10_000;
+        let result = timestamp_is_valid(
+            future_ts,
+            previous_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        // Expect an error due to block timestamp being too far in the future
+        assert!(
+            result.is_ok(),
+            "Expected acceptable for future timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for block clock drift into past
+    fn test_timestamp_is_valid_past() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let block_ts = now_ms - consensus_config.max_future_timestamp_drift_millis - 1_000; // MAX DRIFT + 1 seconds in the past
+        let previous_ts = now_ms - 60_000;
+        let result = timestamp_is_valid(
+            block_ts,
+            previous_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        // Expect an no error when block timestamp being too far in the past
+        assert!(
+            result.is_ok(),
+            "Expected no error due to past timestamp drift"
+        );
+    }
+
+    #[test]
+    /// unit test for unacceptable block clock drift into future
+    fn test_timestamp_is_invalid_future() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let block_ts = now_ms + consensus_config.max_future_timestamp_drift_millis + 1_000; // MAX DRIFT + 1 seconds in the future
+        let previous_ts = now_ms - 10_000;
+        let result = timestamp_is_valid(
+            block_ts,
+            previous_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        match result {
+            Err(super::PreValidationError::TimestampTooFarInFuture { current, now }) => {
+                assert!(
+                    current > now,
+                    "current should be greater than now for future drift"
+                );
+            }
+            other => panic!("expected TimestampTooFarInFuture, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timestamp_older_than_parent_is_invalid() {
+        let consensus_config = ConsensusConfig::testing();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let parent_ts = now_ms;
+        let current_ts = parent_ts.saturating_sub(1);
+        let result = timestamp_is_valid(
+            current_ts,
+            parent_ts,
+            consensus_config.max_future_timestamp_drift_millis,
+        );
+        match result {
+            Err(super::PreValidationError::TimestampOlderThanParent { current, parent }) => {
+                assert_eq!(current, current_ts);
+                assert_eq!(parent, parent_ts);
+            }
+            other => panic!("expected TimestampOlderThanParent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn last_diff_timestamp_no_adjustment_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 1;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 2;
+        block.timestamp = 1500;
+        block.last_diff_timestamp = prev.last_diff_timestamp;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        );
+    }
+
+    #[test]
+    fn last_diff_timestamp_adjustment_ok() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 9;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 10;
+        block.timestamp = 2000;
+        block.last_diff_timestamp = block.timestamp;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        );
+    }
+
+    #[test]
+    fn last_diff_timestamp_incorrect_fails() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.height = 1;
+        prev.last_diff_timestamp = 1000;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 2;
+        block.timestamp = 1500;
+        block.last_diff_timestamp = 999;
+
+        let mut config = ConsensusConfig::testing();
+        config.difficulty_adjustment.difficulty_adjustment_interval = 10;
+
+        assert!(
+            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_err()
+        );
+    }
+
+    #[test]
+    fn previous_cumulative_difficulty_validates_match() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.cumulative_diff = U256::from(12345);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.previous_cumulative_diff = prev.cumulative_diff;
+
+        assert!(
+            previous_cumulative_difficulty_is_valid(&block, &prev).is_ok(),
+            "expected previous_cumulative_diff to match parent's cumulative_diff"
+        );
+    }
+
+    #[test]
+    fn previous_cumulative_difficulty_detects_mismatch() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.cumulative_diff = U256::from(12345);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.previous_cumulative_diff = U256::from(9999);
+
+        if let Err(PreValidationError::PreviousCumulativeDifficultyMismatch { expected, got }) =
+            previous_cumulative_difficulty_is_valid(&block, &prev)
+        {
+            assert_eq!(expected, prev.cumulative_diff);
+            assert_eq!(got, block.previous_cumulative_diff);
+        } else {
+            panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
+        }
     }
 }

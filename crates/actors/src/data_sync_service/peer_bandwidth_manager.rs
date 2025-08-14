@@ -1,78 +1,102 @@
-use irys_domain::{ChunkTimeRecord, CircularBuffer};
-use irys_types::{partition::PartitionAssignment, Config, PeerAddress, PeerListItem};
-use std::time::{Duration, Instant};
-
-#[derive(Debug)]
-pub enum PeerCapacity {
-    Low,    // 0-40 MB/s of throughput
-    Medium, // 40-80 MB/s of throughput
-    High,   // >80 MB/s of throughput
-}
+use crate::data_sync_service::peer_stats::PeerStats;
+use irys_domain::ChunkTimeRecord;
+use irys_types::{partition::PartitionAssignment, Address, Config, PeerAddress, PeerListItem};
 
 #[derive(Debug)]
 pub struct PeerBandwidthManager {
     pub partition_assignments: Vec<PartitionAssignment>,
     pub peer_address: PeerAddress,
-    pub peer_capacity: PeerCapacity,
-    pub interval_start_time: Instant,
-    pub recent_chunk_times: CircularBuffer<ChunkTimeRecord>,
-    pub throughput: u64,
-    pub last_throughput: u64,
-    pub active_requests: usize,
+    pub miner_address: Address,
     pub config: Config,
+    peer_stats: PeerStats, // private - external access only through wrapper methods
 }
 
 impl PeerBandwidthManager {
-    pub fn new(peer_list_item: &PeerListItem, config: &Config) -> Self {
+    pub fn new(miner_address: &Address, peer_list_item: &PeerListItem, config: &Config) -> Self {
+        let chunk_size = config.consensus.chunk_size;
+        let timeout = config.node_config.data_sync.chunk_request_timeout;
+        let target_bandwidth_mbps = 100; // Default target, adjust as needed
+
         Self {
             partition_assignments: Vec::new(),
             peer_address: peer_list_item.address,
-            peer_capacity: PeerCapacity::Medium,
-            throughput: 0,
-            interval_start_time: Instant::now(),
-            last_throughput: 0,
-            recent_chunk_times: Default::default(),
-            active_requests: 0,
+            miner_address: *miner_address,
             config: config.clone(),
+            peer_stats: PeerStats::new(target_bandwidth_mbps, chunk_size, timeout),
         }
     }
 
-    pub fn requests_available(&self, max_bandwidth_bps: u32) -> i32 {
-        self.optimal_concurrency(max_bandwidth_bps) as i32 - self.active_requests as i32
+    pub fn active_requests(&self) -> usize {
+        self.peer_stats.active_requests
     }
 
-    /// Returns the average completion time for chunks in the buffer.
-    /// Returns Duration::ZERO if no chunks are recorded.
-    pub fn average_chunk_completion_time(&self) -> Duration {
-        let recent_chunk_times = &self.recent_chunk_times;
-        if recent_chunk_times.is_empty() {
-            return Duration::ZERO;
-        }
-
-        // Calculate average duration from all records
-        let total_duration_nanos: u128 = recent_chunk_times
-            .iter()
-            .map(|record| record.total_duration.as_nanos())
-            .sum();
-
-        let avg_duration_nanos = total_duration_nanos / recent_chunk_times.len() as u128;
-
-        Duration::from_nanos(avg_duration_nanos as u64)
+    /// Record when a new request is started
+    pub fn on_chunk_request_started(&mut self) {
+        self.peer_stats.record_request_started();
     }
 
-    pub fn optimal_concurrency(&self, max_bandwidth_bps: u32) -> u32 {
-        let average_chunk_completion_time = self.average_chunk_completion_time();
+    /// Record a successful chunk completion
+    pub fn on_chunk_request_completed(&mut self, completion_record: ChunkTimeRecord) {
+        self.peer_stats.record_request_completed(completion_record);
+    }
 
-        // Calculate current throughput per chunk (bytes/s)
-        let throughput_per_chunk =
-            self.config.consensus.chunk_size as f32 / average_chunk_completion_time.as_secs_f32();
+    /// Record a failed chunk request
+    pub fn on_chunk_request_failure(&mut self) {
+        self.peer_stats.record_request_failed();
+    }
 
-        // Calculate how many concurrent chunks we can run without exceeding bandwidth
-        let optimal_concurrency = max_bandwidth_bps as f32 / throughput_per_chunk;
+    /// Get max concurrency (upper bound)
+    pub fn max_concurrency(&self) -> usize {
+        self.peer_stats.max_concurrency as usize
+    }
 
-        let optimal_concurrency = optimal_concurrency.floor() as u32;
+    /// Set max concurrency (upper bound)
+    pub fn set_max_concurrency(&mut self, concurrency: usize) {
+        self.peer_stats.max_concurrency = concurrency as u32;
+    }
 
-        // Set the floor concurrency to at least 1
-        optimal_concurrency.max(1)
+    /// Get current max concurrency (dynamic limit)
+    pub fn current_max_concurrency(&self) -> usize {
+        self.peer_stats.current_max_concurrency as usize
+    }
+
+    /// Get available concurrency capacity (relative to dynamic limit)
+    pub fn available_concurrency(&self) -> u32 {
+        self.peer_stats.available_concurrency()
+    }
+
+    /// Get short-term bandwidth throughput in bytes per second (10s window)
+    pub fn current_bandwidth_bps(&self) -> u64 {
+        self.peer_stats.short_term_bandwidth_bps()
+    }
+
+    pub fn consecutive_failures(&self) -> u32 {
+        self.peer_stats.consecutive_failures
+    }
+
+    pub fn total_failures(&self) -> u64 {
+        self.peer_stats.total_failures
+    }
+
+    /// Get a health score for this peer (0.0 to 1.0)
+    /// Higher scores indicate better performing, more reliable peers
+    pub fn health_score(&self) -> f64 {
+        self.peer_stats.health_score()
+    }
+
+    pub fn short_term_bandwidth_bps(&self) -> u64 {
+        self.peer_stats.short_term_bandwidth_bps()
+    }
+
+    pub fn medium_term_bandwidth_bps(&self) -> u64 {
+        self.peer_stats.medium_term_bandwidth_bps()
+    }
+
+    pub fn is_throughput_stable(&self) -> bool {
+        self.peer_stats.is_throughput_stable()
+    }
+
+    pub fn is_throughput_improving(&self) -> bool {
+        self.peer_stats.is_throughput_improving()
     }
 }

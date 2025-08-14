@@ -19,6 +19,8 @@ impl PeerScore {
     pub const MAX: u16 = 100;
     pub const INITIAL: u16 = 50;
     pub const ACTIVE_THRESHOLD: u16 = 20;
+    /// Score threshold for unstaked peers to be persisted to the database
+    pub const PERSISTENCE_THRESHOLD: u16 = 80;
 
     pub fn new(score: u16) -> Self {
         Self(score.clamp(Self::MIN, Self::MAX))
@@ -38,6 +40,11 @@ impl PeerScore {
 
     pub fn is_active(&self) -> bool {
         self.0 >= Self::ACTIVE_THRESHOLD
+    }
+
+    /// Checks if the peer score is high enough to be persisted to database (for unstaked peers)
+    pub fn is_persistable(&self) -> bool {
+        self.0 >= Self::PERSISTENCE_THRESHOLD
     }
 
     pub fn get(&self) -> u16 {

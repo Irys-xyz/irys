@@ -7,6 +7,7 @@ use irys_actors::block_discovery::{
 };
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
+use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
@@ -31,14 +32,15 @@ use irys_config::chain::chainspec::IrysChainSpecBuilder;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
     EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
     StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, GetPeerListGuard, P2PService, PeerNetworkService,
-    ServiceHandleWithShutdownSignal, SyncState,
+    BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
+    P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -102,12 +104,13 @@ pub struct IrysNodeCtx {
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
     pub peer_list: PeerList,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
     pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
+    pub sync_service_facade: SyncChainServiceFacade,
 }
 
 impl IrysNodeCtx {
@@ -408,10 +411,21 @@ impl IrysNode {
         let difficulty = calculate_initial_difficulty(&self.config.consensus, storage_module_count)
             .expect("valid calculated initial difficulty");
 
-        // Create timestamp for genesis block
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let timestamp = now.as_millis();
+        // Create timestamp for genesis block (prefer configured value if provided)
+        let configured_ts = self.config.consensus.genesis.timestamp_millis;
+        let timestamp = if configured_ts != 0 {
+            configured_ts
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
         genesis_block.diff = difficulty;
+        // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
+        if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
+            genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
+        }
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;
 
@@ -604,17 +618,9 @@ impl IrysNode {
             &node_config.reth_peer_info.peering_tcp_addr
         );
 
-        let latest_known_block_height = ctx.block_index_guard.read().latest_height();
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
-        irys_p2p::sync_chain(
-            ctx.sync_state.clone(),
-            irys_api_client::IrysApiClient::new(),
-            &ctx.peer_list,
-            latest_known_block_height as usize,
-            &ctx.config,
-        )
-        .await?;
+        ctx.sync_service_facade.initial_sync().await?;
 
         // Call stake_and_pledge after mempool service is initialized
         if ctx.config.node_config.stake_pledge_drives {
@@ -1127,6 +1133,16 @@ impl IrysNode {
         // set up chunk provider
         let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
 
+        // set up sync service
+        let (sync_service_facade, sync_service_handle) = Self::init_sync_service(
+            sync_state.clone(),
+            peer_list_guard.clone(),
+            config.clone(),
+            block_index_guard.clone(),
+            runtime_handle.clone(),
+            &block_pool,
+        );
+
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
@@ -1157,6 +1173,7 @@ impl IrysNode {
             validation_enabled,
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),
+            sync_service_facade,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1170,15 +1187,22 @@ impl IrysNode {
             receivers.storage_modules,
             storage_modules.clone(),
             &irys_node_ctx.actor_addresses,
+            service_senders.clone(),
             &config,
             runtime_handle.clone(),
         );
+
+        // Production chunk fetcher is the HTTP chunk fetcher
+        let http_factory: ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(HttpChunkFetcher::new(ledger_id)));
 
         let data_sync_handle = DataSyncService::spawn_service(
             receivers.data_sync,
             block_tree_guard.clone(),
             storage_modules.clone(),
             peer_list_guard.clone(),
+            http_factory,
+            &service_senders,
             &config,
             runtime_handle.clone(),
         );
@@ -1217,10 +1241,13 @@ impl IrysNode {
             services.push(ArbiterEnum::TokioService(storage_module_handle));
             services.push(ArbiterEnum::TokioService(data_sync_handle));
 
-            // 5. Chain management
+            // 5. Sync operations
+            services.push(ArbiterEnum::TokioService(sync_service_handle));
+
+            // 6. Chain management
             services.push(ArbiterEnum::TokioService(block_tree_handle));
 
-            // 6. State management
+            // 7. State management
             services.push(ArbiterEnum::TokioService(mempool_handle));
 
             // 7. Core infrastructure (shutdown last)
@@ -1543,6 +1570,30 @@ impl IrysNode {
         let block_index_service_actor = block_index_service.start();
         SystemRegistry::set(block_index_service_actor.clone());
         block_index_service_actor
+    }
+
+    fn init_sync_service(
+        sync_state: ChainSyncState,
+        peer_list: PeerList,
+        config: Config,
+        block_index_guard: BlockIndexReadGuard,
+        runtime_handle: tokio::runtime::Handle,
+        block_pool: &BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>,
+    ) -> (SyncChainServiceFacade, TokioServiceHandle) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let facade = SyncChainServiceFacade::new(tx);
+
+        let inner = ChainSyncServiceInner::new(
+            sync_state,
+            peer_list,
+            config,
+            block_index_guard,
+            block_pool,
+        );
+
+        let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);
+
+        (facade, handle)
     }
 }
 

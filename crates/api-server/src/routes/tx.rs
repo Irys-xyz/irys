@@ -79,6 +79,8 @@ pub async fn post_tx(
                     commitment_validation_error
                 )))
             }
+            TxIngressError::InvalidLedger(_) => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .body(format!("Invalid ledger ID: {:?}", err))),
         };
     }
 
@@ -137,7 +139,7 @@ pub async fn get_transaction(
 ) -> Result<IrysTransactionResponse, ApiError> {
     let vec = vec![tx_id];
     if let Ok(mut result) =
-        get_commitment_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+        get_commitment_tx_in_parallel(&vec, &state.mempool_service, &state.db).await
     {
         if let Some(tx) = result.pop() {
             return Ok(IrysTransactionResponse::Commitment(tx));

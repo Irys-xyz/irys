@@ -79,7 +79,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let req = TestRequest::post()
         .uri("/v1/version")
-        .set_json(version_request)
+        .peer_addr("127.0.0.1:12345".parse().unwrap())
+        .set_json(&version_request)
         .to_request();
     let resp = call_service(&app, req).await;
     let body = read_body(resp).await;
@@ -93,6 +94,35 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let pretty_json =
         serde_json::to_string_pretty(&peer_response).expect("Failed to serialize to pretty JSON");
     println!("Pretty JSON:\n{}", pretty_json);
+
+    // Test that we get rejected if the source IP doesn't match the gossip IP
+    let req = TestRequest::post()
+        .uri("/v1/version")
+        .peer_addr("127.0.0.5:12345".parse().unwrap())
+        .set_json(&version_request)
+        .to_request();
+    let resp = call_service(&app, req).await;
+    let body = read_body(resp).await;
+
+    // Parse String to JSON
+    let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
+    let peer_response: PeerResponse =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
+
+    match peer_response {
+        PeerResponse::Accepted(_) => panic!("Expected Rejected response, got Accepted"),
+        PeerResponse::Rejected(response) => {
+            assert!(matches!(
+                response.reason,
+                irys_types::RejectionReason::InvalidCredentials
+            ));
+            assert_eq!(
+                response.message,
+                Some("The source address does not match the request address".to_string())
+            );
+            assert!(response.retry_after.is_none(), "Expected no retry after");
+        }
+    }
 
     let miner_signer_2 = IrysSigner::random_signer(&config.consensus_config());
 
@@ -121,6 +151,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let req = TestRequest::post()
         .uri("/v1/version")
+        .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
     let resp = call_service(&app, req).await;
@@ -148,7 +179,9 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 "Missing expected peer 127.0.0.1:8080"
             );
         }
-        PeerResponse::Rejected(_) => panic!("Expected Accepted response, got Rejected"),
+        PeerResponse::Rejected(rejected) => {
+            panic!("Expected Accepted response, got {:?}", rejected)
+        }
     }
 
     let version_json = serde_json::json!({
@@ -172,6 +205,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let req = TestRequest::post()
         .uri("/v1/version")
+        .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
     let resp = call_service(&app, req).await;
@@ -219,6 +253,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let req = TestRequest::post()
         .uri("/v1/version")
+        .peer_addr("127.0.0.3:12345".parse().unwrap())
         .set_json(version_request)
         .to_request();
     let resp = call_service(&app, req).await;
@@ -260,7 +295,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     }
 
     // Verify the peer_list shows all the peers
-    let req = TestRequest::get().uri("/v1/peer_list").to_request();
+    let req = TestRequest::get()
+        .uri("/v1/peer_list")
+        .peer_addr("127.0.0.2:12345".parse().unwrap())
+        .to_request();
     let resp = call_service(&app, req).await;
     let body = read_body(resp).await;
 

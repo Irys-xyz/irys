@@ -373,7 +373,8 @@ where
         let server_handle = HttpServer::new(move || {
             App::new()
                 .app_data(Data::new(server.clone()))
-                .wrap(middleware::Logger::default())
+                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
+                .wrap(middleware::Logger::default()) // TODO: use tracing_actix_web TracingLogger
                 .service(
                     web::scope("/gossip")
                         .route("/transaction", web::post().to(Self::handle_transaction))
@@ -427,7 +428,7 @@ mod tests {
         let peer_list = PeerList::new(&config, &db, peer_network_sender).expect("peer list");
 
         let miner = Address::new([1_u8; 20]);
-        peer_list.add_or_update_peer(miner, PeerListItem::default());
+        peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
 
         let error = GossipError::BlockPool(BlockPoolError::BlockError("bad".into()));
         GossipServer::<MempoolStub, BlockDiscoveryStub, ApiClientStub>::handle_invalid_data(
