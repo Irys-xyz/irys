@@ -27,6 +27,11 @@ impl BlockIndexReadGuard {
         self.block_index_data.read().unwrap()
     }
 
+    /// Get the inner Arc<RwLock<BlockIndex>>
+    pub fn inner(&self) -> Arc<RwLock<BlockIndex>> {
+        self.block_index_data.clone()
+    }
+
     /// Debug utility to validate block index integrity
     ///
     /// Iterates through all items in the block index and verifies that each entry's

@@ -97,7 +97,19 @@ pub async fn calculate_expired_ledger_fees(
     // Step 1: Collect expired partitions
     let expired_slots = collect_expired_partitions(epoch_snapshot, block_height, ledger_type)?;
 
+    tracing::info!(
+        "Ledger expiry check at block {}: found {} expired slots for {:?} ledger",
+        block_height,
+        expired_slots.len(),
+        ledger_type
+    );
+
     if expired_slots.is_empty() {
+        tracing::debug!(
+            "No expired partitions for {:?} ledger at block {}",
+            ledger_type,
+            block_height
+        );
         return Ok(BTreeMap::new());
     }
 
@@ -151,7 +163,29 @@ pub async fn calculate_expired_ledger_fees(
     transactions.sort();
 
     // Step 7: Calculate fees
-    aggregate_miner_fees(transactions, &tx_to_miners, config)
+    tracing::debug!(
+        "Processing {} transactions for fee distribution to {} unique miners",
+        transactions.len(),
+        tx_to_miners
+            .values()
+            .flat_map(|v| v.iter())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+
+    let fees = aggregate_miner_fees(transactions, &tx_to_miners, config)?;
+
+    let total_fees = fees
+        .values()
+        .fold(U256::from(0), |acc, (fee, _)| acc.saturating_add(*fee));
+
+    tracing::info!(
+        "Calculated fees for {} miners, total fees: {}",
+        fees.len(),
+        total_fees
+    );
+
+    Ok(fees)
 }
 
 /// Fetches a block header from mempool or database
@@ -172,6 +206,7 @@ async fn get_block_by_hash(
 }
 
 /// Collects all expired partitions for the specified ledger type and their miners
+#[tracing::instrument]
 fn collect_expired_partitions(
     epoch_snapshot: &EpochSnapshot,
     block_height: u64,
@@ -180,6 +215,14 @@ fn collect_expired_partitions(
     let mut ledgers = epoch_snapshot.ledgers.clone();
     let partition_assignments = &epoch_snapshot.partition_assignments;
     let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
+
+    tracing::debug!(
+        "collect_expired_partitions: block_height={}, target_ledger={:?}, found {} expired partition hashes",
+        block_height,
+        target_ledger_type,
+        expired_partition_hashes.len()
+    );
+
     let mut expired_ledger_slot_indexes = HashMap::new();
 
     for expired_partition_hash in expired_partition_hashes {
@@ -205,12 +248,25 @@ fn collect_expired_partitions(
                 eyre::bail!("publish ledger cannot expire");
             }
 
+            tracing::info!(
+                "Found expired partition for {:?} ledger at slot_index={}, miner={:?}",
+                ledger_id,
+                slot_index.0,
+                partition.miner_address
+            );
+
             expired_ledger_slot_indexes
                 .entry(slot_index)
                 .and_modify(|miners: &mut Vec<Address>| {
                     miners.push(partition.miner_address);
                 })
                 .or_insert(vec![partition.miner_address]);
+        } else {
+            tracing::debug!(
+                "Skipping partition with ledger_id={:?} (looking for {:?})",
+                ledger_id,
+                target_ledger_type
+            );
         }
     }
 
@@ -285,12 +341,6 @@ fn find_block_range(
             blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::clone(&miners));
         }
     }
-
-    // Ensure min and max blocks are different to avoid duplicate processing
-    eyre::ensure!(
-        min_block.item.block_hash != max_block.item.block_hash,
-        "Min and max blocks are the same - partition spans only one block"
-    );
 
     // Get miners for boundary blocks before removing them
     let min_block_miners = blocks_with_expired_ledgers
@@ -416,29 +466,31 @@ fn filter_transactions_by_chunk_range(
     let mut filtered_txs = Vec::new();
     let mut tx_to_miners = HashMap::new();
 
-    for tx in transactions {
-        let chunks = tx.data_size.div_ceil(chunk_size);
-        let tx_start = current_offset;
-        let tx_end = current_offset + chunks;
+    if miners.len() > 0 {
+        for tx in transactions {
+            let chunks = tx.data_size.div_ceil(chunk_size);
+            let tx_start = current_offset;
+            let tx_end = current_offset + chunks;
 
-        if is_earliest {
-            // For earliest block: skip transactions that start before the partition
-            // We only include transactions fully contained within the partition
-            if tx_start < partition_range.start() {
-                current_offset = tx_end;
-                continue;
+            if is_earliest {
+                // For earliest block: skip transactions that start before the partition
+                // We only include transactions fully contained within the partition
+                if tx_start < partition_range.start() {
+                    current_offset = tx_end;
+                    continue;
+                }
+            } else {
+                // For latest block: stop when we reach a transaction that starts after the partition end
+                if tx_start > partition_range.end() {
+                    break;
+                }
             }
-        } else {
-            // For latest block: stop when we reach a transaction that starts after the partition end
-            if tx_start > partition_range.end() {
-                break;
-            }
+
+            // Include this transaction
+            filtered_txs.push(tx.id);
+            tx_to_miners.insert(tx.id, Arc::clone(&miners));
+            current_offset = tx_end;
         }
-
-        // Include this transaction
-        filtered_txs.push(tx.id);
-        tx_to_miners.insert(tx.id, Arc::clone(&miners));
-        current_offset = tx_end;
     }
 
     (filtered_txs, tx_to_miners)
@@ -515,7 +567,7 @@ impl SlotIndex {
 
     fn compute_chunk_range(&self, chunks_per_partition: u64) -> LedgerChunkRange {
         let start = LedgerChunkOffset::from(self.0 * chunks_per_partition);
-        let end = LedgerChunkOffset::from((self.0 + 1) * chunks_per_partition - 1);
+        let end = start + chunks_per_partition;
         LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
     }
 }

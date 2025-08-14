@@ -59,7 +59,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
 
 mod block_validation_tracker;
-mod ledger_expiry;
+pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
 
 /// Commands that can be sent to the block producer service
@@ -161,7 +161,7 @@ impl BlockProducerService {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, ret, err)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block producer service");
         debug!(
@@ -909,6 +909,7 @@ pub trait BlockProdStrategy {
                 .get_epoch_snapshot(&prev_block_header.block_hash)
                 .ok_or_eyre("parent blocks epoch snapshot must be available")?;
 
+            tracing::error!("about to calculate fees");
             // Calculate fees for expired ledgers
             aggregated_miner_fees = self
                 .calculate_expired_ledger_fees(&epoch_snapshot, block_height)

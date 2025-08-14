@@ -1,6 +1,7 @@
 use crate::block_tree_service::ValidationResult;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
@@ -14,7 +15,8 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, SystemLedger};
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
+    ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -785,6 +787,8 @@ pub async fn shadow_transactions_are_valid(
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
     let execution_data = payload_provider
@@ -896,8 +900,15 @@ pub async fn shadow_transactions_are_valid(
         .filter_map(std::result::Result::transpose);
 
     // 3. Generate expected shadow transactions
-    let expected_txs =
-        generate_expected_shadow_transactions_from_db(config, service_senders, block, db).await?;
+    let expected_txs = generate_expected_shadow_transactions_from_db(
+        config,
+        service_senders,
+        block,
+        db,
+        parent_epoch_snapshot,
+        block_index,
+    )
+    .await?;
 
     // 4. Validate they match
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter())
@@ -910,6 +921,8 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
     let prev_block = {
@@ -943,6 +956,23 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     // this is a value that will not result in underflows / overflows while we don't have a proper value
     let initial_treasury_balance = U256::MAX / U256::from(2);
 
+    // Calculate expired ledger fees for epoch blocks
+    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let expired_ledger_fees = if is_epoch_block {
+        ledger_expiry::calculate_expired_ledger_fees(
+            &parent_epoch_snapshot,
+            block.height,
+            DataLedger::Submit, // Currently only Submit ledgers expire
+            config,
+            block_index,
+            service_senders.mempool.clone(),
+            db.clone(),
+        )
+        .await?
+    } else {
+        BTreeMap::new()
+    };
+
     let shadow_txs_vec = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -953,7 +983,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &data_txs,
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
-        &BTreeMap::new(), // No expired ledger fees in validation context
+        &expired_ledger_fees,
     )
     .map(|result| result.map(|metadata| metadata.shadow_tx))
     .collect::<Result<Vec<_>, _>>()?;
