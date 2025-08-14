@@ -20,7 +20,7 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use base58::ToBase58 as _;
-use eyre::{eyre, OptionExt};
+use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExponentialMarketAvgCalculation,
@@ -1079,7 +1079,7 @@ pub trait BlockProdStrategy {
 
             let ledger_id = partition
                 .ledger_id
-                .map(|id| DataLedger::try_from(id))
+                .map(DataLedger::try_from)
                 .ok_or_eyre("ledger id must be present")??;
             let slot_index = partition
                 .slot_index
@@ -1119,7 +1119,7 @@ pub trait BlockProdStrategy {
 
                 // check if we need to update the min/max block index item
                 if let Some(min_item) = &mut min_block_index_item {
-                    if min_item.0 < idx {
+                    if min_item.0 > idx {
                         *min_item = (idx, block_index_item.clone(), start_offset, end_offset);
                     }
                 } else {
@@ -1127,7 +1127,7 @@ pub trait BlockProdStrategy {
                         Some((idx, block_index_item.clone(), start_offset, end_offset));
                 }
                 if let Some(max_item) = &mut max_block_index_item {
-                    if max_item.0 > idx {
+                    if max_item.0 < idx {
                         *max_item = (idx, block_index_item.clone(), start_offset, end_offset);
                     }
                 } else {
@@ -1140,12 +1140,22 @@ pub trait BlockProdStrategy {
         // Step 2.1: Remove min block index item and max block index item
         let min_block_index_item = min_block_index_item.unwrap();
         let max_block_index_item = max_block_index_item.unwrap();
+
+        // Ensure min and max blocks are different to avoid duplicate processing
+        eyre::ensure!(
+            min_block_index_item.1.block_hash != max_block_index_item.1.block_hash,
+            "Min and max blocks are the same - partition spans only one block"
+        );
         let min_block_miners = blocks_with_expired_submit_ledgers
             .remove(&min_block_index_item.1.block_hash)
             .unwrap();
         let max_block_miners = blocks_with_expired_submit_ledgers
             .remove(&max_block_index_item.1.block_hash)
             .unwrap();
+
+        // Initialize collections for transaction processing
+        let mut data_txs = Vec::<H256>::new();
+        let mut data_tx_miner_set = HashMap::new();
 
         // Step 2.2: handle earliest and last block by figuring out which txs need to be included
         let earliest_block = self
@@ -1159,61 +1169,137 @@ pub trait BlockProdStrategy {
         let submit_txs_earliest = data_txs_earliest.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
         let submit_txs_latest = data_txs_latest.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
         let mut submit_data_txs_earliest = get_data_tx_in_parallel(
-            submit_txs_earliest.into_iter().map(|x| *x).collect(),
+            submit_txs_earliest.iter().copied().collect(),
             &self.inner().service_senders.mempool,
             &self.inner().db,
         )
         .await?;
         let mut submit_data_txs_latest = get_data_tx_in_parallel(
-            submit_txs_latest.into_iter().map(|x| *x).collect(),
+            submit_txs_latest.iter().copied().collect(),
             &self.inner().service_senders.mempool,
             &self.inner().db,
         )
         .await?;
-        // for each txid you visit, look at it's size, compute the number of chunks it
-        // would consume in the ledger, check to see if the start chunk is contained in
-        // the lower bound for the slot? if not, move to the next txid and do the same
+
+        // Sort transactions to match their order in the block
+        submit_data_txs_earliest.sort_by_key(|tx| {
+            submit_txs_earliest
+                .iter()
+                .position(|id| *id == tx.id)
+                .unwrap_or(usize::MAX)
+        });
+        submit_data_txs_latest.sort_by_key(|tx| {
+            submit_txs_latest
+                .iter()
+                .position(|id| *id == tx.id)
+                .unwrap_or(usize::MAX)
+        });
+
+        // Filter transactions from the earliest block
+        let (start_offset, _end_offset) = (min_block_index_item.2, min_block_index_item.3);
+        let prev_max_offset = if min_block_index_item.0 == 0 {
+            0
+        } else {
+            let block_index_read = self
+                .inner()
+                .block_index
+                .read()
+                .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
+            block_index_read
+                .get_item(min_block_index_item.0 - 1)
+                .ok_or_eyre("previous block must exist")?
+                .ledgers[DataLedger::Submit]
+                .max_chunk_offset
+        };
+
+        let mut current_offset = prev_max_offset;
+        let mut filtered_earliest_txs = Vec::new();
         for tx in submit_data_txs_earliest {
-            // todo - compute how many chunks is the current tx taking up
-            // todo - correlate this with max_chunk_offset form DataIndexItem.ledgers[Submit].max_chunk_offset
-            // todo - currently only print a log  if it must be included
+            let chunks = tx.data_size.div_ceil(config.consensus.chunk_size);
+            let _tx_start = current_offset;
+            let tx_end = current_offset + chunks;
+
+            // Skip transactions that end before or at the partition start
+            if tx_end <= start_offset {
+                current_offset = tx_end;
+                continue;
+            }
+
+            // Include all remaining transactions (they overlap or are fully inside)
+            filtered_earliest_txs.push(tx.id);
+            data_tx_miner_set.insert(tx.id, Arc::clone(&min_block_miners));
+
+            current_offset = tx_end;
         }
+        data_txs.extend(filtered_earliest_txs);
 
-        // todo do the same for `latest` block txs, except here we only include all the txs up to
-        // the point of the first one that exceeds the bounds
+        // Filter transactions from the latest block
+        let (_start_offset_latest, end_offset_latest) =
+            (max_block_index_item.2, max_block_index_item.3);
+        let prev_max_offset_latest = if max_block_index_item.0 == 0 {
+            0
+        } else {
+            let block_index_read = self
+                .inner()
+                .block_index
+                .read()
+                .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
+            block_index_read
+                .get_item(max_block_index_item.0 - 1)
+                .ok_or_eyre("previous block must exist")?
+                .ledgers[DataLedger::Submit]
+                .max_chunk_offset
+        };
 
-        // Step 3: Collect transaction IDs and their associated miners
-        let mut data_txs = Vec::<H256>::new();
-        let mut data_tx_miner_set = HashMap::new();
+        let mut current_offset = prev_max_offset_latest;
+        let mut filtered_latest_txs = Vec::new();
+        for tx in submit_data_txs_latest {
+            let chunks = tx.data_size.div_ceil(config.consensus.chunk_size);
+            let tx_start = current_offset;
+
+            // Stop when we reach a transaction that starts at or after the partition end
+            if tx_start >= end_offset_latest {
+                break;
+            }
+
+            // Include this transaction (it starts before the partition end)
+            filtered_latest_txs.push(tx.id);
+            data_tx_miner_set.insert(tx.id, Arc::clone(&max_block_miners));
+
+            current_offset += chunks;
+        }
+        data_txs.extend(filtered_latest_txs);
+
+        // Step 3: Collect transaction IDs and their associated miners from middle blocks
         for (block_hash, miners) in blocks_with_expired_submit_ledgers {
             let block = self.get_block_by_hash(block_hash).await?;
 
             let get_data_ledger_tx_ids = block.get_data_ledger_tx_ids();
             let data_txs_ids = get_data_ledger_tx_ids.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
             for data_tx in data_txs_ids.iter() {
-                data_tx_miner_set.insert(data_tx.clone(), Arc::clone(&miners));
+                data_tx_miner_set.insert(*data_tx, Arc::clone(&miners));
             }
             data_txs.extend(data_txs_ids);
         }
 
         // Step 4: Fetch the actual data transactions
-        let mut data_txs = get_data_tx_in_parallel(
-            data_txs_ids.into_iter().map(|x| *x).collect(),
+        let mut data_txs_fetched = get_data_tx_in_parallel(
+            data_txs,
             &self.inner().service_senders.mempool,
             &self.inner().db,
         )
         .await?;
-        data_txs.sort();
+        data_txs_fetched.sort();
 
         // Step 5: Calculate and aggregate fees for each miner
         let mut aggregated_miner_fees = HashMap::<Address, (U256, RollingHash)>::new();
-        for data_tx in data_txs.iter() {
+        for data_tx in data_txs_fetched.iter() {
             let miners_that_stored_this_tx = data_tx_miner_set
                 .get(&data_tx.id)
                 .expect("guaranteed to have the miner list");
             let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
             let fee_distribution_per_miner =
-                fee_charges.distribution_on_expiry(&miners_that_stored_this_tx)?;
+                fee_charges.distribution_on_expiry(miners_that_stored_this_tx)?;
             for (miner, fee) in miners_that_stored_this_tx
                 .iter()
                 .zip(fee_distribution_per_miner)

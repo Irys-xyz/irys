@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon as _, H256, U256,
+    IrysBlockHeader, IrysTransactionCommon as _, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
