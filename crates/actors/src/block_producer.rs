@@ -300,7 +300,7 @@ pub trait BlockProdStrategy {
             tx_path: solution.tx_path.clone().map(Base64),
             data_path: solution.data_path.clone().map(Base64),
             chunk: Some(poa_chunk),
-            recall_chunk_index: solution.recall_chunk_index,
+
             ledger_id,
             partition_chunk_offset: solution.chunk_offset,
             partition_hash: solution.partition_hash,
