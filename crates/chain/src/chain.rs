@@ -429,8 +429,11 @@ impl IrysNode {
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;
 
-        // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config).await;
+        // Add commitment transactions to genesis block and get initial treasury
+        let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
+
+        // Set the genesis treasury to the total value of all commitments
+        genesis_block.treasury = initial_treasury;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
@@ -463,6 +466,9 @@ impl IrysNode {
         let commitments = fetch_genesis_commitments(trusted_peer, &genesis_block)
             .await
             .expect("Must be able to read genesis commitment tx from trusted peer");
+
+        // Note: When fetching from a trusted peer, the genesis_block already has the treasury field set
+        // from the remote peer, so we don't need to recalculate it
 
         (genesis_block, commitments)
     }

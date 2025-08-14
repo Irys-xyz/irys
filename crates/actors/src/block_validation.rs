@@ -939,11 +939,10 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let mut publish_ledger_with_txs =
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
-    // TODO: Get treasury balance from previous block once it's tracked in block headers
-    // this is a value that will not result in underflows / overflows while we don't have a proper value
-    let initial_treasury_balance = U256::MAX / U256::from(2);
+    // Get treasury balance from previous block
+    let initial_treasury_balance = prev_block.treasury;
 
-    let shadow_txs_vec = ShadowTxGenerator::new(
+    let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
@@ -953,9 +952,26 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &data_txs,
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
-    )
-    .map(|result| result.map(|metadata| metadata.shadow_tx))
-    .collect::<Result<Vec<_>, _>>()?;
+    );
+
+    let mut shadow_txs_vec = Vec::new();
+    for result in shadow_tx_generator.by_ref() {
+        let metadata = result?;
+        shadow_txs_vec.push(metadata.shadow_tx);
+    }
+
+    // Get final treasury balance after processing all transactions
+    let expected_treasury = shadow_tx_generator.treasury_balance();
+
+    // Validate that the block's treasury matches the expected value
+    ensure!(
+        block.treasury == expected_treasury,
+        "Treasury mismatch: expected {} but found {} at block height {}",
+        expected_treasury,
+        block.treasury,
+        block.height
+    );
+
     Ok(shadow_txs_vec)
 }
 
@@ -1721,7 +1737,9 @@ mod tests {
             ..node_config.consensus_config()
         };
 
-        let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+        let (commitments, initial_treasury) =
+            add_genesis_commitments(&mut genesis_block, &config).await;
+        genesis_block.treasury = initial_treasury;
 
         let arc_genesis = Arc::new(genesis_block.clone());
         let signer = config.irys_signer();

@@ -382,7 +382,7 @@ pub trait BlockProdStrategy {
         let (system_tx_ledger, commitment_txs_to_bill, submit_txs, mut publish_txs) =
             self.get_mempool_txs(&prev_block_header).await?;
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
-        let eth_built_payload = self
+        let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
@@ -406,6 +406,7 @@ pub trait BlockProdStrategy {
                 block_reward,
                 evm_block,
                 &prev_block_ema_snapshot,
+                final_treasury,
             )
             .await?;
 
@@ -434,6 +435,7 @@ pub trait BlockProdStrategy {
     }
 
     /// Extracts and collects all transactions that should be included in a block
+    /// Returns the EthBuiltPayload and the final treasury balance
     async fn create_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -443,15 +445,15 @@ pub trait BlockProdStrategy {
         publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
-    ) -> eyre::Result<EthBuiltPayload> {
+    ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
 
-        // TODO: Get treasury balance from previous block once it's tracked in block headers
-        let initial_treasury_balance = U256::MAX / U256::from(2);
+        // Get treasury balance from previous block
+        let initial_treasury_balance = prev_block_header.treasury;
 
         // Generate expected shadow transactions using shared logic
-        let shadow_txs_iter = ShadowTxGenerator::new(
+        let mut shadow_tx_generator = ShadowTxGenerator::new(
             &block_height,
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
@@ -461,8 +463,10 @@ pub trait BlockProdStrategy {
             submit_txs,
             publish_txs,
             initial_treasury_balance,
-        )
-        .map(|tx_result| {
+        );
+
+        let mut shadow_txs = Vec::new();
+        for tx_result in shadow_tx_generator.by_ref() {
             let metadata = tx_result?;
             let mut tx_raw = compose_shadow_tx(
                 self.inner().config.consensus.chain_id,
@@ -476,17 +480,22 @@ pub trait BlockProdStrategy {
                 .try_into_recovered()
                 .expect("shadow tx must always be signable");
 
-            Ok::<EthPooledTransaction, eyre::Report>(EthPooledTransaction::new(tx, 300))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+            shadow_txs.push(EthPooledTransaction::new(tx, 300));
+        }
 
-        self.build_and_submit_reth_payload(
-            prev_block_header,
-            timestamp_ms,
-            shadow_txs_iter,
-            perv_evm_block.header.mix_hash,
-        )
-        .await
+        // Get the final treasury balance after all transactions
+        let final_treasury_balance = shadow_tx_generator.treasury_balance();
+
+        let payload = self
+            .build_and_submit_reth_payload(
+                prev_block_header,
+                timestamp_ms,
+                shadow_txs,
+                perv_evm_block.header.mix_hash,
+            )
+            .await?;
+
+        Ok((payload, final_treasury_balance))
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -590,6 +599,7 @@ pub trait BlockProdStrategy {
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
+        final_treasury: U256,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
@@ -727,6 +737,7 @@ pub trait BlockProdStrategy {
             ),
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
+            treasury: final_treasury,
         };
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash

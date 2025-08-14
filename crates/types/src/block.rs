@@ -248,6 +248,9 @@ pub struct IrysBlockHeader {
     /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
     /// This is what the protocol uses for different pricing calculation purposes.
     pub ema_irys_price: IrysTokenPrice,
+
+    /// Treasury balance tracking fees collected and rewards paid
+    pub treasury: U256,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -582,6 +585,7 @@ impl IrysBlockHeader {
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
+            treasury: U256::zero(),
             ..Default::default()
         }
     }
