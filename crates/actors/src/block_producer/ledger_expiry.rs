@@ -10,18 +10,20 @@
 //! doesn't divide evenly into the partition's chunk capacity, it can span multiple partitions:
 //!
 //! ```text
-//! Partition A (chunks 0-99)     |    Partition B (chunks 100-199)
-//! ----------------------------- | ------------------------------
-//! [Tx1: chunks 0-49]            |
-//! [Tx2: chunks 50-97]           |
-//! [Tx3: chunks 98-104] <--------|-------- Spans both partitions!
-//!                               | [Tx4: chunks 105-150]
+//! Partition A (chunks 0-99)   | Partition B (chunks 100-199) | Partition C (chunks 200-299)
+//! ---------------------------- | ----------------------------- | ----------------------------
+//! [Tx1: chunks 0-49]          |                               |
+//! [Tx2: chunks 50-149] <------|---------> Spans A & B         |
+//!                             | [Tx3: chunks 150-199]          |
+//!                             | [Tx4: chunks 180-250] <--------|---------> Spans B & C
+//!                             |                               | [Tx5: chunks 251-299]
 //! ```
 //!
-//! When Partition A expires, we must:
-//! - Include Tx1 and Tx2 (fully within partition)
-//! - Include Tx3 (overlaps with partition)
-//! - Exclude Tx4 (entirely outside partition)
+//! When Partition B expires, we must:
+//! - Exclude Tx2 (starts in partition A - not fully contained)
+//! - Include Tx3 (fully within partition B)
+//! - Include Tx4 (starts in partition B - fully owned by B)
+//! - Ignore Tx1 and Tx5 (not in partition B range)
 //!
 //! ## Detection Strategy
 //!
@@ -35,12 +37,12 @@
 //! ## Filtering Logic
 //!
 //! ### Earliest Block
-//! - Skip transactions that end before the partition starts
-//! - Include the first transaction that overlaps the partition start
+//! - Skip transactions that start before the partition boundary
+//! - Include the first transaction fully contained within the partition
 //! - Include all subsequent transactions in the block
 //!
 //! ### Latest Block
-//! - Include all transactions until one starts outside the partition
+//! - Include all transactions that start within the partition
 //! - Stop processing when a transaction begins after the partition end
 //!
 //! ### Middle Blocks
@@ -394,9 +396,10 @@ async fn process_boundary_block(
 ///
 /// # Boundary Handling
 ///
-/// - **Earliest block**: Skips transactions until finding one that overlaps the partition start,
-///   then includes all remaining transactions
-/// - **Latest block**: Includes transactions until finding one that starts outside the partition
+/// - **Earliest block**: Skips transactions that start before the partition boundary,
+///   only including transactions fully contained within the partition
+/// - **Latest block**: Includes all transactions that start within the partition,
+///   even if they extend beyond the partition end
 ///
 /// # Returns
 ///
@@ -419,8 +422,9 @@ fn filter_transactions_by_chunk_range(
         let tx_end = current_offset + chunks;
 
         if is_earliest {
-            // For earliest block: skip transactions that end before or at the partition start
-            if tx_end <= partition_range.start() {
+            // For earliest block: skip transactions that start before the partition
+            // We only include transactions fully contained within the partition
+            if tx_start < partition_range.start() {
                 current_offset = tx_end;
                 continue;
             }
