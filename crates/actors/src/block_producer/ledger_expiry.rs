@@ -62,9 +62,11 @@ use eyre::OptionExt as _;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
-    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, Address, BlockIndexItem, Config,
-    DataLedger, DataTransactionHeader, IrysBlockHeader, H256, U256,
+    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
+    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
+    LedgerChunkRange, H256, U256,
 };
+use nodit::interval::ii;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
@@ -225,8 +227,7 @@ fn find_block_range(
     let mut max_block_index_item = Option::<BoundaryBlock>::None;
 
     for (slot_index, miners) in expired_slots {
-        let (start_offset, end_offset) =
-            slot_index.compute_chunk_range(config.consensus.num_chunks_in_partition);
+        let chunk_range = slot_index.compute_chunk_range(config.consensus.num_chunks_in_partition);
 
         let block_index_read = block_index
             .read()
@@ -234,7 +235,7 @@ fn find_block_range(
 
         let miners = Arc::new(miners);
 
-        for chunk_offset in start_offset.value()..end_offset.value() {
+        for chunk_offset in *chunk_range.start()..=*chunk_range.end() {
             let (idx, block_index_item) =
                 block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
 
@@ -248,16 +249,14 @@ fn find_block_range(
                     *min_item = BoundaryBlock {
                         index: idx_pos,
                         item: block_index_item.clone(),
-                        start_offset,
-                        end_offset,
+                        chunk_range,
                     };
                 }
             } else {
                 min_block_index_item = Some(BoundaryBlock {
                     index: idx_pos,
                     item: block_index_item.clone(),
-                    start_offset,
-                    end_offset,
+                    chunk_range,
                 });
             }
 
@@ -266,16 +265,14 @@ fn find_block_range(
                     *max_item = BoundaryBlock {
                         index: idx_pos,
                         item: block_index_item.clone(),
-                        start_offset,
-                        end_offset,
+                        chunk_range,
                     };
                 }
             } else {
                 max_block_index_item = Some(BoundaryBlock {
                     index: idx_pos,
                     item: block_index_item.clone(),
-                    start_offset,
-                    end_offset,
+                    chunk_range,
                 });
             }
         }
@@ -313,12 +310,12 @@ fn get_previous_max_offset(
     block_index_guard: &BlockIndex,
     block_idx: BlockIndexPosition,
     ledger_type: DataLedger,
-) -> eyre::Result<ChunkOffset> {
+) -> eyre::Result<LedgerChunkOffset> {
     if block_idx.is_genesis() {
-        Ok(ChunkOffset::new(0))
+        Ok(LedgerChunkOffset::from(0))
     } else {
         let prev_idx = block_idx.previous().unwrap();
-        Ok(ChunkOffset::new(
+        Ok(LedgerChunkOffset::from(
             block_index_guard
                 .get_item(prev_idx.value())
                 .ok_or_eyre("previous block must exist")?
@@ -378,10 +375,9 @@ async fn process_boundary_block(
     let filtered_txs = filter_transactions_by_chunk_range(
         ledger_data_txs,
         prev_max_offset,
-        boundary.start_offset,
-        boundary.end_offset,
+        boundary.chunk_range,
         is_earliest,
-        ChunkSize::new(config.consensus.chunk_size),
+        config.consensus.chunk_size,
         miners,
     );
 
@@ -404,11 +400,10 @@ async fn process_boundary_block(
 /// Tuple of (transaction IDs to include, mapping of tx ID to miners who stored it)
 fn filter_transactions_by_chunk_range(
     transactions: Vec<DataTransactionHeader>,
-    prev_max_offset: ChunkOffset,
-    partition_start: ChunkOffset,
-    partition_end: ChunkOffset,
+    prev_max_offset: LedgerChunkOffset,
+    partition_range: LedgerChunkRange,
     is_earliest: bool,
-    chunk_size: ChunkSize,
+    chunk_size: u64,
     miners: Arc<Vec<Address>>,
 ) -> (Vec<H256>, HashMap<H256, Arc<Vec<Address>>>) {
     let mut current_offset = prev_max_offset;
@@ -416,19 +411,19 @@ fn filter_transactions_by_chunk_range(
     let mut tx_to_miners = HashMap::new();
 
     for tx in transactions {
-        let chunks = chunk_size.calculate_chunks_for(tx.data_size);
+        let chunks = tx.data_size.div_ceil(chunk_size);
         let tx_start = current_offset;
-        let tx_end = current_offset.add(chunks);
+        let tx_end = current_offset + chunks;
 
         if is_earliest {
             // For earliest block: skip transactions that end before or at the partition start
-            if tx_end <= partition_start {
+            if tx_end <= partition_range.start() {
                 current_offset = tx_end;
                 continue;
             }
         } else {
-            // For latest block: stop when we reach a transaction that starts at or after the partition end
-            if tx_start >= partition_end {
+            // For latest block: stop when we reach a transaction that starts after the partition end
+            if tx_start > partition_range.end() {
                 break;
             }
         }
@@ -502,48 +497,6 @@ fn aggregate_miner_fees(
     Ok(aggregated_miner_fees)
 }
 
-/// Represents a chunk offset in the ledger
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ChunkOffset(u64);
-
-impl ChunkOffset {
-    fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    fn value(&self) -> u64 {
-        self.0
-    }
-
-    fn add(&self, chunks: ChunkCount) -> Self {
-        Self(self.0 + chunks.0)
-    }
-}
-
-impl From<u64> for ChunkOffset {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-/// Represents a number of chunks
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ChunkCount(u64);
-
-/// Represents the size of a single chunk in bytes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ChunkSize(u64);
-
-impl ChunkSize {
-    fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    fn calculate_chunks_for(&self, data_size: u64) -> ChunkCount {
-        ChunkCount(data_size.div_ceil(self.0))
-    }
-}
-
 /// Represents a slot index in the partition system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SlotIndex(u64);
@@ -553,10 +506,10 @@ impl SlotIndex {
         Self(value)
     }
 
-    fn compute_chunk_range(&self, chunks_per_partition: u64) -> (ChunkOffset, ChunkOffset) {
-        let start = ChunkOffset(self.0 * chunks_per_partition);
-        let end = ChunkOffset((self.0 + 1) * chunks_per_partition);
-        (start, end)
+    fn compute_chunk_range(&self, chunks_per_partition: u64) -> LedgerChunkRange {
+        let start = LedgerChunkOffset::from(self.0 * chunks_per_partition);
+        let end = LedgerChunkOffset::from((self.0 + 1) * chunks_per_partition - 1);
+        LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
     }
 }
 
@@ -591,8 +544,7 @@ impl BlockIndexPosition {
 struct BoundaryBlock {
     index: BlockIndexPosition,
     item: BlockIndexItem,
-    start_offset: ChunkOffset,
-    end_offset: ChunkOffset,
+    chunk_range: LedgerChunkRange,
 }
 
 /// Tracks the range of blocks containing expired partition data
