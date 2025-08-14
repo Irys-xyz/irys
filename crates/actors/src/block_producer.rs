@@ -35,8 +35,8 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
+    TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -51,7 +51,7 @@ use reth::{
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -385,8 +385,13 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let (system_tx_ledger, commitment_txs_to_bill, submit_txs, mut publish_txs) =
-            self.get_mempool_txs(&prev_block_header).await?;
+        let (
+            system_tx_ledger,
+            commitment_txs_to_bill,
+            submit_txs,
+            mut publish_txs,
+            expired_ledger_fees,
+        ) = self.get_mempool_txs(&prev_block_header).await?;
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
         let eth_built_payload = self
             .create_evm_block(
@@ -397,6 +402,7 @@ pub trait BlockProdStrategy {
                 &mut publish_txs,
                 block_reward,
                 current_timestamp,
+                expired_ledger_fees,
             )
             .await?;
         let evm_block = eth_built_payload.block();
@@ -449,6 +455,7 @@ pub trait BlockProdStrategy {
         publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
+        expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>,
     ) -> eyre::Result<EthBuiltPayload> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -467,6 +474,7 @@ pub trait BlockProdStrategy {
             submit_txs,
             publish_txs,
             initial_treasury_balance,
+            &expired_ledger_fees,
         )
         .map(|tx_result| {
             let metadata = tx_result?;
@@ -866,6 +874,7 @@ pub trait BlockProdStrategy {
         Vec<CommitmentTransaction>,
         Vec<DataTransactionHeader>,
         PublishLedgerWithTxs,
+        BTreeMap<Address, (U256, RollingHash)>,
     )> {
         let config = &self.inner().config;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -891,6 +900,7 @@ pub trait BlockProdStrategy {
         );
         let commitment_txs_to_bill;
         let system_transaction_ledger;
+        let aggregated_miner_fees;
         if is_epoch_block {
             let epoch_snapshot = self
                 .inner()
@@ -900,7 +910,7 @@ pub trait BlockProdStrategy {
                 .ok_or_eyre("parent blocks epoch snapshot must be available")?;
 
             // Calculate fees for expired ledgers
-            let _aggregated_miner_fees = self
+            aggregated_miner_fees = self
                 .calculate_expired_ledger_fees(&epoch_snapshot, block_height)
                 .await?;
 
@@ -959,17 +969,20 @@ pub trait BlockProdStrategy {
             };
             // IMPORTANT: Commitment txs get billed on regular blocks
             commitment_txs_to_bill = mempool_txs.commitment_tx;
+            aggregated_miner_fees = BTreeMap::new();
         };
         let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
             vec![system_transaction_ledger]
         } else {
             Vec::new()
         };
+
         Ok((
             system_ledgers,
             commitment_txs_to_bill,
             mempool_txs.submit_tx,
             mempool_txs.publish_tx,
+            aggregated_miner_fees,
         ))
     }
 
@@ -1035,7 +1048,7 @@ pub trait BlockProdStrategy {
         &self,
         epoch_snapshot: &EpochSnapshot,
         block_height: u64,
-    ) -> eyre::Result<HashMap<Address, (U256, RollingHash)>> {
+    ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
         ledger_expiry::calculate_expired_ledger_fees(
             epoch_snapshot,
             block_height,

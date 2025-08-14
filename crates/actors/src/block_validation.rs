@@ -42,7 +42,7 @@ use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -818,6 +818,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &data_txs,
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
+        &BTreeMap::new(), // No expired ledger fees in validation context
     )
     .map(|result| result.map(|metadata| metadata.shadow_tx))
     .collect::<Result<Vec<_>, _>>()?;

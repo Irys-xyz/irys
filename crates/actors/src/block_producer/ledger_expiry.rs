@@ -65,7 +65,7 @@ use irys_types::{
     app_state::DatabaseProvider, fee_distribution::TermFeeCharges, Address, BlockIndexItem, Config,
     DataLedger, DataTransactionHeader, IrysBlockHeader, H256, U256,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -89,12 +89,12 @@ pub async fn calculate_expired_ledger_fees(
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
     mempool_sender: UnboundedSender<MempoolServiceMessage>,
     db: DatabaseProvider,
-) -> eyre::Result<HashMap<Address, (U256, RollingHash)>> {
+) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
     // Step 1: Collect expired partitions
     let expired_slots = collect_expired_partitions(epoch_snapshot, block_height, ledger_type)?;
 
     if expired_slots.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(BTreeMap::new());
     }
 
     // Step 2: Find block ranges
@@ -226,7 +226,7 @@ fn find_block_range(
 
     for (slot_index, miners) in expired_slots {
         let (start_offset, end_offset) =
-            slot_index.to_chunk_range(config.consensus.num_chunks_in_partition);
+            slot_index.compute_chunk_range(config.consensus.num_chunks_in_partition);
 
         let block_index_read = block_index
             .read()
@@ -473,8 +473,8 @@ fn aggregate_miner_fees(
     transactions: Vec<DataTransactionHeader>,
     tx_to_miners: &HashMap<H256, Arc<Vec<Address>>>,
     config: &Config,
-) -> eyre::Result<HashMap<Address, (U256, RollingHash)>> {
-    let mut aggregated_miner_fees = HashMap::<Address, (U256, RollingHash)>::new();
+) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
+    let mut aggregated_miner_fees = BTreeMap::<Address, (U256, RollingHash)>::new();
 
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners
@@ -553,7 +553,7 @@ impl SlotIndex {
         Self(value)
     }
 
-    fn to_chunk_range(&self, chunks_per_partition: u64) -> (ChunkOffset, ChunkOffset) {
+    fn compute_chunk_range(&self, chunks_per_partition: u64) -> (ChunkOffset, ChunkOffset) {
         let start = ChunkOffset(self.0 * chunks_per_partition);
         let end = ChunkOffset((self.0 + 1) * chunks_per_partition);
         (start, end)

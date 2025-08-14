@@ -62,6 +62,13 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
+            std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -74,6 +81,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                     txs: vec![],
                     proofs: None,
                 },
+                std::collections::BTreeMap::new(),
             ))
         }
     }
@@ -154,6 +162,13 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
+            std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -166,6 +181,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                     txs: vec![],
                     proofs: None,
                 },
+                std::collections::BTreeMap::new(),
             ))
         }
     }
@@ -246,6 +262,13 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
+            std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -258,6 +281,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                     txs: vec![],
                     proofs: None,
                 },
+                std::collections::BTreeMap::new(),
             ))
         }
     }
@@ -349,6 +373,13 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
+            std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -361,6 +392,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                     txs: vec![],
                     proofs: None,
                 },
+                std::collections::BTreeMap::new(),
             ))
         }
     }
@@ -554,6 +586,13 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
+            std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -566,6 +605,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                     txs: vec![],
                     proofs: None,
                 },
+                std::collections::BTreeMap::new(),
             ))
         }
     }
