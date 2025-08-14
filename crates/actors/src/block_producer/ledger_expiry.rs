@@ -241,36 +241,36 @@ fn find_block_range(
 
             blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::clone(&miners));
 
-            let idx_pos = BlockIndexPosition::new(idx);
+            let block_height = idx;
 
             // Update min/max block index items
             if let Some(ref mut min_item) = min_block_index_item {
-                if min_item.index > idx_pos {
+                if min_item.height > block_height {
                     *min_item = BoundaryBlock {
-                        index: idx_pos,
+                        height: block_height,
                         item: block_index_item.clone(),
                         chunk_range,
                     };
                 }
             } else {
                 min_block_index_item = Some(BoundaryBlock {
-                    index: idx_pos,
+                    height: block_height,
                     item: block_index_item.clone(),
                     chunk_range,
                 });
             }
 
             if let Some(ref mut max_item) = max_block_index_item {
-                if max_item.index < idx_pos {
+                if max_item.height < block_height {
                     *max_item = BoundaryBlock {
-                        index: idx_pos,
+                        height: block_height,
                         item: block_index_item.clone(),
                         chunk_range,
                     };
                 }
             } else {
                 max_block_index_item = Some(BoundaryBlock {
-                    index: idx_pos,
+                    height: block_height,
                     item: block_index_item.clone(),
                     chunk_range,
                 });
@@ -308,16 +308,16 @@ fn find_block_range(
 /// Helper to get the previous block's max chunk offset
 fn get_previous_max_offset(
     block_index_guard: &BlockIndex,
-    block_idx: BlockIndexPosition,
+    block_height: BlockHeight,
     ledger_type: DataLedger,
 ) -> eyre::Result<LedgerChunkOffset> {
-    if block_idx.is_genesis() {
+    if block_height == 0 {
         Ok(LedgerChunkOffset::from(0))
     } else {
-        let prev_idx = block_idx.previous().unwrap();
+        let prev_height = block_height - 1;
         Ok(LedgerChunkOffset::from(
             block_index_guard
-                .get_item(prev_idx.value())
+                .get_item(prev_height)
                 .ok_or_eyre("previous block must exist")?
                 .ledgers[ledger_type]
                 .max_chunk_offset,
@@ -368,7 +368,7 @@ async fn process_boundary_block(
     let block_index_read = block_index
         .read()
         .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-    let prev_max_offset = get_previous_max_offset(&block_index_read, boundary.index, ledger_type)?;
+    let prev_max_offset = get_previous_max_offset(&block_index_read, boundary.height, ledger_type)?;
     drop(block_index_read);
 
     // Filter transactions based on chunk positions
@@ -513,36 +513,13 @@ impl SlotIndex {
     }
 }
 
-/// Represents a block index position
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct BlockIndexPosition(u64);
-
-impl BlockIndexPosition {
-    fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    fn is_genesis(&self) -> bool {
-        self.0 == 0
-    }
-
-    fn previous(&self) -> Option<Self> {
-        if self.0 > 0 {
-            Some(Self(self.0 - 1))
-        } else {
-            None
-        }
-    }
-
-    fn value(&self) -> u64 {
-        self.0
-    }
-}
+/// Type alias for block height/index position
+type BlockHeight = u64;
 
 /// Encapsulates information about a boundary block
 #[derive(Debug, Clone)]
 struct BoundaryBlock {
-    index: BlockIndexPosition,
+    height: BlockHeight,
     item: BlockIndexItem,
     chunk_range: LedgerChunkRange,
 }
