@@ -182,3 +182,73 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     genesis_node.stop().await;
     Ok(())
 }
+
+#[actix_web::test]
+async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
+    use crate::utils::solution_context;
+    use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
+
+    // 1. Start node
+    let genesis_config = NodeConfig::testing();
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    genesis_node.gossip_disable();
+
+    // 2. Produce a valid block first
+    let prod = ProductionStrategy {
+        inner: genesis_node.node_ctx.block_producer_inner.clone(),
+    };
+    let (block, _adjustment_stats, _eth_payload) = prod
+        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // 3. Gather parent info and snapshots
+    use irys_actors::block_validation::prevalidate_block;
+    let parent_block_header = genesis_node
+        .get_block_by_height(block.height - 1)
+        .await
+        .expect("parent block header");
+    let parent_hash = parent_block_header.block_hash;
+    let (parent_epoch_snapshot, parent_ema_snapshot) = {
+        let read = genesis_node.node_ctx.block_tree_guard.read();
+        (
+            read.get_epoch_snapshot(&parent_hash)
+                .expect("parent epoch snapshot"),
+            read.get_ema_snapshot(&parent_hash)
+                .expect("parent ema snapshot"),
+        )
+    };
+
+    // 4. Tamper the VDF seeds (make them parent-inconsistent)
+    let mut tampered = (*block).clone();
+    // Flip a byte in the seed to invalidate it
+    let mut seed_bytes = tampered.vdf_limiter_info.seed.0;
+    seed_bytes[0] ^= 0xFF;
+    tampered.vdf_limiter_info.seed.0 = seed_bytes;
+
+    // 5. Run prevalidation and assert it fails due to seed mismatch
+    let prevalidation_result = prevalidate_block(
+        tampered,
+        parent_block_header,
+        parent_epoch_snapshot,
+        genesis_node.node_ctx.config.clone(),
+        genesis_node.node_ctx.reward_curve.clone(),
+        &parent_ema_snapshot,
+    )
+    .await;
+
+    // TODO: These should be updated to error enum variants after https://github.com/Irys-xyz/irys/pull/610 merged
+    let err_msg = prevalidation_result
+        .expect_err("pre-validation should fail for tampered VDF seeds")
+        .to_string();
+    assert!(
+        err_msg.contains("Seed data is invalid"),
+        "error message should indicate the seed mismatch: {err_msg}"
+    );
+
+    // teardown
+    genesis_node.stop().await;
+    Ok(())
+}
