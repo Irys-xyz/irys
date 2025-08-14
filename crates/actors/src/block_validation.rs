@@ -1970,7 +1970,7 @@ mod tests {
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
-            recall_chunk_index: 0,
+
             partition_hash: context.partition_hash,
         };
 
@@ -2224,7 +2224,7 @@ mod tests {
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
-            recall_chunk_index: 0,
+
             partition_hash: context.partition_hash,
         };
 
