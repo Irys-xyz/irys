@@ -1,8 +1,5 @@
 use crate::{
-    block_discovery::{
-        get_data_tx_in_parallel, BlockDiscoveryError, BlockDiscoveryFacade as _,
-        BlockDiscoveryFacadeImpl,
-    },
+    block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
@@ -36,11 +33,10 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    fee_distribution::TermFeeCharges, next_cumulative_diff, storage_pricing::Amount, Address,
-    AdjustmentStats, Base64, BlockIndexItem, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
-    IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
-    VDFLimiterInfo, H256, U256,
+    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
+    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -63,6 +59,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
 
 mod block_validation_tracker;
+mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
 
 /// Commands that can be sent to the block producer service
@@ -1030,291 +1027,25 @@ pub trait BlockProdStrategy {
         Ok(parent)
     }
 
-    #[tracing::instrument(skip_all, fields(block_hash))]
-    async fn get_block_by_hash(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
-        let (tx, rx) = oneshot::channel();
-        self.inner()
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))
-            .expect("expected send to mempool to succeed");
-        let mempool_response = rx.await?;
-        let header = match mempool_response {
-            Some(h) => h,
-            None => self
-                .inner()
-                .db
-                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                .ok_or_eyre("block not found in db")?,
-        };
-        return Ok(header);
-    }
-
     /// Calculates the aggregated fees owed to miners when data ledgers expire.
     ///
-    /// This function processes expired partitions at epoch boundaries, determines which miners
-    /// stored the data, and calculates the appropriate fee distributions based on the term fees
-    /// paid by users when submitting transactions.
-    ///
-    /// # Returns
-    /// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
-    #[tracing::instrument(skip_all, fields(block_height))]
+    /// Delegates to the dedicated ledger_expiry module for processing.
+    /// Currently processes Submit ledger as that's the only expiring ledger type.
     async fn calculate_expired_ledger_fees(
         &self,
         epoch_snapshot: &EpochSnapshot,
         block_height: u64,
     ) -> eyre::Result<HashMap<Address, (U256, RollingHash)>> {
-        let config = &self.inner().config;
-        let mut ledgers = epoch_snapshot.ledgers.clone();
-        let partition_assignments = &epoch_snapshot.partition_assignments;
-
-        // Step 1: Get expired partitions and map them to miners
-        let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
-        let mut expired_submit_ledger_slot_indexes = HashMap::<u64, Vec<Address>>::new();
-
-        for expired_partition_hash in expired_partition_hashes {
-            let partition = partition_assignments
-                .get_assignment(expired_partition_hash)
-                .ok_or_eyre("could not get expired partition")?;
-
-            let ledger_id = partition
-                .ledger_id
-                .map(DataLedger::try_from)
-                .ok_or_eyre("ledger id must be present")??;
-            let slot_index = partition
-                .slot_index
-                .ok_or_eyre("slot index must be present")? as u64;
-
-            match ledger_id {
-                DataLedger::Publish => eyre::bail!("publish ledger cannot expire"),
-                DataLedger::Submit => {
-                    let entry = expired_submit_ledger_slot_indexes.entry(slot_index);
-                    entry
-                        .and_modify(|miners| {
-                            miners.push(partition.miner_address);
-                        })
-                        .or_insert(vec![partition.miner_address]);
-                }
-            }
-        }
-
-        // Step 2: Find blocks containing data in the expired chunk ranges
-        let mut blocks_with_expired_submit_ledgers = HashMap::new();
-        let mut min_block_index_item = Option::<(u64, BlockIndexItem, u64, u64)>::None;
-        let mut max_block_index_item = Option::<(u64, BlockIndexItem, u64, u64)>::None;
-        for (slot_index, miners) in expired_submit_ledger_slot_indexes {
-            let start_offset = slot_index * config.consensus.num_chunks_in_partition;
-            let end_offset = start_offset + config.consensus.num_chunks_in_partition;
-            let block_index_read = self
-                .inner()
-                .block_index
-                .read()
-                .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-            let miners = Arc::from_iter(miners.into_iter());
-            for chunk_offset in start_offset..end_offset {
-                let (idx, block_index_item) =
-                    block_index_read.get_block_index_item(DataLedger::Submit, chunk_offset)?;
-                blocks_with_expired_submit_ledgers
-                    .insert(block_index_item.block_hash, Arc::clone(&miners));
-
-                // check if we need to update the min/max block index item
-                if let Some(min_item) = &mut min_block_index_item {
-                    if min_item.0 > idx {
-                        *min_item = (idx, block_index_item.clone(), start_offset, end_offset);
-                    }
-                } else {
-                    min_block_index_item =
-                        Some((idx, block_index_item.clone(), start_offset, end_offset));
-                }
-                if let Some(max_item) = &mut max_block_index_item {
-                    if max_item.0 < idx {
-                        *max_item = (idx, block_index_item.clone(), start_offset, end_offset);
-                    }
-                } else {
-                    max_block_index_item =
-                        Some((idx, block_index_item.clone(), start_offset, end_offset));
-                }
-            }
-        }
-
-        // Step 2.1: Remove min block index item and max block index item
-        let min_block_index_item = min_block_index_item.unwrap();
-        let max_block_index_item = max_block_index_item.unwrap();
-
-        // Ensure min and max blocks are different to avoid duplicate processing
-        eyre::ensure!(
-            min_block_index_item.1.block_hash != max_block_index_item.1.block_hash,
-            "Min and max blocks are the same - partition spans only one block"
-        );
-        let min_block_miners = blocks_with_expired_submit_ledgers
-            .remove(&min_block_index_item.1.block_hash)
-            .unwrap();
-        let max_block_miners = blocks_with_expired_submit_ledgers
-            .remove(&max_block_index_item.1.block_hash)
-            .unwrap();
-
-        // Initialize collections for transaction processing
-        let mut data_txs = Vec::<H256>::new();
-        let mut data_tx_miner_set = HashMap::new();
-
-        // Step 2.2: handle earliest and last block by figuring out which txs need to be included
-        let earliest_block = self
-            .get_block_by_hash(min_block_index_item.1.block_hash)
-            .await?;
-        let latest_block = self
-            .get_block_by_hash(max_block_index_item.1.block_hash)
-            .await?;
-        let data_txs_earliest = earliest_block.get_data_ledger_tx_ids();
-        let data_txs_latest = latest_block.get_data_ledger_tx_ids();
-        let submit_txs_earliest = data_txs_earliest.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
-        let submit_txs_latest = data_txs_latest.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
-        let mut submit_data_txs_earliest = get_data_tx_in_parallel(
-            submit_txs_earliest.iter().copied().collect(),
-            &self.inner().service_senders.mempool,
-            &self.inner().db,
+        ledger_expiry::calculate_expired_ledger_fees(
+            epoch_snapshot,
+            block_height,
+            DataLedger::Submit, // Currently only Submit ledgers expire
+            &self.inner().config,
+            Arc::clone(&self.inner().block_index),
+            self.inner().service_senders.mempool.clone(),
+            self.inner().db.clone(),
         )
-        .await?;
-        let mut submit_data_txs_latest = get_data_tx_in_parallel(
-            submit_txs_latest.iter().copied().collect(),
-            &self.inner().service_senders.mempool,
-            &self.inner().db,
-        )
-        .await?;
-
-        // Sort transactions to match their order in the block
-        submit_data_txs_earliest.sort_by_key(|tx| {
-            submit_txs_earliest
-                .iter()
-                .position(|id| *id == tx.id)
-                .unwrap_or(usize::MAX)
-        });
-        submit_data_txs_latest.sort_by_key(|tx| {
-            submit_txs_latest
-                .iter()
-                .position(|id| *id == tx.id)
-                .unwrap_or(usize::MAX)
-        });
-
-        // Filter transactions from the earliest block
-        let (start_offset, _end_offset) = (min_block_index_item.2, min_block_index_item.3);
-        let prev_max_offset = if min_block_index_item.0 == 0 {
-            0
-        } else {
-            let block_index_read = self
-                .inner()
-                .block_index
-                .read()
-                .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-            block_index_read
-                .get_item(min_block_index_item.0 - 1)
-                .ok_or_eyre("previous block must exist")?
-                .ledgers[DataLedger::Submit]
-                .max_chunk_offset
-        };
-
-        let mut current_offset = prev_max_offset;
-        let mut filtered_earliest_txs = Vec::new();
-        for tx in submit_data_txs_earliest {
-            let chunks = tx.data_size.div_ceil(config.consensus.chunk_size);
-            let _tx_start = current_offset;
-            let tx_end = current_offset + chunks;
-
-            // Skip transactions that end before or at the partition start
-            if tx_end <= start_offset {
-                current_offset = tx_end;
-                continue;
-            }
-
-            // Include all remaining transactions (they overlap or are fully inside)
-            filtered_earliest_txs.push(tx.id);
-            data_tx_miner_set.insert(tx.id, Arc::clone(&min_block_miners));
-
-            current_offset = tx_end;
-        }
-        data_txs.extend(filtered_earliest_txs);
-
-        // Filter transactions from the latest block
-        let (_start_offset_latest, end_offset_latest) =
-            (max_block_index_item.2, max_block_index_item.3);
-        let prev_max_offset_latest = if max_block_index_item.0 == 0 {
-            0
-        } else {
-            let block_index_read = self
-                .inner()
-                .block_index
-                .read()
-                .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-            block_index_read
-                .get_item(max_block_index_item.0 - 1)
-                .ok_or_eyre("previous block must exist")?
-                .ledgers[DataLedger::Submit]
-                .max_chunk_offset
-        };
-
-        let mut current_offset = prev_max_offset_latest;
-        let mut filtered_latest_txs = Vec::new();
-        for tx in submit_data_txs_latest {
-            let chunks = tx.data_size.div_ceil(config.consensus.chunk_size);
-            let tx_start = current_offset;
-
-            // Stop when we reach a transaction that starts at or after the partition end
-            if tx_start >= end_offset_latest {
-                break;
-            }
-
-            // Include this transaction (it starts before the partition end)
-            filtered_latest_txs.push(tx.id);
-            data_tx_miner_set.insert(tx.id, Arc::clone(&max_block_miners));
-
-            current_offset += chunks;
-        }
-        data_txs.extend(filtered_latest_txs);
-
-        // Step 3: Collect transaction IDs and their associated miners from middle blocks
-        for (block_hash, miners) in blocks_with_expired_submit_ledgers {
-            let block = self.get_block_by_hash(block_hash).await?;
-
-            let get_data_ledger_tx_ids = block.get_data_ledger_tx_ids();
-            let data_txs_ids = get_data_ledger_tx_ids.get(&DataLedger::Submit).ok_or_eyre("Submit ledger is the only one that can expire and if it's not here then we have invalid query logic")?;
-            for data_tx in data_txs_ids.iter() {
-                data_tx_miner_set.insert(*data_tx, Arc::clone(&miners));
-            }
-            data_txs.extend(data_txs_ids);
-        }
-
-        // Step 4: Fetch the actual data transactions
-        let mut data_txs_fetched = get_data_tx_in_parallel(
-            data_txs,
-            &self.inner().service_senders.mempool,
-            &self.inner().db,
-        )
-        .await?;
-        data_txs_fetched.sort();
-
-        // Step 5: Calculate and aggregate fees for each miner
-        let mut aggregated_miner_fees = HashMap::<Address, (U256, RollingHash)>::new();
-        for data_tx in data_txs_fetched.iter() {
-            let miners_that_stored_this_tx = data_tx_miner_set
-                .get(&data_tx.id)
-                .expect("guaranteed to have the miner list");
-            let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
-            let fee_distribution_per_miner =
-                fee_charges.distribution_on_expiry(miners_that_stored_this_tx)?;
-            for (miner, fee) in miners_that_stored_this_tx
-                .iter()
-                .zip(fee_distribution_per_miner)
-            {
-                aggregated_miner_fees
-                    .entry(*miner)
-                    .and_modify(|(current_fee, hash)| {
-                        *current_fee = current_fee.saturating_add(fee);
-                        hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
-                    })
-                    .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
-            }
-        }
-
-        Ok(aggregated_miner_fees)
+        .await
     }
 }
 
