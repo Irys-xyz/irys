@@ -686,14 +686,39 @@ pub trait BlockProdStrategy {
             .max_chunk_offset
             + submit_chunks_added;
 
-        // build a new block header
+        // We recompute solution_hash locally instead of trusting the miner-provided value.
+        // Rationale:
+        // - Prevalidation enforces solution_hash_link_is_valid(poa_chunk, partition_chunk_offset, vdf_seed),
+        //   so the header must be consistent with those inputs.
+        // - A miner-provided solution_hash could be fabricated to meet difficulty but fail the link check.
+        //   Recomputing here guarantees consistency and prevents such bypass attempts.
+        // - Using the recomputed value ensures locally produced blocks always pass the link validation stage.
+        let recomputed_solution_hash = {
+            let mut hasher = sha::Sha256::new();
+            let poa_chunk = poa
+                .chunk
+                .as_ref()
+                .expect("poa chunk must be present during block production");
+            hasher.update(&poa_chunk.0);
+            hasher.update(&poa.partition_chunk_offset.to_le_bytes());
+            hasher.update(solution.seed.0.as_bytes());
+            let computed = H256::from(hasher.finish());
+            if computed != solution.solution_hash {
+                warn!(
+                    "Miner-provided solution_hash mismatch: expected {} got {}",
+                    computed.0.to_base58(),
+                    solution.solution_hash.0.to_base58()
+                );
+            }
+            computed
+        };
         let mut irys_block = IrysBlockHeader {
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
             diff,
             cumulative_diff: cumulative_difficulty,
             last_diff_timestamp,
-            solution_hash: solution.solution_hash,
+            solution_hash: recomputed_solution_hash,
             previous_solution_hash: prev_block_header.solution_hash,
             last_epoch_hash,
             chunk_hash: poa_chunk_hash,
