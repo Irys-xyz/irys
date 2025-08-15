@@ -69,7 +69,7 @@ fn solution_hash_link_invalid_when_inputs_tampered() {
     tampered_chunk[0] ^= 0x01;
 
     assert!(solution_hash_link_is_valid(&block, &tampered_chunk).is_err());
-
+}
 
 #[test_log::test(test)]
 fn poa_chunk_offset_out_of_bounds_returns_error() {
