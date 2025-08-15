@@ -132,7 +132,9 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
             )
             .map_err(|()| eyre!("Unexpected error processing publish ledger transactions"))?;
 
-            // forward the finalization message to the cache service for cleanup
+            // Forward the finalization message to the cache service for cleanup
+            // NOTE: In the new flow, ingress proof generation is deferred until post-inclusion.
+            //       A follow-up task will be dispatched from here to generate proofs once a tx is included.
             let _ = service_senders
                 .chunk_cache
                 .send(CacheServiceAction::OnFinalizedBlock(block_height, None));

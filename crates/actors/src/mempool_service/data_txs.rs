@@ -205,6 +205,44 @@ impl Inner {
             }
         };
 
+        // Ensure a DataRootLRU entry exists/updated so orphaned roots can be pruned
+        let anchor_expiry_depth = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .anchor_expiry_depth as u64;
+        let new_expiry = anchor_height + anchor_expiry_depth;
+
+        self.irys_db
+            .update_eyre(|write_tx| {
+                // Read the current LRU entry and upsert with the latest expiry
+                match write_tx.get::<DataRootLRU>(tx.data_root)? {
+                    Some(mut entry) => {
+                        entry.last_height = new_expiry;
+                        write_tx.put::<DataRootLRU>(tx.data_root, entry)?;
+                    }
+                    None => {
+                        write_tx.put::<DataRootLRU>(
+                            tx.data_root,
+                            irys_database::db_cache::DataRootLRUEntry {
+                                last_height: new_expiry,
+                                ingress_proof: false,
+                            },
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|e| {
+                error!("Error upserting DataRootLRU for {} - {}", &tx.data_root, e);
+                TxIngressError::DatabaseError
+            })?;
+        debug!(
+            "Upserted DataRootLRU for {} with expiry {}",
+            &tx.data_root, new_expiry
+        );
+
         // Process any chunks that arrived before their parent transaction
         // These were temporarily stored in the pending_chunks cache
         let mut mempool_state_write_guard = self.mempool_state.write().await;

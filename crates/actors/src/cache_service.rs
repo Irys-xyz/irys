@@ -3,7 +3,8 @@ use irys_database::{
     db_cache::DataRootLRUEntry,
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{
-        CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
+        CachedChunks, CachedDataRoots, DataRootLRU, IngressProofs, ProgrammableDataCache,
+        ProgrammableDataLRU,
     },
 };
 use irys_types::{Config, DatabaseProvider, TokioServiceHandle, GIGABYTE};
@@ -117,6 +118,7 @@ impl ChunkCacheService {
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         self.prune_data_root_cache(prune_height)?;
         self.prune_pd_cache(prune_height)?;
+        self.prune_orphaned_cached_data_roots()?;
         let (
             (chunk_cache_count, chunk_cache_size),
             (pd_cache_count, pd_cache_size),
@@ -188,6 +190,48 @@ impl ChunkCacheService {
         }
         write_tx.commit()?;
 
+        Ok(())
+    }
+
+    fn prune_orphaned_cached_data_roots(&self) -> eyre::Result<()> {
+        // TTL for orphaned cached roots without ingress proof
+        const ORPHAN_TTL_MILLIS: u128 = 10 * 60 * 1000; // 10 minutes
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| eyre::eyre!("System time before UNIX_EPOCH"))?
+            .as_millis();
+
+        let write_tx = self.db.tx_mut()?;
+        let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
+        let mut walker = cursor.walk(None)?;
+        let mut pruned = 0u64;
+
+        while let Some((data_root, cached)) = walker.next().transpose()? {
+            // Skip if there is an LRU entry (it will be pruned elsewhere)
+            if write_tx.get::<DataRootLRU>(data_root)?.is_some() {
+                continue;
+            }
+            // Skip if there is any ingress proof present
+            if write_tx.get::<IngressProofs>(data_root)?.is_some() {
+                continue;
+            }
+            // Check TTL
+            if now_millis.saturating_sub(cached.timestamp) > ORPHAN_TTL_MILLIS {
+                // delete cached chunks and index
+                pruned =
+                    pruned.saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
+                // delete the CachedDataRoots entry
+                write_tx.delete::<CachedDataRoots>(data_root, None)?;
+            }
+        }
+
+        if pruned > 0 {
+            debug!(
+                pruned_chunks = pruned,
+                "Pruned orphaned cached data roots and chunks"
+            );
+        }
+        write_tx.commit()?;
         Ok(())
     }
 }

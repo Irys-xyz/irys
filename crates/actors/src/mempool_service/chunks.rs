@@ -46,25 +46,28 @@ impl Inner {
             })
             .collect::<Vec<_>>();
 
-        let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
-            .map(|cdr| cdr.data_size)
-            .or_else(|| {
-                debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
-                candidate_sms.iter().find_map(|(sm, write_offsets)| {
-                    write_offsets.iter().find_map(|wo| {
-                        sm.query_submodule_db_by_offset(*wo, |tx| {
-                            get_data_size_by_data_root(tx, chunk.data_root)
-                        })
-                        .ok()
-                        .flatten()
-                    })
-                })
-            });
+        let data_size_from_cache =
+            irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                .map_err(|_| ChunkIngressError::DatabaseError)?
+                .map(|cdr| cdr.data_size);
 
-        let data_size = match data_size {
-            Some(ds) => ds,
-            None => {
+        let data_size_from_sms = {
+            debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
+            candidate_sms.iter().find_map(|(sm, write_offsets)| {
+                write_offsets.iter().find_map(|wo| {
+                    sm.query_submodule_db_by_offset(*wo, |tx| {
+                        get_data_size_by_data_root(tx, chunk.data_root)
+                    })
+                    .ok()
+                    .flatten()
+                })
+            })
+        };
+
+        // Only accept chunks for which we have a cached header; SMS-derived size alone is treated as pre-header
+        let data_size = match (data_size_from_cache, data_size_from_sms) {
+            (Some(ds), _) => ds,
+            (None, Some(_)) | (None, None) => {
                 let mut mempool_state_write_guard = mempool_state.write().await;
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
@@ -131,6 +134,77 @@ impl Inner {
                 return Ok(());
             }
         };
+
+        // data_size already determined above or chunk parked pre-header
+
+        // Ensure a DataRootLRU entry exists (created on header acceptance) before persisting chunks
+        {
+            let maybe_lru = {
+                let read_tx = self
+                    .read_tx()
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                read_tx
+                    .get::<DataRootLRU>(chunk.data_root)
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+            };
+            if maybe_lru.is_none() {
+                let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+                let latest_height = {
+                    let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+                    match canon_chain.0.last() {
+                        Some(h) => h.height,
+                        None => return Err(ChunkIngressError::ServiceUninitialized),
+                    }
+                };
+                let new_expiry = latest_height + anchor_expiry_depth;
+                self.irys_db
+                    .update(|wtx| {
+                        wtx.put::<DataRootLRU>(
+                            chunk.data_root,
+                            DataRootLRUEntry {
+                                last_height: new_expiry,
+                                ingress_proof: false,
+                            },
+                        )
+                    })
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+            }
+        }
+        // Ensure a DataRootLRU entry exists before persisting chunks (for pruning and gating)
+        {
+            let maybe_lru = {
+                let read_tx = self
+                    .read_tx()
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+                read_tx
+                    .get::<DataRootLRU>(chunk.data_root)
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+            };
+            if maybe_lru.is_none() {
+                let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+                let latest_height = {
+                    let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+                    match canon_chain.0.last() {
+                        Some(h) => h.height,
+                        None => return Err(ChunkIngressError::ServiceUninitialized),
+                    }
+                };
+                let new_expiry = latest_height + anchor_expiry_depth;
+                self.irys_db
+                    .update(|wtx| {
+                        wtx.put::<DataRootLRU>(
+                            chunk.data_root,
+                            DataRootLRUEntry {
+                                last_height: new_expiry,
+                                ingress_proof: false,
+                            },
+                        )
+                    })
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .map_err(|_| ChunkIngressError::DatabaseError)?;
+            }
+        }
 
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
@@ -340,36 +414,46 @@ impl Inner {
             let signer = self.config.irys_signer();
             let latest_height = latest.height;
             let chain_id = self.config.consensus.chain_id;
-            self.exec.clone().spawn_blocking(async move {
-                generate_ingress_proof(
-                    db.clone(),
-                    root_hash,
-                    data_size,
-                    chunk_size,
-                    signer,
-                    chain_id,
-                )
-                // TODO: handle results instead of unwrapping
-                .unwrap();
-                db.update(|wtx| {
+            // Deferred: ingress proof generation is performed after tx inclusion; keep LRU updated only.
+            let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+            let new_expiry = latest_height + anchor_expiry_depth;
+            self.irys_db
+                .update(|wtx| {
                     wtx.put::<DataRootLRU>(
                         root_hash,
                         DataRootLRUEntry {
-                            last_height: latest_height,
-                            ingress_proof: true,
+                            last_height: new_expiry,
+                            ingress_proof: false,
                         },
                     )
                 })
-                .unwrap()
-                .unwrap();
-            });
+                .map_err(|_| ChunkIngressError::DatabaseError)?
+                .map_err(|_| ChunkIngressError::DatabaseError)?;
         }
 
-        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
-        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
+        // Gossip only if we have both a cached header and an LRU entry for this data_root
+        let should_gossip = {
+            let read_tx = self
+                .read_tx()
+                .map_err(|_| ChunkIngressError::DatabaseError)?;
+            let have_header =
+                irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                    .map_err(|_| ChunkIngressError::DatabaseError)?
+                    .is_some();
+            let have_lru = read_tx
+                .get::<DataRootLRU>(chunk.data_root)
+                .map_err(|_| ChunkIngressError::DatabaseError)?
+                .is_some();
+            have_header && have_lru
+        };
 
-        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-            tracing::error!("Failed to send gossip data: {:?}", error);
+        if should_gossip {
+            let gossip_sender = &self.service_senders.gossip_broadcast.clone();
+            let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
+
+            if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+                tracing::error!("Failed to send gossip data: {:?}", error);
+            }
         }
 
         Ok(())
