@@ -94,10 +94,10 @@ impl BlockIndexService {
     /// - Invalid chunk calculations
     ///
     /// # Arguments
-    /// * `block` - The finalized block header to be added
+    /// * `block` - The migrated block header to be added
     /// * `all_txs` - Complete list of transaction headers, where the first `n` entries
     ///               correspond to the submit ledger's transaction IDs
-    pub fn add_finalized_block(
+    pub fn add_migrated_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<DataTransactionHeader>>,
@@ -160,7 +160,7 @@ impl Handler<BlockMigrationMessage> for BlockIndexService {
         let all_txs = msg.all_txs;
 
         // Do something with the block
-        self.add_finalized_block(&block, &all_txs);
+        self.add_migrated_block(&block, &all_txs);
 
         Ok(())
     }
