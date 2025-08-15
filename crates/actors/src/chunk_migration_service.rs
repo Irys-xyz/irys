@@ -135,7 +135,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
             // forward the finalization message to the cache service for cleanup
             let _ = service_senders
                 .chunk_cache
-                .send(CacheServiceAction::OnFinalizedBlock(block_height, None));
+                .send(CacheServiceAction::OnBlockMigrated(block_height, None));
 
             Ok(())
         })

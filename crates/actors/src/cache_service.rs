@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
-    OnFinalizedBlock(u64, Option<oneshot::Sender<eyre::Result<()>>>),
+    OnBlockMigrated(u64, Option<oneshot::Sender<eyre::Result<()>>>),
 }
 
 pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
@@ -102,11 +102,11 @@ impl ChunkCacheService {
 
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         match msg {
-            CacheServiceAction::OnFinalizedBlock(migration_height, sender) => {
+            CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
                 let res = self.prune_cache(migration_height);
                 let Some(sender) = sender else { return };
                 if let Err(error) = sender.send(res) {
-                    warn!(?error, "RX failure for OnFinalizedBlock");
+                    warn!(?error, "RX failure for OnBlockMigrated");
                 }
             }
         }
@@ -169,7 +169,7 @@ impl ChunkCacheService {
     }
 
     fn prune_pd_cache(&self, prune_height: u64) -> eyre::Result<()> {
-        debug!("processing OnFinalizedBlock PD {} message!", &prune_height);
+        debug!("processing OnBlockMigrated PD {} message!", &prune_height);
 
         let write_tx = self.db.tx_mut()?;
         let mut cursor = write_tx.cursor_write::<ProgrammableDataLRU>()?;
