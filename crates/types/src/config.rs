@@ -1,15 +1,18 @@
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerChunk, CostPerChunkDurationAdjusted, CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
+        phantoms::{
+            CostPerChunk, CostPerChunkDurationAdjusted, CostPerGb, DecayRate, Irys, IrysPrice,
+            Percentage, Usd,
+        },
         Amount,
     },
     PeerAddress, RethPeerInfo, H256,
 };
-use eyre::Result;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
+use eyre::Result;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -649,7 +652,8 @@ impl ConsensusConfig {
     /// Calculate the number of epochs in one year based on network parameters
     pub fn epochs_per_year(&self) -> u64 {
         const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
-        let seconds_per_epoch = self.difficulty_adjustment.block_time * self.epoch.num_blocks_in_epoch;
+        let seconds_per_epoch =
+            self.difficulty_adjustment.block_time * self.epoch.num_blocks_in_epoch;
         SECONDS_PER_YEAR / seconds_per_epoch
     }
 
@@ -657,19 +661,19 @@ impl ConsensusConfig {
     pub fn years_to_epochs(&self, years: u64) -> u64 {
         years * self.epochs_per_year()
     }
-    
+
     /// Compute cost per chunk per epoch from annual cost per GB
     pub fn cost_per_chunk_per_epoch(&self) -> Result<Amount<(CostPerChunk, Usd)>> {
         const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
         let chunks_per_gb = BYTES_PER_GB / self.chunk_size;
         let epochs_per_year = self.epochs_per_year();
-        
+
         // Convert annual_cost_per_gb to cost_per_chunk_per_epoch
         // annual_cost_per_gb / chunks_per_gb / epochs_per_year
         let annual_decimal = self.annual_cost_per_gb.token_to_decimal()?;
         let cost_per_chunk_per_year = annual_decimal / Decimal::from(chunks_per_gb);
         let cost_per_chunk_per_epoch = cost_per_chunk_per_year / Decimal::from(epochs_per_year);
-        
+
         Amount::token(cost_per_chunk_per_epoch)
     }
 
@@ -689,9 +693,9 @@ impl ConsensusConfig {
             // Annual cost: 0.01 USD/GB/year
             // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
             // 1% annual decay
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),  // $0.01/GB/year
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),      // 1% annual decay
-            safe_minimum_number_of_years: 200,                        // 200 years storage duration
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1% annual decay
+            safe_minimum_number_of_years: 200,                      // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
@@ -812,9 +816,9 @@ impl ConsensusConfig {
             // Annual cost: 0.01 USD/GB/year
             // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
             // 1% annual decay
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),  // $0.01/GB/year
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),      // 1% annual decay
-            safe_minimum_number_of_years: 200,                        // 200 years storage duration
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1% annual decay
+            safe_minimum_number_of_years: 200,                      // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
@@ -1396,7 +1400,8 @@ mod tests {
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
-        safe_minimum_number_of_epochs = 20000
+        safe_minimum_number_of_years = 200
+        minimum_term_fee_usd = 0.01
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9

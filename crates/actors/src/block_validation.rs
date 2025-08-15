@@ -25,7 +25,9 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount};
+use irys_types::storage_pricing::{
+    calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
+};
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,

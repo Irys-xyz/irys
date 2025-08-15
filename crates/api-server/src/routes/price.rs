@@ -6,8 +6,6 @@ use actix_web::{
 use irys_types::{
     storage_pricing::{
         calculate_perm_fee_from_config, calculate_term_fee_from_config,
-        phantoms::{Irys, NetworkFee},
-        Amount,
     },
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
@@ -20,9 +18,7 @@ use crate::ApiState;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
-    // Protocol-enforced permanent storage cost
     pub perm_fee: U256,
-    // Term storage fee with base fee + size-based calculation
     pub term_fee: U256,
     pub ledger: u32,
     pub bytes: u64,
@@ -72,8 +68,16 @@ pub async fn get_price(
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {:?}", e)))?;
 
             // If the cost calculation fails, return 400 with the error text
-            let total_perm_cost = cost_of_perm_storage_with_ema(state, bytes_to_store, term_fee, &ema)
-                .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
+            let total_perm_cost = {
+                let ema: &irys_domain::EmaSnapshot = &ema;
+                calculate_perm_fee_from_config(
+                    bytes_to_store,
+                    &state.config.consensus,
+                    ema.ema_for_public_pricing(),
+                    term_fee,
+                )
+            }
+            .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: total_perm_cost.amount,
@@ -85,20 +89,6 @@ pub async fn get_price(
         // TODO: support other term ledgers here
         DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
     }
-}
-
-fn cost_of_perm_storage_with_ema(
-    state: web::Data<ApiState>,
-    bytes_to_store: u64,
-    term_fee: U256,
-    ema: &irys_domain::EmaSnapshot,
-) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    calculate_perm_fee_from_config(
-        bytes_to_store,
-        &state.config.consensus,
-        ema.ema_for_public_pricing(),
-        term_fee,
-    )
 }
 
 pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
