@@ -1067,4 +1067,53 @@ mod tests {
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
         }
     }
+
+    mod validate_commitments {
+        use crate::EpochSnapshot;
+        use irys_database::SystemLedger;
+        use irys_types::{ConsensusConfig, H256List, SystemTransactionLedger};
+
+        #[test]
+        fn should_check_that_all_commitments_are_included() {
+            let config = ConsensusConfig::testing();
+            let mut mocked_block = irys_types::IrysBlockHeader::new_mock_header();
+            let mut comm_tx_1 = irys_types::CommitmentTransaction::new(&config);
+            let mut comm_tx_2 = irys_types::CommitmentTransaction::new(&config);
+            let mut unrelated_tx = irys_types::CommitmentTransaction::new(&config);
+
+            comm_tx_1.id = [1; 32].into();
+            comm_tx_2.id = [2; 32].into();
+            unrelated_tx.id = [3; 32].into();
+
+            mocked_block.system_ledgers.push(SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List(vec![comm_tx_1.id, comm_tx_2.id]),
+            });
+
+            let valid_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone()];
+            let too_few_commitments = vec![comm_tx_1.clone()];
+            let too_many_commitments =
+                vec![comm_tx_1.clone(), comm_tx_2.clone(), comm_tx_2.clone()];
+            let valid_count_but_invalid_id = vec![comm_tx_1.clone(), unrelated_tx];
+
+            let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
+            assert!(res.is_ok());
+
+            let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_few_commitments)
+                .expect_err("Expected error for too many commitments")
+                .to_string();
+            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 1 commitments provided");
+
+            let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_many_commitments)
+                .expect_err("Expected error for too many commitments")
+                .to_string();
+            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 3 commitments provided");
+
+            let err_str =
+                EpochSnapshot::validate_commitments(&mocked_block, &valid_count_but_invalid_id)
+                    .expect_err("Expected error for the wrong commitment ids")
+                    .to_string();
+            assert_eq!(err_str, "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111");
+        }
+    }
 }
