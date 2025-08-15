@@ -452,21 +452,21 @@ impl BlockTreeServiceInner {
             // Verify block isn't already migrated
             let binding = self.block_index_guard.clone();
             let bi = binding.read();
-            if bi.num_blocks() > finalized_height && bi.num_blocks() > migration_height {
-                if let Some(finalized) = bi.get_item(migration_height) {
-                    if finalized.block_hash == finalized_hash {
+            if bi.num_blocks() > migration_height {
+                if let Some(migrated) = bi.get_item(migration_height) {
+                    if migrated.block_hash == migrated_hash {
                         // Already finalized in index, nothing to do
                         return;
                     } else {
                         debug!(
                             "Block tree and index out of sync at height {} (index has {}, expected {}), continuing migration",
-                            migration_height, finalized.block_hash, finalized_hash
+                            migration_height, migrated.block_hash, migrated_hash
                         );
                     }
                 } else {
                     debug!(
                         "Block index missing item at height {} while finalizing {}, continuing migration",
-                        migration_height, finalized_hash
+                        migration_height, migrated_hash
                     );
                 }
             }
