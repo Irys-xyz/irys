@@ -108,7 +108,11 @@ pub struct ValidatePathResult {
 }
 
 pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
-    let (_, leaf) = path_buff.split_at(path_buff.len() - HASH_SIZE - NOTE_SIZE);
+    // Basic size checks to avoid underflow and malformed proofs
+    let total_len = path_buff.len();
+    let leaf_len = HASH_SIZE + NOTE_SIZE;
+    eyre::ensure!(total_len >= leaf_len, "Invalid proof: too short");
+    let (_, leaf) = path_buff.split_at(total_len - leaf_len);
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
     Ok(leaf_proof)
 }
@@ -118,15 +122,27 @@ pub fn validate_path(
     path_buff: &Base64,
     target_offset: u128,
 ) -> Result<ValidatePathResult, Error> {
+    // Basic size checks to avoid underflow and malformed proofs
+    let total_len = path_buff.len();
+    let leaf_len = HASH_SIZE + NOTE_SIZE;
+    eyre::ensure!(total_len >= leaf_len, "Invalid proof: too short");
+
+    let branches_len = total_len - leaf_len;
+    let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
+    eyre::ensure!(
+        branches_len % branch_item_len == 0,
+        "Invalid proof: misaligned branch length"
+    );
+
     // Split proof into branches and leaf. Leaf is the final proof and branches
     // are ordered from root to leaf.
-    let (branches, leaf) = path_buff.split_at(path_buff.len() - HASH_SIZE - NOTE_SIZE);
+    let (branches, leaf) = path_buff.split_at(branches_len);
 
     // Deserialize proof.
     let branch_proofs: Vec<BranchProof> = branches
-        .chunks(HASH_SIZE * 2 + NOTE_SIZE)
-        .map(|b| BranchProof::try_from_proof_slice(b).unwrap())
-        .collect();
+        .chunks(branch_item_len)
+        .map(BranchProof::try_from_proof_slice)
+        .collect::<Result<Vec<_>, _>>()?;
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
 
     let mut left_bound: u128 = 0;
@@ -207,13 +223,25 @@ pub fn validate_path(
 pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
-    let (branches, leaf) = proof.split_at(proof.len() - HASH_SIZE - NOTE_SIZE);
+    // Basic size checks to avoid underflow and malformed proofs
+    let total_len = proof.len();
+    let leaf_len = HASH_SIZE + NOTE_SIZE;
+    eyre::ensure!(total_len >= leaf_len, "Invalid proof: too short");
+
+    let branches_len = total_len - leaf_len;
+    let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
+    eyre::ensure!(
+        branches_len % branch_item_len == 0,
+        "Invalid proof: misaligned branch length"
+    );
+
+    let (branches, leaf) = proof.split_at(branches_len);
 
     // Deserialize proof.
     let branch_proofs: Vec<BranchProof> = branches
-        .chunks(HASH_SIZE * 2 + NOTE_SIZE)
-        .map(|b| BranchProof::try_from_proof_slice(b).unwrap())
-        .collect();
+        .chunks(branch_item_len)
+        .map(BranchProof::try_from_proof_slice)
+        .collect::<Result<Vec<_>, _>>()?;
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
 
     let mut left_bound: u128 = 0;
@@ -437,7 +465,7 @@ pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
     Ok(Node {
         id,
         data_hash: None,
-        min_byte_range: left.max_byte_range,
+        min_byte_range: left.min_byte_range,
         max_byte_range: right.max_byte_range,
         left_child: Some(Box::new(left)),
         right_child: Some(Box::new(right)),
@@ -496,14 +524,14 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
         // Branch
         Node {
             data_hash: None,
-            min_byte_range,
+            min_byte_range: _,
             left_child: Some(left_child),
             right_child: Some(right_child),
             ..
         } => {
             proof.proof.extend(left_child.id);
             proof.proof.extend(right_child.id);
-            proof.proof.extend(min_byte_range.to_note_vec());
+            proof.proof.extend(left_child.max_byte_range.to_note_vec());
 
             let mut left_proof = resolve_proofs(*left_child, Some(proof.clone()))?;
             let right_proof = resolve_proofs(*right_child, Some(proof))?;
@@ -537,4 +565,87 @@ pub fn hash_all_sha256(messages: Vec<&[u8]>) -> Result<[u8; 32], Error> {
         .collect();
     let hash = hash_sha256(&hash)?;
     Ok(hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProofDeserialize as _;
+    use super::*;
+
+    #[test]
+    fn branch_metadata_invariants_and_proof_offset() {
+        // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
+        // Create two simple leaves using data roots to avoid chunked input complexity
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeave {
+                data_root: H256([1_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeave {
+                data_root: H256([2_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+
+        assert_eq!(leaves.len(), 2);
+
+        let left = leaves[0].clone();
+        let right = leaves[1].clone();
+
+        // The branch pivot is the left child's exclusive upper bound (left.max_byte_range).
+        // Capture expected boundaries
+        let expected_left_min = left.min_byte_range;
+        let expected_left_max = left.max_byte_range;
+        let expected_right_max = right.max_byte_range;
+
+        // Verify the branch spans [left.min_byte_range, right.max_byte_range].
+        // 1) Verify branch node metadata invariants
+        let branch = hash_branch(left.clone(), right.clone()).expect("expected node");
+        assert_eq!(
+            branch.min_byte_range, expected_left_min,
+            "branch.min_byte_range must equal left.min_byte_range"
+        );
+        assert_eq!(
+            branch.max_byte_range, expected_right_max,
+            "branch.max_byte_range must equal right.max_byte_range"
+        );
+
+        // Proofs must encode the branch pivot (left_child.max_byte_range) used to recompute the branch id.
+        // 2) Verify proofs encode left child's max_byte_range as the branch offset
+        let root = generate_data_root(vec![left, right]).expect("expected data root");
+        let proofs = resolve_proofs(root, None).expect("expected proofs");
+        assert_eq!(proofs.len(), 2, "should produce one proof per leaf");
+
+        for proof in proofs {
+            // For a single-branch tree, the proof contains:
+            // - branch: (left_id, right_id, pivot)
+            // - leaf: (data_hash, leaf offset)
+            // Split the proof into branch portion and leaf portion
+            let branch_bytes_len = HASH_SIZE * 2 + NOTE_SIZE;
+            assert!(
+                proof.proof.len() >= branch_bytes_len + HASH_SIZE + NOTE_SIZE,
+                "proof should contain at least one branch (96 bytes) and a leaf (64 bytes)"
+            );
+
+            let (branches, _leaf) = proof
+                .proof
+                .split_at(proof.proof.len() - HASH_SIZE - NOTE_SIZE);
+            assert_eq!(
+                branches.len(),
+                branch_bytes_len,
+                "with two leaves there is exactly one branch in the path"
+            );
+
+            // Deserialize and assert pivot == left.max_byte_range to guarantee proof correctness.
+            // Deserialize the branch and ensure the encoded offset equals left.max_byte_range
+            let branch_proof =
+                BranchProof::try_from_proof_slice(branches).expect("expected BranchProof");
+            assert_eq!(
+                branch_proof.offset(),
+                expected_left_max,
+                "branch proof offset must equal left_child.max_byte_range"
+            );
+        }
+    }
 }

@@ -44,6 +44,9 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
         .await;
 
+    node_1.gossip_disable();
+    node_2.gossip_disable();
+
     let common_height = node_1.get_max_difficulty_block();
     assert_eq!(common_height, node_2.get_max_difficulty_block());
     const BLOCKS_TO_MINE_NODE_1: usize = (PRICE_ADJUSTMENT_INTERVAL as usize * 2) + 6;

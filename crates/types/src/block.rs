@@ -248,6 +248,9 @@ pub struct IrysBlockHeader {
     /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
     /// This is what the protocol uses for different pricing calculation purposes.
     pub ema_irys_price: IrysTokenPrice,
+
+    /// Treasury balance tracking
+    pub treasury: U256,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -334,6 +337,14 @@ impl IrysBlockHeader {
         }
         data_txids
     }
+
+    /// Returns the transaction IDs for a specific data ledger in their original order
+    pub fn get_data_ledger_tx_ids_ordered(&self, ledger_id: DataLedger) -> Option<&[H256]> {
+        self.data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == ledger_id as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+    }
 }
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
@@ -406,7 +417,6 @@ fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interva
 #[serde(rename_all = "camelCase")]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
-    pub recall_chunk_index: u32,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
     pub chunk: Option<Base64>,
@@ -549,7 +559,7 @@ impl IrysBlockHeader {
                 chunk: Some(Base64::from_str("").unwrap()),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
-                recall_chunk_index: 0,
+
                 ledger_id: None,
             },
             reward_address: Address::ZERO,
@@ -582,6 +592,7 @@ impl IrysBlockHeader {
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
+            treasury: U256::zero(),
             ..Default::default()
         }
     }
@@ -814,7 +825,6 @@ mod tests {
     fn test_poa_data_rlp_round_trip() {
         // setup
         let data = PoaData {
-            recall_chunk_index: 123,
             partition_chunk_offset: 321,
             partition_hash: H256::random(),
             chunk: Some(Base64(vec![42; 16])),

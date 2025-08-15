@@ -278,6 +278,17 @@ impl BlockValidationTask {
         // Shadow transaction validation
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
+
+        // Get parent epoch snapshot for expired ledger fee calculation
+        let parent_epoch_snapshot = self
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .expect("parent block should have an epoch snapshot in the block_tree");
+
+        // Get block index (convert read guard to Arc<RwLock>)
+        let block_index = self.service_inner.block_index_guard.inner();
+
         let shadow_tx_task = async move {
             shadow_transactions_are_valid(
                 config,
@@ -286,6 +297,8 @@ impl BlockValidationTask {
                 &self.service_inner.reth_node_adapter,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
+                parent_epoch_snapshot,
+                block_index,
             )
             .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
             .await
