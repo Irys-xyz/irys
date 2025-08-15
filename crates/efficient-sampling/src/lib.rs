@@ -163,7 +163,7 @@ pub fn reset_step_number(step_num: u64, config: &ConsensusConfig) -> u64 {
 pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
     // Prevent arithmetic underflow when step_num is 0
     if step_num == 0 {
-        return 1;
+        return 0;
     }
     ((step_num - 1) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1
 }
