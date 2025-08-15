@@ -385,7 +385,7 @@ impl EpochSnapshot {
             .partition_assignments
             .capacity_partitions
             .iter()
-            .map(|(hash, assignment)| (*hash, assignment.clone()))
+            .map(|(hash, assignment)| (*hash, *assignment))
             .collect();
 
         // Sort partitions by hash using `sort_unstable_by_key` for better performance.

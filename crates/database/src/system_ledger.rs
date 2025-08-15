@@ -282,7 +282,7 @@ pub async fn add_test_commitments_for_signer(
 
     for i in 0..(pledge_count as usize) {
         let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
+            create_pledge_commitment_transaction(signer, anchor, config, &(i as u64)).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;
