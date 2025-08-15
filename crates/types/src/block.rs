@@ -532,15 +532,26 @@ impl IrysBlockHeader {
         let tx_ids = H256List::new();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
+        // Compute default PoA chunk, chunk_hash, and solution_hash so mock headers satisfy solution_hash_link_is_valid
+        let default_poa_chunk: Vec<u8> = Vec::new();
+        let default_partition_chunk_offset: u32 = 0;
+        let default_vdf_output = H256::zero();
+        let default_chunk_hash: H256 = H256(openssl::sha::sha256(&default_poa_chunk));
+        let mut hasher = openssl::sha::Sha256::new();
+        hasher.update(&default_poa_chunk);
+        hasher.update(&default_partition_chunk_offset.to_le_bytes());
+        hasher.update(default_vdf_output.as_bytes());
+        let default_solution_hash: H256 = H256::from(hasher.finish());
+
         // Create a sample IrysBlockHeader object with mock data
         Self {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
             last_diff_timestamp: 1622543200,
-            solution_hash: H256::zero(),
+            solution_hash: default_solution_hash,
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
-            chunk_hash: H256::zero(),
+            chunk_hash: default_chunk_hash,
             height: 42,
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
