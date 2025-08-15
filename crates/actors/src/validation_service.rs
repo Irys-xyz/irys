@@ -10,7 +10,9 @@
 //! 3. **Concurrent Validation**: Three concurrent stages (recall, POA, reth state)
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
-use crate::{block_tree_service::ReorgEvent, services::ServiceSenders};
+use crate::{
+    block_tree_service::ReorgEvent, block_validation::is_seed_data_valid, services::ServiceSenders,
+};
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
 use eyre::{bail, ensure};
@@ -82,7 +84,7 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) db: DatabaseProvider,
     /// Block tree read guard to get access to the canonical chain
     pub(crate) block_tree_guard: BlockTreeReadGuard,
-    /// Rayon thread pool that executes vdf steps   
+    /// Rayon thread pool that executes vdf steps
     pub(crate) pool: rayon::ThreadPool,
     /// Execution payload provider for shadow transaction validation
     pub(crate) execution_payload_provider: ExecutionPayloadCache,
@@ -336,6 +338,23 @@ impl ValidationServiceInner {
         );
 
         // Spawn VDF validation task unless skipping
+        // Early guard: validate seeds against parent before heavy VDF work
+        let vdf_reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
+        {
+            let binding = self.block_tree_guard.read();
+            let previous_block = binding
+                .get_block(&block.previous_block_hash)
+                .expect("previous block should exist");
+            ensure!(
+                matches!(
+                    is_seed_data_valid(block, previous_block, vdf_reset_frequency),
+                    crate::block_tree_service::ValidationResult::Valid
+                ),
+                "Seed data is invalid"
+            );
+        }
+
+        // Spawn VDF validation task
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let vdf_state = self.vdf_state.clone();
         if !skip_vdf_validation {

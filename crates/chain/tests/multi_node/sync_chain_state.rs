@@ -15,7 +15,7 @@ use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
@@ -218,14 +218,12 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
         .await;
-    ctx_peer1_node.start_public_api().await;
 
     let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
     ctx_peer2_node.mode = NodeMode::TrustedPeerSync;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
         .await;
-    ctx_peer2_node.start_public_api().await;
 
     // disable vdf mining on the peers, as they can instead use VDF fast forward as blocks arrive
     // this does not directly contribute to the test but does reduce resource usage during test run
@@ -253,8 +251,8 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let peer2_genesis_block =
             block_header_by_hash(&ctx_peer2_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
 
-        assert!(genesis_genesis_block == peer1_genesis_block);
-        assert!(genesis_genesis_block == peer2_genesis_block);
+        assert_eq!(genesis_genesis_block, peer1_genesis_block);
+        assert_eq!(genesis_genesis_block, peer2_genesis_block);
     }
 
     //
@@ -510,7 +508,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
-    match node.create_submit_data_tx(account, data_bytes).await {
+    match node.create_publish_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);
         }
@@ -548,6 +546,7 @@ async fn poll_until_fetch_at_block_index_height(
         }
 
         let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        debug!("Fetched info endpoint response: {:?}", json_response);
         if required_blocks_height > json_response.block_index_height {
             tracing::debug!(
                 "{} attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",

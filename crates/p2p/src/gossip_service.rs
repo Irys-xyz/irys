@@ -15,6 +15,7 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
+    SyncChainServiceMessage,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
@@ -29,8 +30,8 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::{channel, error::SendError, Receiver, Sender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn, Span};
 
 const MAX_PEERS_PER_BROADCAST: usize = 5;
@@ -156,19 +157,20 @@ impl P2PService {
         execution_payload_provider: ExecutionPayloadCache,
         config: Config,
         service_senders: ServiceSenders,
+        chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
     ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<B, M>>)>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
         A: ApiClient,
     {
-        debug!("Starting gossip service");
+        debug!("Starting the gossip service");
 
         let block_pool = BlockPool::new(
             db,
-            peer_list.clone(),
             block_discovery,
             mempool.clone(),
+            chain_sync_tx,
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),

@@ -16,7 +16,7 @@ use irys_types::{
     PartitionChunkOffset,
 };
 use openssl::sha;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, trace, warn};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
@@ -114,10 +114,6 @@ impl EpochSnapshot {
             expired_partition_hashes: Vec::new(),
         };
 
-        if Self::validate_commitments(&genesis_block, &commitments).is_err() {
-            panic!("Cannot validate genesis block commitments");
-        }
-
         match new_self.perform_epoch_tasks(&None, &genesis_block, commitments) {
             Ok(_) => debug!("Initialized Epoch Snapshot"),
             Err(e) => {
@@ -171,6 +167,17 @@ impl EpochSnapshot {
         // Verify that each commitment transaction ID referenced in the commitments ledger has a
         // corresponding commitment transaction in the replay data
         if let Some(commitment_ledger) = commitment_ledger {
+            // Ensure the counts match exactly - no extra commitments allowed
+            if commitment_ledger.tx_ids.len() != commitments.len() {
+                return Err(eyre::eyre!(
+                    "Commitment count mismatch for block {:?}: ledger has {} commitments, but {} commitments provided",
+                    block_header.block_hash,
+                    commitment_ledger.tx_ids.len(),
+                    commitments.len()
+                ));
+            }
+
+            // Verify each commitment transaction ID in the ledger has a corresponding commitment
             for txid in commitment_ledger.tx_ids.iter() {
                 // If we can't find the commitment transaction for a referenced txid, return an error
                 if !commitments.iter().any(|c| c.id == *txid) {
@@ -180,6 +187,27 @@ impl EpochSnapshot {
                         block_header.block_hash.0.to_base58()
                     ));
                 }
+            }
+
+            // Also check the other way around to verify each provided commitment is referenced in
+            // the ledger (no extra commitments)
+            for commitment in commitments.iter() {
+                if !commitment_ledger.tx_ids.contains(&commitment.id) {
+                    return Err(eyre::eyre!(
+                        "Extra commitment transaction {} not referenced in block {} ledger",
+                        commitment.id.0.to_base58(),
+                        block_header.block_hash.0.to_base58()
+                    ));
+                }
+            }
+        } else {
+            // If no commitment ledger exists, there should be no commitments provided
+            if !commitments.is_empty() {
+                return Err(eyre::eyre!(
+                    "Block {} has no commitment ledger, but {} commitments were provided",
+                    block_header.block_hash.0.to_base58(),
+                    commitments.len()
+                ));
             }
         }
         Ok(())
@@ -379,17 +407,18 @@ impl EpochSnapshot {
     fn backfill_missing_partitions(&mut self) {
         debug!("Backfilling missing partitions...");
         // Start with a sorted list of capacity partitions (sorted by hash)
+        // Now collecting both the hash and the partition assignment
 
-        let mut capacity_partitions: Vec<_> = self
+        let mut capacity_partitions: Vec<(H256, PartitionAssignment)> = self
             .partition_assignments
             .capacity_partitions
-            .keys()
-            .copied()
+            .iter()
+            .map(|(hash, assignment)| (*hash, *assignment))
             .collect();
 
-        // Sort partitions using `sort_unstable` for better performance.
+        // Sort partitions by hash using `sort_unstable_by_key` for better performance.
         // Stability isn't needed/affected as each partition hash is unique.
-        capacity_partitions.sort_unstable();
+        capacity_partitions.sort_unstable_by_key(|(hash, _)| *hash);
 
         // Use the previous epoch hash as a seed/entropy to the prng
         let seed = self.epoch_block.last_epoch_hash.to_u32();
@@ -403,26 +432,46 @@ impl EpochSnapshot {
     }
 
     /// Process slot needs for a given ledger, assigning partitions to each slot
-    /// as needed.
+    /// as needed. Accounts for not assigning the same mining address to multiple
+    /// replicas of a single slot.
     pub fn process_slot_needs(
         &mut self,
         ledger: DataLedger,
-        capacity_partitions: &mut Vec<H256>,
+        capacity_partitions: &mut Vec<(H256, PartitionAssignment)>,
         rng: &mut SimpleRNG,
     ) {
         debug!("Processing slot needs for ledger {:?}", &ledger);
         // Get slot needs for the specified ledger
         let slot_needs = self.ledgers.get_slot_needs(ledger);
 
-        let mut capacity_count: u32 = capacity_partitions
-            .len()
-            .try_into()
-            .expect("Value exceeds u32::MAX");
-
         // Iterate over slots that need partitions and assign them
         for (slot_index, num_needed) in slot_needs {
+            // Build a set of the mining addresses already assigned to this slot
+            let slot = self
+                .ledgers
+                .get_slots(ledger)
+                .get(slot_index)
+                .expect("slot index should exist in the ledger");
+
+            let mut assigned_addresses: HashSet<_> = HashSet::new();
+            for partition_hash in &slot.partitions {
+                let pa = self
+                    .get_data_partition_assignment(*partition_hash)
+                    .expect("a partition in a data ledger slot should have a partition assignment");
+
+                assigned_addresses.insert(pa.miner_address);
+            }
+
+            // Create a slot specific view of the capacity partitions
+            let mut slot_capacity_partitions = capacity_partitions.clone();
+
+            // Filter out any mining addresses already in the slot from the slot specific capacity view
+            slot_capacity_partitions.retain(|(_, partition_assignment)| {
+                !assigned_addresses.contains(&partition_assignment.miner_address)
+            });
+
             for _ in 0..num_needed {
-                if capacity_count == 0 {
+                if slot_capacity_partitions.is_empty() {
                     warn!(
                         "No available capacity partitions (needs {}) for slot {} of ledger {:?}",
                         &num_needed, &slot_index, &ledger
@@ -431,18 +480,25 @@ impl EpochSnapshot {
                 }
 
                 // Pick a random capacity partition hash and assign it
-                let part_index = rng.next_range(capacity_count) as usize;
-                let partition_hash = capacity_partitions.swap_remove(part_index);
-                capacity_count -= 1;
+                let part_index = rng.next_range(slot_capacity_partitions.len() as u32) as usize;
+                let (partition_hash, pa) = slot_capacity_partitions.swap_remove(part_index);
 
                 // Update local PartitionAssignment state and add to data_partitions
                 self.assign_partition_to_slot(partition_hash, ledger, slot_index);
 
+                // Remove any partitions belonging to the assigned miner from the slot capacity view
+                // So no more partitions from this miner will be assigned to this slot
+                slot_capacity_partitions
+                    .retain(|(_, part_assign)| part_assign.miner_address != pa.miner_address);
+
+                // Remove the specific assigned partition hash from the global capacity partitions list
+                capacity_partitions.retain(|(part_hash, _)| (*part_hash) != partition_hash);
+
                 // Push the newly assigned partition hash to the appropriate slot
                 // in the ledger
                 debug!(
-                    "Assigning partition hash {} to slot {} for  {:?}",
-                    &partition_hash, &slot_index, &ledger
+                    "Assigning partition hash {} to slot {} for {:?} addr: {}",
+                    partition_hash, &slot_index, &ledger, pa.miner_address
                 );
 
                 self.ledgers
@@ -1009,6 +1065,54 @@ mod tests {
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
+        }
+    }
+
+    mod validate_commitments {
+        use crate::EpochSnapshot;
+        use irys_database::SystemLedger;
+        use irys_types::{ConsensusConfig, H256List, SystemTransactionLedger};
+
+        #[test]
+        fn should_check_that_all_commitments_are_included() {
+            let config = ConsensusConfig::testing();
+            let mut mocked_block = irys_types::IrysBlockHeader::new_mock_header();
+            let mut comm_tx_1 = irys_types::CommitmentTransaction::new(&config);
+            let mut comm_tx_2 = irys_types::CommitmentTransaction::new(&config);
+            let mut unrelated_tx = irys_types::CommitmentTransaction::new(&config);
+
+            comm_tx_1.id = [1; 32].into();
+            comm_tx_2.id = [2; 32].into();
+            unrelated_tx.id = [3; 32].into();
+
+            mocked_block.system_ledgers.push(SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List(vec![comm_tx_1.id, comm_tx_2.id]),
+            });
+
+            let valid_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone()];
+            let too_few_commitments = vec![comm_tx_1.clone()];
+            let too_many_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone(), comm_tx_2];
+            let valid_count_but_invalid_id = vec![comm_tx_1, unrelated_tx];
+
+            let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
+            assert!(res.is_ok());
+
+            let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_few_commitments)
+                .expect_err("Expected error for too many commitments")
+                .to_string();
+            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 1 commitments provided");
+
+            let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_many_commitments)
+                .expect_err("Expected error for too many commitments")
+                .to_string();
+            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 3 commitments provided");
+
+            let err_str =
+                EpochSnapshot::validate_commitments(&mocked_block, &valid_count_but_invalid_id)
+                    .expect_err("Expected error for the wrong commitment ids")
+                    .to_string();
+            assert_eq!(err_str, "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111");
         }
     }
 }

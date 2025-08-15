@@ -1,16 +1,17 @@
 use crate::{
     block_index_service::BlockIndexService,
+    block_validation::PreValidationError,
     broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockFinalizedMessage, StorageModuleServiceMessage,
+    BlockMigrationMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
-use eyre::{eyre, Context as _};
+use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
@@ -313,7 +314,7 @@ impl BlockTreeServiceInner {
 
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: Arc::new(block_header),
             all_txs: Arc::new(all_txs),
         };
@@ -355,12 +356,12 @@ impl BlockTreeServiceInner {
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
     async fn try_notify_services_of_block_migration(&self, arc_block: &Arc<IrysBlockHeader>) {
-        let finalized_hash = {
+        let migrated_hash = {
             let binding = self.cache.clone();
             let cache = binding.write().unwrap();
             let migration_depth = self.config.consensus.block_migration_depth as usize;
 
-            // Skip if block isn't deep enough for finalization
+            // Skip if block isn't deep enough for migration
             if arc_block.height <= migration_depth as u64 {
                 return;
             }
@@ -370,35 +371,37 @@ impl BlockTreeServiceInner {
                 return;
             }
 
-            // Find block to finalize
+            // Find block to migrate
             let Some(current_index) = longest_chain
                 .iter()
                 .position(|x| x.block_hash == arc_block.block_hash)
             else {
-                info!("Validated block not in longest chain, block {} height: {}, skipping finalization",arc_block.block_hash, arc_block.height);
+                info!(
+                    "Validated block not in longest chain, block {} height: {}, skipping migration",
+                    arc_block.block_hash, arc_block.height
+                );
                 return;
             };
 
             if current_index < migration_depth {
-                return; // Block already finalized
+                return; // Block already migrated
             }
 
-            let finalize_index = current_index - migration_depth;
-            let finalized_hash = longest_chain[finalize_index].block_hash;
-            let finalized_height = longest_chain[finalize_index].height;
+            let migrate_index = current_index - migration_depth;
+            let migrated_hash = longest_chain[migrate_index].block_hash;
+            let migration_height = longest_chain[migrate_index].height;
 
-            // Verify block isn't already finalized
+            // Verify block isn't already migrated
             let binding = self.block_index_guard.clone();
             let bi = binding.read();
-            if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-                let finalized = bi.get_item(finalized_height).unwrap();
-                if finalized.block_hash == finalized_hash {
+            if let Some(finalized) = bi.get_item(migration_height) {
+                if finalized.block_hash == migrated_hash {
                     return;
                 }
-                panic!("Block tree and index out of sync");
+                panic!("Block tree and index out of sync during migration");
             }
 
-            match cache.get_block(&finalized_hash) {
+            match cache.get_block(&migrated_hash) {
                 Some(block) => {
                     let mut block = block.clone();
                     block.poa.chunk = None;
@@ -415,24 +418,24 @@ impl BlockTreeServiceInner {
                         debug!("No reorg subscribers: {:?}", e);
                     }
                 }
-                None => error!("migrated block {} not found in block_tree", finalized_hash),
+                None => error!("migrated block {} not found in block_tree", migrated_hash),
             }
 
-            debug!(?finalized_hash, ?finalized_height, "migrating irys block");
+            debug!(?migrated_hash, ?migration_height, "migrating irys block");
             // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
             if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(cache.tip),
                 confirmed_hash: None,
-                finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                finalized_hash: Some(BlockHashType::Irys(migrated_hash)),
             }) {
-                panic!("Unable to send finalization message to reth: {}", &e)
+                panic!("Unable to send migration message to reth: {}", &e)
             }
 
-            finalized_hash
+            migrated_hash
         }; // RwLockWriteGuard is dropped here, before the await
 
-        if let Err(e) = self.send_storage_finalized_message(finalized_hash).await {
-            error!("Unable to send block finalized message: {:?}", e);
+        if let Err(e) = self.send_block_migration_message(migrated_hash).await {
+            error!("Unable to send block migration message: {:?}", e);
         }
     }
 
@@ -442,7 +445,7 @@ impl BlockTreeServiceInner {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
         skip_vdf: bool,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
         let mut cache = self.cache.write().expect("cache lock poisoned");
 
@@ -477,11 +480,10 @@ impl BlockTreeServiceInner {
         );
 
         // Create ema snapshot for this block
-        let ema_snapshot = parent_block_entry.ema_snapshot.next_snapshot(
-            &block,
-            &parent_block_entry.block,
-            &self.config.consensus,
-        )?;
+        let ema_snapshot = parent_block_entry
+            .ema_snapshot
+            .next_snapshot(&block, &parent_block_entry.block, &self.config.consensus)
+            .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
 
         let add_result = cache.add_block(
             &block,
@@ -498,7 +500,7 @@ impl BlockTreeServiceInner {
                     block: block.clone(),
                     skip_vdf_validation: skip_vdf,
                 })
-                .context("validation service unreachable!")?;
+                .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
 
             if cache
                 .mark_block_as_validation_scheduled(block_hash)
