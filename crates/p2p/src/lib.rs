@@ -14,7 +14,7 @@ mod types;
 pub use block_pool::{BlockPool, BlockPoolError};
 pub use block_status_provider::{BlockStatus, BlockStatusProvider};
 pub use chain_sync::{
-    sync_chain, ChainSyncError, ChainSyncResult, ChainSyncService, ChainSyncServiceInner,
+    ChainSyncError, ChainSyncResult, ChainSyncService, ChainSyncServiceInner,
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
 pub use gossip_client::GossipClient;
