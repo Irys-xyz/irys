@@ -41,6 +41,7 @@ use irys_domain::{
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
     P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
+    SyncChainServiceMessage,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -77,8 +78,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::{self};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
@@ -429,8 +430,11 @@ impl IrysNode {
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;
 
-        // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config).await;
+        // Add commitment transactions to genesis block and get initial treasury
+        let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
+
+        // Set the genesis treasury to the total value of all commitments
+        genesis_block.treasury = initial_treasury;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
@@ -1039,6 +1043,12 @@ impl IrysNode {
         let block_status_provider =
             BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
 
+        // In case if you're wondering why this channel is not in the service senders:
+        // It's because ChainSyncService depends on the BlockPool, and moving it to actors will
+        // create a circular dependency, since BlockPool also depends on actors. This can be
+        // resolved once all actors are converted to tokio services, and BlockPool is moved into
+        // domain
+        let (chain_sync_tx, chain_sync_rx) = mpsc::unbounded_channel();
         let (p2p_service_handle, block_pool) = p2p_service.run(
             mempool_facade,
             block_discovery_facade.clone(),
@@ -1052,6 +1062,7 @@ impl IrysNode {
             vdf_state_readonly.clone(),
             config.clone(),
             service_senders.clone(),
+            chain_sync_tx.clone(),
         )?;
 
         // repair any missing payloads before triggering an FCU
@@ -1088,6 +1099,7 @@ impl IrysNode {
             receivers.block_producer,
             reth_node.provider.clone(),
             shadow_tx_store.clone(),
+            block_index,
             runtime_handle.clone(),
         );
 
@@ -1140,7 +1152,8 @@ impl IrysNode {
             config.clone(),
             block_index_guard.clone(),
             runtime_handle.clone(),
-            &block_pool,
+            Arc::clone(&block_pool),
+            (chain_sync_tx, chain_sync_rx),
         );
 
         // set up IrysNodeCtx
@@ -1458,6 +1471,7 @@ impl IrysNode {
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
+        block_index: Arc<RwLock<BlockIndex>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
@@ -1475,6 +1489,7 @@ impl IrysNode {
             shadow_tx_store,
             reth_service: reth_service_actor,
             beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
+            block_index,
         });
 
         // Spawn the service and get the handle
@@ -1578,9 +1593,12 @@ impl IrysNode {
         config: Config,
         block_index_guard: BlockIndexReadGuard,
         runtime_handle: tokio::runtime::Handle,
-        block_pool: &BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>,
+        block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+        (tx, rx): (
+            UnboundedSender<SyncChainServiceMessage>,
+            UnboundedReceiver<SyncChainServiceMessage>,
+        ),
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
-        let (tx, rx) = mpsc::unbounded_channel();
         let facade = SyncChainServiceFacade::new(tx);
 
         let inner = ChainSyncServiceInner::new(

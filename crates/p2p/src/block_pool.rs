@@ -1,4 +1,5 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
+use crate::chain_sync::SyncChainServiceMessage;
 use actix::Addr;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -10,7 +11,7 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
-use irys_domain::{ExecutionPayloadCache, PeerList};
+use irys_domain::ExecutionPayloadCache;
 use irys_types::{
     BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
     IrysBlockHeader, PeerNetworkError,
@@ -23,8 +24,8 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error, info, instrument};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 
@@ -73,7 +74,7 @@ where
 
     block_discovery: B,
     mempool: M,
-    peer_list: PeerList,
+    sync_service_sender: mpsc::UnboundedSender<SyncChainServiceMessage>,
 
     sync_state: ChainSyncState,
 
@@ -234,9 +235,9 @@ where
 {
     pub(crate) fn new(
         db: DatabaseProvider,
-        peer_list: PeerList,
         block_discovery: B,
         mempool: M,
+        sync_service_sender: mpsc::UnboundedSender<SyncChainServiceMessage>,
         sync_state: ChainSyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadCache,
@@ -247,9 +248,9 @@ where
         Self {
             db,
             blocks_cache: BlockCacheGuard::new(),
-            peer_list,
             block_discovery,
             mempool,
+            sync_service_sender,
             sync_state,
             block_status_provider,
             execution_payload_provider,
@@ -385,6 +386,22 @@ where
                 "Reth payload provider is not set".into(),
             ))?;
 
+        // Get parent epoch snapshot from block tree
+        let parent_epoch_snapshot = self
+            .block_status_provider
+            .block_tree_read_guard()
+            .read()
+            .get_epoch_snapshot(&block_header.previous_block_hash)
+            .ok_or_else(|| {
+                BlockPoolError::OtherInternal(format!(
+                    "Parent epoch snapshot not found for block {:?}",
+                    block_header.previous_block_hash
+                ))
+            })?;
+
+        // Get block index from block status provider
+        let block_index = self.block_status_provider.block_index_read_guard().inner();
+
         match shadow_transactions_are_valid(
             &self.config,
             &self.service_senders,
@@ -392,6 +409,8 @@ where
             adapter,
             &self.db,
             self.execution_payload_provider.clone(),
+            parent_epoch_snapshot,
+            block_index,
         )
         .await
         {
@@ -612,14 +631,16 @@ where
         self.sync_state.mark_processed(block_height as usize);
         self.blocks_cache.remove_block(&block_hash).await;
         if process_ancestor {
-            debug!("BlockPool: Checking if fast tracked block has orphaned ancestors");
-            let fut = Box::pin(self.process_orphaned_ancestor(block_hash));
-            if let Err(err) = fut.await {
-                // Ancestor processing doesn't affect the current block processing,
-                //  but it still is important to log the error
+            if let Err(send_err) =
+                self.sync_service_sender
+                    .send(SyncChainServiceMessage::BlockProcessedByThePool {
+                        block_hash,
+                        response: None,
+                    })
+            {
                 error!(
-                    "Error processing orphaned ancestor for block {:?}: {:?}",
-                    block_hash, err
+                    "Block pool: Failed to send BlockProcessedByThePool message: {:?}",
+                    send_err
                 );
             }
         }
@@ -669,77 +690,120 @@ where
             .block_status(block_header.height.saturating_sub(1), &prev_block_hash);
 
         debug!(
-            "Previous block status for block {:?}: {:?}",
+            "Previous block status for the parent block of the block {:?}: {:?}",
             current_block_hash, previous_block_status
         );
 
-        // If the parent block is in the db, process it
-        if previous_block_status.is_processed() {
-            info!(
-                "Found parent block for block {:?}, checking if tree has enough capacity",
+        if !previous_block_status.is_processed() {
+            debug!(
+                "Parent block for block {:?} is not found in the db",
                 current_block_hash
             );
 
-            self.block_status_provider
-                .wait_for_block_tree_to_catch_up(block_header.height)
+            let is_already_in_cache = self
+                .blocks_cache
+                .block_hash_to_parent_hash_contains(&prev_block_hash)
                 .await;
 
-            if let Err(block_discovery_error) = self
-                .block_discovery
-                .handle_block(Arc::clone(&block_header))
-                .await
-            {
-                error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
-                self.blocks_cache
-                    .remove_block(&block_header.block_hash)
-                    .await;
-                return Err(BlockPoolError::BlockError(format!(
-                    "{:?}",
-                    block_discovery_error
-                )));
+            if is_already_in_cache {
+                debug!(
+                    "Parent block {:?} is already in the cache, skipping the request",
+                    prev_block_hash
+                );
+                return Ok(());
             }
 
-            info!(
-                "Block pool: Block {:?} has been processed",
-                current_block_hash
-            );
+            let canonical_height = self.block_status_provider.canonical_height();
 
-            // Request the execution payload for the block if it is not already stored locally
-            self.handle_execution_payload_for_prevalidated_block(
-                block_header.evm_block_hash,
-                false,
-            );
+            if current_block_height
+                > canonical_height + u64::from(self.config.consensus.block_migration_depth * 2)
+            {
+                // IMPORTANT! If the node is just processing blocks slower than the network, the sync service should catch it up eventually.
+                warn!(
+                    "Block pool: The block {:?} (height {}) is too far ahead of the latest canonical block (height {}). This might indicate a potential issue.",
+                    current_block_hash, current_block_height, canonical_height
+                );
 
-            debug!(
-                "Block pool: Marking block {:?} as processed",
-                current_block_hash
-            );
-            self.sync_state
-                .mark_processed(current_block_height as usize);
-            self.blocks_cache
-                .remove_block(&block_header.block_hash)
-                .await;
+                return Ok(());
+            }
 
-            let fut = Box::pin(self.process_orphaned_ancestor(block_header.block_hash));
-            if let Err(err) = fut.await {
-                // Ancestor processing doesn't affect the current block processing,
-                //  but it still is important to log the error
+            // Use the sync service to request parent block (fire and forget)
+            if let Err(send_err) =
+                self.sync_service_sender
+                    .send(SyncChainServiceMessage::RequestBlockFromTheNetwork {
+                        block_hash: prev_block_hash,
+                        response: None,
+                    })
+            {
                 error!(
-                    "Error processing orphaned ancestor for block {:?}: {:?}",
-                    block_header.block_hash, err
+                    "BlockPool: Failed to send RequestBlockFromTheNetwork message: {:?}",
+                    send_err
                 );
             }
 
             return Ok(());
         }
 
-        debug!(
-            "Parent block for block {:?} not found in db",
+        info!(
+            "Found parent block for block {:?}, checking if tree has enough capacity",
             current_block_hash
         );
 
-        self.request_parent_block_to_be_gossiped(block_header.previous_block_hash)
+        self.block_status_provider
+            .wait_for_block_tree_to_catch_up(block_header.height)
+            .await;
+
+        if let Err(block_discovery_error) = self
+            .block_discovery
+            .handle_block(Arc::clone(&block_header))
             .await
+        {
+            error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
+            self.blocks_cache
+                .remove_block(&block_header.block_hash)
+                .await;
+            return Err(BlockPoolError::BlockError(format!(
+                "{:?}",
+                block_discovery_error
+            )));
+        }
+
+        info!(
+            "Block pool: Block {:?} has been processed",
+            current_block_hash
+        );
+
+        // Request the execution payload for the block if it is not already stored locally
+        self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, false);
+
+        debug!(
+            "Block pool: Marking block {:?} as processed",
+            current_block_hash
+        );
+        self.sync_state
+            .mark_processed(current_block_height as usize);
+        self.blocks_cache
+            .remove_block(&block_header.block_hash)
+            .await;
+
+        debug!(
+            "Block pool: Notifying sync service to process orphaned ancestors of block {:?}",
+            current_block_hash
+        );
+        if let Err(send_err) =
+            self.sync_service_sender
+                .send(SyncChainServiceMessage::BlockProcessedByThePool {
+                    block_hash: current_block_hash,
+                    response: None,
+                })
+        {
+            error!(
+                "Block pool: Failed to send BlockProcessedByThePool message: {:?}",
+                send_err
+            );
+        }
+
+        Ok(())
     }
 
     /// Requests the execution payload for the given EVM block hash if it is not already stored
@@ -809,85 +873,6 @@ where
         self.blocks_cache.clone()
     }
 
-    async fn process_orphaned_ancestor(&self, block_hash: BlockHash) -> Result<(), BlockPoolError> {
-        let maybe_orphaned_block = self
-            .blocks_cache
-            .orphaned_blocks_by_parent_cloned(&block_hash)
-            .await;
-
-        if let Some(orphaned_block) = maybe_orphaned_block {
-            info!(
-                "Start processing orphaned ancestor block: {:?}",
-                orphaned_block.block_hash
-            );
-
-            self.process_block(orphaned_block, false).await
-        } else {
-            info!(
-                "No orphaned ancestor block found for block: {:?}",
-                block_hash
-            );
-            Ok(())
-        }
-    }
-
-    async fn request_parent_block_to_be_gossiped(
-        &self,
-        parent_block_hash: BlockHash,
-    ) -> Result<(), BlockPoolError> {
-        let previous_block_hash = parent_block_hash;
-
-        let parent_is_already_in_the_pool = self
-            .blocks_cache
-            .block_hash_to_parent_hash_contains(&previous_block_hash)
-            .await;
-
-        // If the parent is also in the cache, it's likely that processing has already started
-        if !parent_is_already_in_the_pool {
-            debug!(
-                "Block pool: Parent block {:?} not found in the cache, requesting it from the network",
-                previous_block_hash
-            );
-            self.request_block_from_the_network(previous_block_hash)
-                .await
-        } else {
-            debug!(
-                "Parent block {:?} is already in the cache, skipping get data request",
-                previous_block_hash
-            );
-            Ok(())
-        }
-    }
-
-    async fn request_block_from_the_network(
-        &self,
-        block_hash: BlockHash,
-    ) -> Result<(), BlockPoolError> {
-        self.blocks_cache.mark_block_as_requested(block_hash).await;
-        match self
-            .peer_list
-            .request_block_from_the_network(
-                block_hash,
-                self.sync_state.is_syncing_from_a_trusted_peer(),
-            )
-            .await
-        {
-            Ok(()) => {
-                debug!(
-                    "Block pool: Requested block {:?} from the network",
-                    block_hash
-                );
-                Ok(())
-            }
-            Err(error) => {
-                error!("Error while trying to fetch parent block {:?}: {:?}. Removing the block from the pool", block_hash, error);
-                self.blocks_cache.remove_requested_block(&block_hash).await;
-                self.blocks_cache.remove_block(&block_hash).await;
-                Err(error.into())
-            }
-        }
-    }
-
     /// Inserts an execution payload into the internal cache so that it can be
     /// retrieved by the [`ExecutionPayloadProvider`].
     pub async fn add_execution_payload_to_cache(
@@ -922,6 +907,38 @@ where
             .view_eyre(|tx| block_header_by_hash(tx, block_hash, true))
             .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
             .map(|block| block.map(Arc::new))
+    }
+
+    /// Get orphaned block by parent hash - for orphan block processing
+    pub(crate) async fn get_orphaned_block_by_parent(
+        &self,
+        parent_hash: &BlockHash,
+    ) -> Option<Arc<IrysBlockHeader>> {
+        self.blocks_cache
+            .orphaned_blocks_by_parent_cloned(parent_hash)
+            .await
+    }
+
+    /// Check if parent hash exists in block cache - for orphan block processing
+    pub(crate) async fn is_parent_hash_in_cache(&self, parent_hash: &BlockHash) -> bool {
+        self.blocks_cache
+            .block_hash_to_parent_hash_contains(parent_hash)
+            .await
+    }
+
+    /// Mark the block as requested - for orphan block processing
+    pub(crate) async fn mark_block_as_requested(&self, block_hash: BlockHash) {
+        self.blocks_cache.mark_block_as_requested(block_hash).await;
+    }
+
+    /// Remove requested block - for orphan block processing
+    pub(crate) async fn remove_requested_block(&self, block_hash: &BlockHash) {
+        self.blocks_cache.remove_requested_block(block_hash).await;
+    }
+
+    /// Remove block from cache - for orphan block processing
+    pub(crate) async fn remove_block_from_cache(&self, block_hash: &BlockHash) {
+        self.blocks_cache.remove_block(block_hash).await;
     }
 }
 

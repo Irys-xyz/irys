@@ -75,20 +75,44 @@ impl TermLedger {
     pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<usize> {
         let mut expired_indices = Vec::new();
 
+        tracing::debug!(
+            "expire_old_slots: epoch_height={}, epoch_length={}, num_blocks_in_epoch={}, min_height_needed={}",
+            epoch_height,
+            self.epoch_length,
+            self.num_blocks_in_epoch,
+            self.epoch_length * self.num_blocks_in_epoch
+        );
+
         // Make sure enough blocks have transpired before calculating expiry height
         if epoch_height < self.epoch_length * self.num_blocks_in_epoch {
+            tracing::warn!(
+                "Not enough blocks yet: {} < {}, returning empty",
+                epoch_height,
+                self.epoch_length * self.num_blocks_in_epoch
+            );
             return expired_indices;
         }
 
         let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
+        tracing::error!("Calculated expiry_height={}", expiry_height);
 
         // Collect indices of slots to expire
         for (idx, slot) in self.slots.iter().enumerate() {
+            tracing::debug!(
+                "Checking slot {}: last_height={}, is_expired={}, partitions={:?}",
+                idx,
+                slot.last_height,
+                slot.is_expired,
+                slot.partitions
+            );
+
             if idx == self.slots.len() - 1 {
                 // Never expire the last slot in a ledger
+                tracing::warn!("Skipping slot {} (last slot)", idx);
                 continue;
             }
             if slot.last_height <= expiry_height && !slot.is_expired {
+                tracing::info!("Slot {} is expired! Adding to expired_indices", idx);
                 expired_indices.push(idx);
             }
         }
