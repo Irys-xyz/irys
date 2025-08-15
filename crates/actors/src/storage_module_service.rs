@@ -21,9 +21,11 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
-use tracing::{debug, warn, Span};
+use tracing::{debug, error, warn, Span};
 
-use crate::{packing::PackingRequest, ActorAddresses};
+use crate::{
+    packing::PackingRequest, services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
+};
 
 // Messages that the StorageModuleService service supports
 #[derive(Debug)]
@@ -45,6 +47,7 @@ pub struct StorageModuleServiceInner {
     storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
     actor_addresses: ActorAddresses,
     submodules_config: StorageSubmodulesConfig,
+    service_senders: ServiceSenders,
     _config: Config,
 }
 
@@ -53,6 +56,7 @@ impl StorageModuleServiceInner {
     pub fn new(
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         actor_addresses: ActorAddresses,
+        service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
         let submodules_config =
@@ -65,6 +69,7 @@ impl StorageModuleServiceInner {
             storage_modules,
             actor_addresses,
             submodules_config,
+            service_senders,
             _config: config,
         }
     }
@@ -148,6 +153,19 @@ impl StorageModuleServiceInner {
             }
         }
 
+        // Once the storage module partition assignments are updated we can a
+        // safely update the data_sync_service for any necessary data synchronization
+        if let Err(e) = self
+            .service_senders
+            .data_sync
+            .send(DataSyncServiceMessage::SyncPartitions)
+        {
+            error!(
+                "Failed to send SyncPartitions message to data_sync service: {}",
+                e
+            );
+        }
+
         Ok(())
     }
 
@@ -162,8 +180,8 @@ impl StorageModuleServiceInner {
         // Skip modules without partition assignments
         if module.partition_assignment().is_none() {
             warn!(
-                "Storage module at index {} has no partition assignment",
-                index
+                "Storage module {:?} at index {} has no partition assignment",
+                &module_path, index
             );
             return Ok(());
         }
@@ -177,8 +195,8 @@ impl StorageModuleServiceInner {
             Ok(p) => p,
             Err(e) => {
                 warn!(
-                    "Failed to load packing params for module at index {}: {}",
-                    index, e
+                    "Failed to load packing params for module {:?} at index {}: {}",
+                    &module_path, index, e
                 );
                 return Ok(()); // Skip validation
             }
@@ -192,8 +210,8 @@ impl StorageModuleServiceInner {
         // Report overall status
         if hash_match && slot_match && ledger_match {
             debug!(
-                "Storage module at index {} matches on-disk parameters",
-                index
+                "Storage module {:?} at index {} matches on-disk parameters",
+                &module_path, index
             );
             return Ok(());
         }
@@ -224,7 +242,8 @@ impl StorageModuleServiceInner {
 
         // Return a detailed error with all mismatches
         Err(eyre::eyre!(
-            "Storage module at index {} has mismatched parameters: {}",
+            "Storage module {:?} at index {} has mismatched parameters: {}",
+            &module_path,
             index,
             mismatches.join(", ")
         ))
@@ -238,6 +257,7 @@ impl StorageModuleService {
         rx: UnboundedReceiver<StorageModuleServiceMessage>,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         actor_addresses: &ActorAddresses,
+        service_senders: ServiceSenders,
         config: &Config,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -252,7 +272,12 @@ impl StorageModuleService {
             let pending_storage_module_service = Self {
                 shutdown: shutdown_rx,
                 msg_rx: rx,
-                inner: StorageModuleServiceInner::new(storage_modules, actor_addresses, config),
+                inner: StorageModuleServiceInner::new(
+                    storage_modules,
+                    actor_addresses,
+                    service_senders,
+                    config,
+                ),
             };
             pending_storage_module_service
                 .start()

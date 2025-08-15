@@ -14,7 +14,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
-    IngressProofsList, IrysBlockHeader, NodeConfig, TxIngressProof, H256,
+    IngressProofsList, IrysBlockHeader, NodeConfig, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -62,7 +62,14 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
         data.extend_from_slice(chunk);
     }
 
-    let tx = signer.create_transaction(data, None)?;
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx =
+        signer.create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)?;
     let tx = signer.sign_transaction(tx)?;
 
     // First post the chunks
@@ -100,6 +107,176 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
 }
 
 #[actix::test]
+async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    // Turn on tracing even before the nodes start
+    initialize_tracing();
+
+    // Configure a test network
+    let mut genesis_config = NodeConfig::testing();
+
+    // Create a signer (keypair) for transactions and fund it
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Prepare a small single-chunk data payload
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data = vec![7_u8; chunk_size];
+
+    let tx = signer.create_transaction(data.clone(), None)?;
+    let tx = signer.sign_transaction(tx)?;
+
+    // Start the node
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    // Build a pre-header chunk with an oversized data_path (> 64 KiB)
+    let oversized_path = vec![0_u8; 70_000];
+    let chunk = UnpackedChunk {
+        data_root: tx.header.data_root,
+        data_size: tx.header.data_size,
+        data_path: Base64(oversized_path),
+        bytes: Base64(data),
+        tx_offset: TxChunkOffset::from(0_u32),
+    };
+
+    // Post the chunk before the tx header
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ensure it did not get cached
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    // Post the tx header and confirm cache still empty
+    post_data_tx(&app, &tx).await;
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testing();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Prepare bytes that exceed chunk_size by 1
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data = vec![9_u8; chunk_size + 1];
+
+    let tx = signer.create_transaction(vec![1_u8; chunk_size], None)?;
+    let tx = signer.sign_transaction(tx)?;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    // Build a pre-header chunk with oversized bytes
+    let chunk = UnpackedChunk {
+        data_root: tx.header.data_root,
+        data_size: tx.header.data_size,
+        data_path: Base64(vec![]),
+        bytes: Base64(data),
+        tx_offset: TxChunkOffset::from(0_u32),
+    };
+
+    // Post the chunk before the tx header
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ensure it did not get cached
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    // Post the tx header and confirm cache still empty
+    post_data_tx(&app, &tx).await;
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
+async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    initialize_tracing();
+
+    let mut genesis_config = NodeConfig::testing();
+
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    // Prepare a valid-sized chunk payload
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data = vec![5_u8; chunk_size];
+
+    let tx = signer.create_transaction(data.clone(), None)?;
+    let tx = signer.sign_transaction(tx)?;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+
+    // Pre-header cap is min(max_chunks_per_item, 64) => default 64, so tx_offset >= 64 must be dropped
+    let chunk = UnpackedChunk {
+        data_root: tx.header.data_root,
+        data_size: tx.header.data_size,
+        data_path: Base64(vec![]),
+        bytes: Base64(data),
+        tx_offset: TxChunkOffset::from(64_u32),
+    };
+
+    // Post the chunk before the tx header
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ensure it did not get cached
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    // Post the tx header and confirm cache still empty
+    post_data_tx(&app, &tx).await;
+    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[actix::test]
 async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
@@ -117,7 +294,6 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _ = genesis_node.start_public_api().await;
 
     // Create stake and pledge commitments for the signer
     let config = &genesis_node.node_ctx.config.consensus;
@@ -174,7 +350,6 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
         .await;
-    let _ = genesis_node.start_public_api().await;
 
     // Create and post stake commitment for the signer
     let config = &genesis_node.node_ctx.config.consensus;
@@ -274,7 +449,6 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
     let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
@@ -284,12 +458,10 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
         .start_with_name("PEER1")
         .await;
-    peer1_node.start_public_api().await;
 
     let peer2_node = IrysNodeTest::new(peer2_config.clone())
         .start_with_name("PEER2")
         .await;
-    peer2_node.start_public_api().await;
 
     // Post stake + pledge commitments to peer1
     let peer1_stake_tx = peer1_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
@@ -865,21 +1037,17 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
-        // TODO: why do we have two structs? TxIngressProof and IngressProof?
-        // probably not worth worrying about given ingress proofs need a proper impl, and this should be handled then
+        // Get the ingress proof from the database
         tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
             .expect("Able to get a_blk1_tx1's ingress proof from DB")
     };
 
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
-    a_blk1_tx1_published.ingress_proofs = Some(TxIngressProof {
-        proof: a_blk1_tx1_proof1.proof,
-        signature: a_blk1_tx1_proof1.signature,
-    });
+    a_blk1_tx1_published.ingress_proofs = Some(a_blk1_tx1_proof1.proof.clone());
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
     assert_eq!(
-        a1_b2_reorg_mempool_txs.publish_tx.0,
+        a1_b2_reorg_mempool_txs.publish_tx.txs,
         vec![a_blk1_tx1_published]
     );
 
@@ -935,10 +1103,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .proofs
         .clone()
         .unwrap()
-        .ne(&IngressProofsList(vec![TxIngressProof {
-            proof: a_blk1_tx1_proof1.proof,
-            signature: a_blk1_tx1_proof1.signature
-        }])));
+        .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()])));
 
     // now we gossip B3 back to A
     // it shouldn't reorg, and should accept the block
@@ -959,8 +1124,8 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // (nothing should be in the mempool)
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.0.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.1.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
     assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
     // get a_blk1_tx1 from a, it should have b_blk3's ingress proof
@@ -1255,8 +1420,8 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     // (nothing should be in the mempool)
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.0.is_empty());
-    assert!(a_b_blk3_mempool_txs.publish_tx.1.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
     assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
     // tada!
@@ -1314,7 +1479,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis_config.consensus.extend_genesis_accounts(vec![(
         rich_account.address(),
         GenesisAccount {
-            balance: U256::from(1000000000000000000_u128), // 1 ETH
+            balance: U256::from(1000000000000000000_u128), // 1 IRYS
             ..Default::default()
         },
     )]);
@@ -1326,7 +1491,6 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis.start_public_api().await;
 
     // Setup Reth context for EVM transactions
     let genesis_reth_context = genesis.node_ctx.reth_node_adapter.clone();
@@ -1339,12 +1503,10 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let peer1 = IrysNodeTest::new(peer1_config.clone())
         .start_with_name("PEER1")
         .await;
-    peer1.start_public_api().await;
 
     let peer2 = IrysNodeTest::new(peer2_config.clone())
         .start_with_name("PEER2")
         .await;
-    peer2.start_public_api().await;
 
     // Setup Reth contexts for peers
     let peer1_reth_context = peer1.node_ctx.reth_node_adapter.clone();
@@ -1357,8 +1519,8 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let recipient2_init_balance = genesis_reth_context
         .rpc
         .get_balance(recipient2.address(), None)?;
-    assert_eq!(recipient1_init_balance, U256::ZERO);
-    assert_eq!(recipient2_init_balance, U256::ZERO);
+    assert_eq!(recipient1_init_balance, U256::from(0));
+    assert_eq!(recipient2_init_balance, U256::from(0));
 
     // need to stake & pledge peers before they can mine
     let post_wait_stake_commitment =
@@ -1783,6 +1945,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     // create a signed data transaction
     let valid_tx = genesis_node
         .create_signed_data_tx(&signer, b"hello".to_vec())
+        .await
         .unwrap();
 
     // tamper with the transaction id

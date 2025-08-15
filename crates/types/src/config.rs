@@ -4,7 +4,7 @@ use crate::{
         phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
-    PeerAddress, RethPeerInfo,
+    PeerAddress, RethPeerInfo, H256,
 };
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
@@ -13,7 +13,7 @@ use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc, time::Duration};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -57,6 +57,7 @@ pub struct CombinedConfigInner {
 /// These parameters determine how the network operates, including pricing,
 /// storage requirements, and data validation mechanisms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
     pub chain_id: u64,
@@ -85,6 +86,9 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_token_amount"
     )]
     pub genesis_price: Amount<(IrysPrice, Usd)>,
+
+    /// Genesis-specific config values
+    pub genesis: GenesisConfig,
 
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
@@ -163,9 +167,68 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
     pub pledge_decay: Amount<Percentage>,
+
+    /// This is the fee that is used for immediate tx inclusion fees:
+    /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    ///
+    /// This field is also used for immediate ingress proof rewards:
+    /// ingress proof producer receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    ///
+    /// Both of these reward distribution mechanisms are opaque to the user,
+    /// the user will only ever see `term_fee` and `perm_fee`.
+    #[serde(
+        deserialize_with = "serde_utils::percentage_amount",
+        serialize_with = "serde_utils::serializes_percentage_amount"
+    )]
+    pub immediate_tx_inclusion_reward_percent: Amount<Percentage>,
+
+    /// Maximum future drift
+    #[serde(
+        default = "default_max_future_timestamp_drift_millis",
+        deserialize_with = "serde_utils::u128_millis_from_u64",
+        serialize_with = "serde_utils::u128_millis_to_u64"
+    )]
+    pub max_future_timestamp_drift_millis: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisConfig {
+    /// The timestamp in milliseconds used for the genesis block
+    #[serde(
+        deserialize_with = "serde_utils::u128_millis_from_u64",
+        serialize_with = "serde_utils::u128_millis_to_u64"
+    )]
+    pub timestamp_millis: u128,
+
+    /// Address that signs the genesis block
+    pub miner_address: Address,
+
+    /// Address that receives the genesis block reward
+    pub reward_address: Address,
+
+    /// The initial last_epoch_hash used by the genesis block
+    pub last_epoch_hash: H256,
+
+    /// The initial VDF seed used by the genesis block
+    /// Must be explicitly set for deterministic VDF output at genesis.
+    pub vdf_seed: H256,
+
+    /// The initial next VDF seed used after the first reset boundary.
+    /// If not set in config, defaults to the same value as `vdf_seed`.
+    #[serde(default)]
+    pub vdf_next_seed: Option<H256>,
+}
+
+// removed erroneous derive on helper function
+/// Default for `max_future_timestamp_drift_millis` when the field is not
+/// present in the provided TOML. This keeps legacy configurations working.
+fn default_max_future_timestamp_drift_millis() -> u128 {
+    15_000
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
     #[serde(
         deserialize_with = "serde_utils::token_amount",
@@ -176,6 +239,7 @@ pub struct BlockRewardConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RethChainSpec {
     /// The type of chain.
     pub chain: Chain,
@@ -189,6 +253,7 @@ pub struct RethChainSpec {
 /// to participate in the network. This includes network mode, consensus rules,
 /// pricing parameters, and system resource allocations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
@@ -221,8 +286,11 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
-    /// Data storage configuration
+    /// StorageModule configuration
     pub storage: StorageSyncConfig,
+
+    /// DataSyncService configuration
+    pub data_sync: DataSyncServiceConfig,
 
     /// Data packing and compression settings
     pub packing: PackingConfig,
@@ -232,9 +300,6 @@ pub struct NodeConfig {
 
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
-
-    /// Fee and pricing settings
-    pub pricing: PricingConfig,
 
     /// Reth node configuration
     pub reth: RethConfig,
@@ -257,6 +322,7 @@ impl From<NodeConfig> for Config {
 /// Defines how the node participates in the network - either as a genesis node
 /// that starts a new network or as a peer that syncs with existing nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
@@ -272,6 +338,7 @@ pub enum NodeMode {
 ///
 /// Specifies where the node should obtain its consensus rules from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ConsensusOptions {
     /// Load consensus configuration from a file at the specified path
     Path(PathBuf),
@@ -304,25 +371,11 @@ impl ConsensusOptions {
     }
 }
 
-/// # Pricing Configuration
-///
-/// Controls how the node calculates fees for storage and other services.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PricingConfig {
-    /// Additional fee percentage added by nodes to the base storage cost
-    /// This provides an incentive for nodes to participate in the network
-    #[serde(
-        deserialize_with = "serde_utils::percentage_amount",
-        serialize_with = "serde_utils::serializes_percentage_amount"
-    )]
-    pub fee_percentage: Amount<Percentage>,
-}
-
 /// # Oracle Configuration
 ///
 /// Defines how the node obtains and processes external price information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
 pub enum OracleConfig {
     /// A simulated price oracle for testing and development
     Mock {
@@ -349,6 +402,7 @@ pub enum OracleConfig {
 ///
 /// Controls how token prices are smoothed over time to reduce volatility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmaConfig {
     /// Number of blocks between EMA price recalculations
     /// Lower values make prices more responsive, higher values provide more stability
@@ -359,6 +413,7 @@ pub struct EmaConfig {
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VdfConfig {
     /// VDF reset frequency in global steps
     /// Formula: blocks_between_resets × vdf_steps_per_block
@@ -391,6 +446,7 @@ impl VdfConfig {
 ///
 /// Controls the timing and parameters for network epochs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
     /// Affects how network capacity is calculated and projected
@@ -407,16 +463,35 @@ pub struct EpochConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DataSyncServiceConfig {
+    pub max_pending_chunk_requests: u64,
+    pub max_storage_throughput_bps: u64,
+    #[serde(
+        deserialize_with = "serde_utils::duration_from_string",
+        serialize_with = "serde_utils::serialize_duration_string"
+    )]
+    pub bandwidth_adjustment_interval: Duration,
+    #[serde(
+        deserialize_with = "serde_utils::duration_from_string",
+        serialize_with = "serde_utils::serialize_duration_string"
+    )]
+    pub chunk_request_timeout: Duration,
+}
+
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MempoolConfig {
     /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
@@ -444,6 +519,16 @@ pub struct MempoolConfig {
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
 
+    /// Maximum number of pre-header chunks to keep per data root before the header arrives
+    /// Limits speculative storage window for out-of-order chunks
+    #[serde(default)]
+    pub max_preheader_chunks_per_item: usize,
+
+    /// Maximum allowed pre-header data_path bytes for chunk proofs
+    /// Mitigates DoS on speculative chunk storage before header arrival
+    #[serde(default)]
+    pub max_preheader_data_path_bytes: usize,
+
     /// Maximum number of valid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_valid_items: usize,
@@ -460,6 +545,7 @@ pub struct MempoolConfig {
 ///
 /// Settings for peer-to-peer communication between nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GossipConfig {
     /// The IP address that's going to be announced to other peers
     pub public_ip: String,
@@ -475,6 +561,7 @@ pub struct GossipConfig {
 ///
 /// Settings that are passed to the reth node
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RethConfig {
     pub use_random_ports: bool,
 }
@@ -483,6 +570,7 @@ pub struct RethConfig {
 ///
 /// Controls how data is compressed and packed for storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
@@ -495,6 +583,7 @@ pub struct PackingConfig {
 ///
 /// Settings for in-memory caching to improve performance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     /// Number of blocks cache cleaning will lag behind block finalization
     /// Higher values keep more data in cache but use more memory
@@ -505,6 +594,7 @@ pub struct CacheConfig {
 ///
 /// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// The IP address visible to the outside world
     pub public_ip: String,
@@ -520,6 +610,7 @@ pub struct HttpConfig {
 ///
 /// Controls how mining difficulty changes over time to maintain target block times.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DifficultyAdjustmentConfig {
     /// Target time between blocks in seconds
     pub block_time: u64,
@@ -563,6 +654,14 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            genesis: GenesisConfig {
+                timestamp_millis: 0,
+                miner_address: Address::ZERO,
+                reward_address: Address::ZERO,
+                last_epoch_hash: H256::zero(),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
@@ -573,6 +672,8 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -650,6 +751,9 @@ impl ConsensusConfig {
             stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
             pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
+            max_future_timestamp_drift_millis: 15_000,
         }
     }
 
@@ -668,6 +772,14 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            genesis: GenesisConfig {
+                timestamp_millis: 0,
+                miner_address: Address::ZERO,
+                reward_address: Address::ZERO,
+                last_epoch_hash: H256::zero(),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
+            },
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 51_872_000,
@@ -688,6 +800,8 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -757,6 +871,9 @@ impl ConsensusConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
+            max_future_timestamp_drift_millis: 15_000,
         }
     }
 }
@@ -822,9 +939,12 @@ impl NodeConfig {
     pub fn testing_with_signer(signer: &IrysSigner) -> Self {
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
+        let mut consensus = ConsensusConfig::testing();
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
         Self {
             mode: NodeMode::Genesis,
-            consensus: ConsensusOptions::Custom(ConsensusConfig::testing()),
+            consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
             oracle: OracleConfig::Mock {
@@ -837,14 +957,17 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
+            data_sync: DataSyncServiceConfig {
+                max_pending_chunk_requests: 1000,
+                max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
+                bandwidth_adjustment_interval: Duration::from_secs(5),
+                chunk_request_timeout: Duration::from_secs(10),
+            },
             trusted_peers: vec![PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             }],
-            pricing: PricingConfig {
-                fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
-            },
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -903,7 +1026,7 @@ impl NodeConfig {
                 .expect("valid hex"),
         )
         .expect("valid key");
-        let consensus = ConsensusConfig::testnet();
+        let mut consensus = ConsensusConfig::testnet();
         let signer = IrysSigner {
             signer: mining_key,
             chain_id: consensus.chain_id,
@@ -912,6 +1035,8 @@ impl NodeConfig {
 
         let mining_key = signer.signer.clone();
         let reward_address = signer.address();
+        consensus.genesis.miner_address = reward_address;
+        consensus.genesis.reward_address = reward_address;
         Self {
             mode: NodeMode::PeerSync,
             consensus: ConsensusOptions::Custom(consensus),
@@ -927,15 +1052,18 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
             },
+            data_sync: DataSyncServiceConfig {
+                max_pending_chunk_requests: 1000,
+                max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
+                bandwidth_adjustment_interval: Duration::from_secs(5),
+                chunk_request_timeout: Duration::from_secs(10),
+            },
             trusted_peers: vec![],
             // trusted_peers: vec![PeerAddress {
             //     api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
-            pricing: PricingConfig {
-                fee_percentage: Amount::percentage(dec!(0.01)).expect("valid percentage"),
-            },
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 8081,
@@ -1015,6 +1143,8 @@ impl NodeConfig {
 }
 
 pub mod serde_utils {
+
+    use std::time::Duration;
 
     use rust_decimal::Decimal;
     use serde::{Deserialize as _, Deserializer, Serializer};
@@ -1119,6 +1249,83 @@ pub mod serde_utils {
             .expect("decimal to be convertible to a f64");
         serializer.serialize_f64(float)
     }
+
+    /// Deserialize a timestamp drift value (stored as `u64` in TOML) into a `u128`
+    pub fn u128_millis_from_u64<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let val = u64::deserialize(deserializer)?;
+        Ok(val as u128)
+    }
+
+    /// Serialize a `u128` timestamp drift value as a `u64` so it can be encoded by `toml`
+    /// As this stores time and only 15 seconds, the 128 bit -> 64bit conversion is not a concern
+    pub fn u128_millis_to_u64<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // this type conversion is safe as time stores a value of 15 seconds, and not millions of years
+        serializer.serialize_u64(*value as u64)
+    }
+
+    pub fn duration_from_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+
+    pub fn duration_from_millis<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
+
+    pub fn duration_from_string<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        parse_duration_string(&s).map_err(serde::de::Error::custom)
+    }
+
+    fn parse_duration_string(s: &str) -> Result<Duration, String> {
+        if let Some(secs_str) = s.strip_suffix('s') {
+            let secs: u64 = secs_str
+                .parse()
+                .map_err(|_| format!("Invalid duration number: {}", secs_str))?;
+            Ok(Duration::from_secs(secs))
+        } else if let Some(millis_str) = s.strip_suffix("ms") {
+            let millis: u64 = millis_str
+                .parse()
+                .map_err(|_| format!("Invalid duration number: {}", millis_str))?;
+            Ok(Duration::from_millis(millis))
+        } else {
+            Err(format!("Duration must end with 's' or 'ms': {}", s))
+        }
+    }
+
+    pub fn serialize_duration_secs<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn serialize_duration_string<S>(
+        duration: &Duration,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = format!("{}s", duration.as_secs());
+        serializer.serialize_str(&s)
+    }
 }
 
 #[cfg(test)]
@@ -1147,6 +1354,16 @@ mod tests {
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9
+        immediate_tx_inclusion_reward_percent = 0.05
+
+        [genesis]
+        miner_address = "0x0000000000000000000000000000000000000000"
+        reward_address = "0x0000000000000000000000000000000000000000"
+        last_epoch_hash = "11111111111111111111111111111111"
+        vdf_seed = "11111111111111111111111111111111"
+        # Optional: if omitted, defaults to vdf_seed
+        # vdf_next_seed = "22222222222222222222222222222222"
+        timestamp_millis = 0
 
         [reth]
         chain = 1270
@@ -1179,7 +1396,8 @@ mod tests {
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
-        max_pending_anchor_items = 100
+        max_preheader_chunks_per_item = 64
+        max_preheader_data_path_bytes = 65536
         max_invalid_items = 10000
         max_valid_items = 10000
         commitment_fee = 100
@@ -1255,8 +1473,12 @@ mod tests {
         [storage]
         num_writes_before_sync = 1
 
-        [pricing]
-        fee_percentage = 0.01
+        [data_sync]
+        max_pending_chunk_requests = 1000
+        max_storage_throughput_bps = 209715200
+        bandwidth_adjustment_interval = "5s"
+        chunk_request_timeout = "10s"
+
 
         [gossip]
         bind_ip = "127.0.0.1"
@@ -1320,6 +1542,8 @@ mod tests {
             .join("config")
             .join("templates")
             .join("testnet_config.toml");
+
+        println!("path: {:?}", template_path);
 
         let template_content = std::fs::read_to_string(&template_path)
             .expect("Failed to read testnet_config.toml template");

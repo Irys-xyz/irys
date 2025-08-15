@@ -2,7 +2,7 @@ use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
     irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Compact, Config,
-    H256List, IrysBlockHeader, SystemTransactionLedger, H256,
+    H256List, IrysBlockHeader, SystemTransactionLedger, H256, U256,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
@@ -211,20 +211,25 @@ fn get_or_create_commitment_ledger(
 /// Mutates the provided genesis_block by adding commitment IDs
 /// to the Commitments system ledger.
 ///
-/// Returns the list of commitment transactions.
+/// Returns the list of commitment transactions and the total value locked in commitments.
 pub async fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
-) -> Vec<CommitmentTransaction> {
+) -> (Vec<CommitmentTransaction>, U256) {
     let commitments = get_genesis_commitments(config).await;
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
 
+    // Calculate total value of all commitments (initial treasury)
+    let mut total_value = U256::zero();
+
     // Add the commitment txids to the commitment ledger one by one
-    for txid in commitments.iter().map(|commitment| commitment.id) {
-        commitment_ledger.tx_ids.push(txid);
+    for commitment in commitments.iter() {
+        commitment_ledger.tx_ids.push(commitment.id);
+        // Add commitment value to total (this represents locked funds)
+        total_value = total_value.saturating_add(commitment.value);
     }
 
-    commitments
+    (commitments, total_value)
 }
 
 /// Adds test pledge commitments to the genesis block for testing purposes
@@ -254,11 +259,20 @@ pub async fn add_test_commitments(
     block_header: &mut IrysBlockHeader,
     pledge_count: u8,
     config: &Config,
-) -> Vec<CommitmentTransaction> {
+) -> (Vec<CommitmentTransaction>, U256) {
     let signer = config.irys_signer();
+    add_test_commitments_for_signer(block_header, &signer, pledge_count, config).await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn add_test_commitments_for_signer(
+    block_header: &mut IrysBlockHeader,
+    signer: &IrysSigner,
+    pledge_count: u8,
+    config: &Config,
+) -> (Vec<CommitmentTransaction>, U256) {
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
-
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
         let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
@@ -273,7 +287,7 @@ pub async fn add_test_commitments(
 
     for i in 0..(pledge_count as usize) {
         let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
+            create_pledge_commitment_transaction(signer, anchor, config, &(i as u64)).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;
@@ -283,10 +297,14 @@ pub async fn add_test_commitments(
     // Get a reference to the Commitment Ledger
     let commitment_ledger = get_or_create_commitment_ledger(block_header);
 
+    // Calculate total value of all commitments
+    let mut total_value = U256::zero();
+
     // Add the pledge commitment txids to the system ledger one by one
-    for commitment_id in commitments.iter().map(|commitment| commitment.id) {
-        commitment_ledger.tx_ids.push(commitment_id);
+    for commitment in commitments.iter() {
+        commitment_ledger.tx_ids.push(commitment.id);
+        total_value = total_value.saturating_add(commitment.value);
     }
 
-    commitments
+    (commitments, total_value)
 }

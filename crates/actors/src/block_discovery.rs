@@ -1,6 +1,8 @@
 use crate::{
-    block_tree_service::BlockTreeServiceMessage, block_validation::prevalidate_block,
-    mempool_service::MempoolServiceMessage, services::ServiceSenders,
+    block_tree_service::BlockTreeServiceMessage,
+    block_validation::{prevalidate_block, PreValidationError},
+    mempool_service::MempoolServiceMessage,
+    services::ServiceSenders,
 };
 use actix::prelude::*;
 use async_trait::async_trait;
@@ -54,7 +56,7 @@ pub struct BlockDiscoveryActor {
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
     #[error("Validation error: {0}")]
-    BlockValidationError(eyre::Report),
+    BlockValidationError(PreValidationError),
     #[error("Failed to get previous block header. Previous block hash: {previous_block_hash:?}")]
     PreviousBlockNotFound {
         /// The hash of the previous block that was not found
@@ -129,7 +131,7 @@ pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
 
 /// Sent when a discovered block is pre-validated
 #[derive(Message, Debug, Clone)]
-#[rtype(result = "eyre::Result<()>")]
+#[rtype(result = "Result<(), PreValidationError>")]
 pub struct BlockPreValidatedMessage(
     pub Arc<IrysBlockHeader>,
     pub Arc<Vec<DataTransactionHeader>>,
@@ -408,19 +410,18 @@ impl BlockDiscoveryServiceInner {
             let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
                 Some(proofs) => proofs,
                 None => {
-                    return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                        "Ingress proofs missing"
-                    )));
+                    return Err(BlockDiscoveryError::BlockValidationError(
+                        PreValidationError::IngressProofsMissing,
+                    ));
                 }
             };
 
             // Pre-Validate the ingress-proof by verifying the signature
             for (i, tx_header) in publish_txs.iter().enumerate() {
                 if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    return Err(BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                        "Invalid ingress proof signature: {}",
-                        e
-                    )));
+                    return Err(BlockDiscoveryError::BlockValidationError(
+                        PreValidationError::IngressProofSignatureInvalid(e.to_string()),
+                    ));
                 }
             }
         }
@@ -441,12 +442,8 @@ impl BlockDiscoveryServiceInner {
                 "incoming block commitment txids, height {}\n{:#?}",
                 new_block_header.height, commitment_ledger
             );
-            match get_commitment_tx_in_parallel(
-                commitment_ledger.tx_ids.0.clone(),
-                &mempool_sender,
-                &db,
-            )
-            .await
+            match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
+                .await
             {
                 Ok(tx) => {
                     commitments = tx;
@@ -664,12 +661,7 @@ impl BlockDiscoveryServiceInner {
                             e
                         ))
                     })?
-                    .map_err(|e| {
-                        BlockDiscoveryError::BlockValidationError(eyre::eyre!(
-                            "Block pre-validation failed: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(BlockDiscoveryError::BlockValidationError)?;
 
                 // Send the block to the gossip bus
                 tracing::trace!(
@@ -694,20 +686,20 @@ impl BlockDiscoveryServiceInner {
 
 /// Get all commitment transactions from the mempool and database
 pub async fn get_commitment_tx_in_parallel(
-    commitment_tx_ids: Vec<IrysTransactionId>,
+    commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let tx_ids_clone = commitment_tx_ids.clone();
+    let tx_ids_clone = commitment_tx_ids;
 
     // Set up a function to query the mempool for commitment transactions
     let mempool_future = {
-        let tx_ids = tx_ids_clone.clone();
+        let tx_ids = tx_ids_clone;
         async move {
             let (tx, rx) = oneshot::channel();
 
             match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: tx_ids,
+                commitment_tx_ids: tx_ids.to_vec(),
                 response: tx,
             }) {
                 Ok(()) => {
@@ -729,12 +721,12 @@ pub async fn get_commitment_tx_in_parallel(
 
     // Set up a function to query the database for commitment transactions
     let db_future = {
-        let tx_ids = commitment_tx_ids.clone();
+        let tx_ids = commitment_tx_ids;
         let db_ref = db.clone();
         async move {
             let db_tx = db_ref.tx()?;
             let mut results = HashMap::new();
-            for tx_id in &tx_ids {
+            for tx_id in tx_ids {
                 if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
                     results.insert(*tx_id, header);
                 }
@@ -753,9 +745,9 @@ pub async fn get_commitment_tx_in_parallel(
     let mut missing = Vec::new();
 
     for tx_id in commitment_tx_ids {
-        if let Some(header) = mempool_map.get(&tx_id) {
+        if let Some(header) = mempool_map.get(tx_id) {
             headers.push(header.clone());
-        } else if let Some(header) = db_map.get(&tx_id) {
+        } else if let Some(header) = db_map.get(tx_id) {
             headers.push(header.clone());
         } else {
             missing.push(tx_id);

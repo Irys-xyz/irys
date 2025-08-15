@@ -15,13 +15,14 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncState,
+    SyncChainServiceMessage,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
@@ -30,8 +31,8 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::{channel, error::SendError, Receiver, Sender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn, Span};
 
 const MAX_PEERS_PER_BROADCAST: usize = 5;
@@ -103,7 +104,7 @@ pub struct P2PService {
     cache: Arc<GossipCache>,
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
     client: GossipClient,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
 }
 
 impl P2PService {
@@ -133,7 +134,7 @@ impl P2PService {
             client,
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
-            sync_state: SyncState::new(true, false),
+            sync_state: ChainSyncState::new(true, false),
         }
     }
 
@@ -158,19 +159,20 @@ impl P2PService {
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
+        chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
     ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<B, M>>)>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
         A: ApiClient,
     {
-        debug!("Staring gossip service");
+        debug!("Starting the gossip service");
 
         let block_pool = BlockPool::new(
             db,
-            peer_list.clone(),
             block_discovery,
             mempool.clone(),
+            chain_sync_tx,
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
@@ -209,6 +211,8 @@ impl P2PService {
 
         let gossip_service_handle =
             spawn_watcher_task(server, server_handle, broadcast_task_handle, task_executor);
+
+        debug!("Started gossip service");
 
         Ok((gossip_service_handle, arc_pool))
     }

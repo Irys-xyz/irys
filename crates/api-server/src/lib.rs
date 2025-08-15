@@ -5,12 +5,12 @@ use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
-    web::{self, JsonConfig},
+    web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
 use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
-use irys_p2p::SyncState;
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
@@ -36,7 +36,7 @@ pub struct ApiState {
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
 }
 
@@ -48,6 +48,7 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
+        .route("/", web::get().to(index::info_route))
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
             "/block_index",
@@ -121,9 +122,9 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
                             .into()
                     }),
             )
+            // not a permanent redirect, so we can redirect to the highest API version
+            .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
-            //FIXME this default route is not behind a api version, should it be before 1.0 release?
-            .route("/", web::get().to(index::info_route))
             .wrap(Cors::permissive())
     })
     .listen(listener)

@@ -21,6 +21,12 @@ bind_port = 8080
 [storage]
 num_writes_before_sync = 1
 
+[data_sync]
+max_storage_throughput_bps = 1047961600
+bandwidth_adjustment_interval = "1s"
+chunk_request_timeout = "15s"
+
+max_pending_chunk_requests = 100
 [packing]
 cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
@@ -33,9 +39,6 @@ type = "mock"
 initial_price = 1.0
 incremental_change = 0.00000000000001
 smoothing_interval = 15
-
-[pricing]
-fee_percentage = 0.01
 
 [reth]
 use_random_ports = false
@@ -62,6 +65,16 @@ safe_minimum_number_of_years = 200
 stake_value = 20000.0
 pledge_base_value = 950.0
 pledge_decay = 0.9
+immediate_tx_inclusion_reward_percent = 0.01
+
+[consensus.Custom.genesis]
+timestamp_millis = 0
+miner_address = "0x0000000000000000000000000000000000000000"
+reward_address = "0x0000000000000000000000000000000000000000"
+last_epoch_hash = "11111111111111111111111111111111"
+vdf_seed = "11111111111111111111111111111111"
+# Optional: if omitted, defaults to vdf_seed
+# vdf_next_seed = "22222222222222222222222222222222"
 
 [consensus.Custom.reth]
 chain = 1270
@@ -91,7 +104,6 @@ max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
 anchor_expiry_depth = 10
 max_pending_pledge_items = 100
-max_pending_anchor_items = 100
 max_pledges_per_item = 100
 max_pending_chunk_items = 30
 max_chunks_per_item = 500
