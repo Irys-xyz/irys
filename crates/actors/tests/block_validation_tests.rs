@@ -1,5 +1,5 @@
 use irys_actors::block_validation::{
-    poa_is_valid, previous_solution_hash_is_valid, PreValidationError, solution_hash_link_is_valid
+    poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid, PreValidationError,
 };
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
