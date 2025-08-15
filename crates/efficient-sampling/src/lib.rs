@@ -161,6 +161,10 @@ pub fn reset_step_number(step_num: u64, config: &ConsensusConfig) -> u64 {
 }
 
 pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
+    // Prevent arithmetic underflow when step_num is 0
+    if step_num == 0 {
+        return 0;
+    }
     ((step_num - 1) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1
 }
 
@@ -228,5 +232,16 @@ mod tests {
             );
             assert!(res.is_ok());
         }
+    }
+
+    #[test]
+    fn no_underflow_in_reset_step_number() {
+        let config = ConsensusConfig::testing();
+        let step_num = 0;
+        let reset_step_num = reset_step_number(step_num, &config);
+        assert_eq!(
+            reset_step_num, 0,
+            "Reset step number should be 0 for step 0"
+        );
     }
 }
