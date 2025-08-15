@@ -1232,19 +1232,20 @@ pub fn calculate_perm_storage_total_fee(
     ema_snapshot: &EmaSnapshot,
     config: &Config,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    // Calculate the cost per GB (take into account replica count & cost per replica)
-    let cost_per_gb = config
+    // Calculate the cost per chunk (take into account replica count & cost per replica)
+    let epochs_for_storage = config
         .consensus
-        .annual_cost_per_gb
-        .cost_per_replica(
-            config.consensus.safe_minimum_number_of_years,
-            config.consensus.decay_rate,
-        )?
+        .years_to_epochs(config.consensus.safe_minimum_number_of_years);
+    let cost_per_chunk_duration_adjusted = config
+        .consensus
+        .cost_per_chunk_per_epoch
+        .cost_per_replica(epochs_for_storage, config.consensus.decay_rate)?
         .replica_count(config.consensus.number_of_ingress_proofs)?;
 
     // Calculate the base network fee (protocol cost) using the provided EMA snapshot
-    let base_network_fee = cost_per_gb.base_network_fee(
+    let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
         U256::from(bytes_to_store),
+        config.consensus.chunk_size,
         ema_snapshot.ema_for_public_pricing(),
     )?;
 

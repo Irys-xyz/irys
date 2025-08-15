@@ -87,21 +87,26 @@ fn cost_of_perm_storage(
         .ok_or_eyre("tip block should still remain in state")?;
     drop(tree);
 
-    // Calculate the cost per GB (take into account replica count & cost per replica)
+    // Calculate the cost per chunk (take into account replica count & cost per replica)
     // NOTE: this value can be memoised because it is deterministic based on the config
-    let cost_per_gb_per_year = state
+    let epochs_for_storage = state
         .config
         .consensus
-        .annual_cost_per_gb
-        .cost_per_replica(
-            state.config.consensus.safe_minimum_number_of_years,
-            state.config.consensus.decay_rate,
-        )?
+        .years_to_epochs(state.config.consensus.safe_minimum_number_of_years);
+    let cost_per_chunk_duration_adjusted = state
+        .config
+        .consensus
+        .cost_per_chunk_per_epoch
+        .cost_per_replica(epochs_for_storage, state.config.consensus.decay_rate)?
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 
     // calculate the base network fee (protocol cost)
-    let base_network_fee = cost_per_gb_per_year
-        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
+    let base_network_fee = cost_per_chunk_duration_adjusted
+        .base_network_fee(
+            U256::from(bytes_to_store),
+            state.config.consensus.chunk_size,
+            ema.ema_for_public_pricing(),
+        )?;
 
     // Add ingress proof rewards to the base network fee
     // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)

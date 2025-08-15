@@ -1,7 +1,7 @@
 //! A utility module for calculating network fees, costs for storing different amounts of data, and EMA for blocks.
 //!
 //! Core data types:
-//! - `Amount<(CostPerGb, Usd)>` - Cost in $USD of storing 1GB on irys (per single replica), data part of the config
+//! - `Amount<(CostPerChunk, Usd)>` - Cost in $USD of storing 1 chunk on irys (per single replica), data part of the config
 //! - `Amount<(IrysPrice, Usd)>` - Cost in $USD of a single $IRYS token, the data retrieved form oracles
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 
@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 pub const TOKEN_SCALE: U256 = U256([TOKEN_SCALE_NATIVE, 0, 0, 0]);
 const TOKEN_SCALE_NATIVE: u64 = 1_000_000_000_000_000_000_u64;
 
-/// Basis points scale representation.
-/// 100% - 1_000_000 as little endian number.
-/// Used by percentage representations.
-pub const BPS_SCALE: U256 = U256([BPS_SCALE_NATIVE, 0, 0, 0]);
-const BPS_SCALE_NATIVE: u64 = 1_000_000;
+/// High precision scale for percentage representations.
+/// 100% = 1_000_000_000_000 (1e12) for better precision with very small values.
+/// This allows us to accurately represent decay rates as small as 0.000001%.
+pub const PRECISION_SCALE: U256 = U256([PRECISION_SCALE_NATIVE, 0, 0, 0]);
+const PRECISION_SCALE_NATIVE: u64 = 1_000_000_000_000;
 
 /// ln(2) in 18-decimal fixed-point:
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
@@ -100,7 +100,7 @@ impl<T: std::fmt::Debug> Amount<T> {
 
     #[tracing::instrument(err)]
     pub fn percentage(amount: Decimal) -> Result<Self> {
-        let amount = Self::decimal_to_u256(amount, BPS_SCALE_NATIVE)?;
+        let amount = Self::decimal_to_u256(amount, PRECISION_SCALE_NATIVE)?;
         Ok(Self::new(amount))
     }
 
@@ -144,7 +144,7 @@ impl<T: std::fmt::Debug> Amount<T> {
     /// Assumes that the U256 value is small enough to fit into a u128.
     #[tracing::instrument(err)]
     pub fn percentage_to_decimal(&self) -> Result<Decimal> {
-        self.amount_to_decimal(BPS_SCALE, BPS_SCALE_NATIVE)
+        self.amount_to_decimal(PRECISION_SCALE, PRECISION_SCALE_NATIVE)
     }
 
     #[tracing::instrument(err)]
@@ -159,7 +159,7 @@ impl<T: std::fmt::Debug> Amount<T> {
 
         // Build the Decimal value:
         // The quotient represents the integer part,
-        // while the remainder scaled by 1e-`scal_native` is the fractional part.
+        // while the remainder scaled by 1e-`scale_native` is the fractional part.
         let remainder = Decimal::from(remainder)
             .checked_div(Decimal::from(scale_native))
             .ok_or_else(|| {
@@ -180,11 +180,11 @@ impl<T: std::fmt::Debug> Amount<T> {
 pub mod phantoms {
     use arbitrary::Arbitrary;
 
-    /// The cost of storing a single GB of data.
+    /// The cost of storing a single chunk of data.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
-    pub struct CostPerGb;
+    pub struct CostPerChunk;
 
-    /// Currency denomintator util type.
+    /// Currency denominator util type.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct Usd;
 
@@ -207,9 +207,9 @@ pub mod phantoms {
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct IrysPrice;
 
-    /// Cost per storing 1GB, of data. Includes adjustment for storage duration.
+    /// Cost per storing 1 chunk of data. Includes adjustment for storage duration.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
-    pub struct CostPerGbYearAdjusted;
+    pub struct CostPerChunkDurationAdjusted;
 }
 
 use phantoms::*;
@@ -238,9 +238,9 @@ impl Amount<Irys> {
         // Calculate ln(count+1) in fixed-point
         let ln_count = ln_fp18(count_fp18)?;
 
-        // Convert decay_rate from basis points to TOKEN_SCALE
-        // decay_rate is in BPS_SCALE (1e6), we need it in TOKEN_SCALE (1e18)
-        let decay_rate_fp18 = mul_div(decay_rate.amount, TOKEN_SCALE, BPS_SCALE)?;
+        // Convert decay_rate from precision scale to TOKEN_SCALE
+        // decay_rate is in PRECISION_SCALE (1e12), we need it in TOKEN_SCALE (1e18)
+        let decay_rate_fp18 = mul_div(decay_rate.amount, TOKEN_SCALE, PRECISION_SCALE)?;
 
         // Calculate decay_rate * ln(count+1)
         let exponent = mul_div(decay_rate_fp18, ln_count, TOKEN_SCALE)?;
@@ -258,15 +258,15 @@ impl Amount<Irys> {
     }
 }
 
-/// Implements cost calculation for 1GB/year storage in USD.
-impl Amount<(CostPerGb, Usd)> {
+/// Implements cost calculation for 1 chunk/epoch storage in USD.
+impl Amount<(CostPerChunk, Usd)> {
     /// Calculate the total cost for storage.
     /// The price is for storing a single replica.
     ///
-    /// n = years to pay for storage
-    /// r = decay rate
+    /// n = epochs to pay for storage
+    /// r = decay rate per epoch
     ///
-    /// total cost = `annual_cost` * ((1 - (1-r)^n) / r)
+    /// total cost = `cost_per_epoch` * ((1 - (1-r)^n) / r)
     ///
     /// # Errors
     ///
@@ -274,25 +274,25 @@ impl Amount<(CostPerGb, Usd)> {
     #[tracing::instrument(err)]
     pub fn cost_per_replica(
         self,
-        years: u64,
+        epochs: u64,
         decay_rate: Amount<DecayRate>,
-    ) -> Result<Amount<(CostPerGbYearAdjusted, Usd)>> {
-        // Calculate (1 - r) in basis points.
-        let one_minus_r = safe_sub(BPS_SCALE, decay_rate.amount)?;
+    ) -> Result<Amount<(CostPerChunkDurationAdjusted, Usd)>> {
+        // Calculate (1 - r) in precision scale.
+        let one_minus_r = safe_sub(PRECISION_SCALE, decay_rate.amount)?;
 
-        // Compute (1 - r)^n in basis points using basis_pow (the correct scale).
-        let pow_val = basis_pow(one_minus_r, years)?;
+        // Compute (1 - r)^n in precision scale using precision_pow (the correct scale).
+        let pow_val = precision_pow(one_minus_r, epochs)?;
 
-        // numerator = (1 - (1 - r)^n) in basis points.
-        let numerator = safe_sub(BPS_SCALE, pow_val)?;
+        // numerator = (1 - (1 - r)^n) in precision scale.
+        let numerator = safe_sub(PRECISION_SCALE, pow_val)?;
 
-        // fraction_bps = numerator / r => (numerator * BPS_SCALE / r)
-        let fraction_bps = mul_div(numerator, BPS_SCALE, decay_rate.amount)?;
+        // fraction_ps = numerator / r => (numerator * PRECISION_SCALE / r)
+        let fraction_ps = mul_div(numerator, PRECISION_SCALE, decay_rate.amount)?;
 
-        // Convert fraction from basis points to 1e18 fixed point:
-        let fraction_1e18 = mul_div(fraction_bps, TOKEN_SCALE, BPS_SCALE)?;
+        // Convert fraction from precision scale to 1e18 fixed point:
+        let fraction_1e18 = mul_div(fraction_ps, TOKEN_SCALE, PRECISION_SCALE)?;
 
-        // Multiply the annual cost by the fraction.
+        // Multiply the cost per epoch by the fraction.
         let total = mul_div(self.amount, fraction_1e18, TOKEN_SCALE)?;
 
         Ok(Amount {
@@ -312,8 +312,8 @@ impl Amount<(CostPerGb, Usd)> {
     }
 }
 
-/// For cost of storing 1GB/year in USD, already adjusted for a certain period.
-impl Amount<(CostPerGbYearAdjusted, Usd)> {
+/// For cost of storing 1 chunk per epoch in USD, already adjusted for a certain period.
+impl Amount<(CostPerChunkDurationAdjusted, Usd)> {
     /// Apply a multiplier of how much would storing the data cost for `n` replicas.
     ///
     /// # Errors
@@ -338,14 +338,18 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
     pub fn base_network_fee(
         self,
         bytes_to_store: U256,
+        chunk_size: u64,
         irys_token_price: Amount<(IrysPrice, Usd)>,
     ) -> Result<Amount<(NetworkFee, Irys)>> {
-        // We treat bytes_to_store as a pure integer.
-        let bytes_in_gb = U256::from(1_073_741_824_u64); // 1024 * 1024 * 1024
-        let ratio = mul_div(bytes_to_store, TOKEN_SCALE, bytes_in_gb)?;
+        // Calculate number of chunks (rounded up)
+        let chunk_size_u256 = U256::from(chunk_size);
+        let num_chunks = safe_div(
+            safe_add(bytes_to_store, safe_sub(chunk_size_u256, U256::one())?)?,
+            chunk_size_u256,
+        )?;
 
-        // usd_fee = self.amount * ratio / SCALE
-        let usd_fee = mul_div(self.amount, ratio, TOKEN_SCALE)?;
+        // usd_fee = self.amount * num_chunks
+        let usd_fee = safe_mul(self.amount, num_chunks)?;
 
         // IRYS = usd_fee / token_price
         let network_fee = mul_div(usd_fee, TOKEN_SCALE, irys_token_price.amount)?;
@@ -358,8 +362,8 @@ impl Amount<(CostPerGbYearAdjusted, Usd)> {
 }
 
 impl Amount<(NetworkFee, Irys)> {
-    /// Add additional network fee for storing data to increase incentivisation.
-    /// Percentage must be expressed using BPS_SCALE.
+    /// Add additional network fee for storing data to increase incentivization.
+    /// Percentage must be expressed using PRECISION_SCALE.
     ///
     /// # Errors
     ///
@@ -367,8 +371,8 @@ impl Amount<(NetworkFee, Irys)> {
     #[tracing::instrument(err)]
     pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 + percentage) / SCALE
-        let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, PRECISION_SCALE)?;
         Ok(Self {
             amount: total,
             _t: PhantomData,
@@ -393,7 +397,7 @@ impl Amount<(NetworkFee, Irys)> {
         fee_percentage: Amount<Percentage>,
     ) -> Result<Self> {
         // Calculate reward per ingress proof (fee_percentage × term_fee)
-        let per_ingress_reward = mul_div(term_fee, fee_percentage.amount, BPS_SCALE)?;
+        let per_ingress_reward = mul_div(term_fee, fee_percentage.amount, PRECISION_SCALE)?;
 
         // Calculate total ingress rewards
         let total_ingress_rewards =
@@ -410,7 +414,7 @@ impl Amount<(NetworkFee, Irys)> {
 }
 
 impl Amount<(IrysPrice, Usd)> {
-    /// Calculate the Exponential Moving Average for the current Irys Price (denominaed in $USD).
+    /// Calculate the Exponential Moving Average for the current Irys Price (denominated in $USD).
     ///
     /// The EMA can be calculated using the following formula:
     ///
@@ -459,7 +463,7 @@ impl Amount<(IrysPrice, Usd)> {
     }
 
     /// Add extra percentage on top of the existing price.
-    /// Percentage must be expressed using BPS_SCALE.
+    /// Percentage must be expressed using PRECISION_SCALE.
     ///
     /// # Errors
     ///
@@ -467,22 +471,22 @@ impl Amount<(IrysPrice, Usd)> {
     #[tracing::instrument(err)]
     pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 + percentage) / SCALE
-        let one_plus = safe_add(BPS_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, BPS_SCALE)?;
+        let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, PRECISION_SCALE)?;
         Ok(Self::new(total))
     }
 
     /// Remove extra percentage on top of the existing price.
-    /// Percentage must be expressed using BPS_SCALE.
+    /// Percentage must be expressed using PRECISION_SCALE.
     ///
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
     #[tracing::instrument(err)]
     pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = (amount * (1 - percentage)) / BPS_SCALE
-        let one_minus = safe_sub(BPS_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_minus, BPS_SCALE)?;
+        // total = (amount * (1 - percentage)) / PRECISION_SCALE
+        let one_minus = safe_sub(PRECISION_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_minus, PRECISION_SCALE)?;
         Ok(Self::new(total))
     }
 }
@@ -499,17 +503,17 @@ impl<T> Debug for Amount<T> {
     }
 }
 
-/// Example exponentiation by squaring for basis points:
-/// (base_bps / 10000)^exp, returning a result scaled by 10000.
-fn basis_pow(mut base_bps: U256, mut exp: u64) -> Result<U256> {
-    // Start with 1 in basis point scale.
-    let mut result = BPS_SCALE;
+/// Exponentiation by squaring for precision scale:
+/// (base_ps / PRECISION_SCALE)^exp, returning a result scaled by PRECISION_SCALE.
+fn precision_pow(mut base_ps: U256, mut exp: u64) -> Result<U256> {
+    // Start with 1 in precision scale.
+    let mut result = PRECISION_SCALE;
     while exp > 0 {
         if (exp & 1) == 1 {
-            // Multiply: result = result * base_bps / BPS_SCALE
-            result = mul_div(result, base_bps, BPS_SCALE)?;
+            // Multiply: result = result * base_ps / PRECISION_SCALE
+            result = mul_div(result, base_ps, PRECISION_SCALE)?;
         }
-        base_bps = mul_div(base_bps, base_bps, BPS_SCALE)?;
+        base_ps = mul_div(base_ps, base_ps, PRECISION_SCALE)?;
         exp >>= 1;
     }
     Ok(result)
@@ -674,7 +678,7 @@ mod tests {
         assert_eq!(data, decoded);
     }
 
-    mod token_conversoins {
+    mod token_conversions {
         use super::*;
 
         #[test]
@@ -732,7 +736,7 @@ mod tests {
         }
     }
 
-    mod cost_per_byte {
+    mod cost_per_chunk {
         use super::*;
         use eyre::Result;
         use rust_decimal::Decimal;
@@ -741,19 +745,21 @@ mod tests {
         #[test]
         fn test_normal_case() -> Result<()> {
             // Setup:
-            // annual = 0.01
-            // decay = 1%
-            let annual = Amount::token(dec!(0.01)).unwrap();
-            let decay = Amount::percentage(dec!(0.01)).unwrap(); // 1%
-            let years = 200;
+            // This test verifies the mathematical formula produces consistent results
+            // Golden values from original test: 0.01 cost, 200 periods, 1% decay = 0.8661 total
+            
+            // We use abstract values that match the original test to maintain golden values
+            let cost_per_period = Amount::token(dec!(0.01)).unwrap();
+            let decay_rate = Amount::percentage(dec!(0.01)).unwrap(); // 1% per period
+            let periods = 200;
 
             // Action
-            let cost_per_gb = annual.cost_per_replica(years, decay)?.replica_count(1)?;
+            let total_cost = cost_per_period.cost_per_replica(periods, decay_rate)?.replica_count(1)?;
 
             // Convert the result to Decimal for comparison
-            let actual = cost_per_gb.token_to_decimal().unwrap();
+            let actual = total_cost.token_to_decimal().unwrap();
 
-            // Assert - cost per GB (single replica) should be ~0.8661
+            // Assert - should match the golden value
             let expected = dec!(0.8661);
             let diff = (actual - expected).abs();
             assert!(
@@ -764,7 +770,7 @@ mod tests {
             );
 
             // Check cost for 10 replicas => multiply by 10
-            let cost_10 = cost_per_gb.replica_count(10)?;
+            let cost_10 = total_cost.replica_count(10)?;
             let actual_10 = cost_10.token_to_decimal().unwrap();
             let expected_10 = dec!(8.66);
             let diff_10 = (actual_10 - expected_10).abs();
@@ -781,13 +787,13 @@ mod tests {
         #[test]
         // r = 0 => division by zero => should error.
         fn test_zero_decay_rate() {
-            // annual = 1000 (scaled 1e18)
+            // cost_per_epoch = 1000 (scaled 1e18)
             // decay = 0 BPS => division by zero.
-            let annual = Amount::token(dec!(1000)).unwrap();
+            let cost_per_epoch = Amount::token(dec!(1000)).unwrap();
             let decay = Amount::percentage(dec!(0)).unwrap();
-            let years = 10;
+            let epochs = 10;
 
-            let result = annual.cost_per_replica(years, decay);
+            let result = cost_per_epoch.cost_per_replica(epochs, decay);
 
             // Expect an error.
             assert!(result.is_err(), "Expected an error for r=0, got Ok(...)");
@@ -796,14 +802,14 @@ mod tests {
         #[test]
         // r = 1 => fraction = (1 - (1 - 1)^n)/1 = 1,
         fn test_full_decay_rate() -> Result<()> {
-            // annual = 500 (scaled 1e18)
+            // cost_per_epoch = 500 (scaled 1e18)
             // decay = 100% (BPS_SCALE)
-            let annual = Amount::token(dec!(500)).unwrap();
+            let cost_per_epoch = Amount::token(dec!(500)).unwrap();
             let decay = Amount::percentage(dec!(1.0)).unwrap(); // 100%
-            let years_to_pay_for_storage = 5;
+            let epochs_to_pay_for_storage = 5;
 
-            let total = annual
-                .cost_per_replica(years_to_pay_for_storage, decay)?
+            let total = cost_per_epoch
+                .cost_per_replica(epochs_to_pay_for_storage, decay)?
                 .replica_count(1)?;
 
             let actual_dec = total.token_to_decimal().unwrap();
@@ -818,11 +824,11 @@ mod tests {
 
         #[test]
         fn test_decay_rate_above_one() {
-            let annual = Amount::token(dec!(0.01)).unwrap();
+            let cost_per_epoch = Amount::token(dec!(0.01)).unwrap();
             let decay = Amount::percentage(dec!(1.5)).unwrap(); // Above 100%
-            let years = 200;
+            let epochs = 200;
 
-            let result = annual.cost_per_replica(years, decay);
+            let result = cost_per_epoch.cost_per_replica(epochs, decay);
             assert!(
                 result.is_err(),
                 "Expected result.is_err() for a decay rate above 1.0"
@@ -830,15 +836,15 @@ mod tests {
         }
 
         #[test]
-        fn test_no_years_to_pay() -> Result<()> {
-            // If years = 0 => total cost = 0.
-            // annual = 1234.56 (scaled 1e18)
+        fn test_no_epochs_to_pay() -> Result<()> {
+            // If epochs = 0 => total cost = 0.
+            // cost_per_epoch = 1234.56 (scaled 1e18)
             // decay = 5%
-            let annual = Amount::token(dec!(1234.56)).unwrap();
+            let cost_per_epoch = Amount::token(dec!(1234.56)).unwrap();
             let decay = Amount::percentage(dec!(0.05)).unwrap(); // 5%
-            let years = 0;
+            let epochs = 0;
 
-            let total = annual.cost_per_replica(years, decay)?.replica_count(1)?;
+            let total = cost_per_epoch.cost_per_replica(epochs, decay)?.replica_count(1)?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             let expected_dec = Decimal::ZERO;
@@ -847,15 +853,15 @@ mod tests {
         }
 
         #[test]
-        // If annual cost = 0 => total = 0, regardless of decay rate.
-        fn test_annual_cost_zero() -> Result<()> {
-            // annual = 0
+        // If cost per epoch = 0 => total = 0, regardless of decay rate.
+        fn test_cost_per_epoch_zero() -> Result<()> {
+            // cost_per_epoch = 0
             // decay = 5%
-            let annual = Amount::token(dec!(0)).unwrap();
+            let cost_per_epoch = Amount::token(dec!(0)).unwrap();
             let decay = Amount::percentage(dec!(0.05)).unwrap(); // 5%
-            let years = 10;
+            let epochs = 10;
 
-            let total = annual.cost_per_replica(years, decay)?.replica_count(1)?;
+            let total = cost_per_epoch.cost_per_replica(epochs, decay)?.replica_count(1)?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             assert_eq!(
@@ -874,30 +880,42 @@ mod tests {
 
         #[test]
         fn test_normal_case() -> Result<()> {
-            // Setup:
-            let cost_per_gb_10_replicas_200_years = Amount::token(dec!(8.65)).unwrap();
-            let price_irys = Amount::token(dec!(1.09)).unwrap();
-            let bytes_to_store = 1024_u64 * 1024_u64 * 200_u64; // 200 MB
+            // Setup: Testing base_network_fee calculation
+            // Using simple values for clarity
+            let cost_per_chunk_adjusted = Amount::token(dec!(0.001)).unwrap(); // 0.001 USD per chunk (after duration adjustment)
+            let price_irys = Amount::token(dec!(1.0)).unwrap(); // 1 USD per IRYS token
+            let bytes_to_store = 256_u64 * 1024_u64 * 10_u64; // 10 chunks worth
+            let chunk_size = 256_u64 * 1024_u64; // 256 KiB
             let fee_percentage = Amount::percentage(dec!(0.05)).unwrap(); // 5%
 
             // Action
-            let network_fee = cost_per_gb_10_replicas_200_years
-                .base_network_fee(U256::from(bytes_to_store), price_irys)?;
+            let network_fee = cost_per_chunk_adjusted
+                .base_network_fee(U256::from(bytes_to_store), chunk_size, price_irys)?;
             let price_with_network_reward = network_fee.add_multiplier(fee_percentage)?;
 
             // Convert results for checking
             let network_fee_dec = network_fee.token_to_decimal().unwrap();
             let reward_dec = price_with_network_reward.token_to_decimal().unwrap();
 
-            // Assert ~1.55
-            let expected = dec!(1.55);
+            // Expected: 10 chunks * 0.001 USD per chunk / 1.0 USD per IRYS = 0.01 IRYS
+            let expected = dec!(0.01);
             let diff = (network_fee_dec - expected).abs();
-            assert!(diff < dec!(0.0001));
+            assert!(
+                diff < dec!(0.0000001),
+                "network_fee = {}, expected = {}",
+                network_fee_dec,
+                expected
+            );
 
-            // Assert with 5% multiplier => ~1.63
-            let expected2 = dec!(1.63);
+            // Assert with 5% multiplier: 0.01 * 1.05 = 0.0105
+            let expected2 = dec!(0.0105);
             let diff2 = (reward_dec - expected2).abs();
-            assert!(diff2 < dec!(0.01));
+            assert!(
+                diff2 < dec!(0.0000001),
+                "with multiplier = {}, expected = {}",
+                reward_dec,
+                expected2
+            );
             Ok(())
         }
     }
