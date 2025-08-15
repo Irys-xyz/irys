@@ -117,31 +117,70 @@ pub async fn calculate_expired_ledger_fees(
     let block_range = find_block_range(expired_slots, config, &block_index, ledger_type)?;
 
     // Step 3: Process boundary blocks
-    let (earliest_txs, earliest_miners) = process_boundary_block(
-        &block_range.min_block,
-        block_range.min_block.item.block_hash,
-        Arc::clone(&block_range.min_block_miners),
-        true, // is_earliest
-        ledger_type,
-        config,
-        &block_index,
-        &mempool_sender,
-        &db,
-    )
-    .await?;
+    let same_block = block_range.min_block.item.block_hash == block_range.max_block.item.block_hash;
+    tracing::info!(
+        "Processing boundary blocks: min_block height={}, max_block height={}, same_block={}",
+        block_range.min_block.height,
+        block_range.max_block.height,
+        same_block
+    );
+    
+    let (earliest_txs, earliest_miners);
+    let (latest_txs, latest_miners);
+    
+    if same_block {
+        // When min and max are the same block, process it only once to avoid double-counting
+        // Process as earliest block (will include all transactions in the partition range)
+        let (txs, miners) = process_boundary_block(
+            &block_range.min_block,
+            block_range.min_block.item.block_hash,
+            Arc::clone(&block_range.min_block_miners),
+            true, // is_earliest
+            ledger_type,
+            config,
+            &block_index,
+            &mempool_sender,
+            &db,
+        )
+        .await?;
+        
+        earliest_txs = txs;
+        earliest_miners = miners;
+        latest_txs = Vec::new();
+        latest_miners = BTreeMap::new();
+    } else {
+        // Different blocks - process both boundaries
+        let (e_txs, e_miners) = process_boundary_block(
+            &block_range.min_block,
+            block_range.min_block.item.block_hash,
+            Arc::clone(&block_range.min_block_miners),
+            true, // is_earliest
+            ledger_type,
+            config,
+            &block_index,
+            &mempool_sender,
+            &db,
+        )
+        .await?;
 
-    let (latest_txs, latest_miners) = process_boundary_block(
-        &block_range.max_block,
-        block_range.max_block.item.block_hash,
-        Arc::clone(&block_range.max_block_miners),
-        false, // is_earliest
-        ledger_type,
-        config,
-        &block_index,
-        &mempool_sender,
-        &db,
-    )
-    .await?;
+        let (l_txs, l_miners) = process_boundary_block(
+            &block_range.max_block,
+            block_range.max_block.item.block_hash,
+            Arc::clone(&block_range.max_block_miners),
+            false, // is_earliest
+            ledger_type,
+            config,
+            &block_index,
+            &mempool_sender,
+            &db,
+        )
+        .await?;
+        
+        earliest_txs = e_txs;
+        earliest_miners = e_miners;
+        latest_txs = l_txs;
+        latest_miners = l_miners;
+    }
 
     // Step 4: Process middle blocks
     let (middle_txs, middle_miners) =
@@ -149,9 +188,17 @@ pub async fn calculate_expired_ledger_fees(
 
     // Step 5: Combine all transactions
     let mut all_tx_ids = Vec::new();
-    all_tx_ids.extend(earliest_txs);
-    all_tx_ids.extend(latest_txs);
-    all_tx_ids.extend(middle_txs);
+    all_tx_ids.extend(earliest_txs.clone());
+    all_tx_ids.extend(latest_txs.clone());
+    all_tx_ids.extend(middle_txs.clone());
+    
+    tracing::info!(
+        "Collected transactions: earliest={}, latest={}, middle={}, total={}",
+        earliest_txs.len(),
+        latest_txs.len(),
+        middle_txs.len(),
+        all_tx_ids.len()
+    );
 
     let mut tx_to_miners = BTreeMap::new();
     tx_to_miners.extend(earliest_miners);
@@ -467,33 +514,57 @@ fn filter_transactions_by_chunk_range(
     let mut filtered_txs = Vec::new();
     let mut tx_to_miners = BTreeMap::new();
 
+    tracing::info!(
+        "Filtering {} transactions: is_earliest={}, prev_max_offset={}, partition_range=[{}, {}]",
+        transactions.len(),
+        is_earliest,
+        *prev_max_offset,
+        *partition_range.start(),
+        *partition_range.end()
+    );
+
     if !miners.is_empty() {
-        for tx in transactions {
+        for (idx, tx) in transactions.iter().enumerate() {
             let chunks = tx.data_size.div_ceil(chunk_size);
             let tx_start = current_offset;
             let tx_end = current_offset + chunks;
+
+            tracing::debug!(
+                "Tx {}: id={}, data_size={}, chunks={}, tx_start={}, tx_end={}",
+                idx,
+                tx.id,
+                tx.data_size,
+                chunks,
+                *tx_start,
+                *tx_end
+            );
 
             if is_earliest {
                 // For earliest block: skip transactions that start before the partition
                 // We only include transactions fully contained within the partition
                 if tx_start < partition_range.start() {
+                    tracing::debug!("  Skipping (starts before partition)");
                     current_offset = tx_end;
                     continue;
                 }
             } else {
-                // For latest block: stop when we reach a transaction that starts after the partition end
-                if tx_start > partition_range.end() {
+                // For latest block: stop when we reach a transaction that starts at or after the partition end
+                // We use >= because a transaction starting exactly at the end belongs to the next partition
+                if tx_start >= partition_range.end() {
+                    tracing::debug!("  Breaking (starts at or after partition end)");
                     break;
                 }
             }
 
             // Include this transaction
+            tracing::debug!("  Including transaction");
             filtered_txs.push(tx.id);
             tx_to_miners.insert(tx.id, Arc::clone(&miners));
             current_offset = tx_end;
         }
     }
 
+    tracing::info!("Filtered to {} transactions", filtered_txs.len());
     (filtered_txs, tx_to_miners)
 }
 

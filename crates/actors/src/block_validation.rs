@@ -968,7 +968,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
             service_senders.mempool.clone(),
             db.clone(),
         )
-        .instrument(error_span!("from validator"))
+        .in_current_span()
         .await?
     } else {
         BTreeMap::new()

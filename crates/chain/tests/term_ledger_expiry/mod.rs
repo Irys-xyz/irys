@@ -6,8 +6,88 @@ use irys_types::{
     fee_distribution::TermFeeCharges, irys::IrysSigner, Address, ConsensusConfig, DataLedger,
     DataTransaction, IrysBlockHeader, NodeConfig, U256,
 };
+use reth::providers::TransactionsProvider;
+use reth::rpc::types::TransactionTrait;
 use std::ops::{Deref, DerefMut};
 use tracing::info;
+
+// Test 1: Many sparse blocks with single transaction per block
+#[test_log::test(actix_web::test)]
+async fn heavy_ledger_expiry_many_blocks_sparse_txs() -> eyre::Result<()> {
+    info!("Testing ledger expiry with many sparse blocks (1 tx per block)");
+    
+    // Expected behavior:
+    // - Each tx is 32 bytes = 1 chunk
+    // - Partition size: 10 chunks * 32 bytes = 320 bytes
+    // - 11 transactions = 11 chunks total
+    // - The system dynamically allocates multiple slots as data arrives
+    // - All slots are created within the same epoch (blocks 1-3)
+    // - When expiry occurs after 2 epochs, all slots expire together
+    // - Therefore, all 11 transactions expire
+    
+    ledger_expiry_test(LedgerExpiryTestParams {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,   // 320 bytes per partition
+        submit_ledger_epoch_length: 2, // expires after 2 epochs to ensure proper setup
+        num_blocks_in_epoch: 3,        // 3 blocks per epoch
+        num_transactions: 11,          // 11 txs to create 2 partitions
+        txs_per_block: 4,              // batch more txs per block (11 txs / 3 blocks ≈ 4)
+        data_size_per_tx: 32,          // 1 chunk per tx
+        expected_expired_tx_count: 11, // All 11 txs expire (multiple slots created at similar times)
+    })
+    .await
+}
+
+// Test 2: Multiple transactions per block filling partitions
+#[test_log::test(actix_web::test)]
+async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
+    info!("Testing ledger expiry with multiple transactions per block");
+    ledger_expiry_test(LedgerExpiryTestParams {
+        chunk_size: 32,
+        num_chunks_in_partition: 5, // 160 bytes per partition
+        submit_ledger_epoch_length: 2,
+        num_blocks_in_epoch: 3,
+        num_transactions: 7,
+        txs_per_block: 2,
+        data_size_per_tx: 32,         // 1 chunk per tx
+        expected_expired_tx_count: 5, // first partition
+    })
+    .await
+}
+
+// Test 3: Large transactions spanning multiple partitions
+#[test_log::test(actix_web::test)]
+async fn heavy_ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()> {
+    info!("Testing ledger expiry with large transactions spanning partitions");
+    ledger_expiry_test(LedgerExpiryTestParams {
+        chunk_size: 32,
+        num_chunks_in_partition: 5, // 160 bytes per partition - larger partitions
+        submit_ledger_epoch_length: 1,
+        num_blocks_in_epoch: 3,
+        num_transactions: 4,          // 4 transactions to ensure >1 partition
+        txs_per_block: 2,             // 2 txs per block for stability
+        data_size_per_tx: 96,         // 3 chunks per tx, some span boundaries
+        expected_expired_tx_count: 2, // first 2 txs start in first partition (chunks 0-4)
+    })
+    .await
+}
+
+// Test 4: Multiple partitions fully filled and all expire
+#[test_log::test(actix_web::test)]
+async fn heavy_ledger_expiry_multiple_partitions_expire() -> eyre::Result<()> {
+    info!("Testing ledger expiry with multiple partitions all expiring");
+    ledger_expiry_test(LedgerExpiryTestParams {
+        chunk_size: 32,
+        num_chunks_in_partition: 3, // 96 bytes per partition - small partitions
+        submit_ledger_epoch_length: 1, // expires after 1 epoch
+        num_blocks_in_epoch: 6,
+        num_transactions: 16, // 16 txs * 32 bytes = 16 chunks = 6 partitions (need >5 for 5 to expire)
+        txs_per_block: 4,     // 4 txs per block
+        data_size_per_tx: 32, // 1 chunk per tx
+        expected_expired_tx_count: 15, // first 15 transactions expire (5 full partitions)
+    })
+    .await
+}
 
 /// Test context for ledger expiry testing that wraps the test node
 struct LedgerExpiryTestContext {
@@ -110,21 +190,35 @@ impl LedgerExpiryTestContext {
         })
     }
 
-    /// Post transactions and mine blocks in batches
+    /// Post transactions and mine blocks in batches with custom data sizes
     async fn post_transactions_and_mine(
         &mut self,
         num_transactions: usize,
         txs_per_block: usize,
+        data_size_per_tx: usize,
     ) -> eyre::Result<()> {
         let genesis_block = self.get_block_by_height(0).await?;
         let anchor = genesis_block.block_hash;
         let mut pending_txs = Vec::new();
+        
+        // Calculate expected partition layout
+        let chunk_size = self.consensus_config.chunk_size;
+        let chunks_per_partition = self.consensus_config.num_chunks_in_partition;
+        let partition_size = chunk_size * chunks_per_partition;
+        let chunks_per_tx = data_size_per_tx.div_ceil(chunk_size as usize) as u64;
+        
+        info!("Partition layout:");
+        info!("  Chunk size: {} bytes", chunk_size);
+        info!("  Chunks per partition: {}", chunks_per_partition);
+        info!("  Partition size: {} bytes", partition_size);
+        info!("  Data size per tx: {} bytes", data_size_per_tx);
+        info!("  Chunks per tx: {}", chunks_per_tx);
 
         for i in 0..num_transactions {
-            info!("Posting transaction {}", i);
+            info!("Posting transaction {} with {} bytes", i, data_size_per_tx);
 
-            // Create and post transaction
-            let data = vec![i as u8; 32];
+            // Create transaction with custom data size
+            let data = vec![i as u8; data_size_per_tx];
             let tx = self.post_data_tx(anchor, data, &self.signer).await;
 
             // Track fees
@@ -187,8 +281,7 @@ impl LedgerExpiryTestContext {
         let current_height = last_block.height;
 
         // Calculate target height for expiry
-        let target_expiry_height =
-            ((self.submit_ledger_epoch_length + 1) * self.num_blocks_in_epoch);
+        let target_expiry_height = (self.submit_ledger_epoch_length + 1) * self.num_blocks_in_epoch;
         let expiry_block_height = target_expiry_height.max(current_height + 3);
 
         info!(
@@ -206,18 +299,36 @@ impl LedgerExpiryTestContext {
             info!("Block {} reward: {}", height, block.reward_amount);
 
             let tx_ids = block.get_data_ledger_tx_ids();
+            let submit_count = tx_ids
+                .get(&DataLedger::Submit)
+                .map(std::collections::HashSet::len)
+                .unwrap_or(0);
+            let publish_count = tx_ids
+                .get(&DataLedger::Publish)
+                .map(std::collections::HashSet::len)
+                .unwrap_or(0);
+            
             info!(
                 "Block {}: Submit: {} txs, Publish: {} txs",
-                height,
-                tx_ids
-                    .get(&DataLedger::Submit)
-                    .map(std::collections::HashSet::len)
-                    .unwrap_or(0),
-                tx_ids
-                    .get(&DataLedger::Publish)
-                    .map(std::collections::HashSet::len)
-                    .unwrap_or(0)
+                height, submit_count, publish_count
             );
+            
+            // Log which transactions moved to publish (expired)
+            if publish_count > 0 {
+                if let Some(publish_txs) = tx_ids.get(&DataLedger::Publish) {
+                    info!("Block {} expired transactions: {:?}", height, publish_txs);
+                    
+                    // Check which of our transactions expired
+                    let mut expired_count = 0;
+                    for (idx, tx) in self.transactions.iter().enumerate() {
+                        if publish_txs.contains(&tx.header.id) {
+                            info!("Transaction {} (index {}) expired in block {}", tx.header.id, idx, height);
+                            expired_count += 1;
+                        }
+                    }
+                    info!("Total of our transactions expired in block {}: {}", height, expired_count);
+                }
+            }
 
             self.blocks_mined.push(block);
         }
@@ -259,10 +370,43 @@ impl LedgerExpiryTestContext {
     fn calculate_expiry_fees(&mut self, expired_tx_count: usize) -> eyre::Result<()> {
         self.expected_expiry_fees = U256::from(0);
 
+        info!("Calculating expiry fees for {} expired transactions", expired_tx_count);
+        info!("Total transactions posted: {}", self.transactions.len());
+        
+        // Log which blocks contain which transactions
+        let mut tx_to_block = std::collections::HashMap::new();
+        for block in &self.blocks_mined {
+            let tx_ids = block.get_data_ledger_tx_ids();
+            if let Some(submit_txs) = tx_ids.get(&DataLedger::Submit) {
+                for tx_id in submit_txs {
+                    for (idx, tx) in self.transactions.iter().enumerate() {
+                        if &tx.header.id == tx_id {
+                            tx_to_block.insert(idx, block.height);
+                        }
+                    }
+                }
+            }
+        }
+        
+        info!("Transaction distribution across blocks:");
+        for i in 0..self.transactions.len() {
+            if let Some(block_height) = tx_to_block.get(&i) {
+                info!("  Tx {}: in block {}", i, block_height);
+            }
+        }
+        
         for i in 0..expired_tx_count {
             let tx = &self.transactions[i];
             let term_charges = TermFeeCharges::new(tx.header.term_fee, &self.consensus_config)?;
 
+            info!(
+                "Tx {} (expecting to expire): term_fee={}, block_producer_reward={}, treasury={}",
+                i,
+                tx.header.term_fee,
+                term_charges.block_producer_reward,
+                term_charges.term_fee_treasury
+            );
+            
             // On expiry, the miner gets the treasury portion
             self.expected_expiry_fees = self
                 .expected_expiry_fees
@@ -305,7 +449,50 @@ impl LedgerExpiryTestContext {
 
     /// Verify final balance matches all expected fees
     async fn verify_final_balance(&self) -> eyre::Result<()> {
-        let final_block = self.blocks_mined.last().expect("Should have final block");
+        // Get the reth context to examine shadow transactions
+        let reth_context = self.node.node_ctx.reth_node_adapter.clone();
+        
+        // Look for expired ledger fee shadow transactions in ALL blocks we mined
+        let mut actual_expiry_fees = U256::from(0);
+        
+        // Check each block for TermFeeReward shadow transactions
+        for block in &self.blocks_mined {
+            // Get all transactions from this block
+            let block_txs = reth_context
+                .inner
+                .provider
+                .transactions_by_block(alloy_eips::HashOrNumber::Hash(block.evm_block_hash))?
+                .unwrap_or_default();
+            
+            info!("Block {} has {} transactions", block.height, block_txs.len());
+            
+            for tx in &block_txs {
+                // Decode the shadow transaction
+                if let Ok(shadow_tx) = irys_reth_node_bridge::irys_reth::shadow_tx::ShadowTransaction::decode(&mut tx.input().as_ref()) {
+                    if let Some(packet) = shadow_tx.as_v1() {
+                        // Check if this is a TermFeeReward transaction (from expired ledger)
+                        if let irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward) = packet {
+                            info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}", 
+                                block.height, reward.target, reward.amount, reward.irys_ref);
+                            if reward.target == self.miner_address {
+                                let amount = U256::from_le_bytes(reward.amount.to_le_bytes());
+                                actual_expiry_fees = actual_expiry_fees.saturating_add(amount);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        info!("Total expiry fees from shadow transactions: {}", actual_expiry_fees);
+        info!("Expected expiry fees: {}", self.expected_expiry_fees);
+        
+        // Verify the shadow transactions match our expectations
+        assert_eq!(
+            actual_expiry_fees, self.expected_expiry_fees,
+            "Shadow transaction expiry fees should match expected. Got {}, expected {}",
+            actual_expiry_fees, self.expected_expiry_fees
+        );
 
         let expected = self
             .initial_balance
@@ -313,6 +500,7 @@ impl LedgerExpiryTestContext {
             .saturating_add(self.immediate_term_rewards)
             .saturating_add(self.expected_expiry_fees);
 
+        let final_block = self.blocks_mined.last().expect("Should have final block");
         let actual = self.get_miner_balance(final_block.evm_block_hash).await;
 
         info!("Balance breakdown:");
@@ -332,30 +520,52 @@ impl LedgerExpiryTestContext {
             actual, expected
         );
 
-        info!("✅ Submit ledger expiry fee distribution verified with EXACT balance matching!");
+        info!("Submit ledger expiry fee distribution verified with EXACT balance matching!");
         Ok(())
     }
 }
 
-#[test_log::test(actix_web::test)]
-async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
+/// Test parameters for ledger expiry scenarios
+struct LedgerExpiryTestParams {
+    // Node configuration
+    chunk_size: u64,
+    num_chunks_in_partition: u64,
+    submit_ledger_epoch_length: u64,
+    num_blocks_in_epoch: u64,
+
+    // Test scenario
+    num_transactions: usize,
+    txs_per_block: usize,
+    data_size_per_tx: usize,
+
+    // Expected results
+    expected_expired_tx_count: usize,
+}
+
+/// Parametrized ledger expiry test
+async fn ledger_expiry_test(params: LedgerExpiryTestParams) -> eyre::Result<()> {
     // Setup
     let mut ctx = LedgerExpiryTestContext::setup(
-        32, // chunk_size
-        5,  // num_chunks_in_partition
-        2,  // submit_ledger_epoch_length
-        3,  // num_blocks_in_epoch
+        params.chunk_size,
+        params.num_chunks_in_partition,
+        params.submit_ledger_epoch_length,
+        params.num_blocks_in_epoch,
     )
     .await?;
 
     // Post transactions and mine initial blocks
-    ctx.post_transactions_and_mine(7, 2).await?;
+    ctx.post_transactions_and_mine(
+        params.num_transactions,
+        params.txs_per_block,
+        params.data_size_per_tx,
+    )
+    .await?;
     ctx.calculate_immediate_rewards()?;
     ctx.verify_initial_balance().await?;
 
     // Mine blocks to trigger expiry
     ctx.mine_to_trigger_expiry().await?;
-    ctx.calculate_expiry_fees(5)?; // First 5 transactions expire
+    ctx.calculate_expiry_fees(params.expected_expired_tx_count)?;
 
     // Verify final balance
     ctx.verify_final_balance().await?;

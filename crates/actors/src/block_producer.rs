@@ -1059,7 +1059,7 @@ pub trait BlockProdStrategy {
             self.inner().service_senders.mempool.clone(),
             self.inner().db.clone(),
         )
-        .instrument(error_span!("from block prod"))
+        .in_current_span()
         .await
     }
 }
