@@ -32,7 +32,6 @@ impl IrysChainSpecBuilder {
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(0),
             poa: PoaData {
-                recall_chunk_index: 0,
                 partition_chunk_offset: 0,
                 partition_hash: PartitionHash::zero(),
                 chunk: None,

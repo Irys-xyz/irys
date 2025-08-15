@@ -720,7 +720,7 @@ pub fn poa_is_valid(
             .read()
             .get_block_bounds(ledger, ledger_chunk_offset)
             .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
-        if !(bb.start_chunk_offset..=bb.end_chunk_offset).contains(&ledger_chunk_offset) {
+        if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
 
@@ -2003,7 +2003,7 @@ mod tests {
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
-            recall_chunk_index: 0,
+
             partition_hash: context.partition_hash,
         };
 
@@ -2257,7 +2257,7 @@ mod tests {
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
-            recall_chunk_index: 0,
+
             partition_hash: context.partition_hash,
         };
 

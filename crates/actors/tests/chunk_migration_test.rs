@@ -202,7 +202,6 @@
 //             chunk: Base64::from_str("").unwrap(),
 //             ledger_id: None,
 //             partition_chunk_offset: 0,
-//             recall_chunk_index: 0,
 //             partition_hash: PartitionHash::zero(),
 //         },
 //         reward_address: Address::ZERO,

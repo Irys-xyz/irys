@@ -13,10 +13,13 @@ use irys_actors::{
     BlockFinalizedMessage,
 };
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{add_genesis_commitments, add_test_commitments};
+use irys_database::{
+    add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
+};
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
 use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
 use irys_types::{
@@ -25,6 +28,7 @@ use irys_types::{
 use irys_types::{Config, U256};
 use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
@@ -259,6 +263,110 @@ async fn add_slots_test() {
     assert_eq!(pub_slots.len(), 3);
     assert_eq!(sub_slots.len(), 7);
     println!("Ledger State: {:#?}", epoch_snapshot.ledgers);
+}
+
+#[actix::test]
+async fn unique_addresses_per_slot_test() {
+    std::env::set_var("RUST_LOG", "debug");
+
+    let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
+    let base_path = tmp_dir.path().to_path_buf();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
+    let consensus_config = ConsensusConfig {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_per_slot: 10, // <- relevant to this test
+        block_migration_depth: 1,    // Testnet / single node config
+        chain_id: 333,
+        epoch: EpochConfig {
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            num_capacity_partitions: Some(123),
+            submit_ledger_epoch_length: 5,
+        },
+        ..ConsensusConfig::testing()
+    };
+    let mut testing_config = NodeConfig::testing();
+    testing_config.base_directory = base_path;
+    testing_config.consensus = ConsensusOptions::Custom(consensus_config);
+    let config = Config::new(testing_config);
+    let genesis_signer = config.irys_signer();
+    genesis_block.height = 0;
+    let mut commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+
+    // Create some other signers to simulate other pledged and staked addresses
+    let signer1 = IrysSigner::random_signer(&config.consensus);
+    let signer2 = IrysSigner::random_signer(&config.consensus);
+
+    // Give them both 10 pledged partitions
+    let mut comm1 =
+        add_test_commitments_for_signer(&mut genesis_block, &signer1, 10, &config).await;
+    let mut comm2 =
+        add_test_commitments_for_signer(&mut genesis_block, &signer2, 10, &config).await;
+
+    commitments.append(&mut comm1);
+    commitments.append(&mut comm2);
+
+    let storage_submodules_config =
+        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+
+    let epoch_snapshot = EpochSnapshot::new(
+        &storage_submodules_config,
+        genesis_block.clone(),
+        commitments,
+        &config,
+    );
+
+    debug!("{:#?}", epoch_snapshot.ledgers);
+
+    let publish_slot = &epoch_snapshot.ledgers.get_slots(DataLedger::Publish)[0];
+    let submit_slot = &epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0];
+
+    // Publish and submit slots should have exactly 3 partitions (not 10) because that's
+    // how many uniquely staked addresses there are.
+    assert_eq!(publish_slot.partitions.len(), 3);
+    assert_eq!(submit_slot.partitions.len(), 3);
+
+    // Collect mining addresses from publish_slot partitions
+    let publish_mining_addresses: Vec<_> = publish_slot
+        .partitions
+        .iter()
+        .map(|partition_hash| {
+            epoch_snapshot
+                .get_data_partition_assignment(*partition_hash)
+                .unwrap()
+                .miner_address
+        })
+        .collect();
+
+    // Convert to HashSet for easier assertion (assuming you have 3 expected addresses)
+    let publish_addresses_set: HashSet<_> = publish_mining_addresses.iter().collect();
+
+    // Assert that all 3 expected addresses are in the collected addresses
+    assert!(publish_addresses_set.contains(&genesis_signer.address()));
+    assert!(publish_addresses_set.contains(&signer1.address()));
+    assert!(publish_addresses_set.contains(&signer2.address()));
+
+    // Collect mining addresses from submit_slot partitions
+    let submit_mining_addresses: Vec<_> = submit_slot
+        .partitions
+        .iter()
+        .map(|partition_hash| {
+            epoch_snapshot
+                .get_data_partition_assignment(*partition_hash)
+                .unwrap()
+                .miner_address
+        })
+        .collect();
+
+    // Convert to HashSet for easier assertion (assuming you have 3 expected addresses)
+    let submit_addresses_set: HashSet<_> = submit_mining_addresses.iter().collect();
+
+    // Assert that all 3 expected addresses are in the collected addresses
+    assert!(submit_addresses_set.contains(&genesis_signer.address()));
+    assert!(submit_addresses_set.contains(&signer1.address()));
+    assert!(submit_addresses_set.contains(&signer2.address()));
 }
 
 #[actix::test]
@@ -927,7 +1035,7 @@ async fn partitions_assignment_determinism_test() {
         panic!("Should have an assignment");
     };
 
-    let publish_slot_1 = H256::from_base58("2HVmW86qVyKTw1DYJMX6NoNvVxATLNZHSAyMceEWPtLC");
+    let publish_slot_1 = H256::from_base58("3FQ7mPXwHhmNVD74DqNATHCex4wrtSQEBaa1FYeBEneN");
 
     epoch_snapshot.partition_assignments.print_assignments();
 
@@ -971,7 +1079,7 @@ async fn partitions_assignment_determinism_test() {
         panic!("Should have an assignment");
     };
 
-    let submit_slot_2 = H256::from_base58("8sRHV12yycwpUSzean97JemQrzAXSSQWMmC4Jx3xUXzQ");
+    let submit_slot_2 = H256::from_base58("4jNP3tGi9hxAGsR6WnkM1dbrWG68E7wzP1JZ58QvHnXk");
 
     if let Some(submit_assignment) = epoch_snapshot
         .partition_assignments

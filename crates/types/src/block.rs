@@ -406,7 +406,6 @@ fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interva
 #[serde(rename_all = "camelCase")]
 /// Stores deserialized fields from a `poa` (Proof of Access) JSON
 pub struct PoaData {
-    pub recall_chunk_index: u32,
     pub partition_chunk_offset: u32,
     pub partition_hash: PartitionHash,
     pub chunk: Option<Base64>,
@@ -549,7 +548,7 @@ impl IrysBlockHeader {
                 chunk: Some(Base64::from_str("").unwrap()),
                 partition_hash: PartitionHash::zero(),
                 partition_chunk_offset: 0,
-                recall_chunk_index: 0,
+
                 ledger_id: None,
             },
             reward_address: Address::ZERO,
@@ -814,7 +813,6 @@ mod tests {
     fn test_poa_data_rlp_round_trip() {
         // setup
         let data = PoaData {
-            recall_chunk_index: 123,
             partition_chunk_offset: 321,
             partition_hash: H256::random(),
             chunk: Some(Base64(vec![42; 16])),
