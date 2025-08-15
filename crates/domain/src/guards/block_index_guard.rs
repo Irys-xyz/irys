@@ -42,13 +42,40 @@ impl BlockIndexReadGuard {
     /// @param db Database provider for accessing the blockchain data
     pub fn print_items(&self, db: DatabaseProvider) {
         let rg = self.read();
-        let tx = db.tx().unwrap();
+        let tx = match db.tx() {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(
+                    "Failed to open db transaction for printing block index: {:?}",
+                    e
+                );
+                return;
+            }
+        };
         for i in 0..rg.num_blocks() {
-            let item = rg.get_item(i).unwrap();
+            let Some(item) = rg.get_item(i) else {
+                error!("Block index missing item at position {}", i);
+                continue;
+            };
             let block_hash = item.block_hash;
-            let block = block_header_by_hash(&tx, &block_hash, false)
-                .unwrap()
-                .unwrap();
+            let block = match block_header_by_hash(&tx, &block_hash, false) {
+                Ok(Some(block)) => block,
+                Ok(None) => {
+                    error!(
+                        "Block header not found in DB for hash {}",
+                        block_hash.0.to_base58()
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    error!(
+                        "DB error fetching block header for {}: {:?}",
+                        block_hash.0.to_base58(),
+                        e
+                    );
+                    continue;
+                }
+            };
             debug!(
                 "index: {} height: {} hash: {}",
                 i,

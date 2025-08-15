@@ -806,7 +806,12 @@ where
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
                 .into_iter()
                 .filter(Option::is_some)
-                .map(|v| (v.clone().unwrap().id, v.unwrap()))
+                .map(|v| {
+                    (
+                        v.clone().expect("tx header to be present after filter").id,
+                        v.expect("tx header to be present after filter"),
+                    )
+                })
                 .collect::<HashMap<IrysTransactionId, DataTransactionHeader>>();
             Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }

@@ -579,7 +579,10 @@ pub trait BlockProdStrategy {
             .map_err(|e| eyre!("Failed to build payload: {}", e))?;
 
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap();
+        let payload = built_payload
+            .clone()
+            .try_into_v5()
+            .expect("failed to convert built payload to v5");
         let new_payload_result = beacon_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),

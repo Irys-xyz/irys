@@ -26,7 +26,7 @@ pub struct RethServiceActor {
 
 impl Default for RethServiceActor {
     fn default() -> Self {
-        panic!("Don't rely on the default constructor for RethServiceActor, use the `new` method instead");
+        panic!("expected RethServiceActor::new() to be used instead of Default");
     }
 }
 

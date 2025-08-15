@@ -228,11 +228,11 @@ impl BlockIndex {
 
     pub fn print_items(&self) {
         for height in 0..self.num_blocks() {
-            println!(
-                "height: {} hash: {}",
-                height,
-                self.get_item(height).unwrap().block_hash.0.to_base58()
-            );
+            if let Some(item) = self.get_item(height) {
+                println!("height: {} hash: {}", height, item.block_hash.0.to_base58());
+            } else {
+                println!("height: {} missing in block index", height);
+            }
         }
     }
 }

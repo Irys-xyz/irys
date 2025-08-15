@@ -335,7 +335,10 @@ fn find_block_range(
         .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
 
     // Ensure that we don't start reading a partition that's only partially populated
-    let last_item = block_index_read.items.last().unwrap();
+    let last_item = block_index_read
+        .items
+        .last()
+        .expect("expected block index to contain at least one item");
     let max_chunk_offset_across_all_partitions =
         LedgerChunkOffset::from(last_item.ledgers[ledger_type].max_chunk_offset);
 
