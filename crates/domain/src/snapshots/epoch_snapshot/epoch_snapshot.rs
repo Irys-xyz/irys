@@ -453,7 +453,7 @@ impl EpochSnapshot {
 
                 // Pick a random capacity partition hash and assign it
                 let part_index = rng.next_range(slot_capacity_partitions.len() as u32) as usize;
-                let (partition_hash, pa) = capacity_partitions.swap_remove(part_index);
+                let (partition_hash, pa) = slot_capacity_partitions.swap_remove(part_index);
 
                 // Update local PartitionAssignment state and add to data_partitions
                 self.assign_partition_to_slot(partition_hash, ledger, slot_index);
@@ -469,8 +469,8 @@ impl EpochSnapshot {
                 // Push the newly assigned partition hash to the appropriate slot
                 // in the ledger
                 debug!(
-                    "Assigning partition hash {} to slot {} for  {:?}",
-                    &partition_hash, &slot_index, &ledger
+                    "Assigning partition hash {} to slot {} for {:?} addr: {}",
+                    partition_hash, &slot_index, &ledger, pa.miner_address
                 );
 
                 self.ledgers
