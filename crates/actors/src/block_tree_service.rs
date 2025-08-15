@@ -271,10 +271,12 @@ impl BlockTreeServiceInner {
         //  Notify reth service
         let tip_hash = {
             let block_index = self.block_index_guard.read();
-            block_index
-                .get_latest_item()
-                .expect("block index has no latest item")
-                .block_hash
+            if let Some(item) = block_index.get_latest_item() {
+                item.block_hash
+            } else {
+                // Fallback: if the block index is empty or out of sync, use the cache tip
+                self.cache.read().expect("cache read lock poisoned").tip
+            }
         };
 
         self.reth_service_actor
@@ -441,13 +443,22 @@ impl BlockTreeServiceInner {
             let binding = self.block_index_guard.clone();
             let bi = binding.read();
             if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-                let finalized = bi
-                    .get_item(finalized_height)
-                    .expect("finalized block index item must exist");
-                if finalized.block_hash == finalized_hash {
-                    return;
+                if let Some(finalized) = bi.get_item(finalized_height) {
+                    if finalized.block_hash == finalized_hash {
+                        // Already finalized in index, nothing to do
+                        return;
+                    } else {
+                        debug!(
+                            "Block tree and index out of sync at height {} (index has {}, expected {}), continuing migration",
+                            finalized_height, finalized.block_hash, finalized_hash
+                        );
+                    }
+                } else {
+                    debug!(
+                        "Block index missing item at height {} while finalizing {}, continuing migration",
+                        finalized_height, finalized_hash
+                    );
                 }
-                panic!("Block tree and index out of sync");
             }
 
             match cache.get_block(&finalized_hash) {
