@@ -180,8 +180,8 @@ impl StorageModuleServiceInner {
         // Skip modules without partition assignments
         if module.partition_assignment().is_none() {
             warn!(
-                "Storage module at index {} has no partition assignment",
-                index
+                "Storage module {:?} at index {} has no partition assignment",
+                &module_path, index
             );
             return Ok(());
         }
@@ -195,8 +195,8 @@ impl StorageModuleServiceInner {
             Ok(p) => p,
             Err(e) => {
                 warn!(
-                    "Failed to load packing params for module at index {}: {}",
-                    index, e
+                    "Failed to load packing params for module {:?} at index {}: {}",
+                    &module_path, index, e
                 );
                 return Ok(()); // Skip validation
             }
@@ -210,8 +210,8 @@ impl StorageModuleServiceInner {
         // Report overall status
         if hash_match && slot_match && ledger_match {
             debug!(
-                "Storage module at index {} matches on-disk parameters",
-                index
+                "Storage module {:?} at index {} matches on-disk parameters",
+                &module_path, index
             );
             return Ok(());
         }
@@ -242,7 +242,8 @@ impl StorageModuleServiceInner {
 
         // Return a detailed error with all mismatches
         Err(eyre::eyre!(
-            "Storage module at index {} has mismatched parameters: {}",
+            "Storage module {:?} at index {} has mismatched parameters: {}",
+            &module_path,
             index,
             mismatches.join(", ")
         ))
