@@ -61,6 +61,18 @@ pub async fn post_chunk(
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                     .body(format!("Unknown transaction: {:?}", err)))
             }
+            ChunkIngressError::PreHeaderOversizedBytes => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Pre-header chunk oversized bytes: {:?}", err)))
+            }
+            ChunkIngressError::PreHeaderOversizedDataPath => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Pre-header chunk oversized data_path: {:?}", err)))
+            }
+            ChunkIngressError::PreHeaderOffsetExceedsCap => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Pre-header chunk tx_offset exceeds cap: {:?}", err)))
+            }
             ChunkIngressError::DatabaseError => {
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to store chunk: {:?}", err)))

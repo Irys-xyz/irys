@@ -28,7 +28,6 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    genesis_node.start_public_api().await;
 
     // Initialize peer configs with their keypair/signer
     let peer1_config = genesis_node.testing_peer_with_signer(&peer1_signer);
@@ -38,12 +37,10 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
         .start_with_name("PEER1")
         .await;
-    peer1_node.start_public_api().await;
 
     let peer2_node = IrysNodeTest::new(peer2_config.clone())
         .start_with_name("PEER2")
         .await;
-    peer2_node.start_public_api().await;
 
     // Post stake + pledge commitments to peer1
     let peer1_stake_tx = peer1_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash

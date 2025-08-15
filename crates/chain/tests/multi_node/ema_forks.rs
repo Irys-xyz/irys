@@ -33,7 +33,6 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     let node_1 = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-    node_1.start_public_api().await;
     let mut peer_config = node_1.testing_peer_with_signer(&peer_signer);
     peer_config.oracle = OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.01)).unwrap(),
@@ -44,6 +43,9 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     let node_2 = node_1
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
         .await;
+
+    node_1.gossip_disable();
+    node_2.gossip_disable();
 
     let common_height = node_1.get_max_difficulty_block();
     assert_eq!(common_height, node_2.get_max_difficulty_block());

@@ -30,7 +30,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error};
 
 #[tokio::test]
-async fn test_data_sync_with_different_peer_performance() {
+async fn slow_test_data_sync_with_different_peer_performance() {
     std::env::set_var("RUST_LOG", "debug,storage=off");
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 
