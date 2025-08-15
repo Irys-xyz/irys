@@ -138,13 +138,19 @@ impl BlockTreeService {
 
         let handle = runtime_handle.spawn(
             async move {
-                let cache = BlockTree::restore_from_db(
+                let cache = match BlockTree::restore_from_db(
                     bi_guard.clone(),
                     epoch_replay_data,
                     db.clone(),
                     &storage_submodules_config,
                     config.clone(),
-                );
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Failed to restore BlockTree from DB: {}", e);
+                        return;
+                    }
+                };
 
                 let block_tree_service = Self {
                     shutdown: shutdown_rx,
@@ -263,7 +269,7 @@ impl BlockTreeServiceInner {
             self.db.clone(),
             &self.storage_submodules_config,
             self.config.clone(),
-        );
+        )?;
         *self.cache.write().expect("cache write lock poisoned") = new_block_tree_cache;
 
         //  Notify reth service
