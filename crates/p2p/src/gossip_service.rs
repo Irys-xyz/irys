@@ -15,13 +15,14 @@ use crate::{
     gossip_client::GossipClient,
     server::GossipServer,
     types::{GossipError, GossipResult},
-    SyncState,
+    SyncChainServiceMessage,
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
@@ -30,19 +31,12 @@ use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::{
-    sync::mpsc::{channel, error::SendError, Receiver, Sender},
-    time,
-};
+use tokio::sync::mpsc::{channel, error::SendError, Receiver, Sender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn, Span};
 
-const ONE_HOUR: Duration = Duration::from_secs(3600);
-const TWO_HOURS: Duration = Duration::from_secs(7200);
 const MAX_PEERS_PER_BROADCAST: usize = 5;
 const BROADCAST_INTERVAL: Duration = Duration::from_secs(1);
-const CACHE_CLEANUP_INTERVAL: Duration = ONE_HOUR;
-const CACHE_ENTRY_TTL: Duration = TWO_HOURS;
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -110,7 +104,7 @@ pub struct P2PService {
     cache: Arc<GossipCache>,
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
     client: GossipClient,
-    pub sync_state: SyncState,
+    pub sync_state: ChainSyncState,
 }
 
 impl P2PService {
@@ -140,7 +134,7 @@ impl P2PService {
             client,
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
-            sync_state: SyncState::new(true, false),
+            sync_state: ChainSyncState::new(true, false),
         }
     }
 
@@ -165,19 +159,20 @@ impl P2PService {
         vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
+        chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
     ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<B, M>>)>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
         A: ApiClient,
     {
-        debug!("Staring gossip service");
+        debug!("Starting the gossip service");
 
         let block_pool = BlockPool::new(
             db,
-            peer_list.clone(),
             block_discovery,
             mempool.clone(),
+            chain_sync_tx,
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
@@ -211,20 +206,13 @@ impl P2PService {
                     InternalGossipError::BroadcastReceiverShutdown,
                 ))?;
 
-        let cache = Arc::clone(&self.cache);
-
-        let cache_pruning_task_handle = spawn_cache_pruning_task(cache, task_executor);
-
         let broadcast_task_handle =
             spawn_broadcast_task(mempool_data_receiver, self, task_executor, peer_list);
 
-        let gossip_service_handle = spawn_watcher_task(
-            server,
-            server_handle,
-            cache_pruning_task_handle,
-            broadcast_task_handle,
-            task_executor,
-        );
+        let gossip_service_handle =
+            spawn_watcher_task(server, server_handle, broadcast_task_handle, task_executor);
+
+        debug!("Started gossip service");
 
         Ok((gossip_service_handle, arc_pool))
     }
@@ -311,36 +299,6 @@ impl P2PService {
     }
 }
 
-fn spawn_cache_pruning_task(
-    cache: Arc<GossipCache>,
-    task_executor: &TaskExecutor,
-) -> ServiceHandleWithShutdownSignal {
-    ServiceHandleWithShutdownSignal::spawn(
-        "gossip cache pruning",
-        move |mut shutdown_rx| async move {
-            info!("Starting cache pruning task");
-            let mut interval = time::interval(CACHE_CLEANUP_INTERVAL);
-
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        if let Err(error) = cache.prune_expired(CACHE_ENTRY_TTL) {
-                            error!("Failed to clean up cache: {}", error);
-                            break;
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        break;
-                    }
-                }
-            }
-
-            debug!("Cleanup task complete");
-        },
-        task_executor,
-    )
-}
-
 fn spawn_broadcast_task(
     mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     service: P2PService,
@@ -378,7 +336,6 @@ fn spawn_broadcast_task(
 fn spawn_watcher_task(
     server: Server,
     server_handle: ServerHandle,
-    mut cache_pruning_task_handle: ServiceHandleWithShutdownSignal,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
 ) -> ServiceHandleWithShutdownSignal {
@@ -393,9 +350,6 @@ fn spawn_watcher_task(
                     tokio::select! {
                         _ = task_shutdown_signal.recv() => {
                             debug!("Gossip service shutdown signal received");
-                        }
-                        cleanup_res = cache_pruning_task_handle.wait_for_exit() => {
-                            warn!("Gossip cleanup exited because: {:?}", cleanup_res);
                         }
                         broadcast_res = broadcast_task_handle.wait_for_exit() => {
                             warn!("Gossip broadcast exited because: {:?}", broadcast_res);
@@ -418,8 +372,6 @@ fn spawn_watcher_task(
                         )),
                     };
 
-                    info!("Stopping gossip cleanup");
-                    handle_result(cache_pruning_task_handle.stop().await);
                     info!("Stopping gossip broadcast");
                     handle_result(broadcast_task_handle.stop().await);
 

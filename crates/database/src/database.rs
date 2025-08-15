@@ -4,8 +4,8 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IrysBlockHeaders, IrysCommitments,
-    IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
+    IrysBlockHeaders, IrysCommitments, IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -268,7 +268,12 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
-    Ok((chunk_count as u64, chunk_count as u64 * chunk_size))
+    let chunk_count_u64 = u64::try_from(chunk_count)
+        .map_err(|_| eyre::eyre!("Cache size chunk_count does not fit into u64"))?;
+    let total_size = chunk_count_u64
+        .checked_mul(chunk_size)
+        .ok_or_else(|| eyre::eyre!("Cache size calculation overflow"))?;
+    Ok((chunk_count_u64, total_size))
 }
 
 pub fn insert_peer_list_item<T: DbTxMut>(
@@ -277,6 +282,37 @@ pub fn insert_peer_list_item<T: DbTxMut>(
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
     Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
+}
+
+/// Gets all ingress proofs associated with a specific data_root
+///
+pub fn ingress_proofs_by_data_root<TX: DbTx>(
+    read_tx: &TX,
+    data_root: DataRoot,
+) -> eyre::Result<Vec<(DataRoot, CompactCachedIngressProof)>> {
+    let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
+    let walker = cursor.walk_dup(Some(data_root), None)?; // iterate over all subkeys
+    let proofs: Vec<(irys_types::H256, CompactCachedIngressProof)> =
+        walker.collect::<Result<Vec<_>, DatabaseError>>()?;
+
+    Ok(proofs)
+}
+
+pub fn ingress_proof_by_data_root_address<TX: DbTx>(
+    read_tx: &TX,
+    data_root: DataRoot,
+    address: Address,
+) -> eyre::Result<Option<CompactCachedIngressProof>> {
+    let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
+
+    if let Some(index_entry) = cursor
+        .seek_by_key_subkey(data_root, address)?
+        .filter(|e| e.address == address)
+    {
+        Ok(Some(index_entry))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn walk_all<T: Table, TX: DbTx>(
@@ -309,17 +345,18 @@ pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseE
 mod tests {
     use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
     use reth_db::Database as _;
+    use tempfile::tempdir;
 
     use crate::{
-        block_header_by_hash, commitment_tx_by_txid, config::get_data_dir,
-        db::IrysDatabaseExt as _, insert_commitment_tx, tables::IrysTables,
+        block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _,
+        insert_commitment_tx, tables::IrysTables,
     };
 
     use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
-        let path = get_data_dir();
+        let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
         let tx_header = DataTransactionHeader::default();

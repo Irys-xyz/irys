@@ -85,10 +85,12 @@ async fn check_transaction_endpoints(
 
     let tx = ctx
         .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .await
         .unwrap();
     let tx_id = tx.header.id;
     let tx_2 = ctx
         .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![4, 5, 6])
+        .await
         .unwrap();
     let tx_2_id = tx_2.header.id;
 

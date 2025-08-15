@@ -1,12 +1,15 @@
+pub use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, TxIngressProof, H256, U256,
+    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod fee_distribution;
 
 pub type IrysTransactionId = H256;
 
@@ -83,9 +86,8 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub data_size: u64,
 
-    /// Funds the storage of the transaction data during the storage term
-    #[serde(with = "string_u64")]
-    pub term_fee: u64,
+    /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
+    pub term_fee: U256,
 
     /// Destination ledger for the transaction, default is 0 - Permanent Ledger
     pub ledger_id: u32,
@@ -102,16 +104,29 @@ pub struct DataTransactionHeader {
     #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
-    /// Funds the storage of the transaction for the next 200+ years
-    #[serde(default, with = "optional_string_u64")]
-    pub perm_fee: Option<u64>,
+    /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
+    #[serde(default)]
+    pub perm_fee: Option<U256>,
 
     /// INTERNAL: Signed ingress proofs used to promote this transaction to the Publish ledger
     /// TODO: put these somewhere else?
     #[rlp(skip)]
     #[rlp(default)]
     #[serde(skip)]
-    pub ingress_proofs: Option<TxIngressProof>,
+    pub ingress_proofs: Option<IngressProof>,
+}
+
+/// Ordering for DataTransactionHeader by transaction ID
+impl Ord for DataTransactionHeader {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for DataTransactionHeader {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl DataTransactionHeader {
@@ -185,7 +200,7 @@ impl DataTransactionHeader {
             signer: Address::default(),
             data_root: H256::zero(),
             data_size: 0,
-            term_fee: 0,
+            term_fee: U256::zero(),
             perm_fee: None,
             ledger_id: 0,
             bundle_format: None,
@@ -254,6 +269,42 @@ pub struct CommitmentTransaction {
     #[rlp(skip)]
     #[rlp(default)]
     pub signature: IrysSignature,
+}
+
+/// Ordering for CommitmentTransaction prioritizes transactions as follows:
+/// 1. Stake commitments (sorted by fee, highest first)
+/// 2. Pledge commitments (sorted by pledge_count_before_executing ascending, then by fee descending)
+/// 3. Other commitment types (sorted by fee)
+impl Ord for CommitmentTransaction {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // First, compare by commitment type (Stake > Pledge/Unpledge)
+        match (&self.commitment_type, &other.commitment_type) {
+            (CommitmentType::Stake, CommitmentType::Stake) => {
+                // Both are stakes, sort by fee (higher first)
+                other.user_fee().cmp(&self.user_fee())
+            }
+            (CommitmentType::Stake, _) => std::cmp::Ordering::Less, // Stake comes first
+            (_, CommitmentType::Stake) => std::cmp::Ordering::Greater, // Stake comes first
+            (
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: count_a,
+                },
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: count_b,
+                },
+            ) => count_a
+                .cmp(count_b)
+                .then_with(|| other.user_fee().cmp(&self.user_fee())),
+            // Handle other cases (Unpledge, Unstake) - sort by fee
+            _ => other.user_fee().cmp(&self.user_fee()),
+        }
+    }
+}
+
+impl PartialOrd for CommitmentTransaction {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl CommitmentTransaction {
@@ -481,7 +532,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
     }
 
     fn signer(&self) -> Address {
@@ -497,7 +548,9 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        U256::from(self.perm_fee.unwrap_or(0) + self.term_fee)
+        // Return term_fee as the user fee for prioritization
+        // todo: use TermFeeCharges to get the fee that will go to the miner
+        self.term_fee
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -901,8 +954,8 @@ mod tests {
             signer: Address::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
-            term_fee: 100,
-            perm_fee: Some(200),
+            term_fee: U256::from(100),
+            perm_fee: Some(U256::from(200)),
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,
@@ -1052,5 +1105,147 @@ mod pledge_decay_parametrized_tests {
             actual_amount.round_dp(0),
             expected_unpledge_value.round_dp(0)
         );
+    }
+}
+
+#[cfg(test)]
+mod commitment_ordering_tests {
+    use super::*;
+
+    fn create_test_commitment(
+        id: &str,
+        commitment_type: CommitmentType,
+        fee: u64,
+    ) -> CommitmentTransaction {
+        CommitmentTransaction {
+            id: H256::from_slice(&[id.as_bytes()[0]; 32]),
+            anchor: H256::zero(),
+            signer: Address::default(),
+            signature: IrysSignature::default(),
+            fee,
+            value: U256::zero(),
+            commitment_type,
+            version: 1,
+            chain_id: 1,
+        }
+    }
+
+    #[test]
+    fn test_stake_comes_before_pledge() {
+        let stake = create_test_commitment("stake", CommitmentType::Stake, 100);
+        let pledge = create_test_commitment(
+            "pledge",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 1,
+            },
+            200,
+        );
+
+        assert!(stake < pledge);
+    }
+
+    #[test]
+    fn test_stake_sorted_by_fee() {
+        let stake_low = create_test_commitment("stake1", CommitmentType::Stake, 50);
+        let stake_high = create_test_commitment("stake2", CommitmentType::Stake, 150);
+
+        assert!(stake_high < stake_low);
+    }
+
+    #[test]
+    fn test_pledge_sorted_by_count_then_fee() {
+        let pledge_count2_fee100 = create_test_commitment(
+            "p1",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            100,
+        );
+        let pledge_count2_fee200 = create_test_commitment(
+            "p2",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            200,
+        );
+        let pledge_count5_fee300 = create_test_commitment(
+            "p3",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 5,
+            },
+            300,
+        );
+
+        // Lower count comes first
+        assert!(pledge_count2_fee100 < pledge_count5_fee300);
+        assert!(pledge_count2_fee200 < pledge_count5_fee300);
+
+        // Same count, higher fee comes first
+        assert!(pledge_count2_fee200 < pledge_count2_fee100);
+    }
+
+    #[test]
+    fn test_complete_ordering() {
+        // Create commitments with distinct IDs for easier verification
+        let stake_high = create_test_commitment("stake_high", CommitmentType::Stake, 150);
+        let stake_low = create_test_commitment("stake_low", CommitmentType::Stake, 50);
+        let pledge_2_high = create_test_commitment(
+            "pledge_2_high",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            200,
+        );
+        let pledge_2_low = create_test_commitment(
+            "pledge_2_low",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 2,
+            },
+            50,
+        );
+        let pledge_5 = create_test_commitment(
+            "pledge_5",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 5,
+            },
+            100,
+        );
+        let pledge_10 = create_test_commitment(
+            "pledge_10",
+            CommitmentType::Pledge {
+                pledge_count_before_executing: 10,
+            },
+            300,
+        );
+        let unstake = create_test_commitment("unstake", CommitmentType::Unstake, 75);
+
+        let mut commitments = vec![
+            pledge_5.clone(),
+            stake_low.clone(),
+            pledge_2_high.clone(),
+            stake_high.clone(),
+            pledge_2_low.clone(),
+            pledge_10.clone(),
+            unstake.clone(),
+        ];
+
+        commitments.sort();
+
+        // Verify the expected order:
+        // 1. stake_high (Stake, fee=150)
+        // 2. stake_low (Stake, fee=50)
+        // 3. pledge_2_high (Pledge count=2, fee=200)
+        // 4. pledge_2_low (Pledge count=2, fee=50)
+        // 5. pledge_5 (Pledge count=5, fee=100)
+        // 6. pledge_10 (Pledge count=10, fee=300)
+        // 7. unstake (Other type, fee=75)
+
+        assert_eq!(commitments[0].id, stake_high.id);
+        assert_eq!(commitments[1].id, stake_low.id);
+        assert_eq!(commitments[2].id, pledge_2_high.id);
+        assert_eq!(commitments[3].id, pledge_2_low.id);
+        assert_eq!(commitments[4].id, pledge_5.id);
+        assert_eq!(commitments[5].id, pledge_10.id);
+        assert_eq!(commitments[6].id, unstake.id);
     }
 }

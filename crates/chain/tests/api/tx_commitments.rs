@@ -245,7 +245,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .commitment_state
             .pledge_commitments
             .get(&signer1.address())
-            .expect("commitments for genesis miner")
+            .expect("commitments for signer1 miner")
             .len(),
         2
     );
@@ -256,7 +256,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .commitment_state
             .pledge_commitments
             .get(&signer2.address())
-            .expect("commitments for genesis miner")
+            .expect("commitments for signer2 miner")
             .len(),
         1
     );
@@ -289,7 +289,6 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
 #[actix_web::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
-    // std::env::set_var("RUST_LOG", "debug");
     std::env::set_var(
         "RUST_LOG",
         "irys_actors::epoch_service::epoch_service=debug",
@@ -470,7 +469,7 @@ async fn post_stake_commitment(
     let stake_tx = CommitmentTransaction {
         commitment_type: CommitmentType::Stake,
         anchor: H256::default(),
-        fee: price_info.fee,
+        fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
         ..CommitmentTransaction::new(consensus)
     };
@@ -503,7 +502,7 @@ async fn post_pledge_commitment(
             pledge_count_before_executing: 0, // First pledge
         },
         anchor,
-        fee: price_info.fee,
+        fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
         ..CommitmentTransaction::new(consensus)
     };

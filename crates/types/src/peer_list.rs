@@ -19,6 +19,8 @@ impl PeerScore {
     pub const MAX: u16 = 100;
     pub const INITIAL: u16 = 50;
     pub const ACTIVE_THRESHOLD: u16 = 20;
+    /// Score threshold for unstaked peers to be persisted to the database
+    pub const PERSISTENCE_THRESHOLD: u16 = 80;
 
     pub fn new(score: u16) -> Self {
         Self(score.clamp(Self::MIN, Self::MAX))
@@ -38,6 +40,11 @@ impl PeerScore {
 
     pub fn is_active(&self) -> bool {
         self.0 >= Self::ACTIVE_THRESHOLD
+    }
+
+    /// Checks if the peer score is high enough to be persisted to database (for unstaked peers)
+    pub fn is_persistable(&self) -> bool {
+        self.0 >= Self::PERSISTENCE_THRESHOLD
     }
 
     pub fn get(&self) -> u16 {
@@ -88,6 +95,7 @@ impl Default for PeerListItem {
     PartialEq,
 )]
 #[rtype(result = "eyre::Result<()>")]
+#[serde(deny_unknown_fields)]
 pub struct RethPeerInfo {
     // Reth's peering port: https://reth.rs/run/ports.html#peering-ports
     pub peering_tcp_addr: SocketAddr,
@@ -156,7 +164,7 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     let address = match tag {
         0 => {
             // IPv4 address (needs 4 bytes IP + 2 bytes port after tag)
-            if buf.len() < 11 {
+            if buf.len() < 7 {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
             } else {
                 let ip_octets: [u8; 4] = buf[1..5].try_into().unwrap();
@@ -166,7 +174,7 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
         }
         1 => {
             // IPv6 address (needs 16 bytes IP + 2 bytes port after tag)
-            if buf.len() < 23 {
+            if buf.len() < 19 {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
             } else {
                 let mut ip_octets = [0_u8; 16];
@@ -450,5 +458,18 @@ mod tests {
         encode_address(&address, &mut buf);
         let (decoded, _) = decode_address(&buf[..]);
         assert_eq!(address, decoded);
+    }
+
+    #[test]
+    fn address_encode_decode_roundtrip_short_buffer() {
+        let original_address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(100, 0, 0, 1), 2000));
+        let mut buf = bytes::BytesMut::with_capacity(10);
+        let size = encode_address(&original_address, &mut buf);
+        assert_eq!(size, 7);
+        assert_eq!(buf.len(), 7);
+
+        let (decoded_address, consumed) = decode_address(&buf[..]);
+        assert_eq!(consumed, 7);
+        assert_eq!(decoded_address, original_address);
     }
 }
