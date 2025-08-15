@@ -322,7 +322,7 @@ where
         let (sender, receiver) = oneshot::channel();
         self.service_senders
             .block_tree
-            .send(BlockTreeServiceMessage::FastTrackStorageFinalized {
+            .send(BlockTreeServiceMessage::FastTrackBlockMigration {
                 block_header: header.clone(),
                 response: sender,
             })

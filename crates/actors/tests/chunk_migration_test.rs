@@ -15,7 +15,7 @@
 // use actix::{prelude::*, SystemRegistry};
 // use chunk::TxRelativeChunkOffset;
 // use irys_actors::{
-//     block_producer::BlockFinalizedMessage, chunk_migration_service::ChunkMigrationService,
+//     block_producer::BlockMigrationMessage, chunk_migration_service::ChunkMigrationService,
 // };
 // use irys_config::IrysNodeConfig;
 // use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
@@ -235,7 +235,7 @@
 //     // Send the block confirmed message
 //     let block = Arc::new(irys_block);
 //     let txs = Arc::new(tx_headers);
-//     let block_finalized_message = BlockFinalizedMessage {
+//     let block_finalized_message = BlockMigrationMessage {
 //         block_header: block.clone(),
 //         all_txs: Arc::clone(&txs),
 //     };
@@ -251,7 +251,7 @@
 //     );
 
 //     let chunk_migration_addr = chunk_migration_service.start();
-//     let block_finalized_message = BlockFinalizedMessage {
+//     let block_finalized_message = BlockMigrationMessage {
 //         block_header: block.clone(),
 //         all_txs: txs.clone(),
 //     };

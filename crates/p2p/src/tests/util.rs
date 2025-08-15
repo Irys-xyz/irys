@@ -419,7 +419,7 @@ impl GossipServiceTestFixture {
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
-                if let BlockTreeServiceMessage::FastTrackStorageFinalized {
+                if let BlockTreeServiceMessage::FastTrackBlockMigration {
                     block_header: _,
                     response,
                 } = message

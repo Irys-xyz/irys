@@ -200,7 +200,7 @@ impl MockedServices {
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
-                if let BlockTreeServiceMessage::FastTrackStorageFinalized {
+                if let BlockTreeServiceMessage::FastTrackBlockMigration {
                     block_header: _,
                     response,
                 } = message
@@ -208,7 +208,7 @@ impl MockedServices {
                     // Simulate processing the block header
                     response
                         .send(Ok(None))
-                        .expect("to send response for FastTrackStorageFinalized");
+                        .expect("to send response for FastTrackBlockMigration");
                 } else {
                     debug!("Received unsupported BlockTreeServiceMessage");
                 }

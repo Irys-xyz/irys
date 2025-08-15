@@ -10,7 +10,7 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
     services::ServiceSenders,
-    BlockFinalizedMessage,
+    BlockMigrationMessage,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
@@ -794,7 +794,7 @@ async fn epoch_blocks_reinitialization_test() {
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
-    let msg = BlockFinalizedMessage {
+    let msg = BlockMigrationMessage {
         block_header: Arc::new(genesis_block.clone()),
         all_txs: Arc::new(vec![]),
     };

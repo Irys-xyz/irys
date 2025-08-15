@@ -7,7 +7,7 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockFinalizedMessage, StorageModuleServiceMessage,
+    BlockMigrationMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
@@ -49,7 +49,7 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
-    FastTrackStorageFinalized {
+    FastTrackBlockMigration {
         block_header: IrysBlockHeader,
         response: oneshot::Sender<eyre::Result<Option<Addr<RethServiceActor>>>>,
     },
@@ -237,13 +237,11 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
             }
-            BlockTreeServiceMessage::FastTrackStorageFinalized {
+            BlockTreeServiceMessage::FastTrackBlockMigration {
                 block_header,
                 response,
             } => {
-                let result = self
-                    .fast_track_storage_finalized_message(block_header)
-                    .await;
+                let result = self.fast_track_block_migration(block_header).await;
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
@@ -285,9 +283,9 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do
+    /// Fast tracks block migration by retrieving transaction headers. Do
     /// after the block has been migrated.
-    async fn fast_track_storage_finalized_message(
+    async fn fast_track_block_migration(
         &self,
         block_header: IrysBlockHeader,
     ) -> eyre::Result<Option<Addr<RethServiceActor>>> {
@@ -313,7 +311,7 @@ impl BlockTreeServiceInner {
 
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: Arc::new(block_header),
             all_txs: Arc::new(all_txs),
         };
@@ -323,7 +321,16 @@ impl BlockTreeServiceInner {
         Ok(Some(self.reth_service_actor.clone()))
     }
 
-    async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
+    /// Sends block-migration notifications to services after a block reaches migration depth.
+    ///
+    /// This method:
+    /// - Resolves the full `IrysBlockHeader` for the provided `block_hash` from the mempool or the database
+    /// - Fetches the Submit and Publish data-transaction headers from the mempool
+    /// - Emits a `BlockMigrationMessage` to the `BlockIndexService` and `ChunkMigrationService`
+    ///
+    /// Errors
+    /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
+    async fn send_block_migration_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
         // retrieve block header from the mempool or database
         let block_header = {
             let (tx_block, rx_block) = oneshot::channel();
@@ -363,7 +370,7 @@ impl BlockTreeServiceInner {
 
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: Arc::new(block_header),
             all_txs: Arc::new(all_txs),
         };
@@ -405,12 +412,12 @@ impl BlockTreeServiceInner {
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
     async fn try_notify_services_of_block_migration(&self, arc_block: &Arc<IrysBlockHeader>) {
-        let finalized_hash = {
+        let migrated_hash = {
             let binding = self.cache.clone();
             let cache = binding.write().unwrap();
             let migration_depth = self.config.consensus.block_migration_depth as usize;
 
-            // Skip if block isn't deep enough for finalization
+            // Skip if block isn't deep enough for migration
             if arc_block.height <= migration_depth as u64 {
                 return;
             }
@@ -420,35 +427,37 @@ impl BlockTreeServiceInner {
                 return;
             }
 
-            // Find block to finalize
+            // Find block to migrate
             let Some(current_index) = longest_chain
                 .iter()
                 .position(|x| x.block_hash == arc_block.block_hash)
             else {
-                info!("Validated block not in longest chain, block {} height: {}, skipping finalization",arc_block.block_hash, arc_block.height);
+                info!(
+                    "Validated block not in longest chain, block {} height: {}, skipping migration",
+                    arc_block.block_hash, arc_block.height
+                );
                 return;
             };
 
             if current_index < migration_depth {
-                return; // Block already finalized
+                return; // Block already migrated
             }
 
-            let finalize_index = current_index - migration_depth;
-            let finalized_hash = longest_chain[finalize_index].block_hash;
-            let finalized_height = longest_chain[finalize_index].height;
+            let migrate_index = current_index - migration_depth;
+            let migrated_hash = longest_chain[migrate_index].block_hash;
+            let migration_height = longest_chain[migrate_index].height;
 
-            // Verify block isn't already finalized
+            // Verify block isn't already migrated
             let binding = self.block_index_guard.clone();
             let bi = binding.read();
-            if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-                let finalized = bi.get_item(finalized_height).unwrap();
-                if finalized.block_hash == finalized_hash {
+            if let Some(finalized) = bi.get_item(migration_height) {
+                if finalized.block_hash == migrated_hash {
                     return;
                 }
-                panic!("Block tree and index out of sync");
+                panic!("Block tree and index out of sync during migration");
             }
 
-            match cache.get_block(&finalized_hash) {
+            match cache.get_block(&migrated_hash) {
                 Some(block) => {
                     let mut block = block.clone();
                     block.poa.chunk = None;
@@ -465,24 +474,24 @@ impl BlockTreeServiceInner {
                         debug!("No reorg subscribers: {:?}", e);
                     }
                 }
-                None => error!("migrated block {} not found in block_tree", finalized_hash),
+                None => error!("migrated block {} not found in block_tree", migrated_hash),
             }
 
-            debug!(?finalized_hash, ?finalized_height, "migrating irys block");
+            debug!(?migrated_hash, ?migration_height, "migrating irys block");
             // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
             if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
                 head_hash: BlockHashType::Irys(cache.tip),
                 confirmed_hash: None,
-                finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                finalized_hash: Some(BlockHashType::Irys(migrated_hash)),
             }) {
-                panic!("Unable to send finalization message to reth: {}", &e)
+                panic!("Unable to send migration message to reth: {}", &e)
             }
 
-            finalized_hash
+            migrated_hash
         }; // RwLockWriteGuard is dropped here, before the await
 
-        if let Err(e) = self.send_storage_finalized_message(finalized_hash).await {
-            error!("Unable to send block finalized message: {:?}", e);
+        if let Err(e) = self.send_block_migration_message(migrated_hash).await {
+            error!("Unable to send block migration message: {:?}", e);
         }
     }
 
