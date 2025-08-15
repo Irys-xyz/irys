@@ -1035,7 +1035,7 @@ async fn partitions_assignment_determinism_test() {
         panic!("Should have an assignment");
     };
 
-    let publish_slot_1 = H256::from_base58("2HVmW86qVyKTw1DYJMX6NoNvVxATLNZHSAyMceEWPtLC");
+    let publish_slot_1 = H256::from_base58("3FQ7mPXwHhmNVD74DqNATHCex4wrtSQEBaa1FYeBEneN");
 
     epoch_snapshot.partition_assignments.print_assignments();
 
@@ -1079,7 +1079,7 @@ async fn partitions_assignment_determinism_test() {
         panic!("Should have an assignment");
     };
 
-    let submit_slot_2 = H256::from_base58("8sRHV12yycwpUSzean97JemQrzAXSSQWMmC4Jx3xUXzQ");
+    let submit_slot_2 = H256::from_base58("4jNP3tGi9hxAGsR6WnkM1dbrWG68E7wzP1JZ58QvHnXk");
 
     if let Some(submit_assignment) = epoch_snapshot
         .partition_assignments
