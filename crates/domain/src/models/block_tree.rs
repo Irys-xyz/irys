@@ -301,7 +301,12 @@ impl BlockTree {
         for block_height in (start + 1)..end {
             let block_hash = {
                 let block_index = block_index_guard.read();
-                block_index.get_item(block_height).unwrap().block_hash
+                if let Some(item) = block_index.get_item(block_height) {
+                    item.block_hash
+                } else {
+                    // Skip missing index entries gracefully
+                    continue;
+                }
             };
 
             let block = block_header_by_hash(&tx, &block_hash, false)
