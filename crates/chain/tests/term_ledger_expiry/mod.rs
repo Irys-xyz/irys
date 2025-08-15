@@ -10,7 +10,7 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
     // Configure test parameters
     let chunk_size = 32; // Use 32 byte chunks to match test utilities
     let num_chunks_in_partition = 5; // Very small partition - only 5 chunks to fill it quickly
-    let submit_ledger_epoch_length = 2; // Expires after 1 epoch
+    let submit_ledger_epoch_length = 2; // Expires after 2 epoch
     let num_blocks_in_epoch = 3; // Short epochs for faster testing
 
     // Setup node configuration
@@ -39,8 +39,8 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
         .start_and_wait_for_packing("test", 30)
         .await;
 
-    // Get the miner address (using the main signer as the miner for this test)
-    let miner_address = main_signer.address();
+    // Get the actual miner address from the node's configuration
+    let miner_address = node.node_ctx.config.node_config.miner_address();
 
     // Record initial miner balance
     let genesis_block = node.get_block_by_height(0).await?;
@@ -57,6 +57,11 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
     let mut transactions = Vec::new();
     let mut total_term_fees = U256::from(0);
     let mut total_perm_fees = U256::from(0);
+
+    // Track which blocks contain which transactions
+    let mut blocks_mined = Vec::new();
+    let txs_per_block = 2;
+    let mut pending_txs = Vec::new();
 
     for i in 0..num_transactions {
         info!("Posting transaction {}", i);
@@ -75,41 +80,51 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
         }
         tx_ids.push(tx.header.id);
         transactions.push(tx.clone());
+        pending_txs.push(tx.header.id);
 
         // Wait for transaction to be in mempool
         node.wait_for_mempool(tx.header.id, 10).await?;
+
+        // Mine a block after every 2 transactions (or if it's the last transaction)
+        if pending_txs.len() >= txs_per_block || i == num_transactions - 1 {
+            info!("Mining block with {} transactions", pending_txs.len());
+            let block = node.mine_block().await?;
+
+            // Verify transactions were included
+            let tx_ids_map = block.get_data_ledger_tx_ids();
+            let submit_txs = tx_ids_map
+                .get(&DataLedger::Submit)
+                .expect("Submit ledger should have transactions");
+
+            for tx_id in &pending_txs {
+                assert!(
+                    submit_txs.contains(tx_id),
+                    "Transaction {:?} should be included in block {}",
+                    tx_id,
+                    block.height
+                );
+            }
+
+            info!(
+                "Block {} mined with {} transactions",
+                block.height,
+                pending_txs.len()
+            );
+
+            blocks_mined.push(block);
+            pending_txs.clear();
+        }
     }
 
     info!(
-        "Posted 5 transactions with total term_fees: {}, perm_fees: {}",
-        total_term_fees, total_perm_fees
+        "Posted {} transactions with total term_fees: {}, perm_fees: {}",
+        num_transactions, total_term_fees, total_perm_fees
     );
 
-    // Mine first block to include all transactions
-    let block1 = node.mine_block().await?;
-
-    // Verify all transactions were included
-    let tx_ids_map = block1.get_data_ledger_tx_ids();
-    dbg!(&tx_ids_map);
-    let submit_txs = tx_ids_map
-        .get(&DataLedger::Submit)
-        .expect("Submit ledger should have transactions");
-
-    assert_eq!(
-        submit_txs.len(),
-        num_transactions,
-        "All {} transactions should be included",
-        num_transactions
+    info!(
+        "Transactions distributed across {} blocks",
+        blocks_mined.len()
     );
-    for tx_id in &tx_ids {
-        assert!(
-            submit_txs.contains(tx_id),
-            "Transaction {:?} should be included",
-            tx_id
-        );
-    }
-
-    info!("All transactions included in block 1");
 
     // Calculate expected fee distribution
     // Block producer gets 5% of term_fee immediately, 95% goes to treasury
@@ -131,12 +146,16 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
 
     info!("Expected expiry fees for miner: {}", expected_expiry_fees);
 
-    // Get balance after first block (includes block producer rewards)
-    let balance_after_block1 = U256::from_be_bytes(
-        node.get_balance(miner_address, block1.evm_block_hash)
+    // Get balance after initial blocks (includes block producer rewards)
+    let last_initial_block = blocks_mined.last().expect("Should have mined blocks");
+    let balance_after_initial_blocks = U256::from_be_bytes(
+        node.get_balance(miner_address, last_initial_block.evm_block_hash)
             .to_be_bytes(),
     );
-    info!("Balance after block 1: {}", balance_after_block1);
+    info!(
+        "Balance after initial blocks: {}",
+        balance_after_initial_blocks
+    );
 
     // Mine blocks to trigger Submit ledger expiry
     // Submit ledger expires after submit_ledger_epoch_length epochs
@@ -150,18 +169,21 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
     // - Block 3: New epoch starts (slot 1 should be created)
     // - After block 3: slot 0 can expire (it's no longer the last slot)
 
-    // We need to mine more blocks to ensure a second slot is created
-    // Let's mine to block 6 to ensure we're well past the expiry point
-    let expiry_block_height = (submit_ledger_epoch_length * num_blocks_in_epoch * 2 + 1) as u64; // Double the epochs to ensure slot creation
-    let blocks_to_mine = (expiry_block_height - 1) as usize; // -1 because we already mined block 1
+    // We need to mine more blocks to ensure expiry occurs
+    // The first partition should expire after submit_ledger_epoch_length epochs
+    let current_height = last_initial_block.height;
+    // We need to reach at least 2 full epochs to trigger expiry
+    // Since we're already at block 4, we need to mine to at least block 7 (2 epochs * 3 blocks + 1)
+    let target_expiry_height = ((submit_ledger_epoch_length + 1) * num_blocks_in_epoch) as u64;
+    let expiry_block_height = target_expiry_height.max(current_height + 3); // Ensure we mine at least a few more blocks
 
     info!(
-        "Mining {} more blocks to reach expiry at block {}",
-        blocks_to_mine, expiry_block_height
+        "Current height: {}, targeting expiry at block {}",
+        current_height, expiry_block_height
     );
 
     // Mine blocks one by one to track ledger changes
-    for height in 2..=expiry_block_height {
+    for height in (current_height + 1)..=expiry_block_height {
         node.mine_block().await?;
         let block = node.get_block_by_height(height).await?;
         let tx_ids = block.get_data_ledger_tx_ids();
@@ -200,9 +222,9 @@ async fn heavy_submit_ledger_expiry_single_partition() -> eyre::Result<()> {
     info!("Final miner balance: {}", final_balance);
 
     // Calculate actual fee received from expiry
-    // We need to account for block production rewards between block1 and expiry
+    // We need to account for block production rewards between initial blocks and expiry
     // For simplicity, we'll check that the balance increased by at least the expected expiry fees
-    let balance_increase = final_balance.saturating_sub(balance_after_block1);
+    let balance_increase = final_balance.saturating_sub(balance_after_initial_blocks);
     info!("Balance increased by: {}", balance_increase);
 
     // The balance increase should include:

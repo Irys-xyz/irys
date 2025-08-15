@@ -215,6 +215,10 @@ fn collect_expired_partitions(
     let mut ledgers = epoch_snapshot.ledgers.clone();
     let partition_assignments = &epoch_snapshot.partition_assignments;
     let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
+    let mut expired_ledger_slot_indexes = BTreeMap::new();
+    if expired_partition_hashes.is_empty() {
+        return Ok(expired_ledger_slot_indexes);
+    }
 
     tracing::debug!(
         "collect_expired_partitions: block_height={}, target_ledger={:?}, found {} expired partition hashes",
@@ -222,8 +226,6 @@ fn collect_expired_partitions(
         target_ledger_type,
         expired_partition_hashes.len()
     );
-
-    let mut expired_ledger_slot_indexes = BTreeMap::new();
 
     for expired_partition_hash in expired_partition_hashes {
         let partition = partition_assignments
@@ -405,30 +407,28 @@ async fn process_boundary_block(
 ) -> eyre::Result<(Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>)> {
     // Get the block and its transactions
     let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
-    let data_txs = block.get_data_ledger_tx_ids();
-    let ledger_tx_ids = data_txs.get(&ledger_type).ok_or_eyre(format!(
-        "{:?} ledger is required for expired blocks",
-        ledger_type
-    ))?;
+    let ledger_tx_ids = block
+        .get_data_ledger_tx_ids_ordered(ledger_type)
+        .ok_or_eyre(format!(
+            "{:?} ledger is required for expired blocks",
+            ledger_type
+        ))?;
 
     // Fetch the actual transactions
-    let mut ledger_data_txs =
+    // Note: get_data_tx_in_parallel preserves the order of input IDs
+    let ledger_data_txs =
         get_data_tx_in_parallel(ledger_tx_ids.iter().copied().collect(), mempool_sender, db)
             .await?;
-
-    // Sort transactions to match their order in the block
-    ledger_data_txs.sort_by_key(|tx| {
-        ledger_tx_ids
-            .iter()
-            .position(|id| *id == tx.id)
-            .unwrap_or(usize::MAX)
-    });
 
     // Get the previous block's max offset
     let block_index_read = block_index
         .read()
         .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
     let prev_max_offset = get_previous_max_offset(&block_index_read, boundary.height, ledger_type)?;
+    if is_earliest {
+        let mut ves = Vec::from_iter(ledger_data_txs.iter().map(|x| x.id));
+        tracing::error!(txs = ?ves, ?boundary.chunk_range, ?prev_max_offset);
+    }
     drop(block_index_read);
 
     // Filter transactions based on chunk positions
@@ -440,6 +440,7 @@ async fn process_boundary_block(
         config.consensus.chunk_size,
         miners,
     );
+    tracing::error!(?filtered_txs);
 
     Ok(filtered_txs)
 }
@@ -513,9 +514,8 @@ async fn process_middle_blocks(
 
     for (block_hash, miners) in middle_blocks {
         let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
-        let data_txs = block.get_data_ledger_tx_ids();
-        let ledger_tx_ids = data_txs
-            .get(&ledger_type)
+        let ledger_tx_ids = block
+            .get_data_ledger_tx_ids_ordered(ledger_type)
             .ok_or_eyre(format!("{:?} ledger is required", ledger_type))?;
 
         for tx_id in ledger_tx_ids.iter() {
@@ -536,7 +536,6 @@ fn aggregate_miner_fees(
     let mut aggregated_miner_fees = BTreeMap::<Address, (U256, RollingHash)>::new();
     transactions.sort();
 
-    tracing::error!(?tx_to_miners);
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners
             .get(&data_tx.id)

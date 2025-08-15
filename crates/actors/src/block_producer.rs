@@ -56,7 +56,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, error_span, info, warn, Instrument as _};
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
@@ -1059,6 +1059,7 @@ pub trait BlockProdStrategy {
             self.inner().service_senders.mempool.clone(),
             self.inner().db.clone(),
         )
+        .instrument(error_span!("from block prod"))
         .await
     }
 }

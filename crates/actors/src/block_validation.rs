@@ -49,7 +49,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, error_span, info, Instrument};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
@@ -968,6 +968,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
             service_senders.mempool.clone(),
             db.clone(),
         )
+        .instrument(error_span!("from validator"))
         .await?
     } else {
         BTreeMap::new()
@@ -987,6 +988,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     )
     .map(|result| result.map(|metadata| metadata.shadow_tx))
     .collect::<Result<Vec<_>, _>>()?;
+    dbg!(&shadow_txs_vec);
     Ok(shadow_txs_vec)
 }
 
