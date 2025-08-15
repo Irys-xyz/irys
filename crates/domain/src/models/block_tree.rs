@@ -190,14 +190,26 @@ impl BlockTree {
         // Extract block range and start block info
         let (start, end, start_block_hash) = {
             let block_index = block_index_guard.read();
-            assert!(block_index.num_blocks() > 0, "Block list must not be empty");
 
-            let start = block_index
-                .num_blocks()
-                .saturating_sub(consensus_config.block_tree_depth - 1);
-            let end = block_index.num_blocks();
-            let start_block_hash = block_index.get_item(start).unwrap().block_hash;
-            (start, end, start_block_hash)
+            if block_index.num_blocks() == 0 {
+                // Fallback: start from genesis block only
+                let start = 0;
+                let end = 1;
+                let start_block_hash = epoch_replay_data.genesis_block_header.block_hash;
+                (start, end, start_block_hash)
+            } else {
+                let start = block_index
+                    .num_blocks()
+                    .saturating_sub(consensus_config.block_tree_depth - 1);
+                let end = block_index.num_blocks();
+                // Prefer index entry; if missing, fall back to genesis block hash
+                let start_block_hash = if let Some(item) = block_index.get_item(start) {
+                    item.block_hash
+                } else {
+                    epoch_replay_data.genesis_block_header.block_hash
+                };
+                (start, end, start_block_hash)
+            }
         };
 
         // Initialize epoch snapshot from genesis state to establish the baseline
