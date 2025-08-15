@@ -337,6 +337,14 @@ impl IrysBlockHeader {
         }
         data_txids
     }
+
+    /// Returns the transaction IDs for a specific data ledger in their original order
+    pub fn get_data_ledger_tx_ids_ordered(&self, ledger_id: DataLedger) -> Option<&[H256]> {
+        self.data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == ledger_id as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+    }
 }
 
 // treat any block whose height is a multiple of blocks_in_price_adjustment_interval

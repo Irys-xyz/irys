@@ -35,6 +35,7 @@ pub struct ShadowTxGenerator<'a> {
     commitment_txs: &'a [CommitmentTransaction],
     submit_txs: &'a [DataTransactionHeader],
     publish_ledger: &'a mut PublishLedgerWithTxs,
+    expired_ledger_fees: &'a BTreeMap<Address, (U256, RollingHash)>,
 
     // Iterator state
     treasury_balance: U256,
@@ -42,6 +43,8 @@ pub struct ShadowTxGenerator<'a> {
     index: usize,
     // Current publish ledger iterator (if processing publish ledger)
     current_publish_iter: Option<std::vec::IntoIter<Result<ShadowMetadata>>>,
+    // Current expired ledger fees iterator (if processing expired ledger fees)
+    current_expired_ledger_iter: Option<std::vec::IntoIter<Result<ShadowMetadata>>>,
 }
 
 impl<'a> ShadowTxGenerator<'a> {
@@ -55,6 +58,7 @@ impl<'a> ShadowTxGenerator<'a> {
         submit_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a mut PublishLedgerWithTxs,
         initial_treasury_balance: U256,
+        expired_ledger_fees: &'a BTreeMap<Address, (U256, RollingHash)>,
     ) -> Self {
         // Sort publish ledger transactions by id for deterministic processing
         publish_ledger.txs.sort();
@@ -68,10 +72,12 @@ impl<'a> ShadowTxGenerator<'a> {
             commitment_txs,
             submit_txs,
             publish_ledger,
+            expired_ledger_fees,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
             current_publish_iter: None,
+            current_expired_ledger_iter: None,
         }
     }
 
@@ -86,6 +92,7 @@ enum Phase {
     Header,
     Commitments,
     SubmitLedger,
+    ExpiredLedgerFees,
     PublishLedger,
     Done,
 }
@@ -118,6 +125,13 @@ impl Iterator for ShadowTxGenerator<'_> {
 
                 Phase::SubmitLedger => {
                     if let Some(result) = self.try_process_submit_ledger().transpose() {
+                        return Some(result);
+                    }
+                    // Continue to next iteration if phase completed
+                }
+
+                Phase::ExpiredLedgerFees => {
+                    if let Some(result) = self.try_process_expired_ledger_fees().transpose() {
                         return Some(result);
                     }
                     // Continue to next iteration if phase completed
@@ -326,7 +340,7 @@ impl ShadowTxGenerator<'_> {
     #[tracing::instrument(skip_all, err)]
     fn try_process_submit_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
         if self.index >= self.submit_txs.len() {
-            self.phase = Phase::PublishLedger;
+            self.phase = Phase::ExpiredLedgerFees;
             self.index = 0;
             return Ok(None);
         }
@@ -397,6 +411,71 @@ impl ShadowTxGenerator<'_> {
         }
 
         Ok(Some(shadow_metadata))
+    }
+
+    /// Process expired ledger fees phase with clean error handling
+    #[tracing::instrument(skip_all, err)]
+    fn try_process_expired_ledger_fees(&mut self) -> Result<Option<ShadowMetadata>> {
+        // On first entry to ExpiredLedgerFees phase, prepare all rewards
+        if self.current_expired_ledger_iter.is_none() {
+            if !self.expired_ledger_fees.is_empty() {
+                // Create TermFeeReward transactions
+                let shadow_txs = self.create_expired_ledger_shadow_txs(self.expired_ledger_fees)?;
+                self.current_expired_ledger_iter = Some(
+                    shadow_txs
+                        .into_iter()
+                        .map(Ok)
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                );
+            } else {
+                // No expired ledger fees, move to PublishLedger
+                self.phase = Phase::PublishLedger;
+                return Ok(None);
+            }
+        }
+
+        // Yield shadow txs
+        if let Some(ref mut iter) = self.current_expired_ledger_iter {
+            if let Some(result) = iter.next() {
+                // result is already Result<ShadowMetadata, _>, wrap in Some
+                return Ok(Some(result?));
+            }
+        }
+
+        // All rewards processed, move to PublishLedger
+        self.phase = Phase::PublishLedger;
+        Ok(None)
+    }
+
+    /// Creates shadow transactions for expired ledger fee rewards
+    fn create_expired_ledger_shadow_txs(
+        &self,
+        fees: &BTreeMap<Address, (U256, RollingHash)>,
+    ) -> Result<Vec<ShadowMetadata>> {
+        // BTreeMap already maintains sorted order by address
+        let shadow_txs: Vec<ShadowMetadata> = fees
+            .iter()
+            .map(|(address, (amount, rolling_hash))| {
+                // Convert the rolling hash to FixedBytes<32> for irys_ref
+                let hash_bytes = rolling_hash.to_bytes();
+                let h256 = irys_types::H256::from(hash_bytes);
+                let irys_ref = h256.into();
+
+                ShadowMetadata {
+                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
+                        BalanceIncrement {
+                            amount: Uint::from_le_bytes(amount.to_le_bytes()),
+                            target: *address,
+                            irys_ref,
+                        },
+                    )),
+                    transaction_fee: 0, // No block producer reward for term fee rewards
+                }
+            })
+            .collect();
+
+        Ok(shadow_txs)
     }
 
     /// Process publish ledger phase with clean error handling
@@ -474,18 +553,18 @@ impl RewardAmount {
 
 /// Newtype for rolling hash to prevent mixing with other U256 values
 #[derive(Debug, Clone, Copy, Default)]
-struct RollingHash(U256);
+pub struct RollingHash(pub U256);
 
 impl RollingHash {
     fn zero() -> Self {
         Self(U256::zero())
     }
 
-    fn xor_assign(&mut self, value: U256) {
+    pub fn xor_assign(&mut self, value: U256) {
         self.0 ^= value;
     }
 
-    fn to_bytes(self) -> [u8; 32] {
+    pub fn to_bytes(self) -> [u8; 32] {
         self.0.to_be_bytes()
     }
 }
@@ -603,6 +682,7 @@ mod tests {
             transaction_fee: 0,
         }];
 
+        let empty_fees = BTreeMap::new();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -613,6 +693,7 @@ mod tests {
             &[],
             &mut publish_ledger,
             initial_treasury,
+            &empty_fees,
         );
 
         // Compare actual with expected
@@ -710,6 +791,7 @@ mod tests {
             },
         ];
 
+        let empty_fees = BTreeMap::new();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -720,6 +802,7 @@ mod tests {
             &[],
             &mut publish_ledger,
             initial_treasury,
+            &empty_fees,
         );
 
         // Compare actual with expected
@@ -780,6 +863,7 @@ mod tests {
             },
         ];
 
+        let empty_fees = BTreeMap::new();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -790,6 +874,7 @@ mod tests {
             &submit_txs,
             &mut publish_ledger,
             initial_treasury,
+            &empty_fees,
         );
 
         // Compare actual with expected
@@ -951,6 +1036,7 @@ mod tests {
             },
         ];
 
+        let empty_fees = BTreeMap::new();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -961,6 +1047,7 @@ mod tests {
             &submit_txs,
             &mut publish_ledger,
             initial_treasury,
+            &empty_fees,
         );
 
         // Compare actual with expected

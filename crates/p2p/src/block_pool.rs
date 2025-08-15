@@ -386,6 +386,22 @@ where
                 "Reth payload provider is not set".into(),
             ))?;
 
+        // Get parent epoch snapshot from block tree
+        let parent_epoch_snapshot = self
+            .block_status_provider
+            .block_tree_read_guard()
+            .read()
+            .get_epoch_snapshot(&block_header.previous_block_hash)
+            .ok_or_else(|| {
+                BlockPoolError::OtherInternal(format!(
+                    "Parent epoch snapshot not found for block {:?}",
+                    block_header.previous_block_hash
+                ))
+            })?;
+
+        // Get block index from block status provider
+        let block_index = self.block_status_provider.block_index_read_guard().inner();
+
         match shadow_transactions_are_valid(
             &self.config,
             &self.service_senders,
@@ -393,6 +409,8 @@ where
             adapter,
             &self.db,
             self.execution_payload_provider.clone(),
+            parent_epoch_snapshot,
+            block_index,
         )
         .await
         {

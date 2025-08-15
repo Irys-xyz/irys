@@ -167,6 +167,16 @@ impl BlockStatusProvider {
         binding.get_latest_item().cloned()
     }
 
+    /// Get the block tree read guard
+    pub fn block_tree_read_guard(&self) -> &BlockTreeReadGuard {
+        &self.block_tree_read_guard
+    }
+
+    /// Get the block index read guard
+    pub fn block_index_read_guard(&self) -> &BlockIndexReadGuard {
+        &self.block_index_read_guard
+    }
+
     pub fn canonical_height(&self) -> u64 {
         let binding = self.block_tree_read_guard.read();
         binding.get_latest_canonical_entry().height
