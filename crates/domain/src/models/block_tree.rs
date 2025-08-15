@@ -257,7 +257,12 @@ impl BlockTree {
         // Get the latest block from index for EMA snapshot
         let latest_block_hash = {
             let block_index = block_index_guard.read();
-            block_index.get_item(end - 1).unwrap().block_hash
+            if let Some(item) = block_index.get_item(end - 1) {
+                item.block_hash
+            } else {
+                // Fallback: if index is missing, use the start block hash
+                start_block_hash
+            }
         };
         let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
             .unwrap()
@@ -357,7 +362,12 @@ impl BlockTree {
 
         let tip_hash = {
             let block_index = block_index_guard.read();
-            block_index.get_latest_item().unwrap().block_hash
+            if let Some(item) = block_index.get_latest_item() {
+                item.block_hash
+            } else {
+                // Fallback: if the block index is empty or out of sync, use the last processed block as tip
+                prev_block.block_hash
+            }
         };
 
         block_tree_cache.mark_tip(&tip_hash).unwrap();
