@@ -431,8 +431,11 @@ impl IrysNode {
         genesis_block.last_epoch_hash =
             H256::from_base58("6mZBRJGrxbYZsLLQqwZEFEAsdvNvx4Hd7RVVBAD69f7Y");
 
-        // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config).await;
+        // Add commitment transactions to genesis block and get initial treasury
+        let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
+
+        // Set the genesis treasury to the total value of all commitments
+        genesis_block.treasury = initial_treasury;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 

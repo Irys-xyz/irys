@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
-use irys_types::NodeConfig;
+use irys_types::{NodeConfig, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
@@ -52,7 +52,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
-        ) -> eyre::Result<EthBuiltPayload> {
+        ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(
                     prev_block_header,
@@ -77,6 +77,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
+            treasury: U256,
         ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
             self.prod
                 .produce_block_without_broadcasting(
@@ -89,6 +90,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     block_reward,
                     eth_built_payload,
                     prev_block_ema_snapshot,
+                    treasury,
                 )
                 .await
         }

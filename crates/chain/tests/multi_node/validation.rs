@@ -7,7 +7,7 @@ use irys_actors::{
 };
 use irys_types::{
     storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    NodeConfig,
+    NodeConfig, U256,
 };
 use reth::payload::EthBuiltPayload;
 
@@ -35,7 +35,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-        ) -> eyre::Result<EthBuiltPayload> {
+        ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
 
             self.prod
@@ -186,7 +186,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-        ) -> eyre::Result<EthBuiltPayload> {
+        ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let mut submit_txs = submit_txs.to_vec();
             submit_txs.push(self.extra_tx.clone());
 
@@ -275,7 +275,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-        ) -> eyre::Result<EthBuiltPayload> {
+        ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let mut submit_txs = submit_txs.to_vec();
             // NOTE: We reverse the order of txs, this means
             // that during validation the irys block txs will not match the

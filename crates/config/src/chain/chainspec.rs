@@ -32,7 +32,6 @@ impl IrysChainSpecBuilder {
             previous_block_hash: H256::zero(),
             previous_cumulative_diff: U256::from(0),
             poa: PoaData {
-                recall_chunk_index: 0,
                 partition_chunk_offset: 0,
                 partition_hash: PartitionHash::zero(),
                 chunk: None,
@@ -81,6 +80,7 @@ impl IrysChainSpecBuilder {
             },
             oracle_irys_price: config.consensus.genesis_price,
             ema_irys_price: config.consensus.genesis_price,
+            treasury: U256::zero(), // Treasury will be set when genesis commitments are added
         };
         Self {
             reth_builder: ChainSpecBuilder::mainnet()

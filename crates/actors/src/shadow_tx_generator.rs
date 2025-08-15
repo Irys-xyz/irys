@@ -374,9 +374,29 @@ impl ShadowTxGenerator<'_> {
         let tx = &self.commitment_txs[self.index];
         self.index += 1;
 
-        // Process commitment transaction (no treasury impact currently)
-        // TODO: should commitment txs affect the treasury?
-        Ok(Some(self.process_commitment_transaction(tx)?))
+        // Process commitment transaction
+        let shadow_metadata = self.process_commitment_transaction(tx)?;
+
+        // Update treasury based on commitment type
+        match tx.commitment_type {
+            irys_primitives::CommitmentType::Stake
+            | irys_primitives::CommitmentType::Pledge { .. } => {
+                // Stake and Pledge lock funds in the treasury
+                self.treasury_balance =
+                    self.treasury_balance.checked_add(tx.value).ok_or_else(|| {
+                        eyre!("Treasury balance overflow when adding commitment value")
+                    })?;
+            }
+            irys_primitives::CommitmentType::Unstake
+            | irys_primitives::CommitmentType::Unpledge { .. } => {
+                self.treasury_balance =
+                    self.treasury_balance.checked_sub(tx.value).ok_or_else(|| {
+                        eyre!("Treasury balance underflow when releasing commitment value")
+                    })?;
+            }
+        }
+
+        Ok(Some(shadow_metadata))
     }
 
     /// Process publish ledger phase with clean error handling
