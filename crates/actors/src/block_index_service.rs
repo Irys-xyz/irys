@@ -81,7 +81,7 @@ impl BlockIndexService {
         }
     }
 
-    /// Adds a finalized block and its associated transactions to the block index.
+    /// Adds a migrated block and its associated transactions to the block index.
     ///
     /// # Safety Considerations
     /// This function expects `all_txs` to contain transaction headers for every transaction ID
