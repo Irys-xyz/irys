@@ -59,10 +59,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
     match command {
         Commands::Test { args, coverage } => {
             println!("cargo test");
-            let _ = cmd!(sh, "cargo install --locked cargo-nextest").remove_and_run();
+            let _ =
+                cmd!(sh, "cargo install --locked --version 0.9.102 cargo-nextest").remove_and_run();
 
             if coverage {
-                cmd!(sh, "cargo install  --locked grcov").remove_and_run()?;
+                cmd!(sh, "cargo install  --locked --version 0.10.5 grcov").remove_and_run()?;
                 for (key, val) in [
                     ("CARGO_INCREMENTAL", "0"),
                     ("RUSTFLAGS", "-Cinstrument-coverage"),
@@ -104,7 +105,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             cmd!(sh, "cargo check --all-features --all-targets {args...}").remove_and_run()?;
         }
         Commands::FullBacon { args } => {
-            let _ = cmd!(sh, "cargo install --locked bacon").remove_and_run();
+            let _ = cmd!(sh, "cargo install --locked --version 3.16.0 bacon").remove_and_run();
             println!("bacon check-all ");
             cmd!(sh, "bacon check-all {args...}").remove_and_run()?;
         }
@@ -148,12 +149,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Typos => {
             println!("typos check");
-            cmd!(sh, "cargo install --locked typos-cli").remove_and_run()?;
+            cmd!(sh, "cargo install --locked --version 1.35.4 typos-cli").remove_and_run()?;
             cmd!(sh, "typos").remove_and_run()?;
         }
         Commands::UnusedDeps => {
             println!("unused deps");
-            cmd!(sh, "cargo install --locked cargo-machete").remove_and_run()?;
+            cmd!(sh, "cargo install --locked --version 0.8.0 cargo-machete").remove_and_run()?;
             cmd!(sh, "cargo-machete").run()?;
         }
         Commands::EmissionSimulation => {
