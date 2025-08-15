@@ -49,7 +49,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tracing::{debug, error, error_span, info, Instrument as _};
+use tracing::{debug, error, info, Instrument as _};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {

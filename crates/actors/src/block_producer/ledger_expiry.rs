@@ -124,10 +124,10 @@ pub async fn calculate_expired_ledger_fees(
         block_range.max_block.height,
         same_block
     );
-    
+
     let (earliest_txs, earliest_miners);
     let (latest_txs, latest_miners);
-    
+
     if same_block {
         // When min and max are the same block, process it only once to avoid double-counting
         // Process as earliest block (will include all transactions in the partition range)
@@ -143,7 +143,7 @@ pub async fn calculate_expired_ledger_fees(
             &db,
         )
         .await?;
-        
+
         earliest_txs = txs;
         earliest_miners = miners;
         latest_txs = Vec::new();
@@ -175,7 +175,7 @@ pub async fn calculate_expired_ledger_fees(
             &db,
         )
         .await?;
-        
+
         earliest_txs = e_txs;
         earliest_miners = e_miners;
         latest_txs = l_txs;
@@ -191,7 +191,7 @@ pub async fn calculate_expired_ledger_fees(
     all_tx_ids.extend(earliest_txs.clone());
     all_tx_ids.extend(latest_txs.clone());
     all_tx_ids.extend(middle_txs.clone());
-    
+
     tracing::info!(
         "Collected transactions: earliest={}, latest={}, middle={}, total={}",
         earliest_txs.len(),
@@ -364,12 +364,16 @@ fn find_block_range(
                 max_height = Some((height, block_index_item.clone(), chunk_range));
             }
 
-            let block_appearance = blocks_with_expired_ledgers
-                .insert(block_index_item.block_hash, Arc::new(miners.clone()));
-            eyre::ensure!(
-                block_appearance.is_none(),
-                "why are we getting the same block twice in at least 2 different slot indexes?"
-            );
+            // If the block already exists, merge the miners
+            blocks_with_expired_ledgers
+                .entry(block_index_item.block_hash)
+                .and_modify(|existing_miners: &mut Arc<Vec<Address>>| {
+                    // Merge the new miners with existing ones
+                    let mut combined = (**existing_miners).clone();
+                    combined.extend(miners.clone());
+                    *existing_miners = Arc::new(combined);
+                })
+                .or_insert_with(|| Arc::new(miners.clone()));
 
             // Skip to the next chunk after this block ends.
             // We do this by going to the very end of the current blocks max chunk offset
@@ -464,8 +468,7 @@ async fn process_boundary_block(
     // Fetch the actual transactions
     // Note: get_data_tx_in_parallel preserves the order of input IDs
     let ledger_data_txs =
-        get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_sender, db)
-            .await?;
+        get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_sender, db).await?;
 
     // Get the previous block's max offset
     let block_index_read = block_index
