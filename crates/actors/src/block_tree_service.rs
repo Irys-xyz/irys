@@ -49,7 +49,7 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
-    FastTrackStorageFinalized {
+    FastTrackBlockMigration {
         block_header: IrysBlockHeader,
         response: oneshot::Sender<eyre::Result<Option<Addr<RethServiceActor>>>>,
     },
@@ -237,7 +237,7 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
             }
-            BlockTreeServiceMessage::FastTrackStorageFinalized {
+            BlockTreeServiceMessage::FastTrackBlockMigration {
                 block_header,
                 response,
             } => {
