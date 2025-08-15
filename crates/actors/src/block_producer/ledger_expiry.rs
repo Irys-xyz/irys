@@ -425,10 +425,6 @@ async fn process_boundary_block(
         .read()
         .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
     let prev_max_offset = get_previous_max_offset(&block_index_read, boundary.height, ledger_type)?;
-    if is_earliest {
-        let mut ves = Vec::from_iter(ledger_data_txs.iter().map(|x| x.id));
-        tracing::error!(txs = ?ves, ?boundary.chunk_range, ?prev_max_offset);
-    }
     drop(block_index_read);
 
     // Filter transactions based on chunk positions
@@ -440,7 +436,6 @@ async fn process_boundary_block(
         config.consensus.chunk_size,
         miners,
     );
-    tracing::error!(?filtered_txs);
 
     Ok(filtered_txs)
 }

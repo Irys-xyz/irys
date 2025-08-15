@@ -988,7 +988,6 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     )
     .map(|result| result.map(|metadata| metadata.shadow_tx))
     .collect::<Result<Vec<_>, _>>()?;
-    dbg!(&shadow_txs_vec);
     Ok(shadow_txs_vec)
 }
 
