@@ -281,45 +281,52 @@ fn find_block_range(
     ledger_type: DataLedger,
 ) -> eyre::Result<BlockRange> {
     let mut blocks_with_expired_ledgers = HashMap::new();
-
-    // Collect all chunk ranges and find the global min/max
-    let mut all_ranges = Vec::new();
-    for (slot_index, miners) in expired_slots {
-        let chunk_range = slot_index.compute_chunk_range(config.consensus.num_chunks_in_partition);
-        all_ranges.push((chunk_range, Arc::new(miners)));
-    }
-
-    // Find the overall min and max chunk offsets
-    let min_chunk = all_ranges
-        .iter()
-        .map(|(r, _)| r.start())
-        .min()
-        .ok_or_eyre("No chunk ranges found")?;
-    let max_chunk = all_ranges
-        .iter()
-        .map(|(r, _)| r.end())
-        .max()
-        .ok_or_eyre("No chunk ranges found")?;
-
     let block_index_read = block_index
         .read()
         .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
 
-    // Get the blocks at the boundary offsets
-    let (min_height, min_item) = block_index_read.get_block_index_item(ledger_type, *min_chunk)?;
-    let (max_height, max_item) = block_index_read.get_block_index_item(ledger_type, *max_chunk)?;
+    // Ensure that we don't start reading a partition that's only partially populated
+    let last_item = block_index_read.items.last().unwrap();
+    let max_chunk_offset_across_all_partitions =
+        LedgerChunkOffset::from(last_item.ledgers[ledger_type].max_chunk_offset);
 
-    // Find which range the min/max blocks belong to
-    let min_range = all_ranges
-        .iter()
-        .find(|(r, _)| r.contains_point(min_chunk))
-        .map(|(r, _)| *r)
-        .ok_or_eyre("Min chunk not in any range")?;
-    let max_range = all_ranges
-        .iter()
-        .find(|(r, _)| r.contains_point(max_chunk))
-        .map(|(r, _)| *r)
-        .ok_or_eyre("Max chunk not in any range")?;
+    // Track min and max blocks as we iterate
+    let mut min_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
+    let mut max_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
+    
+    for (slot_index, miners) in expired_slots {
+        let chunk_range = slot_index.compute_chunk_range(
+            config.consensus.num_chunks_in_partition,
+            max_chunk_offset_across_all_partitions,
+        );
+        for chunk_offset in *chunk_range.start()..=*chunk_range.end() {
+            let (height, block_index_item) =
+                block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
+            
+            // Update min_height if this is the first block or a lower height
+            if min_height.as_ref().map_or(true, |(h, _, _)| height < *h) {
+                min_height = Some((height, block_index_item.clone(), chunk_range.clone()));
+            }
+            
+            // Update max_height if this is the first block or a higher height
+            if max_height.as_ref().map_or(true, |(h, _, _)| height > *h) {
+                max_height = Some((height, block_index_item.clone(), chunk_range.clone()));
+            }
+            
+            let block_appearance =
+                blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::new(miners.clone()));
+            eyre::ensure!(
+                block_appearance.is_none(),
+                "why are we getting the same block twice in at least 2 different slot indexes?"
+            );
+        }
+    }
+
+    // Extract min and max block data - these must exist if we have expired slots
+    let (min_height, min_item, min_range) = min_height
+        .expect("min_height must be populated after iterating expired slots");
+    let (max_height, max_item, max_range) = max_height
+        .expect("max_height must be populated after iterating expired slots");
 
     let min_block = BoundaryBlock {
         height: min_height,
@@ -332,15 +339,6 @@ fn find_block_range(
         item: max_item.clone(),
         chunk_range: max_range,
     };
-
-    // Collect all blocks in the ranges
-    for (chunk_range, miners) in all_ranges {
-        for chunk_offset in *chunk_range.start()..=*chunk_range.end() {
-            let (_, block_index_item) =
-                block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
-            blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::clone(&miners));
-        }
-    }
 
     // Get miners for boundary blocks before removing them
     let min_block_miners = blocks_with_expired_ledgers
@@ -565,10 +563,15 @@ impl SlotIndex {
         Self(value)
     }
 
-    fn compute_chunk_range(&self, chunks_per_partition: u64) -> LedgerChunkRange {
+    fn compute_chunk_range(
+        &self,
+        chunks_per_partition: u64,
+        max_offset: LedgerChunkOffset,
+    ) -> LedgerChunkRange {
         let start = LedgerChunkOffset::from(self.0 * chunks_per_partition);
         let end = start + chunks_per_partition;
-        LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
+        let end = end.min(max_offset);
+        LedgerChunkRange(ledger_chunk_offset_ii!(start, LedgerChunkOffset::from(end)))
     }
 }
 
