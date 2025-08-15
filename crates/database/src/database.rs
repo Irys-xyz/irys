@@ -227,7 +227,7 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
         .filter(|e| e.index == chunk_offset)
     {
         let meta: CachedChunkIndexMetadata = index_entry.into();
-        // expect that the cached chunk always has an entry if the index entry exists
+        // the cached chunk always has an entry if the index entry exists
         Ok(Some((
             meta.clone(),
             tx.get::<CachedChunks>(meta.chunk_path_hash)?
