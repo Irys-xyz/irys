@@ -1056,9 +1056,8 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             solution: &irys_types::block_production::SolutionContext,
             ledger_id: Option<u32>,
         ) -> eyre::Result<(irys_types::PoaData, H256)> {
-            // Create an invalid PoA chunk that doesn't match the actual solution
-            let invalid_chunk = vec![0xFF; 256 * 1024]; // Fill with invalid data
-            let poa_chunk = irys_types::Base64(invalid_chunk);
+            // Use the actual PoA chunk from the solution to pass prevalidation
+            let poa_chunk = irys_types::Base64(solution.chunk.clone());
             // hash is valid so that prevalidation succeeds
             let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
 
@@ -1069,7 +1068,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
                 ledger_id,
                 partition_chunk_offset: solution.chunk_offset,
-                partition_hash: solution.partition_hash,
+                partition_hash: H256::from_slice(&[0xAA; 32]), // bogus partition_hash
             };
             Ok((poa, poa_chunk_hash))
         }

@@ -221,40 +221,48 @@ impl BlockProducerService {
                 }
 
                 let inner = self.inner.clone();
-                let result = Self::produce_block_inner(inner, solution).await?;
+                let production_attempt = Self::produce_block_inner(inner, solution).await;
 
-                // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Some((irys_block_header, eth_built_payload)) = &result {
-                    info!(
-                        block_hash = %irys_block_header.block_hash.0.to_base58(),
-                        block_height = irys_block_header.height,
-                        "Block production completed successfully"
-                    );
+                match production_attempt {
+                    Ok(result) => {
+                        // Only decrement blocks_remaining_for_test when a block is successfully produced
+                        if let Some((irys_block_header, eth_built_payload)) = &result {
+                            info!(
+                                block_hash = %irys_block_header.block_hash.0.to_base58(),
+                                block_height = irys_block_header.height,
+                                "Block production completed successfully"
+                            );
 
-                    // Broadcast the EVM payload
-                    let execution_payload_gossip_data =
-                        GossipBroadcastMessage::from(eth_built_payload.block().clone());
-                    if let Err(payload_broadcast_error) = self
-                        .inner
-                        .service_senders
-                        .gossip_broadcast
-                        .send(execution_payload_gossip_data)
-                    {
-                        error!(
-                            "Failed to broadcast execution payload: {:?}",
-                            payload_broadcast_error
-                        );
+                            // Broadcast the EVM payload
+                            let execution_payload_gossip_data =
+                                GossipBroadcastMessage::from(eth_built_payload.block().clone());
+                            if let Err(payload_broadcast_error) = self
+                                .inner
+                                .service_senders
+                                .gossip_broadcast
+                                .send(execution_payload_gossip_data)
+                            {
+                                error!(
+                                    "Failed to broadcast execution payload: {:?}",
+                                    payload_broadcast_error
+                                );
+                            }
+
+                            if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
+                                *remaining = remaining.saturating_sub(1);
+                                debug!("Test blocks remaining after production: {}", *remaining);
+                            }
+                        } else {
+                            info!("Block production skipped (solution outdated or invalid)");
+                        }
+
+                        let _ = response.send(Ok(result));
                     }
-
-                    if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
-                        *remaining = remaining.saturating_sub(1);
-                        debug!("Test blocks remaining after production: {}", *remaining);
+                    Err(err) => {
+                        error!("Block production failed: {:?}", err);
+                        let _ = response.send(Err(err));
                     }
-                } else {
-                    info!("Block production skipped (solution outdated or invalid)");
                 }
-
-                let _ = response.send(Ok(result));
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
@@ -702,14 +710,39 @@ pub trait BlockProdStrategy {
             .max_chunk_offset
             + submit_chunks_added;
 
-        // build a new block header
+        // We recompute solution_hash locally instead of trusting the miner-provided value.
+        // Rationale:
+        // - Prevalidation enforces solution_hash_link_is_valid(poa_chunk, partition_chunk_offset, vdf_seed),
+        //   so the header must be consistent with those inputs.
+        // - A miner-provided solution_hash could be fabricated to meet difficulty but fail the link check.
+        //   Recomputing here guarantees consistency and prevents such bypass attempts.
+        // - Using the recomputed value ensures locally produced blocks always pass the link validation stage.
+        let recomputed_solution_hash = {
+            let mut hasher = sha::Sha256::new();
+            let poa_chunk = poa
+                .chunk
+                .as_ref()
+                .expect("poa chunk must be present during block production");
+            hasher.update(&poa_chunk.0);
+            hasher.update(&poa.partition_chunk_offset.to_le_bytes());
+            hasher.update(solution.seed.0.as_bytes());
+            let computed = H256::from(hasher.finish());
+            if computed != solution.solution_hash {
+                warn!(
+                    "Miner-provided solution_hash mismatch: expected {} got {}",
+                    computed.0.to_base58(),
+                    solution.solution_hash.0.to_base58()
+                );
+            }
+            computed
+        };
         let mut irys_block = IrysBlockHeader {
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
             diff,
             cumulative_diff: cumulative_difficulty,
             last_diff_timestamp,
-            solution_hash: solution.solution_hash,
+            solution_hash: recomputed_solution_hash,
             previous_solution_hash: prev_block_header.solution_hash,
             last_epoch_hash,
             chunk_hash: poa_chunk_hash,
