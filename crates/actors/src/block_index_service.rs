@@ -24,7 +24,10 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexService {
         if self.block_index.is_none() {
             error!("block_index service not initialized");
         }
-        let binding = self.block_index.clone().unwrap();
+        let binding = self
+            .block_index
+            .clone()
+            .expect("block_index must be initialized");
         BlockIndexReadGuard::new(binding)
     }
 }
@@ -111,9 +114,9 @@ impl BlockIndexService {
 
         self.block_index
             .clone()
-            .unwrap()
+            .expect("block_index must be initialized")
             .write()
-            .unwrap()
+            .expect("block_index write lock poisoned")
             .push_block(block, all_txs, chunk_size)
             .expect("expect to add the block to the index");
 
@@ -183,8 +186,11 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
             return None;
         }
 
-        let binding = self.block_index.clone().unwrap();
-        let bi = binding.read().unwrap();
+        let binding = self
+            .block_index
+            .clone()
+            .expect("block_index must be initialized");
+        let bi = binding.read().expect("block_index read lock poisoned");
         let block_height = bi.num_blocks().max(1) - 1;
         Some(bi.get_item(block_height)?.clone())
     }

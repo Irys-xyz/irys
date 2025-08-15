@@ -266,12 +266,15 @@ impl BlockTreeServiceInner {
             &self.storage_submodules_config,
             self.config.clone(),
         );
-        *self.cache.write().unwrap() = new_block_tree_cache;
+        *self.cache.write().expect("cache write lock poisoned") = new_block_tree_cache;
 
         //  Notify reth service
         let tip_hash = {
             let block_index = self.block_index_guard.read();
-            block_index.get_latest_item().unwrap().block_hash
+            block_index
+                .get_latest_item()
+                .expect("block index has no latest item")
+                .block_hash
         };
 
         self.reth_service_actor
@@ -382,16 +385,13 @@ impl BlockTreeServiceInner {
             "JESSEDEBUG confirming irys block evm_block_hash: {} ({})",
             &confirmed_block.evm_block_hash, &confirmed_block.height
         );
-        if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
-            head_hash: BlockHashType::Irys(tip_hash),
-            confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
-            finalized_hash: None,
-        }) {
-            panic!(
-                "Unable to send confirmation FCU message to reth for {}: {}",
-                &tip_hash, &e
-            )
-        }
+        self.reth_service_actor
+            .try_send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Irys(tip_hash),
+                confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
+                finalized_hash: None,
+            })
+            .expect("Unable to send confirmation FCU message to reth");
         self.service_senders
             .mempool
             .send(MempoolServiceMessage::BlockConfirmed(
@@ -407,7 +407,7 @@ impl BlockTreeServiceInner {
     async fn try_notify_services_of_block_migration(&self, arc_block: &Arc<IrysBlockHeader>) {
         let finalized_hash = {
             let binding = self.cache.clone();
-            let cache = binding.write().unwrap();
+            let cache = binding.write().expect("cache write lock poisoned");
             let migration_depth = self.config.consensus.block_migration_depth as usize;
 
             // Skip if block isn't deep enough for finalization
@@ -441,7 +441,9 @@ impl BlockTreeServiceInner {
             let binding = self.block_index_guard.clone();
             let bi = binding.read();
             if bi.num_blocks() > finalized_height && bi.num_blocks() > finalized_height {
-                let finalized = bi.get_item(finalized_height).unwrap();
+                let finalized = bi
+                    .get_item(finalized_height)
+                    .expect("finalized block index item must exist");
                 if finalized.block_hash == finalized_hash {
                     return;
                 }
@@ -470,13 +472,13 @@ impl BlockTreeServiceInner {
 
             debug!(?finalized_hash, ?finalized_height, "migrating irys block");
             // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
-            if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(cache.tip),
-                confirmed_hash: None,
-                finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
-            }) {
-                panic!("Unable to send finalization message to reth: {}", &e)
-            }
+            self.reth_service_actor
+                .try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(cache.tip),
+                    confirmed_hash: None,
+                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                })
+                .expect("Unable to send finalization message to reth");
 
             finalized_hash
         }; // RwLockWriteGuard is dropped here, before the await
@@ -593,7 +595,7 @@ impl BlockTreeServiceInner {
         let height = self
             .cache
             .read()
-            .unwrap()
+            .expect("cache read lock poisoned")
             .get_block(&block_hash)
             .expect("block to be in cache")
             .height;
@@ -605,7 +607,7 @@ impl BlockTreeServiceInner {
 
         if validation_result == ValidationResult::Invalid {
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write().expect("cache write lock poisoned");
 
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
             let Some(block_entry) = cache.get_block(&block_hash) else {
@@ -639,13 +641,16 @@ impl BlockTreeServiceInner {
 
         let (arc_block, epoch_block, reorg_event) = {
             let binding = self.cache.clone();
-            let mut cache = binding.write().unwrap();
+            let mut cache = binding.write().expect("cache write lock poisoned");
 
             // Get the current tip before any changes
             // Note: We can't rely on canonical chain here, because the canonical chain was already updated when this
             //       block arrived and was added after pre-validation. The tip only moves after full validation.
             let old_tip = cache.tip;
-            let old_tip_block = cache.get_block(&old_tip).unwrap().clone();
+            let old_tip_block = cache
+                .get_block(&old_tip)
+                .expect("old tip block not found in cache")
+                .clone();
 
             // Mark block as validated in cache, this will update the canonical chain
             if let Err(err) = cache.mark_block_as_valid(&block_hash) {
@@ -677,7 +682,10 @@ impl BlockTreeServiceInner {
             let is_reorg = !fork_blocks.iter().any(|bh| bh.block_hash == old_tip);
 
             // Get block info before mutable operations
-            let block_entry = cache.blocks.get(&block_hash).unwrap();
+            let block_entry = cache
+                .blocks
+                .get(&block_hash)
+                .expect("block entry not found in cache");
             let arc_block = Arc::new(block_entry.block.clone());
 
             // Now do mutable operations
@@ -699,8 +707,13 @@ impl BlockTreeServiceInner {
                     orphaned_blocks.push(&old_tip_block);
 
                     // Find the fork point where the old and new chains diverged
-                    let fork_hash = orphaned_blocks.first().unwrap().block_hash;
-                    let fork_block = cache.get_block(&fork_hash).unwrap();
+                    let fork_hash = orphaned_blocks
+                        .first()
+                        .expect("no orphaned blocks to determine fork point")
+                        .block_hash;
+                    let fork_block = cache
+                        .get_block(&fork_hash)
+                        .expect("fork block not found in cache");
                     let fork_height = fork_block.height;
 
                     // Convert orphaned blocks to BlockTreeEntry to make a snapshot of the old canonical chain
@@ -735,7 +748,10 @@ impl BlockTreeServiceInner {
                     let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
                         .iter()
                         .map(|e| {
-                            let mut block = cache.get_block(&e.block_hash).unwrap().clone();
+                            let mut block = cache
+                                .get_block(&e.block_hash)
+                                .expect("block not found in cache while preparing reorg event")
+                                .clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
                         })
@@ -744,7 +760,10 @@ impl BlockTreeServiceInner {
                     let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
                         .iter()
                         .map(|e| {
-                            let mut block = cache.get_block(&e.block_hash).unwrap().clone();
+                            let mut block = cache
+                                .get_block(&e.block_hash)
+                                .expect("block not found in cache while preparing reorg event")
+                                .clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
                         })
@@ -843,15 +862,10 @@ impl BlockTreeServiceInner {
         let epoch_snapshot = self
             .cache
             .read()
-            .unwrap()
+            .expect("cache read lock poisoned")
             .get_epoch_snapshot(&epoch_block.block_hash);
 
-        let epoch_snapshot = epoch_snapshot.unwrap_or_else(|| {
-            panic!(
-                "Epoch block should have a snapshot in cache {}",
-                epoch_block.block_hash
-            )
-        });
+        let epoch_snapshot = epoch_snapshot.expect("Epoch block should have a snapshot in cache");
         let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
 
         // Let the mining actors know about expired partitions

@@ -38,7 +38,7 @@ use crate::validation_service::VdfValidationResult;
 pub(crate) enum BlockPriority {
     /// Canonical extensions that extend from the canonical tip (highest priority)
     CanonicalExtension,
-    /// Canonical blocks already on chain (middle priority)  
+    /// Canonical blocks already on chain (middle priority)
     Canonical,
     /// Fork blocks that don't extend the canonical tip (low priority)
     Fork,
@@ -320,8 +320,10 @@ impl ActiveValidations {
         match result {
             VdfValidationResult::Valid => {
                 // remove task from the vdf_pending queue
-                let (hash, task) = self.vdf_pending_queue.remove(&task.block_hash).unwrap_or_else(|| panic!("Expected processing task for {} to have an entry in the vdf_pending queue",
-                        &task.block_hash));
+                let (hash, task) = self
+                    .vdf_pending_queue
+                    .remove(&task.block_hash)
+                    .expect("Expected processing task to have an entry in the vdf_pending queue");
                 // do NOT send anything to the block tree
 
                 debug!(

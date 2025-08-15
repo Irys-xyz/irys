@@ -579,7 +579,10 @@ pub trait BlockProdStrategy {
             .map_err(|e| eyre!("Failed to build payload: {}", e))?;
 
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap();
+        let payload = built_payload
+            .clone()
+            .try_into_v5()
+            .expect("failed to convert built payload to v5");
         let new_payload_result = beacon_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
@@ -1031,12 +1034,10 @@ pub trait BlockProdStrategy {
                 }
             }
         }
-        .unwrap_or_else(|| {
-            panic!(
-                "Should be able to get the parent EVM block {} {}",
-                &prev_block_header.evm_block_hash, &prev_block_header.height
-            )
-        });
+        .expect(&format!(
+            "Should be able to get the parent EVM block {} {}",
+            &prev_block_header.evm_block_hash, &prev_block_header.height
+        ));
         // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
         // for now we just skip the check for the genesis block
         if prev_block_header.height > 0 {

@@ -1656,8 +1656,8 @@ async fn get_previous_tx_inclusions(
             None => {
                 let header = db
                     .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .unwrap()
-                    .unwrap()
+                    .expect("database returned error fetching parent block header")
+                    .expect("db view error while fetching parent block header")
                     .expect("to find the parent block header in the database");
                 update_states(&header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
