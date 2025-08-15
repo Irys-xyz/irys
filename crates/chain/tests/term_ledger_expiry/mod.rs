@@ -122,27 +122,35 @@ async fn heavy_ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()>
     .await
 }
 
-// Test 4: Small partitions with partial expiry
+// Test 4: Transactions spanning boundaries with multiple slot expiry
 //
 // ═══ DATA LAYOUT ═══
-// • 16 txs × 32 bytes = 16 chunks total
+// • 10 txs × 64 bytes = 20 chunks total (2 chunks per tx)
 // • Partition size = 3 chunks (96 bytes) - very small
-// • Creates ~6 slots (3 txs per slot)
+// • Creates ~7 partitions, txs span boundaries
 //
-// Slot Distribution:
-// ┌────────┬────────┬────────┬────────┬────────┬────────┐
-// │ Slot 0 │ Slot 1 │ Slot 2 │ Slot 3 │ Slot 4 │ Slot 5 │
-// │ Txs    │ Txs    │ Txs    │ Txs    │ Txs    │ Tx     │
-// │ 0-2    │ 3-5    │ 6-8    │ 9-11   │ 12-14  │ 15     │
-// └────────┴────────┴────────┴────────┴────────┴────────┘
+// Chunk Distribution (txs span partition boundaries):
+// ┌────────┬────────┬────────┬────────┬────────┬────────┬────────┐
+// │ Part 0 │ Part 1 │ Part 2 │ Part 3 │ Part 4 │ Part 5 │ Part 6 │
+// │ [0-2]  │ [3-5]  │ [6-8]  │ [9-11] │ [12-14]│ [15-17]│ [18-19]│
+// ├────────┼────────┼────────┼────────┼────────┼────────┼────────┤
+// │Tx0:[0,1]        │        │        │        │        │        │
+// │Tx1:[2]─│─>[3]   │        │        │        │        │        │
+// │        │Tx2:[4,5]        │        │        │        │        │
+// │        │Tx3:[5]─│─>[6]   │        │        │        │        │
+// │        │        │Tx4:[7,8]        │        │        │        │
+// │        │        │Tx5:[8]─│─>[9]   │        │        │        │
+// │        │        │        │Tx6:[10,│11]     │        │        │
+// │        │        │        │Tx7:[11]│─>[12]  │        │        │
+// │        │        │        │        │Tx8:[13,│14]     │        │
+// │        │        │        │        │Tx9:[14]│─>[15]  │        │
+// └────────┴────────┴────────┴────────┴────────┴────────┴────────┘
 //
 // ═══ TIMELINE ═══
-// Epoch 1 (blocks 1-6): 16 txs submitted (4 per block)
-// Epoch 2 (block 7):    EXPIRY → Only Slot 0 expires (3 txs)
-//                       Other slots remain active
-//
-// This tests small partition sizes and verifies that only
-// the first slot expires when multiple slots are created
+// Epoch 1 (blocks 1-3): 10 txs submitted, creating slots 0-2
+// Epoch 2 (block 4-6): Waiting period
+// Epoch 3 (block 7):   EXPIRY → First 3 slots expire (6 txs)
+//                      Txs 0-5 expire (start in partitions 0-2)
 //
 #[test_log::test(actix_web::test)]
 async fn heavy_ledger_expiry_multiple_partitions_expire() -> eyre::Result<()> {
@@ -150,12 +158,12 @@ async fn heavy_ledger_expiry_multiple_partitions_expire() -> eyre::Result<()> {
     ledger_expiry_test(LedgerExpiryTestParams {
         chunk_size: 32,
         num_chunks_in_partition: 3,   // Small 96-byte partitions
-        submit_ledger_epoch_length: 1,
-        num_blocks_in_epoch: 6,
-        num_transactions: 16,
+        submit_ledger_epoch_length: 2,  // Changed to 2 epochs for proper expiry
+        num_blocks_in_epoch: 3,         // Changed to 3 blocks per epoch
+        num_transactions: 10,           // 10 txs that span boundaries
         txs_per_block: 4,
-        data_size_per_tx: 32,
-        expected_expired_tx_count: 3, // Only first slot expires
+        data_size_per_tx: 64,          // 2 chunks per tx to span boundaries
+        expected_expired_tx_count: 6,  // First 6 txs expire (slots 0-2)
     })
     .await
 }
