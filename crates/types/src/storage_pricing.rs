@@ -29,8 +29,6 @@ const PRECISION_SCALE_NATIVE: u64 = 1_000_000_000_000;
 pub const LN2_FP18: U256 = U256([693_147_180_559_945_309_u64, 0, 0, 0]);
 const TAYLOR_TERMS: u32 = 30;
 
-pub const TERM_FEE: U256 = U256([1_000_000_000, 0, 0, 0]);
-
 /// `Amount<T>` represents a value stored as a U256.
 ///
 /// The actual scale is defined by the usage: pr
@@ -281,6 +279,15 @@ impl Amount<(CostPerChunk, Usd)> {
         epochs: u64,
         decay_rate: Amount<DecayRate>,
     ) -> Result<Amount<(CostPerChunkDurationAdjusted, Usd)>> {
+        // Special case: if decay_rate is 0, the cost is simply epochs * cost_per_epoch
+        if decay_rate.amount.is_zero() {
+            let total = safe_mul(self.amount, U256::from(epochs))?;
+            return Ok(Amount {
+                amount: total,
+                _t: PhantomData,
+            });
+        }
+
         // Calculate (1 - r) in precision scale.
         let one_minus_r = safe_sub(PRECISION_SCALE, decay_rate.amount)?;
 
@@ -505,6 +512,85 @@ impl<T> Debug for Amount<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.amount)
     }
+}
+
+// ===== Fee Calculation Functions =====
+
+use crate::ConsensusConfig;
+
+/// Calculate term fee for temporary storage using ConsensusConfig
+/// Uses the same replica count as permanent storage but for submit_ledger_epoch_length duration
+pub fn calculate_term_fee_from_config(
+    bytes_to_store: u64,
+    config: &ConsensusConfig,
+    ema_price: Amount<(IrysPrice, Usd)>,
+) -> Result<U256> {
+    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
+    
+    // Apply duration (no decay for short-term storage)
+    let zero_decay = Amount::percentage(Decimal::ZERO)?;
+    let cost_per_chunk_duration = cost_per_chunk_per_epoch.cost_per_replica(
+        config.epoch.submit_ledger_epoch_length, 
+        zero_decay
+    )?;
+    
+    // Apply same replica count as perm storage
+    let cost_with_replicas = cost_per_chunk_duration.replica_count(config.number_of_ingress_proofs)?;
+    
+    // Calculate base network fee using current EMA price
+    let base_fee = cost_with_replicas.base_network_fee(
+        U256::from(bytes_to_store),
+        config.chunk_size,
+        ema_price,
+    )?;
+    
+    // Ensure minimum fee in USD terms
+    // Convert minimum USD to IRYS tokens using the current EMA price
+    let min_fee_irys = config.minimum_term_fee_usd.base_network_fee(
+        U256::from(config.chunk_size), // 1 chunk worth
+        config.chunk_size,
+        ema_price,
+    )?;
+    
+    if base_fee.amount < min_fee_irys.amount {
+        Ok(min_fee_irys.amount)
+    } else {
+        Ok(base_fee.amount)
+    }
+}
+
+/// Calculate permanent storage fee including base network fee and ingress proof rewards
+pub fn calculate_perm_fee_from_config(
+    bytes_to_store: u64,
+    config: &ConsensusConfig,
+    ema_price: Amount<(IrysPrice, Usd)>,
+    term_fee: U256,
+) -> Result<Amount<(NetworkFee, Irys)>> {
+    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
+    
+    // Calculate epochs for storage duration
+    let epochs_for_storage = config.safe_minimum_number_of_years * config.epochs_per_year();
+    
+    // Apply decay over storage duration
+    let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
+        .cost_per_replica(epochs_for_storage, config.decay_rate)?
+        .replica_count(config.number_of_ingress_proofs)?;
+    
+    // Calculate base network fee
+    let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
+        U256::from(bytes_to_store),
+        config.chunk_size,
+        ema_price,
+    )?;
+    
+    // Add ingress proof rewards to the base network fee
+    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
+        term_fee,
+        config.number_of_ingress_proofs,
+        config.immediate_tx_inclusion_reward_percent,
+    )?;
+    
+    Ok(total_perm_fee)
 }
 
 /// Exponentiation by squaring for precision scale:

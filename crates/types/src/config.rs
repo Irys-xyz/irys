@@ -1,7 +1,7 @@
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerChunk, CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
+        phantoms::{CostPerChunk, CostPerChunkDurationAdjusted, CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
     PeerAddress, RethPeerInfo, H256,
@@ -182,6 +182,14 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
     pub immediate_tx_inclusion_reward_percent: Amount<Percentage>,
+
+    /// Minimum term fee in USD that must be paid for term storage
+    /// If calculated fee is below this threshold, it will be rounded up
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub minimum_term_fee_usd: Amount<(CostPerChunkDurationAdjusted, Usd)>,
 
     /// Maximum future drift
     #[serde(
@@ -785,6 +793,7 @@ impl ConsensusConfig {
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -909,6 +918,7 @@ impl ConsensusConfig {
             },
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             max_future_timestamp_drift_millis: 15_000,
         }
     }

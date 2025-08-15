@@ -23,7 +23,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{Amount, TERM_FEE};
+use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount};
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
@@ -1232,44 +1232,26 @@ pub fn calculate_perm_storage_total_fee(
     ema_snapshot: &EmaSnapshot,
     config: &Config,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    // Calculate the cost per chunk (take into account replica count & cost per replica)
-    let epochs_for_storage = config
-        .consensus
-        .years_to_epochs(config.consensus.safe_minimum_number_of_years);
-    let cost_per_chunk_per_epoch = config.consensus.cost_per_chunk_per_epoch()?;
-    let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
-        .cost_per_replica(epochs_for_storage, config.consensus.decay_rate)?
-        .replica_count(config.consensus.number_of_ingress_proofs)?;
-
-    // Calculate the base network fee (protocol cost) using the provided EMA snapshot
-    let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
-        U256::from(bytes_to_store),
-        config.consensus.chunk_size,
+    calculate_perm_fee_from_config(
+        bytes_to_store,
+        &config.consensus,
         ema_snapshot.ema_for_public_pricing(),
-    )?;
-
-    // Add ingress proof rewards to the base network fee
-    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
-    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        config.consensus.number_of_ingress_proofs,
-        config.consensus.immediate_tx_inclusion_reward_percent,
-    )?;
-
-    Ok(total_perm_fee)
+    )
 }
 
 /// Helper function to calculate term storage fee using a specific EMA snapshot
-/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
-/// when term storage pricing is fully implemented
+/// Uses the same replica count as permanent storage but for submit_ledger_epoch_length duration
 pub fn calculate_term_storage_base_network_fee(
-    _bytes_to_store: u64,
-    _ema_snapshot: &EmaSnapshot,
-    _config: &Config,
+    bytes_to_store: u64,
+    ema_snapshot: &EmaSnapshot,
+    config: &Config,
 ) -> eyre::Result<U256> {
-    // Placeholder implementation matching the mempool service
-    // Returns a fixed value until proper term fee calculation is implemented
-    Ok(TERM_FEE)
+    calculate_term_fee_from_config(
+        bytes_to_store,
+        &config.consensus,
+        ema_snapshot.ema_for_public_pricing(),
+    )
 }
 
 /// Validates that data transactions in a block are correctly placed and have valid properties

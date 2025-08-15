@@ -69,6 +69,7 @@ stake_value = 20000.0
 pledge_base_value = 950.0
 pledge_decay = 0.9
 immediate_tx_inclusion_reward_percent = 0.01
+minimum_term_fee_usd = 0.01  # $0.01 USD minimum for term storage
 
 [consensus.Custom.genesis]
 timestamp_millis = 0

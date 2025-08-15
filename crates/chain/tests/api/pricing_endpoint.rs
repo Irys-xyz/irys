@@ -3,7 +3,7 @@
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::price::PriceInfo;
-use irys_types::{storage_pricing::TERM_FEE, DataLedger, U256};
+use irys_types::{storage_pricing::calculate_term_fee_from_config, DataLedger, U256};
 
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
@@ -35,9 +35,16 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         )?
     };
 
+    // Calculate the expected term fee
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        ctx.node_ctx.config.consensus.genesis_price,
+    )?;
+
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        TERM_FEE, // Current placeholder value
+        expected_term_fee,
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
         ctx.node_ctx
             .config
@@ -54,9 +61,8 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
-    // TODO: Update when term_fee calculation is properly implemented
-    // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, TERM_FEE);
+    // Verify term_fee is calculated correctly
+    assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, data_size_bytes);
     assert!(
@@ -99,9 +105,16 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         )?
     };
 
+    // Calculate the expected term fee
+    let expected_term_fee = calculate_term_fee_from_config(
+        ctx.node_ctx.config.consensus.chunk_size, // small data rounds up to chunk_size
+        &ctx.node_ctx.config.consensus,
+        ctx.node_ctx.config.consensus.genesis_price,
+    )?;
+
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        TERM_FEE, // Current placeholder value
+        expected_term_fee,
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
         ctx.node_ctx
             .config
@@ -118,9 +131,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
-    // TODO: Update when term_fee calculation is properly implemented
-    // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, TERM_FEE);
+    // Verify term_fee is calculated correctly
+    assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(price_info.bytes, ctx.node_ctx.config.consensus.chunk_size);
     assert!(
@@ -186,9 +198,16 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         )?
     };
 
+    // Calculate the expected term fee
+    let expected_term_fee = calculate_term_fee_from_config(
+        ctx.node_ctx.config.consensus.chunk_size * 2, // data rounds up to 2 chunks
+        &ctx.node_ctx.config.consensus,
+        ctx.node_ctx.config.consensus.genesis_price,
+    )?;
+
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        TERM_FEE, // Current placeholder value
+        expected_term_fee,
         ctx.node_ctx.config.consensus.number_of_ingress_proofs,
         ctx.node_ctx
             .config
@@ -205,9 +224,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
-    // TODO: Update when term_fee calculation is properly implemented
-    // Currently using placeholder value of 1 Gwei (1_000_000_000 wei)
-    assert_eq!(price_info.term_fee, TERM_FEE);
+    // Verify term_fee is calculated correctly
+    assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
     assert_eq!(
         price_info.bytes,
