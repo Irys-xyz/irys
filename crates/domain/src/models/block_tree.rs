@@ -1158,9 +1158,8 @@ fn build_current_ema_snapshot_from_index(
     chain_blocks.reverse();
 
     // Pass the collected blocks to create_ema_snapshot_from_chain_history
-    create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(|err| {
-        panic!("Failed to create EMA snapshot from chain history: {}", err);
-    })
+    create_ema_snapshot_from_chain_history(&chain_blocks, config)
+        .expect("Failed to create EMA snapshot from chain history")
 }
 
 pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
