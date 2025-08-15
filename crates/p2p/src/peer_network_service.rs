@@ -445,8 +445,7 @@ where
                         peer_addresses.len(),
                         peer_addresses
                     );
-                    peer_list
-                        .add_peers_to_whitelist(peer_addresses.clone());
+                    peer_list.add_peers_to_whitelist(peer_addresses.clone());
                 }
 
                 for peer in accepted_peers.peers {
@@ -484,7 +483,7 @@ where
             peer_list_service_address,
             is_trusted_peer,
             peer_filter_mode,
-            peer_list
+            peer_list,
         )
         .await
         {
