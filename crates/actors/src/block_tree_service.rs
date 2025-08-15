@@ -241,9 +241,7 @@ impl BlockTreeServiceInner {
                 block_header,
                 response,
             } => {
-                let result = self
-                    .fast_track_storage_finalized_message(block_header)
-                    .await;
+                let result = self.fast_track_block_migration(block_header).await;
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
@@ -285,9 +283,9 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    /// Fast tracks the storage finalization of a block by retrieving transaction headers. Do
+    /// Fast tracks block migration by retrieving transaction headers. Do
     /// after the block has been migrated.
-    async fn fast_track_storage_finalized_message(
+    async fn fast_track_block_migration(
         &self,
         block_header: IrysBlockHeader,
     ) -> eyre::Result<Option<Addr<RethServiceActor>>> {
@@ -323,7 +321,7 @@ impl BlockTreeServiceInner {
         Ok(Some(self.reth_service_actor.clone()))
     }
 
-    async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
+    async fn send_block_migration_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
         // retrieve block header from the mempool or database
         let block_header = {
             let (tx_block, rx_block) = oneshot::channel();
@@ -483,7 +481,7 @@ impl BlockTreeServiceInner {
             migrated_hash
         }; // RwLockWriteGuard is dropped here, before the await
 
-        if let Err(e) = self.send_storage_finalized_message(migrated_hash).await {
+        if let Err(e) = self.send_block_migration_message(migrated_hash).await {
             error!("Unable to send block migration message: {:?}", e);
         }
     }
