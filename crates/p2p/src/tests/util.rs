@@ -1,5 +1,7 @@
 use crate::peer_network_service::{GetPeerListGuard, PeerNetworkService};
-use crate::{BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal};
+use crate::{
+    BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
+};
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
@@ -34,6 +36,7 @@ use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
@@ -309,6 +312,8 @@ pub(crate) struct GossipServiceTestFixture {
     pub vdf_state_stub: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
+    pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
+    pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -422,13 +427,15 @@ impl GossipServiceTestFixture {
                     // Simulate processing the block header
                     response
                         .send(Ok(None))
-                        .expect("to send response for FastTrackStorageFinalized");
+                        .expect("to send a response for FastTrackStorageFinalized");
                 } else {
                     debug!("Received unsupported BlockTreeServiceMessage");
                 }
             }
             debug!("BlockTreeServiceMessage channel closed");
         });
+
+        let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
 
         Self {
             // temp_dir,
@@ -452,6 +459,8 @@ impl GossipServiceTestFixture {
             vdf_state_stub,
             service_senders,
             gossip_receiver: Some(service_receivers.gossip_broadcast),
+            sync_tx,
+            _sync_rx: Some(sync_rx),
         }
     }
 
@@ -510,8 +519,9 @@ impl GossipServiceTestFixture {
                 self.vdf_state_stub.clone(),
                 self.config.clone(),
                 self.service_senders.clone(),
+                self.sync_tx.clone(),
             )
-            .expect("failed to run gossip service");
+            .expect("failed to run the gossip service");
 
         (service_handle, gossip_broadcast)
     }
@@ -730,7 +740,7 @@ async fn handle_get_data(
                 warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(true)
             }
             GossipDataRequest::Chunk(chunk_hash) => {
                 warn!("Chunk request for hash {:?}", chunk_hash);

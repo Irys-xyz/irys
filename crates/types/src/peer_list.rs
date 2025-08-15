@@ -95,6 +95,7 @@ impl Default for PeerListItem {
     PartialEq,
 )]
 #[rtype(result = "eyre::Result<()>")]
+#[serde(deny_unknown_fields)]
 pub struct RethPeerInfo {
     // Reth's peering port: https://reth.rs/run/ports.html#peering-ports
     pub peering_tcp_addr: SocketAddr,

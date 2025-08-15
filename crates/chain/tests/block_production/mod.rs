@@ -6,3 +6,4 @@ mod difficulty_adjustment;
 mod reset_seed;
 pub mod test_double_spend;
 pub mod testing_primitives;
+pub mod treasury_tracking;
