@@ -178,7 +178,9 @@ pub async fn get_tx_local_start_offset(
     // Only works for storage transaction header
     // read storage tx from mempool or database
     let tx_header = get_storage_transaction(&state, tx_id)?;
-    let ledger = DataLedger::try_from(tx_header.ledger_id).unwrap();
+    let ledger = DataLedger::try_from(tx_header.ledger_id).map_err(|_| ApiError::Internal {
+        err: String::from("invalid ledger id"),
+    })?;
 
     match state
         .chunk_provider
