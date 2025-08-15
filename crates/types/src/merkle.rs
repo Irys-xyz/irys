@@ -675,7 +675,12 @@ mod tests {
             proof: vec![0; HASH_SIZE - 1], // Intentionally too short
         };
         let result = validate_chunk(root_id, &chunk_node, &proof);
-        let err_text = result.expect_err("expected error for too short proof").to_string();
-        assert_eq!(&err_text, "Invalid proof buffer: length 31 is less than the minimum required length 64");
+        let err_text = result
+            .expect_err("expected error for too short proof")
+            .to_string();
+        assert_eq!(
+            &err_text,
+            "Invalid proof buffer: length 31 is less than the minimum required length 64"
+        );
     }
 }
