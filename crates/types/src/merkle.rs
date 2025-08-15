@@ -295,6 +295,16 @@ pub fn validate_chunk(
             max_byte_range,
             ..
         } => {
+            // Validate that proof has sufficient length to avoid arithmetic underflow
+            let min_required_length = HASH_SIZE + NOTE_SIZE;
+            if proof.proof.len() < min_required_length {
+                return Err(eyre!(
+                    "Invalid proof buffer: length {} is less than the minimum required length {}",
+                    proof.proof.len(),
+                    min_required_length
+                ));
+            }
+
             // Split proof into branches and leaf. Leaf is at the end and branches are ordered
             // from root to leaf.
             let (branches, leaf) = proof
@@ -647,5 +657,30 @@ mod tests {
                 "branch proof offset must equal left_child.max_byte_range"
             );
         }
+    }
+
+    #[test]
+    fn should_return_error_if_proof_is_too_short() {
+        let root_id = [0_u8; HASH_SIZE];
+        let chunk_node = Node {
+            id: root_id,
+            data_hash: Some([1_u8; HASH_SIZE]),
+            min_byte_range: 0,
+            max_byte_range: 100,
+            left_child: None,
+            right_child: None,
+        };
+        let proof = Proof {
+            offset: 0,
+            proof: vec![0; HASH_SIZE - 1], // Intentionally too short
+        };
+        let result = validate_chunk(root_id, &chunk_node, &proof);
+        let err_text = result
+            .expect_err("expected error for too short proof")
+            .to_string();
+        assert_eq!(
+            &err_text,
+            "Invalid proof buffer: length 31 is less than the minimum required length 64"
+        );
     }
 }
