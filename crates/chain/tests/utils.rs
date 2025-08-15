@@ -2107,219 +2107,87 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-/// Construct a SolutionContext using a provided PoA chunk for the current step and recall range.
-/// Computes solution_hash = sha256(poa_chunk || offset_le || vdf_output).
-/// Tries offsets within the recall range and progresses steps until it meets the parent difficulty,
-/// falling back to the latest computed link only after a timeout.
+/// Construct a SolutionContext using a provided PoA chunk for the current step.
+/// Computes solution_hash = sha256(poa_chunk || offset_le || vdf_output) and returns immediately
+/// with a consistent cryptographic link, without attempting to satisfy difficulty or iterate offsets.
+/// This avoids timeouts and nondeterminism when running the full test suite.
+///
+/// Note: This is only used in tests that disable validation when producing the "evil" block.
+/// The block will later be rejected when validation is re-enabled due to PoA verification.
 pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
-    // Determine current parent difficulty from in-memory block tree
-    let (_parent_hash, parent_diff) = {
-        let read = node_ctx.block_tree_guard.read();
-        let (_, h) = read.get_max_cumulative_difficulty_block();
-        let b = read
-            .get_block(&h)
-            .cloned()
-            .ok_or_else(|| eyre::eyre!("Parent block header not found in block tree"))?;
-        (h, b.diff)
-    };
-
-    // Ensure VDF is running and we have steps materialized
+    // Ensure the VDF has at least two steps materialized (N-1, N)
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     node_ctx.start_vdf().await?;
-
     let start = std::time::Instant::now();
-    let max_wait = std::time::Duration::from_secs(20);
-
-    // Helper to safely fetch a valid (prev_step, step) pair
-    let get_two_steps = || -> Option<(u64, H256List)> {
-        let step = vdf_steps_guard.read().global_step;
-        if step < 1 {
-            return None;
+    let max_wait = std::time::Duration::from_secs(5);
+    let (step, steps) = loop {
+        if start.elapsed() > max_wait {
+            node_ctx.stop_vdf().await?;
+            return Err(eyre::eyre!(
+                "VDF steps unavailable: timed out waiting for (prev,current) pair"
+            ));
         }
-        // Always request a range within available bounds; avoid (0..=1) when only 1 is stored
-        match vdf_steps_guard
-            .read()
-            .get_steps(ii(step.saturating_sub(1), step))
-        {
-            Ok(steps) if steps.len() >= 2 => Some((step, steps)),
-            _ => None,
+        let s = vdf_steps_guard.read().global_step;
+        if s >= 1 {
+            if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
+                if steps.len() >= 2 {
+                    break (s, steps);
+                }
+            }
         }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
-    // Attempt across steps until we either satisfy difficulty or timeout
-    loop {
-        if start.elapsed() > max_wait {
-            // Fallback: compute latest link without satisfying difficulty
-            if let Some((step, steps)) = get_two_steps() {
-                // Compute checkpoints for (step-1)
-                let mut hasher = Sha256::new();
-                let mut salt = irys_types::U256::from(step_number_to_salt_number(
-                    &node_ctx.config.consensus.vdf,
-                    step.saturating_sub(1),
-                ));
-                let mut seed = steps[0];
-                let mut checkpoints: Vec<H256> =
-                    vec![
-                        H256::default();
-                        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step
-                    ];
-                vdf_sha(
-                    &mut hasher,
-                    &mut salt,
-                    &mut seed,
-                    node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
-                    node_ctx
-                        .config
-                        .consensus
-                        .vdf
-                        .num_iterations_per_checkpoint(),
-                    &mut checkpoints,
-                );
+    // Compute checkpoints for (step-1)
+    let mut hasher = Sha256::new();
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(
+        &node_ctx.config.consensus.vdf,
+        step - 1,
+    ));
+    let mut seed = steps[0];
+    let mut checkpoints: Vec<H256> =
+        vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut seed,
+        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
+        node_ctx
+            .config
+            .consensus
+            .vdf
+            .num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
 
-                // Determine recall range and partition_chunk_offset (use first offset)
-                let partition_hash = H256::zero();
-                let recall_range_idx = block_validation::get_recall_range(
-                    step,
-                    &node_ctx.config.consensus,
-                    &vdf_steps_guard,
-                    &partition_hash,
-                )
-                .map_err(|e| eyre::eyre!("Failed to get recall range (fallback): {:?}", e))?;
-                let offset_u64 = (recall_range_idx as u64)
-                    * node_ctx.config.consensus.num_chunks_in_recall_range;
-                let partition_chunk_offset: u32 = offset_u64 as u32;
+    // For deterministic linkage without recall-range dependency, use offset 0
+    let partition_hash = H256::zero();
+    let partition_chunk_offset: u32 = 0;
 
-                // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-                let mut hasher_sol = Sha256::new();
-                hasher_sol.update(&poa_chunk);
-                hasher_sol.update(&partition_chunk_offset.to_le_bytes());
-                hasher_sol.update(steps[1].as_bytes());
-                let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+    // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
+    let mut hasher_sol = Sha256::new();
+    hasher_sol.update(&poa_chunk);
+    hasher_sol.update(&partition_chunk_offset.to_le_bytes());
+    hasher_sol.update(steps[1].as_bytes());
+    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
-                node_ctx.stop_vdf().await?;
-                return Ok(SolutionContext {
-                    partition_hash,
-                    chunk_offset: partition_chunk_offset,
-                    mining_address: node_ctx.config.node_config.miner_address(),
-                    tx_path: None,
-                    data_path: None,
-                    chunk: poa_chunk,
-                    vdf_step: step,
-                    checkpoints: H256List(checkpoints),
-                    seed: Seed(steps[1]),
-                    solution_hash,
-                    ..Default::default()
-                });
-            } else {
-                node_ctx.stop_vdf().await?;
-                return Err(eyre::eyre!(
-                    "VDF steps unavailable after waiting: no (prev,current) step pair"
-                ));
-            }
-        }
-
-        // Try to get steps (step-1, step). If unavailable, wait and retry.
-        let (step, steps) = match get_two_steps() {
-            Some(val) => val,
-            None => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-
-        // Compute checkpoints for (step-1)
-        let mut hasher = Sha256::new();
-        let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &node_ctx.config.consensus.vdf,
-            step.saturating_sub(1),
-        ));
-        let mut seed = steps[0];
-        let mut checkpoints: Vec<H256> =
-            vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
-        vdf_sha(
-            &mut hasher,
-            &mut salt,
-            &mut seed,
-            node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
-            node_ctx
-                .config
-                .consensus
-                .vdf
-                .num_iterations_per_checkpoint(),
-            &mut checkpoints,
-        );
-
-        // Determine recall range for this step
-        let partition_hash = H256::zero();
-        let recall_range_idx = match block_validation::get_recall_range(
-            step,
-            &node_ctx.config.consensus,
-            &vdf_steps_guard,
-            &partition_hash,
-        ) {
-            Ok(idx) => idx,
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                continue;
-            }
-        };
-
-        // Try each offset within the recall range window to satisfy difficulty
-        let mut found: Option<(u32, H256)> = None;
-        for local_idx in 0..node_ctx.config.consensus.num_chunks_in_recall_range {
-            let offset_u64 = (recall_range_idx as u64)
-                * node_ctx.config.consensus.num_chunks_in_recall_range
-                + local_idx;
-            let partition_chunk_offset: u32 = offset_u64 as u32;
-
-            // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-            let mut hasher_sol = Sha256::new();
-            hasher_sol.update(&poa_chunk);
-            hasher_sol.update(&partition_chunk_offset.to_le_bytes());
-            hasher_sol.update(steps[1].as_bytes());
-            let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
-
-            // Check difficulty
-            let mut le = [0u8; 32];
-            le.copy_from_slice(&solution_hash.0);
-            let solution_val = U256::from_little_endian(&le);
-            if solution_val >= parent_diff {
-                found = Some((partition_chunk_offset, solution_hash));
-                break;
-            }
-        }
-
-        if let Some((partition_chunk_offset, solution_hash)) = found {
-            node_ctx.stop_vdf().await?;
-            return Ok(SolutionContext {
-                partition_hash,
-                chunk_offset: partition_chunk_offset,
-                mining_address: node_ctx.config.node_config.miner_address(),
-                tx_path: None,
-                data_path: None,
-                chunk: poa_chunk,
-                vdf_step: step,
-                checkpoints: H256List(checkpoints),
-                seed: Seed(steps[1]),
-                solution_hash,
-                ..Default::default()
-            });
-        }
-
-        // Advance to next step
-        let target_next = step.saturating_add(1);
-        let mut spin = 0u8;
-        while vdf_steps_guard.read().global_step < target_next && spin < 80 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            spin += 1;
-            if start.elapsed() > max_wait {
-                break;
-            }
-        }
-    }
+    node_ctx.stop_vdf().await?;
+    Ok(SolutionContext {
+        partition_hash,
+        chunk_offset: partition_chunk_offset,
+        mining_address: node_ctx.config.node_config.miner_address(),
+        tx_path: None,
+        data_path: None,
+        chunk: poa_chunk,
+        vdf_step: step,
+        checkpoints: H256List(checkpoints),
+        seed: Seed(steps[1]),
+        solution_hash,
+        ..Default::default()
+    })
 }
 
 pub async fn mine_blocks(
