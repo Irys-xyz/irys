@@ -427,10 +427,9 @@ impl Inner {
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
                 let id = tx.id;
-                let promoted_in_block = publish_tx_block_map.get(&tx.id).expect(&format!(
-                    "new fork publish_tx_block_map missing tx {}",
-                    &tx.id
-                ));
+                let promoted_in_block = publish_tx_block_map.get(&tx.id).unwrap_or_else(|| {
+                    panic!("new fork publish_tx_block_map missing tx {}", &tx.id)
+                });
 
                 let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
                 // get publish tx pos
@@ -438,18 +437,24 @@ impl Inner {
                     .tx_ids
                     .iter()
                     .position(|tx_id| *tx_id == tx.id)
-                    .expect(&format!(
-                        "publish tx {} to be present in block {}",
-                        &tx.id, &promoted_in_block.block_hash
-                    ));
-                let proofs = publish_ledger.proofs.clone().expect(&format!(
-                    "Publish ledger of block {} to have proofs",
-                    &promoted_in_block.block_hash
-                ));
-                let proof = proofs.get(proof_idx).expect(&format!(
-                    "Publish ledger of block {} to have a proof at index {} for publish tx {}",
-                    &promoted_in_block.block_hash, &proof_idx, &tx.id
-                ));
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "publish tx {} to be present in block {}",
+                            &tx.id, &promoted_in_block.block_hash
+                        )
+                    });
+                let proofs = publish_ledger.proofs.clone().unwrap_or_else(|| {
+                    panic!(
+                        "Publish ledger of block {} to have proofs",
+                        &promoted_in_block.block_hash
+                    )
+                });
+                let proof = proofs.get(proof_idx).unwrap_or_else(|| {
+                    panic!(
+                        "Publish ledger of block {} to have a proof at index {} for publish tx {}",
+                        &promoted_in_block.block_hash, &proof_idx, &tx.id
+                    )
+                });
                 tx.ingress_proofs = Some(proof.clone());
                 // update entry
                 {
