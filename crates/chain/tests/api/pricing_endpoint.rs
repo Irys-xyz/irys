@@ -22,11 +22,8 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        let cost_per_chunk_duration_adjusted = ctx
-            .node_ctx
-            .config
-            .consensus
-            .cost_per_chunk_per_epoch
+        let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, ctx.node_ctx.config.consensus.decay_rate)?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
@@ -88,11 +85,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        let cost_per_chunk_duration_adjusted = ctx
-            .node_ctx
-            .config
-            .consensus
-            .cost_per_chunk_per_epoch
+        let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, ctx.node_ctx.config.consensus.decay_rate)?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
@@ -178,11 +172,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        let cost_per_chunk_duration_adjusted = ctx
-            .node_ctx
-            .config
-            .consensus
-            .cost_per_chunk_per_epoch
+        let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, ctx.node_ctx.config.consensus.decay_rate)?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 

@@ -93,10 +93,8 @@ fn cost_of_perm_storage(
         .config
         .consensus
         .years_to_epochs(state.config.consensus.safe_minimum_number_of_years);
-    let cost_per_chunk_duration_adjusted = state
-        .config
-        .consensus
-        .cost_per_chunk_per_epoch
+    let cost_per_chunk_per_epoch = state.config.consensus.cost_per_chunk_per_epoch()?;
+    let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
         .cost_per_replica(epochs_for_storage, state.config.consensus.decay_rate)?
         .replica_count(state.config.consensus.number_of_ingress_proofs)?;
 

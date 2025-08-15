@@ -52,12 +52,9 @@ chain_id = 1270
 token_price_safe_range = 1.0
 genesis_price = 1.0
 # Storage economics: Based on 0.01 USD/GB/year target
-# With 12s blocks, 100 blocks/epoch: 1 epoch = 20 min, 26,280 epochs/year
-# 1 GB = 4096 chunks
-# cost_per_chunk_per_epoch = 0.01 / 4096 / 26280 ≈ 9.3e-11 USD
-cost_per_chunk_per_epoch = 0.000000000093  # ~9.3e-11 USD per chunk per epoch
-# 1% annual decay → per-epoch decay ≈ 0.01 / 26280 ≈ 0.000038%
-decay_rate = 0.00000038  # ~0.000038% decay per epoch
+annual_cost_per_gb = 0.01  # $0.01 USD/GB/year
+# 1% annual decay
+decay_rate = 0.01  # 1% annual decay per year
 chunk_size = 262144
 block_migration_depth = 6
 block_tree_depth = 50

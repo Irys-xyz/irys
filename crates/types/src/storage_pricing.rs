@@ -184,6 +184,10 @@ pub mod phantoms {
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct CostPerChunk;
 
+    /// The cost of storing 1 GB of data.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    pub struct CostPerGb;
+
     /// Currency denominator util type.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
     pub struct Usd;

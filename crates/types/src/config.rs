@@ -1,11 +1,12 @@
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerChunk, DecayRate, Irys, IrysPrice, Percentage, Usd},
+        phantoms::{CostPerChunk, CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
         Amount,
     },
     PeerAddress, RethPeerInfo, H256,
 };
+use eyre::Result;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
@@ -90,13 +91,13 @@ pub struct ConsensusConfig {
     /// Genesis-specific config values
     pub genesis: GenesisConfig,
 
-    /// The cost in USD for storing 1 chunk of data per epoch on the Irys network
+    /// The annual cost in USD for storing 1 GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
     )]
-    pub cost_per_chunk_per_epoch: Amount<(CostPerChunk, Usd)>,
+    pub annual_cost_per_gb: Amount<(CostPerGb, Usd)>,
 
     /// Annual rate at which storage costs are expected to decrease
     /// Accounts for technological improvements making storage cheaper over time
@@ -648,6 +649,21 @@ impl ConsensusConfig {
     pub fn years_to_epochs(&self, years: u64) -> u64 {
         years * self.epochs_per_year()
     }
+    
+    /// Compute cost per chunk per epoch from annual cost per GB
+    pub fn cost_per_chunk_per_epoch(&self) -> Result<Amount<(CostPerChunk, Usd)>> {
+        const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
+        let chunks_per_gb = BYTES_PER_GB / self.chunk_size;
+        let epochs_per_year = self.epochs_per_year();
+        
+        // Convert annual_cost_per_gb to cost_per_chunk_per_epoch
+        // annual_cost_per_gb / chunks_per_gb / epochs_per_year
+        let annual_decimal = self.annual_cost_per_gb.token_to_decimal()?;
+        let cost_per_chunk_per_year = annual_decimal / Decimal::from(chunks_per_gb);
+        let cost_per_chunk_per_epoch = cost_per_chunk_per_year / Decimal::from(epochs_per_year);
+        
+        Amount::token(cost_per_chunk_per_epoch)
+    }
 
     // this is a config used for testing
     pub fn testing() -> Self {
@@ -662,13 +678,12 @@ impl ConsensusConfig {
         Self {
             chain_id: 1270,
             // Storage economics for testing config:
+            // Annual cost: 0.01 USD/GB/year
             // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
-            // epochs_per_year = 31,536,000 / 100 = 315,360 epochs
-            // For 0.01 USD/GB/year: cost_per_chunk_per_epoch = 0.01 / 4096 / 315,360 ≈ 7.74e-12 USD
-            // 1% annual decay: decay_per_epoch ≈ 0.01 / 315,360 ≈ 0.0000032%
-            cost_per_chunk_per_epoch: Amount::token(dec!(0.00000000000774)).unwrap(), // ~7.74e-12 USD per chunk per epoch
-            decay_rate: Amount::percentage(dec!(0.000000032)).unwrap(),               // ~0.0000032% decay per epoch  
-            safe_minimum_number_of_years: 200,                            // Placeholder: ~76 years at 20min/epoch
+            // 1% annual decay
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),  // $0.01/GB/year
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),      // 1% annual decay
+            safe_minimum_number_of_years: 200,                        // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
@@ -785,13 +800,12 @@ impl ConsensusConfig {
         Self {
             chain_id: 1270,
             // Storage economics for testing config:
+            // Annual cost: 0.01 USD/GB/year
             // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
-            // epochs_per_year = 31,536,000 / 100 = 315,360 epochs
-            // For 0.01 USD/GB/year: cost_per_chunk_per_epoch = 0.01 / 4096 / 315,360 ≈ 7.74e-12 USD
-            // 1% annual decay: decay_per_epoch ≈ 0.01 / 315,360 ≈ 0.0000032%
-            cost_per_chunk_per_epoch: Amount::token(dec!(0.00000000000774)).unwrap(), // ~7.74e-12 USD per chunk per epoch
-            decay_rate: Amount::percentage(dec!(0.000000032)).unwrap(),               // ~0.0000032% decay per epoch  
-            safe_minimum_number_of_years: 200,                            // Placeholder: ~76 years at 20min/epoch
+            // 1% annual decay
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(),  // $0.01/GB/year
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),      // 1% annual decay
+            safe_minimum_number_of_years: 200,                        // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
