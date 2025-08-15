@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
@@ -107,10 +107,6 @@ impl BlockCacheGuard {
 
     async fn remove_block(&self, block_hash: &BlockHash) {
         self.inner.write().await.remove_block(block_hash);
-    }
-
-    async fn is_block_in_cache(&self, block_hash: &BlockHash) -> bool {
-        self.inner.read().await.is_block_in_cache(block_hash)
     }
 
     async fn get_block_header_cloned(
@@ -216,10 +212,6 @@ impl BlockCacheInner {
         }
 
         None
-    }
-
-    fn is_block_in_cache(&self, block_hash: &BlockHash) -> bool {
-        self.block_hash_to_parent_hash.contains(block_hash)
     }
 }
 

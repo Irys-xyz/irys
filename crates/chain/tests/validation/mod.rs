@@ -510,7 +510,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     block = Arc::new(irys_block);
 
     // Send the malformed block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -557,7 +557,13 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     let block_after_epoch = Arc::new(tampered);
 
     // Step 4: Send and expect rejection
-    send_block_to_block_tree(&genesis_node.node_ctx, block_after_epoch.clone(), vec![]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block_after_epoch.clone(),
+        vec![],
+        false,
+    )
+    .await?;
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &block_after_epoch.block_hash).await;

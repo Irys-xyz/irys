@@ -359,9 +359,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config.clone(),
-        config,
         service_senders,
     ));
 
@@ -559,9 +557,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config.clone(),
-        config,
         service_senders,
     ));
 

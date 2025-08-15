@@ -274,7 +274,16 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    async fn send_storage_finalized_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
+    /// Sends block-migration notifications to services after a block reaches migration depth.
+    ///
+    /// This method:
+    /// - Resolves the full `IrysBlockHeader` for the provided `block_hash` from the mempool or the database
+    /// - Fetches the Submit and Publish data-transaction headers from the mempool
+    /// - Emits a `BlockMigrationMessage` to the `BlockIndexService` and `ChunkMigrationService`
+    ///
+    /// Errors
+    /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
+    async fn send_block_migration_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
         // retrieve block header from the mempool or database
         let block_header = {
             let (tx_block, rx_block) = oneshot::channel();
