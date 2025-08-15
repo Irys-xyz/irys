@@ -1092,9 +1092,8 @@ mod tests {
 
             let valid_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone()];
             let too_few_commitments = vec![comm_tx_1.clone()];
-            let too_many_commitments =
-                vec![comm_tx_1.clone(), comm_tx_2.clone(), comm_tx_2.clone()];
-            let valid_count_but_invalid_id = vec![comm_tx_1.clone(), unrelated_tx];
+            let too_many_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone(), comm_tx_2];
+            let valid_count_but_invalid_id = vec![comm_tx_1, unrelated_tx];
 
             let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
             assert!(res.is_ok());
