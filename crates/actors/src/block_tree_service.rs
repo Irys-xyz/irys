@@ -44,7 +44,7 @@ pub enum BlockTreeServiceMessage {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
         skip_vdf_validation: bool,
-        response: oneshot::Sender<eyre::Result<()>>,
+        response: oneshot::Sender<Result<(), PreValidationError>>,
     },
     BlockValidationFinished {
         block_hash: H256,
