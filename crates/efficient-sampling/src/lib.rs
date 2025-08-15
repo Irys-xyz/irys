@@ -239,6 +239,9 @@ mod tests {
         let config = ConsensusConfig::testing();
         let step_num = 0;
         let reset_step_num = reset_step_number(step_num, &config);
-        assert_eq!(reset_step_num, 0, "Reset step number should be 0 for step 0");
+        assert_eq!(
+            reset_step_num, 0,
+            "Reset step number should be 0 for step 0"
+        );
     }
 }
