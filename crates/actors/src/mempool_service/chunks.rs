@@ -46,21 +46,39 @@ impl Inner {
             })
             .collect::<Vec<_>>();
 
-        let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
-            .map(|cdr| cdr.data_size)
-            .or_else(|| {
-                debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
-                candidate_sms.iter().find_map(|(sm, write_offsets)| {
-                    write_offsets.iter().find_map(|wo| {
-                        sm.query_submodule_db_by_offset(*wo, |tx| {
-                            get_data_size_by_data_root(tx, chunk.data_root)
-                        })
-                        .ok()
-                        .flatten()
+        // Determine cached state and data_size resolution order:
+        // 1) DB CachedDataRoots (persisted, safe to persist chunks)
+        // 2) Mempool header (known header but not yet confirmed - do NOT persist chunks)
+        // 3) Storage modules sub-databases
+        let cached_data_root =
+            irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                .map_err(|_| ChunkIngressError::DatabaseError)?;
+        let cached_txids = cached_data_root.as_ref().map(|cdr| cdr.txid_set.clone());
+        let mut data_size = cached_data_root.as_ref().map(|cdr| cdr.data_size);
+
+        if data_size.is_none() {
+            // Look for a matching header in the mempool to learn data_size without DB-caching
+            let guard = mempool_state.read().await;
+            data_size = guard
+                .valid_submit_ledger_tx
+                .values()
+                .find(|h| h.data_root == chunk.data_root)
+                .map(|h| h.data_size);
+            drop(guard);
+        }
+
+        if data_size.is_none() {
+            debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
+            data_size = candidate_sms.iter().find_map(|(sm, write_offsets)| {
+                write_offsets.iter().find_map(|wo| {
+                    sm.query_submodule_db_by_offset(*wo, |tx| {
+                        get_data_size_by_data_root(tx, chunk.data_root)
                     })
+                    .ok()
+                    .flatten()
                 })
             });
+        }
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -240,31 +258,69 @@ impl Inner {
             }
         }
 
-        // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-        if let Err(e) = self
-            .irys_db
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-            .map_err(|_| ChunkIngressError::DatabaseError)
-        {
-            error!("Database error: {:?}", e);
-            return Err(e);
-        }
-
-        for sm in self.storage_modules_guard.read().iter() {
-            if !sm
-                .get_writeable_offsets(&chunk)
-                .unwrap_or_default()
-                .is_empty()
+        let is_confirmed = match &cached_txids {
+            Some(txids) => {
+                let mut confirmed = false;
+                for txid in txids {
+                    match irys_database::tx_header_by_txid(&read_tx, txid) {
+                        Ok(Some(_)) => {
+                            confirmed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(_) => return Err(ChunkIngressError::DatabaseError),
+                    }
+                }
+                confirmed
+            }
+            None => false,
+        };
+        if is_confirmed {
+            // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
+            if let Err(e) = self
+                .irys_db
+                .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+                .map_err(|_| ChunkIngressError::DatabaseError)
             {
-                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                let result = sm
-                    .write_data_chunk(&chunk)
-                    .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
-                if let Err(e) = result {
-                    error!("Internal error: {:?}", e);
-                    return Err(e);
+                error!("Database error: {:?}", e);
+                return Err(e);
+            }
+
+            for sm in self.storage_modules_guard.read().iter() {
+                if !sm
+                    .get_writeable_offsets(&chunk)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
+                    let result = sm
+                        .write_data_chunk(&chunk)
+                        .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
+                    if let Err(e) = result {
+                        error!("Internal error: {:?}", e);
+                        return Err(e);
+                    }
                 }
             }
+        } else {
+            // Post-header but pre-inclusion: buffer chunk in LRU and avoid persisting/gossiping to reduce DoS surface.
+            let mut mempool_state_write_guard = mempool_state.write().await;
+            let post_header_capacity =
+                NonZeroUsize::new(max_chunks_per_item).expect("expected valid NonZeroUsize::new");
+            if let Some(chunks_map) = mempool_state_write_guard
+                .pending_chunks
+                .get_mut(&chunk.data_root)
+            {
+                chunks_map.put(chunk.tx_offset, chunk.clone());
+            } else {
+                let mut new_lru_cache = LruCache::new(post_header_capacity);
+                new_lru_cache.put(chunk.tx_offset, chunk.clone());
+                mempool_state_write_guard
+                    .pending_chunks
+                    .put(chunk.data_root, new_lru_cache);
+            }
+            drop(mempool_state_write_guard);
+            return Ok(());
         }
 
         // ==== INGRESS PROOFS ====
@@ -377,7 +433,9 @@ impl Inner {
             }
         };
 
-        if chunk_count == expected_chunk_count {
+        // Only generate ingress proofs and gossip when the transaction is confirmed on-chain
+
+        if is_confirmed && chunk_count == expected_chunk_count {
             // we *should* have all the chunks
             // dispatch a ingress proof task
 
@@ -428,11 +486,13 @@ impl Inner {
             });
         }
 
-        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
-        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
+        if is_confirmed {
+            let gossip_sender = &self.service_senders.gossip_broadcast.clone();
+            let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
 
-        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-            tracing::error!("Failed to send gossip data: {:?}", error);
+            if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+                tracing::error!("Failed to send gossip data: {:?}", error);
+            }
         }
 
         Ok(())

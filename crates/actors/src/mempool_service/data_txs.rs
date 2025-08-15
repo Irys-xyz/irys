@@ -133,36 +133,61 @@ impl Inner {
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
-        // Update any associated ingress proofs
-        if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let anchor_expiry_depth = self
-                .config
-                .node_config
-                .consensus_config()
-                .mempool
-                .anchor_expiry_depth as u64;
-            let new_expiry = anchor_height + anchor_expiry_depth;
-            debug!(
-                "Updating ingress proof for data root {} expiry from {} -> {}",
-                &tx.data_root, &old_expiry.last_height, &new_expiry
-            );
+        // Update DataRootLRU expiry based on anchor height and preserve existing ingress_proof flag.
+        // Insert an entry if missing; only write when the expiry increases.
+        let anchor_expiry_depth = self
+            .config
+            .node_config
+            .consensus_config()
+            .mempool
+            .anchor_expiry_depth as u64;
+        let new_expiry = anchor_height + anchor_expiry_depth;
 
-            self.irys_db
-                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
+        match read_tx.get::<DataRootLRU>(tx.data_root) {
+            Ok(existing_opt) => {
+                let (prev_height, ingress_proof) = match existing_opt {
+                    Some(ref e) => (e.last_height, e.ingress_proof),
+                    None => (0, false),
+                };
+
+                if existing_opt.is_none() || prev_height < new_expiry {
+                    debug!(
+                        "Setting DataRootLRU for {} expiry from {} -> {} (ingress_proof={})",
+                        &tx.data_root, prev_height, new_expiry, ingress_proof
                     );
-                    TxIngressError::DatabaseError
-                })?
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?;
+                    self.irys_db
+                        .update(|write_tx| {
+                            write_tx.put::<DataRootLRU>(
+                                tx.data_root,
+                                irys_database::db_cache::DataRootLRUEntry {
+                                    last_height: new_expiry,
+                                    ingress_proof,
+                                },
+                            )
+                        })
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?
+                        .map_err(|e| {
+                            error!(
+                                "Error updating ingress proof expiry for {} - {}",
+                                &tx.data_root, &e
+                            );
+                            TxIngressError::DatabaseError
+                        })?;
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Database error fetching DataRootLRU for {} - {}",
+                    &tx.data_root, &e
+                );
+                return Err(TxIngressError::DatabaseError);
+            }
         }
 
         // Check account balance
