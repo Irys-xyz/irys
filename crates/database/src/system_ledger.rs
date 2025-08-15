@@ -256,9 +256,18 @@ pub async fn add_test_commitments(
     config: &Config,
 ) -> Vec<CommitmentTransaction> {
     let signer = config.irys_signer();
+    add_test_commitments_for_signer(block_header, &signer, pledge_count, config).await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn add_test_commitments_for_signer(
+    block_header: &mut IrysBlockHeader,
+    signer: &IrysSigner,
+    pledge_count: u8,
+    config: &Config,
+) -> Vec<CommitmentTransaction> {
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
-
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
         let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
@@ -273,7 +282,7 @@ pub async fn add_test_commitments(
 
     for i in 0..(pledge_count as usize) {
         let pledge_tx =
-            create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
+            create_pledge_commitment_transaction(signer, anchor, config, &(i as u64)).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
         anchor = pledge_tx.id;
