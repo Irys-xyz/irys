@@ -69,7 +69,7 @@ use irys_types::{
     LedgerChunkRange, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -153,7 +153,7 @@ pub async fn calculate_expired_ledger_fees(
     all_tx_ids.extend(latest_txs);
     all_tx_ids.extend(middle_txs);
 
-    let mut tx_to_miners = HashMap::new();
+    let mut tx_to_miners = BTreeMap::new();
     tx_to_miners.extend(earliest_miners);
     tx_to_miners.extend(latest_miners);
     tx_to_miners.extend(middle_miners);
@@ -206,12 +206,12 @@ async fn get_block_by_hash(
 }
 
 /// Collects all expired partitions for the specified ledger type and their miners
-#[tracing::instrument]
+#[tracing::instrument(skip_all, fields(block_height, target_ledger_type))]
 fn collect_expired_partitions(
     epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     target_ledger_type: DataLedger,
-) -> eyre::Result<HashMap<SlotIndex, Vec<Address>>> {
+) -> eyre::Result<BTreeMap<SlotIndex, Vec<Address>>> {
     let mut ledgers = epoch_snapshot.ledgers.clone();
     let partition_assignments = &epoch_snapshot.partition_assignments;
     let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
@@ -223,7 +223,7 @@ fn collect_expired_partitions(
         expired_partition_hashes.len()
     );
 
-    let mut expired_ledger_slot_indexes = HashMap::new();
+    let mut expired_ledger_slot_indexes = BTreeMap::new();
 
     for expired_partition_hash in expired_partition_hashes {
         let partition = partition_assignments
@@ -275,12 +275,12 @@ fn collect_expired_partitions(
 
 /// Finds all blocks containing data in the expired chunk ranges
 fn find_block_range(
-    expired_slots: HashMap<SlotIndex, Vec<Address>>,
+    expired_slots: BTreeMap<SlotIndex, Vec<Address>>,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
     ledger_type: DataLedger,
 ) -> eyre::Result<BlockRange> {
-    let mut blocks_with_expired_ledgers = HashMap::new();
+    let mut blocks_with_expired_ledgers = BTreeMap::new();
     let block_index_read = block_index
         .read()
         .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
@@ -293,40 +293,47 @@ fn find_block_range(
     // Track min and max blocks as we iterate
     let mut min_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
     let mut max_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
-    
+
     for (slot_index, miners) in expired_slots {
         let chunk_range = slot_index.compute_chunk_range(
             config.consensus.num_chunks_in_partition,
             max_chunk_offset_across_all_partitions,
         );
-        for chunk_offset in *chunk_range.start()..=*chunk_range.end() {
+
+        let mut chunk_offset = *chunk_range.start();
+        while chunk_offset < *chunk_range.end() {
             let (height, block_index_item) =
                 block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
-            
+
             // Update min_height if this is the first block or a lower height
             if min_height.as_ref().map_or(true, |(h, _, _)| height < *h) {
                 min_height = Some((height, block_index_item.clone(), chunk_range.clone()));
             }
-            
+
             // Update max_height if this is the first block or a higher height
             if max_height.as_ref().map_or(true, |(h, _, _)| height > *h) {
                 max_height = Some((height, block_index_item.clone(), chunk_range.clone()));
             }
-            
-            let block_appearance =
-                blocks_with_expired_ledgers.insert(block_index_item.block_hash, Arc::new(miners.clone()));
+
+            let block_appearance = blocks_with_expired_ledgers
+                .insert(block_index_item.block_hash, Arc::new(miners.clone()));
             eyre::ensure!(
                 block_appearance.is_none(),
                 "why are we getting the same block twice in at least 2 different slot indexes?"
             );
+
+            // Skip to the next chunk after this block ends.
+            // We do this by going to the very end of the current blocks max chunk offset
+            chunk_offset = (block_index_item.ledgers[ledger_type].max_chunk_offset + 1)
+                .min(*chunk_range.end());
         }
     }
 
     // Extract min and max block data - these must exist if we have expired slots
-    let (min_height, min_item, min_range) = min_height
-        .expect("min_height must be populated after iterating expired slots");
-    let (max_height, max_item, max_range) = max_height
-        .expect("max_height must be populated after iterating expired slots");
+    let (min_height, min_item, min_range) =
+        min_height.expect("min_height must be populated after iterating expired slots");
+    let (max_height, max_item, max_range) =
+        max_height.expect("max_height must be populated after iterating expired slots");
 
     let min_block = BoundaryBlock {
         height: min_height,
@@ -395,7 +402,7 @@ async fn process_boundary_block(
     block_index: &std::sync::RwLock<BlockIndex>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<(Vec<H256>, HashMap<H256, Arc<Vec<Address>>>)> {
+) -> eyre::Result<(Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>)> {
     // Get the block and its transactions
     let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
     let data_txs = block.get_data_ledger_tx_ids();
@@ -459,10 +466,10 @@ fn filter_transactions_by_chunk_range(
     is_earliest: bool,
     chunk_size: u64,
     miners: Arc<Vec<Address>>,
-) -> (Vec<H256>, HashMap<H256, Arc<Vec<Address>>>) {
+) -> (Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>) {
     let mut current_offset = prev_max_offset;
     let mut filtered_txs = Vec::new();
-    let mut tx_to_miners = HashMap::new();
+    let mut tx_to_miners = BTreeMap::new();
 
     if miners.len() > 0 {
         for tx in transactions {
@@ -496,13 +503,13 @@ fn filter_transactions_by_chunk_range(
 
 /// Processes all middle blocks (non-boundary blocks)
 async fn process_middle_blocks(
-    middle_blocks: HashMap<H256, Arc<Vec<Address>>>,
+    middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
     ledger_type: DataLedger,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<(Vec<H256>, HashMap<H256, Arc<Vec<Address>>>)> {
+) -> eyre::Result<(Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>)> {
     let mut all_tx_ids = Vec::new();
-    let mut tx_to_miners = HashMap::new();
+    let mut tx_to_miners = BTreeMap::new();
 
     for (block_hash, miners) in middle_blocks {
         let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
@@ -522,12 +529,14 @@ async fn process_middle_blocks(
 
 /// Calculates and aggregates fees for each miner
 fn aggregate_miner_fees(
-    transactions: Vec<DataTransactionHeader>,
-    tx_to_miners: &HashMap<H256, Arc<Vec<Address>>>,
+    mut transactions: Vec<DataTransactionHeader>,
+    tx_to_miners: &BTreeMap<H256, Arc<Vec<Address>>>,
     config: &Config,
 ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
     let mut aggregated_miner_fees = BTreeMap::<Address, (U256, RollingHash)>::new();
+    transactions.sort();
 
+    tracing::error!(?tx_to_miners);
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners
             .get(&data_tx.id)
@@ -555,7 +564,7 @@ fn aggregate_miner_fees(
 }
 
 /// Represents a slot index in the partition system
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct SlotIndex(u64);
 
 impl SlotIndex {
@@ -568,7 +577,7 @@ impl SlotIndex {
         chunks_per_partition: u64,
         max_offset: LedgerChunkOffset,
     ) -> LedgerChunkRange {
-        let start = LedgerChunkOffset::from(self.0 * chunks_per_partition);
+        let start = LedgerChunkOffset::from(self.0 * chunks_per_partition).min(max_offset);
         let end = start + chunks_per_partition;
         let end = end.min(max_offset);
         LedgerChunkRange(ledger_chunk_offset_ii!(start, LedgerChunkOffset::from(end)))
@@ -592,5 +601,5 @@ struct BlockRange {
     max_block: BoundaryBlock,
     min_block_miners: Arc<Vec<Address>>,
     max_block_miners: Arc<Vec<Address>>,
-    middle_blocks: HashMap<H256, Arc<Vec<Address>>>,
+    middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
 }

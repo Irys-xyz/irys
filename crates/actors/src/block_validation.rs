@@ -1153,8 +1153,6 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
-        tracing::error!(?expected_commitments, "validation");
-        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments

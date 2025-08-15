@@ -189,6 +189,7 @@ impl BlockIndex {
         Ok(block_bounds)
     }
 
+    /// Returns the block height + block index item
     pub fn get_block_index_item(
         &self,
         ledger: DataLedger,
