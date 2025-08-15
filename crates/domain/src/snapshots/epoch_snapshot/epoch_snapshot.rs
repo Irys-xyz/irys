@@ -114,10 +114,6 @@ impl EpochSnapshot {
             expired_partition_hashes: Vec::new(),
         };
 
-        if Self::validate_commitments(&genesis_block, &commitments).is_err() {
-            panic!("Cannot validate genesis block commitments");
-        }
-
         match new_self.perform_epoch_tasks(&None, &genesis_block, commitments) {
             Ok(_) => debug!("Initialized Epoch Snapshot"),
             Err(e) => {
