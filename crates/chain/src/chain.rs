@@ -429,8 +429,11 @@ impl IrysNode {
         genesis_block.timestamp = timestamp;
         genesis_block.last_diff_timestamp = timestamp;
 
-        // Add commitment transactions to genesis block
-        add_genesis_commitments(&mut genesis_block, &self.config).await;
+        // Add commitment transactions to genesis block and get initial treasury
+        let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
+
+        // Set the genesis treasury to the total value of all commitments
+        genesis_block.treasury = initial_treasury;
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 

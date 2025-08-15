@@ -80,6 +80,7 @@ impl IrysChainSpecBuilder {
             },
             oracle_irys_price: config.consensus.genesis_price,
             ema_irys_price: config.consensus.genesis_price,
+            treasury: U256::zero(), // Treasury will be set when genesis commitments are added
         };
         Self {
             reth_builder: ChainSpecBuilder::mainnet()
