@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
-    OnFinalizedBlock(u64, Option<oneshot::Sender<eyre::Result<()>>>),
+    OnBlockMigrated(u64, Option<oneshot::Sender<eyre::Result<()>>>),
 }
 
 pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
@@ -102,18 +102,18 @@ impl ChunkCacheService {
 
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         match msg {
-            CacheServiceAction::OnFinalizedBlock(finalized_height, sender) => {
-                let res = self.prune_cache(finalized_height);
+            CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
+                let res = self.prune_cache(migration_height);
                 let Some(sender) = sender else { return };
                 if let Err(error) = sender.send(res) {
-                    warn!(?error, "RX failure for OnFinalizedBlock");
+                    warn!(?error, "RX failure for OnBlockMigrated");
                 }
             }
         }
     }
 
-    fn prune_cache(&self, finalized_height: u64) -> eyre::Result<()> {
-        let prune_height = finalized_height
+    fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
+        let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         self.prune_data_root_cache(prune_height)?;
         self.prune_pd_cache(prune_height)?;
@@ -129,7 +129,7 @@ impl ChunkCacheService {
             ))
         })?;
         info!(
-            ?finalized_height,
+            ?migration_height,
             "Chunk cache: {} chunks ({:.3} GB), PD: {} chunks ({:.3} GB) {} ingress proofs",
             chunk_cache_count,
             (chunk_cache_size / GIGABYTE as u64),
@@ -169,7 +169,7 @@ impl ChunkCacheService {
     }
 
     fn prune_pd_cache(&self, prune_height: u64) -> eyre::Result<()> {
-        debug!("processing OnFinalizedBlock PD {} message!", &prune_height);
+        debug!("processing OnBlockMigrated PD {} message!", &prune_height);
 
         let write_tx = self.db.tx_mut()?;
         let mut cursor = write_tx.cursor_write::<ProgrammableDataLRU>()?;
