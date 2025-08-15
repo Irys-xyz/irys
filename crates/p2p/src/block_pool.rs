@@ -502,20 +502,20 @@ where
             .wait_for_block_tree_to_catch_up(block_header.height)
             .await;
 
-            if let Err(block_discovery_error) = self
-                .block_discovery
-                .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
-                .await
-            {
-                error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
-                self.blocks_cache
-                    .remove_block(&block_header.block_hash)
-                    .await;
-                return Err(BlockPoolError::BlockError(format!(
-                    "{:?}",
-                    block_discovery_error
-                )));
-            }
+        if let Err(block_discovery_error) = self
+            .block_discovery
+            .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+            .await
+        {
+            error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
+            self.blocks_cache
+                .remove_block(&block_header.block_hash)
+                .await;
+            return Err(BlockPoolError::BlockError(format!(
+                "{:?}",
+                block_discovery_error
+            )));
+        }
 
         info!(
             "Block pool: Block {:?} has been processed",
