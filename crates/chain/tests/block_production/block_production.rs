@@ -1099,8 +1099,12 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     };
 
     // Produce block with invalid PoA
+    // Build a SolutionContext whose solution_hash is computed from the same tampered PoA chunk
+    let tampered_chunk = vec![0xFF; 256 * 1024];
+    let evil_solution =
+        crate::utils::solution_context_with_poa_chunk(&node.node_ctx, tampered_chunk).await?;
     let (evil_block, _eth_payload) = evil_strategy
-        .fully_produce_new_block(solution_context(&node.node_ctx).await?)
+        .fully_produce_new_block(evil_solution)
         .await?
         .unwrap();
 
