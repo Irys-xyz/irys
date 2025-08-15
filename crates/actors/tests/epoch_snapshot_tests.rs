@@ -297,16 +297,16 @@ async fn unique_addresses_per_slot_test() {
     let config = Config::new(testing_config);
     let genesis_signer = config.irys_signer();
     genesis_block.height = 0;
-    let mut commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+    let (mut commitments, _) = add_genesis_commitments(&mut genesis_block, &config).await;
 
     // Create some other signers to simulate other pledged and staked addresses
     let signer1 = IrysSigner::random_signer(&config.consensus);
     let signer2 = IrysSigner::random_signer(&config.consensus);
 
     // Give them both 10 pledged partitions
-    let mut comm1 =
+    let (mut comm1, _) =
         add_test_commitments_for_signer(&mut genesis_block, &signer1, 10, &config).await;
-    let mut comm2 =
+    let (mut comm2, _) =
         add_test_commitments_for_signer(&mut genesis_block, &signer2, 10, &config).await;
 
     commitments.append(&mut comm1);

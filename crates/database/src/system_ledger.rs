@@ -270,7 +270,7 @@ pub async fn add_test_commitments_for_signer(
     signer: &IrysSigner,
     pledge_count: u8,
     config: &Config,
-) -> Vec<CommitmentTransaction> {
+) -> (Vec<CommitmentTransaction>, U256) {
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
     if block_header.is_genesis() {
