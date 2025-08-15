@@ -188,7 +188,7 @@ impl LedgerExpiryTestContext {
 
         // Calculate target height for expiry
         let target_expiry_height =
-            ((self.submit_ledger_epoch_length + 1) * self.num_blocks_in_epoch) as u64;
+            ((self.submit_ledger_epoch_length + 1) * self.num_blocks_in_epoch);
         let expiry_block_height = target_expiry_height.max(current_height + 3);
 
         info!(
@@ -211,11 +211,11 @@ impl LedgerExpiryTestContext {
                 height,
                 tx_ids
                     .get(&DataLedger::Submit)
-                    .map(|v| v.len())
+                    .map(std::collections::HashSet::len)
                     .unwrap_or(0),
                 tx_ids
                     .get(&DataLedger::Publish)
-                    .map(|v| v.len())
+                    .map(std::collections::HashSet::len)
                     .unwrap_or(0)
             );
 

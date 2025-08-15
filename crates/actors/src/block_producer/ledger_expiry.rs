@@ -68,7 +68,7 @@ use irys_types::{
     BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
     LedgerChunkRange, H256, U256,
 };
-use nodit::{interval::ii, InclusiveInterval};
+use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
@@ -308,13 +308,13 @@ fn find_block_range(
                 block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
 
             // Update min_height if this is the first block or a lower height
-            if min_height.as_ref().map_or(true, |(h, _, _)| height < *h) {
-                min_height = Some((height, block_index_item.clone(), chunk_range.clone()));
+            if min_height.as_ref().is_none_or(|(h, _, _)| height < *h) {
+                min_height = Some((height, block_index_item.clone(), chunk_range));
             }
 
             // Update max_height if this is the first block or a higher height
-            if max_height.as_ref().map_or(true, |(h, _, _)| height > *h) {
-                max_height = Some((height, block_index_item.clone(), chunk_range.clone()));
+            if max_height.as_ref().is_none_or(|(h, _, _)| height > *h) {
+                max_height = Some((height, block_index_item.clone(), chunk_range));
             }
 
             let block_appearance = blocks_with_expired_ledgers
@@ -339,13 +339,13 @@ fn find_block_range(
 
     let min_block = BoundaryBlock {
         height: min_height,
-        item: min_item.clone(),
+        item: min_item,
         chunk_range: min_range,
     };
 
     let max_block = BoundaryBlock {
         height: max_height,
-        item: max_item.clone(),
+        item: max_item,
         chunk_range: max_range,
     };
 
@@ -417,7 +417,7 @@ async fn process_boundary_block(
     // Fetch the actual transactions
     // Note: get_data_tx_in_parallel preserves the order of input IDs
     let ledger_data_txs =
-        get_data_tx_in_parallel(ledger_tx_ids.iter().copied().collect(), mempool_sender, db)
+        get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_sender, db)
             .await?;
 
     // Get the previous block's max offset
@@ -467,7 +467,7 @@ fn filter_transactions_by_chunk_range(
     let mut filtered_txs = Vec::new();
     let mut tx_to_miners = BTreeMap::new();
 
-    if miners.len() > 0 {
+    if !miners.is_empty() {
         for tx in transactions {
             let chunks = tx.data_size.div_ceil(chunk_size);
             let tx_start = current_offset;
@@ -574,7 +574,7 @@ impl SlotIndex {
         let start = LedgerChunkOffset::from(self.0 * chunks_per_partition).min(max_offset);
         let end = start + chunks_per_partition;
         let end = end.min(max_offset);
-        LedgerChunkRange(ledger_chunk_offset_ii!(start, LedgerChunkOffset::from(end)))
+        LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
     }
 }
 
