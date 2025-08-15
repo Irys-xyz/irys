@@ -102,9 +102,10 @@ use paste::paste;
 use reth_db::table::TableInfo;
 
 tables! {
-    IrysTables;
-   /// Stores the header hashes belonging to the canonical chain.
-   table IrysBlockHeaders {
+IrysTables;
+
+/// Stores the header hashes belonging to the canonical chain.
+table IrysBlockHeaders {
     type Key = H256;
     type Value = CompactIrysBlockHeader;
 }

@@ -60,7 +60,7 @@ pub enum TransactionPacket {
     Pledge(BalanceDecrement),
     /// Unpledge funds from an account (balance increment). Used for unpledging operations.
     Unpledge(EitherIncrementOrDecrement),
-    /// Term fee reward payment to ingress proof providers and block producer (balance increment).
+    /// Term fee reward to the miners that stored the block
     TermFeeReward(BalanceIncrement),
     /// Ingress proof reward payment to providers who submitted valid proofs (balance increment).
     IngressProofReward(BalanceIncrement),

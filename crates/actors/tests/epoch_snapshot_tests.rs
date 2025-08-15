@@ -46,7 +46,9 @@ async fn genesis_test() {
     // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+    let (commitments, initial_treasury) =
+        add_genesis_commitments(&mut genesis_block, &config).await;
+    genesis_block.treasury = initial_treasury;
 
     // Create epoch service with random miner address
     let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
@@ -204,7 +206,9 @@ async fn add_slots_test() {
     genesis_block.height = 0;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-    let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+    let (commitments, initial_treasury) =
+        add_genesis_commitments(&mut genesis_block, &config).await;
+    genesis_block.treasury = initial_treasury;
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -293,16 +297,16 @@ async fn unique_addresses_per_slot_test() {
     let config = Config::new(testing_config);
     let genesis_signer = config.irys_signer();
     genesis_block.height = 0;
-    let mut commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+    let (mut commitments, _) = add_genesis_commitments(&mut genesis_block, &config).await;
 
     // Create some other signers to simulate other pledged and staked addresses
     let signer1 = IrysSigner::random_signer(&config.consensus);
     let signer2 = IrysSigner::random_signer(&config.consensus);
 
     // Give them both 10 pledged partitions
-    let mut comm1 =
+    let (mut comm1, _) =
         add_test_commitments_for_signer(&mut genesis_block, &signer1, 10, &config).await;
-    let mut comm2 =
+    let (mut comm2, _) =
         add_test_commitments_for_signer(&mut genesis_block, &signer2, 10, &config).await;
 
     commitments.append(&mut comm1);
@@ -412,7 +416,9 @@ async fn partition_expiration_and_repacking_test() {
 
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let commitments = add_test_commitments(&mut genesis_block, 5, &config).await;
+    let (commitments, initial_treasury) =
+        add_test_commitments(&mut genesis_block, 5, &config).await;
+    genesis_block.treasury = initial_treasury;
 
     // Create a storage config for testing
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
@@ -768,7 +774,9 @@ async fn epoch_blocks_reinitialization_test() {
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let pledge_count = config.consensus.epoch.num_capacity_partitions.unwrap_or(31) as u8;
-    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config).await;
+    let (commitments, initial_treasury) =
+        add_test_commitments(&mut genesis_block, pledge_count, &config).await;
+    genesis_block.treasury = initial_treasury;
 
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
@@ -956,7 +964,9 @@ async fn partitions_assignment_determinism_test() {
     genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
     genesis_block.height = 0;
     let pledge_count = 20;
-    let commitments = add_test_commitments(&mut genesis_block, pledge_count, &config).await;
+    let (commitments, initial_treasury) =
+        add_test_commitments(&mut genesis_block, pledge_count, &config).await;
+    genesis_block.treasury = initial_treasury;
 
     let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
 

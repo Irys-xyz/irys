@@ -55,6 +55,13 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
+            std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         )> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
             Ok((
@@ -65,6 +72,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
                     txs: vec![],
                     proofs: None,
                 }, // No Publish ledger txs
+                std::collections::BTreeMap::new(), // No expired ledger fees
             ))
         }
     }

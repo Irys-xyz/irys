@@ -40,9 +40,6 @@ initial_price = 1.0
 incremental_change = 0.00000000000001
 smoothing_interval = 15
 
-[pricing]
-fee_percentage = 0.01
-
 [reth]
 use_random_ports = false
 
@@ -107,7 +104,6 @@ max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
 anchor_expiry_depth = 10
 max_pending_pledge_items = 100
-max_pending_anchor_items = 100
 max_pledges_per_item = 100
 max_pending_chunk_items = 30
 max_chunks_per_item = 500

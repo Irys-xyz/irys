@@ -1,6 +1,7 @@
 use crate::block_tree_service::ValidationResult;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
     mining::hash_to_number,
     services::ServiceSenders,
@@ -14,7 +15,8 @@ use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, SystemLedger};
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
+    ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -42,12 +44,12 @@ use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument as _};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
@@ -785,6 +787,8 @@ pub async fn shadow_transactions_are_valid(
     reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<()> {
     // 1. Validate that the evm block is valid
     let execution_data = payload_provider
@@ -896,8 +900,15 @@ pub async fn shadow_transactions_are_valid(
         .filter_map(std::result::Result::transpose);
 
     // 3. Generate expected shadow transactions
-    let expected_txs =
-        generate_expected_shadow_transactions_from_db(config, service_senders, block, db).await?;
+    let expected_txs = generate_expected_shadow_transactions_from_db(
+        config,
+        service_senders,
+        block,
+        db,
+        parent_epoch_snapshot,
+        block_index,
+    )
+    .await?;
 
     // 4. Validate they match
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter())
@@ -910,6 +921,8 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
     let prev_block = {
@@ -939,11 +952,28 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let mut publish_ledger_with_txs =
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
-    // TODO: Get treasury balance from previous block once it's tracked in block headers
-    // this is a value that will not result in underflows / overflows while we don't have a proper value
-    let initial_treasury_balance = U256::MAX / U256::from(2);
+    // Get treasury balance from previous block
+    let initial_treasury_balance = prev_block.treasury;
 
-    let shadow_txs_vec = ShadowTxGenerator::new(
+    // Calculate expired ledger fees for epoch blocks
+    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let expired_ledger_fees = if is_epoch_block {
+        ledger_expiry::calculate_expired_ledger_fees(
+            &parent_epoch_snapshot,
+            block.height,
+            DataLedger::Submit, // Currently only Submit ledgers expire
+            config,
+            block_index,
+            service_senders.mempool.clone(),
+            db.clone(),
+        )
+        .in_current_span()
+        .await?
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
@@ -953,9 +983,27 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &data_txs,
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
-    )
-    .map(|result| result.map(|metadata| metadata.shadow_tx))
-    .collect::<Result<Vec<_>, _>>()?;
+        &expired_ledger_fees,
+    );
+
+    let mut shadow_txs_vec = Vec::new();
+    for result in shadow_tx_generator.by_ref() {
+        let metadata = result?;
+        shadow_txs_vec.push(metadata.shadow_tx);
+    }
+
+    // Get final treasury balance after processing all transactions
+    let expected_treasury = shadow_tx_generator.treasury_balance();
+
+    // Validate that the block's treasury matches the expected value
+    ensure!(
+        block.treasury == expected_treasury,
+        "Treasury mismatch: expected {} but found {} at block height {}",
+        expected_treasury,
+        block.treasury,
+        block.height
+    );
+
     Ok(shadow_txs_vec)
 }
 
@@ -1122,8 +1170,6 @@ pub async fn commitment_txs_are_valid(
             .read()
             .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
-        tracing::error!(?expected_commitments, "validation");
-        tracing::error!(?actual_commitments, "validation");
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in actual_commitments
@@ -1721,7 +1767,9 @@ mod tests {
             ..node_config.consensus_config()
         };
 
-        let commitments = add_genesis_commitments(&mut genesis_block, &config).await;
+        let (commitments, initial_treasury) =
+            add_genesis_commitments(&mut genesis_block, &config).await;
+        genesis_block.treasury = initial_treasury;
 
         let arc_genesis = Arc::new(genesis_block.clone());
         let signer = config.irys_signer();
