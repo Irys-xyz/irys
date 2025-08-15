@@ -1,4 +1,4 @@
-use crate::BlockFinalizedMessage;
+use crate::BlockMigrationMessage;
 use actix::prelude::*;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
@@ -152,9 +152,9 @@ impl BlockIndexService {
     }
 }
 
-impl Handler<BlockFinalizedMessage> for BlockIndexService {
+impl Handler<BlockMigrationMessage> for BlockIndexService {
     type Result = eyre::Result<()>;
-    fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Collect working variables to move into the closure
         let block = msg.block_header;
         let all_txs = msg.all_txs;

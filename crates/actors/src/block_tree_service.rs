@@ -7,7 +7,7 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockFinalizedMessage, StorageModuleServiceMessage,
+    BlockMigrationMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
 use base58::ToBase58 as _;
@@ -313,7 +313,7 @@ impl BlockTreeServiceInner {
 
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: Arc::new(block_header),
             all_txs: Arc::new(all_txs),
         };
@@ -363,7 +363,7 @@ impl BlockTreeServiceInner {
 
         let chunk_migration = ChunkMigrationService::from_registry();
         let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: Arc::new(block_header),
             all_txs: Arc::new(all_txs),
         };

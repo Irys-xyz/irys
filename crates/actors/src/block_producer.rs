@@ -1069,7 +1069,7 @@ pub struct BlockConfirmedMessage(
 /// index to the storage modules when a block is finalized.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "eyre::Result<()>")]
-pub struct BlockFinalizedMessage {
+pub struct BlockMigrationMessage {
     /// Block being finalized
     pub block_header: Arc<IrysBlockHeader>,
     /// Include all the blocks transaction headers [Submit, Publish]
