@@ -975,7 +975,7 @@ impl EpochSnapshot {
     fn process_storage_module_assignments(
         &self,
         assignments: &[PartitionAssignment],
-        sm_packing_info: &mut Vec<(PathBuf, Option<PackingParams>)>,
+        sm_packing_info: &mut [(PathBuf, Option<PackingParams>)],
         module_infos: &mut Vec<StorageModuleInfo>,
         target_ledger_id: Option<u32>,
         miner: Address,
@@ -1025,7 +1025,7 @@ impl EpochSnapshot {
         let existing_id = sm_packing_info.iter().position(|(_, params)| {
             params
                 .as_ref()
-                .map_or(false, |pp| pp.partition_hash == Some(pa.partition_hash))
+                .is_some_and(|pp| pp.partition_hash == Some(pa.partition_hash))
         });
 
         // If not found, find first available storage module index/id with no assignment
