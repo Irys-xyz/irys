@@ -57,6 +57,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let genesis_parts_before;
     let signer1_parts_before;
     let signer2_parts_before;
+    let sm_infos_before;
 
     let node = {
         // Start a test node with custom configuration
@@ -253,6 +254,13 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             &signer2_address,
         ));
 
+        sm_infos_before = node
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .map_storage_modules_to_partition_assignments();
+
         node.wait_until_height_confirmed(6, 10).await?;
 
         node
@@ -323,6 +331,15 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(genesis_parts_after, genesis_parts_before);
     assert_eq!(signer1_parts_after, signer1_parts_before);
     assert_eq!(signer2_parts_after, signer2_parts_before);
+
+    let sm_infos_after = restarted_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot()
+        .map_storage_modules_to_partition_assignments();
+
+    assert_eq!(sm_infos_before, sm_infos_after);
 
     // ===== TEST CLEANUP =====
     restarted_node.node_ctx.stop().await;
