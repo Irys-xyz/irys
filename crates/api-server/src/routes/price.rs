@@ -4,9 +4,7 @@ use actix_web::{
     HttpResponse, Result as ActixResult,
 };
 use irys_types::{
-    storage_pricing::{
-        calculate_perm_fee_from_config, calculate_term_fee_from_config,
-    },
+    storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config},
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
 };

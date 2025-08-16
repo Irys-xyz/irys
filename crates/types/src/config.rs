@@ -108,7 +108,7 @@ pub struct ConsensusConfig {
         deserialize_with = "serde_utils::percentage_amount",
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
-    pub decay_rate: Amount<DecayRate>,
+    pub decay_rate_per_year: Amount<DecayRate>,
 
     /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
@@ -694,7 +694,7 @@ impl ConsensusConfig {
             // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
             // 1% annual decay
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1% annual decay
+            decay_rate_per_year: Amount::percentage(dec!(0.01)).unwrap(), // 1% annual decay
             safe_minimum_number_of_years: 200,                      // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
@@ -817,7 +817,7 @@ impl ConsensusConfig {
             // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
             // 1% annual decay
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1% annual decay
+            decay_rate_per_year: Amount::percentage(dec!(0.01)).unwrap(), // 1% annual decay
             safe_minimum_number_of_years: 200,                      // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
@@ -1391,7 +1391,7 @@ mod tests {
         token_price_safe_range = 1.0
         genesis_price = 1.0
         cost_per_chunk_per_epoch = 0.00000001
-        decay_rate = 0.01
+        decay_rate_per_year =  0.01
         chunk_size = 32
         block_migration_depth = 6
         block_tree_depth = 50
