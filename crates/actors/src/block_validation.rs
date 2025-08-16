@@ -26,7 +26,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{
-    calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
+    calculate_perm_fee_from_config, Amount,
 };
 use irys_types::BlockHash;
 use irys_types::{
@@ -1273,14 +1273,16 @@ pub fn calculate_perm_storage_total_fee(
 }
 
 /// Helper function to calculate term storage fee using a specific EMA snapshot
-/// Uses the same replica count as permanent storage but for submit_ledger_epoch_length duration
+/// Uses the same replica count as permanent storage but for the specified number of epochs
 pub fn calculate_term_storage_base_network_fee(
     bytes_to_store: u64,
+    epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
 ) -> eyre::Result<U256> {
-    calculate_term_fee_from_config(
+    irys_types::storage_pricing::calculate_term_fee(
         bytes_to_store,
+        epochs_for_storage,
         &config.consensus,
         ema_snapshot.ema_for_public_pricing(),
     )
@@ -1435,8 +1437,15 @@ pub async fn data_txs_are_valid(
 
         // Calculate expected fees based on data size using block's EMA
         // Calculate term fee first as it's needed for perm fee calculation
+        // Get the epochs from the Submit ledger in the block
+        let epochs_for_storage = block.data_ledgers
+            .iter()
+            .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
+            .and_then(|ledger| ledger.expires)
+            .unwrap_or(config.consensus.epoch.submit_ledger_epoch_length);
+            
         let expected_term_fee =
-            calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)?;
+            calculate_term_storage_base_network_fee(tx.data_size, epochs_for_storage, &block_ema, config)?;
         let expected_perm_fee =
             calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)?;
 

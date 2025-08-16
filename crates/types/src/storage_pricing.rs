@@ -515,10 +515,11 @@ impl<T> Debug for Amount<T> {
     }
 }
 
-/// Calculate term fee for temporary storage using ConsensusConfig
-/// Uses the same replica count as permanent storage but for submit_ledger_epoch_length duration
-pub fn calculate_term_fee_from_config(
+/// Calculate term fee for temporary storage with dynamic epoch count
+/// Uses the same replica count as permanent storage but for the specified number of epochs
+pub fn calculate_term_fee(
     bytes_to_store: u64,
+    epochs_for_storage: u64,
     config: &ConsensusConfig,
     ema_price: Amount<(IrysPrice, Usd)>,
 ) -> Result<U256> {
@@ -527,7 +528,7 @@ pub fn calculate_term_fee_from_config(
     // Apply duration (no decay for short-term storage)
     let zero_decay = Amount::percentage(Decimal::ZERO)?;
     let cost_per_chunk_duration = cost_per_chunk_per_epoch
-        .cost_per_replica(config.epoch.submit_ledger_epoch_length, zero_decay)?;
+        .cost_per_replica(epochs_for_storage, zero_decay)?;
 
     // Apply same replica count as perm storage
     let cost_with_replicas =
@@ -553,6 +554,21 @@ pub fn calculate_term_fee_from_config(
     } else {
         Ok(base_fee.amount)
     }
+}
+
+/// Calculate term fee for temporary storage using ConsensusConfig
+/// Uses the same replica count as permanent storage but for submit_ledger_epoch_length duration
+pub fn calculate_term_fee_from_config(
+    bytes_to_store: u64,
+    config: &ConsensusConfig,
+    ema_price: Amount<(IrysPrice, Usd)>,
+) -> Result<U256> {
+    calculate_term_fee(
+        bytes_to_store,
+        config.epoch.submit_ledger_epoch_length,
+        config,
+        ema_price,
+    )
 }
 
 /// Calculate permanent storage fee including base network fee and ingress proof rewards
@@ -1784,6 +1800,140 @@ mod tests {
                 expected_fee,
                 daily_fee_dec,
                 diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_dynamic_epoch_count() -> Result<()> {
+            // Test that the new calculate_term_fee function correctly uses different epoch counts
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 1024_u64.pow(4) * 100; // 100TB - large enough to avoid minimum fee
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Test with different epoch counts
+            let test_cases = vec![
+                (1_u64, "1 epoch"),
+                (3_u64, "3 epochs"),
+                (5_u64, "5 epochs (default)"),
+                (10_u64, "10 epochs"),
+                (100_u64, "100 epochs"),
+            ];
+
+            let mut previous_fee = U256::zero();
+            for (epochs, description) in test_cases {
+                let fee = calculate_term_fee(bytes_to_store, epochs, &config, irys_price)?;
+                
+                // Fee should increase with more epochs
+                assert!(
+                    fee > previous_fee || epochs == 1,
+                    "Fee for {} should be greater than previous: {} vs {}",
+                    description,
+                    fee,
+                    previous_fee
+                );
+                
+                // Verify the fee is proportional to epochs (no decay for term storage)
+                if epochs == 1 {
+                    let fee_1_epoch = fee;
+                    let fee_5_epochs = calculate_term_fee(bytes_to_store, 5, &config, irys_price)?;
+                    let fee_10_epochs = calculate_term_fee(bytes_to_store, 10, &config, irys_price)?;
+                    
+                    // With no decay, 5 epochs should cost ~5x one epoch
+                    let ratio_5 = fee_5_epochs / fee_1_epoch;
+                    assert!(
+                        ratio_5 >= U256::from(4) && ratio_5 <= U256::from(6),
+                        "5 epochs should cost ~5x one epoch, got ratio: {}",
+                        ratio_5
+                    );
+                    
+                    // With no decay, 10 epochs should cost ~10x one epoch
+                    let ratio_10 = fee_10_epochs / fee_1_epoch;
+                    assert!(
+                        ratio_10 >= U256::from(9) && ratio_10 <= U256::from(11),
+                        "10 epochs should cost ~10x one epoch, got ratio: {}",
+                        ratio_10
+                    );
+                }
+                
+                previous_fee = fee;
+            }
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_dynamic_epoch_vs_config() -> Result<()> {
+            // Verify that calculate_term_fee with config epochs matches calculate_term_fee_from_config
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 1024_u64.pow(3) * 500; // 500GB
+            let irys_price = Amount::token(dec!(2.5))?; // $2.50 per IRYS token
+
+            // Calculate using the old function
+            let fee_from_config = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Calculate using the new function with same epoch count
+            let fee_dynamic = calculate_term_fee(
+                bytes_to_store,
+                config.epoch.submit_ledger_epoch_length,
+                &config,
+                irys_price,
+            )?;
+
+            // Should be exactly the same
+            assert_eq!(
+                fee_from_config, fee_dynamic,
+                "Dynamic function should match config function when using same epochs"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_zero_epochs() -> Result<()> {
+            // Test edge case: 0 epochs should still charge minimum fee
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = config.chunk_size; // 1 chunk
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            let fee = calculate_term_fee(bytes_to_store, 0, &config, irys_price)?;
+            let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
+
+            // Should be exactly the minimum fee ($0.01 with IRYS at $1)
+            let expected_min = dec!(0.01);
+            assert_eq!(
+                fee_dec, expected_min,
+                "Zero epochs should still charge minimum fee"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_very_large_epoch_count() -> Result<()> {
+            // Test that large epoch counts don't cause overflow
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 1024_u64.pow(3); // 1GB
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            // Test with a year's worth of epochs (~26280 epochs)
+            let epochs_per_year = config.epochs_per_year();
+            let fee = calculate_term_fee(bytes_to_store, epochs_per_year, &config, irys_price)?;
+            let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
+
+            // Should be reasonable (not astronomical due to overflow)
+            assert!(
+                fee_dec < dec!(1000),
+                "Fee for 1GB for 1 year should be reasonable, got {}",
+                fee_dec
+            );
+
+            // Should be more than minimum fee of $0.01
+            assert!(
+                fee_dec > dec!(0.01),
+                "Fee for 1GB for 1 year should be more than minimum, got {}",
+                fee_dec
             );
 
             Ok(())
