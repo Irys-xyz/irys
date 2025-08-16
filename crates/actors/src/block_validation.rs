@@ -1694,7 +1694,7 @@ mod tests {
     use super::*;
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        BlockFinalizedMessage,
+        BlockMigrationMessage,
     };
     use actix::{prelude::*, SystemRegistry};
     use irys_config::StorageSubmodulesConfig;
@@ -1785,7 +1785,7 @@ mod tests {
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
-        let msg = BlockFinalizedMessage {
+        let msg = BlockMigrationMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),
         };
@@ -2043,7 +2043,7 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: block.clone(),
             all_txs: Arc::clone(&txs),
         };
@@ -2297,7 +2297,7 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: block.clone(),
             all_txs: Arc::clone(&txs),
         };
