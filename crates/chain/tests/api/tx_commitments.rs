@@ -206,8 +206,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .create_transaction(data, Some(genesis_block.block_hash))
             .expect("To make a data transaction");
 
-        data_tx.header.perm_fee = Some(U256::from(4_000_000_000_000u64));
-        data_tx.header.term_fee = U256::from(1_000_000_000u32);
+        data_tx.header.perm_fee = Some(U256::from(4_000_000_000_000_u64));
+        data_tx.header.term_fee = U256::from(1_000_000_000_u32);
 
         // Sign the data transaction
         let data_tx = signer1
