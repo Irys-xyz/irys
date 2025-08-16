@@ -1059,7 +1059,6 @@ impl IrysNode {
             gossip_listener,
             block_status_provider.clone(),
             execution_payload_cache,
-            vdf_state_readonly.clone(),
             config.clone(),
             service_senders.clone(),
             chain_sync_tx.clone(),
