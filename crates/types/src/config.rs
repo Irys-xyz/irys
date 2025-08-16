@@ -1,7 +1,10 @@
 use crate::{
     irys::IrysSigner,
     storage_pricing::{
-        phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
+        phantoms::{
+            CostPerChunk, CostPerChunkDurationAdjusted, CostPerGb, DecayRate, Irys, IrysPrice,
+            Percentage, Usd,
+        },
         Amount,
     },
     PeerAddress, RethPeerInfo, H256,
@@ -9,6 +12,7 @@ use crate::{
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
+use eyre::Result;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -90,7 +94,7 @@ pub struct ConsensusConfig {
     /// Genesis-specific config values
     pub genesis: GenesisConfig,
 
-    /// The annual cost in USD for storing 1GB of data on the Irys network
+    /// The annual cost in USD for storing 1 GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
     #[serde(
         deserialize_with = "serde_utils::token_amount",
@@ -104,7 +108,7 @@ pub struct ConsensusConfig {
         deserialize_with = "serde_utils::percentage_amount",
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
-    pub decay_rate: Amount<DecayRate>,
+    pub decay_rate_per_year: Amount<DecayRate>,
 
     /// Configuration for the Verifiable Delay Function used in consensus
     pub vdf: VdfConfig,
@@ -144,7 +148,7 @@ pub struct ConsensusConfig {
     pub number_of_ingress_proofs: u64,
 
     /// Target number of years data should be preserved on the network
-    /// Determines long-term storage pricing and incentives
+    /// Determines long-term storage pricing and incentives (perm storage fee)
     pub safe_minimum_number_of_years: u64,
 
     /// Fee required for staking operations in Irys tokens
@@ -181,6 +185,14 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
     pub immediate_tx_inclusion_reward_percent: Amount<Percentage>,
+
+    /// Minimum term fee in USD that must be paid for term storage
+    /// If calculated fee is below this threshold, it will be rounded up
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub minimum_term_fee_usd: Amount<(CostPerChunkDurationAdjusted, Usd)>,
 
     /// Maximum future drift
     #[serde(
@@ -637,6 +649,34 @@ impl ConsensusConfig {
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
+    /// Calculate the number of epochs in one year based on network parameters
+    pub fn epochs_per_year(&self) -> u64 {
+        const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
+        let seconds_per_epoch =
+            self.difficulty_adjustment.block_time * self.epoch.num_blocks_in_epoch;
+        SECONDS_PER_YEAR / seconds_per_epoch
+    }
+
+    /// Convert years to epochs based on network parameters
+    pub fn years_to_epochs(&self, years: u64) -> u64 {
+        years * self.epochs_per_year()
+    }
+
+    /// Compute cost per chunk per epoch from annual cost per GB
+    pub fn cost_per_chunk_per_epoch(&self) -> Result<Amount<(CostPerChunk, Usd)>> {
+        const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
+        let chunks_per_gb = BYTES_PER_GB / self.chunk_size;
+        let epochs_per_year = self.epochs_per_year();
+
+        // Convert annual_cost_per_gb to cost_per_chunk_per_epoch
+        // annual_cost_per_gb / chunks_per_gb / epochs_per_year
+        let annual_decimal = self.annual_cost_per_gb.token_to_decimal()?;
+        let cost_per_chunk_per_year = annual_decimal / Decimal::from(chunks_per_gb);
+        let cost_per_chunk_per_epoch = cost_per_chunk_per_year / Decimal::from(epochs_per_year);
+
+        Amount::token(cost_per_chunk_per_epoch)
+    }
+
     // this is a config used for testing
     pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
@@ -649,9 +689,13 @@ impl ConsensusConfig {
 
         Self {
             chain_id: 1270,
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
-            safe_minimum_number_of_years: 200,
+            // Storage economics for testing config:
+            // Annual cost: 0.01 USD/GB/year
+            // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
+            // 1% annual decay
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
+            decay_rate_per_year: Amount::percentage(dec!(0.01)).unwrap(), // 1% annual decay
+            safe_minimum_number_of_years: 200,                      // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
@@ -753,6 +797,7 @@ impl ConsensusConfig {
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -767,9 +812,13 @@ impl ConsensusConfig {
         const INFLATION_CAP: u128 = 100_000_000;
         Self {
             chain_id: 1270,
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
-            safe_minimum_number_of_years: 200,
+            // Storage economics for testing config:
+            // Annual cost: 0.01 USD/GB/year
+            // With 1s blocks, 100 blocks/epoch: 1 epoch = 100 seconds
+            // 1% annual decay
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
+            decay_rate_per_year: Amount::percentage(dec!(0.01)).unwrap(), // 1% annual decay
+            safe_minimum_number_of_years: 200,                      // 200 years storage duration
             number_of_ingress_proofs: 10,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
@@ -873,6 +922,7 @@ impl ConsensusConfig {
             },
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -1340,8 +1390,8 @@ mod tests {
         chain_id = 1270
         token_price_safe_range = 1.0
         genesis_price = 1.0
-        annual_cost_per_gb = 0.01
-        decay_rate = 0.01
+        cost_per_chunk_per_epoch = 0.00000001
+        decay_rate_per_year =  0.01
         chunk_size = 32
         block_migration_depth = 6
         block_tree_depth = 50
@@ -1351,6 +1401,7 @@ mod tests {
         entropy_packing_iterations = 1000
         number_of_ingress_proofs = 10
         safe_minimum_number_of_years = 200
+        minimum_term_fee_usd = 0.01
         stake_value = 20000.0
         pledge_base_value = 950.0
         pledge_decay = 0.9
