@@ -404,10 +404,6 @@ where
         block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
     ) -> Result<(), BlockPoolError> {
-        // Note: skip_validation_for_fast_track no longer triggers a separate fast-track path.
-        // It's propagated downstream to selectively skip the slowest checks (e.g., VDF verification)
-        // while preserving the normal processing flow.
-
         check_block_status(
             &self.block_status_provider,
             block_header.block_hash,
