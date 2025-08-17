@@ -93,13 +93,15 @@ impl StorageModuleServiceInner {
         let current_modules = self.storage_modules.read().unwrap();
         let mut updated_modules: Vec<Arc<StorageModule>> = Vec::new();
 
-        for (i, info) in storage_module_infos.iter().enumerate() {
+        debug!("StorageModuleInfos:\n{:#?}", storage_module_infos);
+
+        for sm_info in storage_module_infos.iter() {
             // Get the existing StorageModule
-            let existing = &current_modules[i];
+            let existing = &current_modules[sm_info.id];
 
             // Did this storage module get assigned a new partition_hash ?
-            if existing.partition_assignment().is_none() && info.partition_assignment.is_some() {
-                existing.assign_partition(info.partition_assignment.unwrap());
+            if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
+                existing.assign_partition(sm_info.partition_assignment.unwrap());
                 // Record this storage module as updated
                 updated_modules.push(existing.clone());
 
@@ -108,7 +110,7 @@ impl StorageModuleServiceInner {
             }
 
             // Get the path for this module
-            let path = &self.submodules_config.submodule_paths[i];
+            let path = &self.submodules_config.submodule_paths[sm_info.id];
 
             // Validate the path
             // ARCHITECTURE NOTE: Configuration vs. Implementation Mismatch
@@ -129,15 +131,28 @@ impl StorageModuleServiceInner {
             // This limitation should be addressed in future versions to fully realize the original
             // flexible storage architecture. see [`system_ledger::get_genesis_commitments()`] and
             // [`EpochServiceActor::map_storage_modules_to_partition_assignments`] for reference
-            if *path != info.submodules[0].1 {
+            if *path != sm_info.submodules[0].1 {
                 return Err(eyre::eyre!("Submodule paths don't match"));
             }
 
             // Validate the module against on-disk packing parameters
-            if info.partition_assignment.is_some() {
-                match self.validate_packing_params(existing, path, i) {
+            if let Some(info_pa) = sm_info.partition_assignment {
+                match self.validate_packing_params(existing, path, sm_info.id) {
                     Ok(()) => {}
                     Err(err) => panic!("{}", err),
+                }
+
+                // Check to see if there's been a change in the ledger assignment for the partition_has
+                // moved from Capacity->LedgerSlot or LedgerSlot->Capacity
+                if info_pa.ledger_id != existing.partition_assignment().unwrap().ledger_id
+                    || info_pa.slot_index != existing.partition_assignment().unwrap().slot_index
+                {
+                    // Update the storage modules partition assignment (and packing params toml)
+                    // to match ledger/capacity reassignment
+                    existing.assign_partition(info_pa);
+
+                    // Record this storage module as updated
+                    updated_modules.push(existing.clone());
                 }
             }
         }

@@ -172,7 +172,7 @@ impl PackingParams {
     }
 }
 
-static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
+pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
