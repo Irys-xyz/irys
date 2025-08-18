@@ -23,7 +23,7 @@ use reth::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::utils::{
     mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
@@ -316,6 +316,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // - recipient: will receive the EVM transfer from account1
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
+
     let recipient = IrysSigner::random_signer(&config.consensus_config());
     let initial_balance = TEST_USER_BALANCE_IRYS;
     config.consensus.extend_genesis_accounts(vec![(
@@ -341,12 +342,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         ..Default::default()
     };
     let tx_env = TransactionTestContext::sign_tx(account1.clone().into(), evm_tx_req).await;
+
     let evm_tx_hash = reth_context
         .rpc
         .inject_tx(tx_env.encoded_2718().into())
         .await
         .expect("tx should be accepted");
     let data_bytes = "Hello, world!".as_bytes().to_vec();
+
     let irys_tx = node
         .create_publish_data_tx(&account1, data_bytes.clone())
         .await?;
@@ -390,6 +393,25 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .find(|tx| *tx.hash() == evm_tx_hash)
         .expect("EVM transaction should be included in the block");
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
+
+    let debug_api = reth_context.rpc.inner.debug_api();
+    let trace = debug_api
+        .debug_trace_transaction(
+            evm_tx_hash,
+            alloy_rpc_types_trace::geth::GethDebugTracingOptions::new_tracer(
+                alloy_rpc_types_trace::geth::GethDebugBuiltInTracerType::CallTracer,
+            ),
+        )
+        .await?;
+    // we expect to be able to get a trace
+    debug!("Got trace for {}: {:?}", &evm_tx_hash, &trace);
+
+    let _block_trace = debug_api
+        .debug_trace_block(
+            alloy_eips::BlockId::Hash(reth_block.hash().into()),
+            Default::default(),
+        )
+        .await?;
 
     // Verify recipient received the transfer
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
