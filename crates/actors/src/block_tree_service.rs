@@ -386,7 +386,7 @@ impl BlockTreeServiceInner {
         confirmed_block: &Arc<IrysBlockHeader>,
     ) {
         debug!(
-            "JESSEDEBUG confirming irys block evm_block_hash: {} ({})",
+            "confirming irys block evm_block_hash: {} ({})",
             &confirmed_block.evm_block_hash, &confirmed_block.height
         );
         if let Err(e) = self.reth_service_actor.try_send(ForkChoiceUpdateMessage {
