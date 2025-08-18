@@ -31,7 +31,7 @@ use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
 // External crate imports - Revm
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
-use revm::context::{BlockEnv, CfgEnv, ContextTr as _};
+use revm::context::{BlockEnv, Cfg as _, CfgEnv, ContextTr as _};
 use revm::database::states::plain_account::PlainStorage;
 use revm::database::PlainAccount;
 use revm::inspector::NoOpInspector;
@@ -1389,6 +1389,43 @@ where
             result: execution_result,
             state: std::mem::take(&mut self.state),
         };
+
+        // HACK so that inspecting using trace returns a valid frame
+        // as we don't call the "traditional" EVM methods, the inspector returns a default, invalid, frame.
+        if self.inspect && result_state.result.is_success() {
+            // create the initial frame
+            let mut frame = revm::handler::execution::create_init_frame(
+                &tx,
+                self.ctx().cfg().spec(),
+                tx.gas_limit,
+            );
+
+            // tell the inspector that we're starting a frame
+            revm::inspector::handler::frame_start(
+                &mut self.inner.ctx,
+                &mut self.inner.inspector,
+                &mut frame,
+            );
+
+            // force the output to be a valid frame
+            let mut frame_result =
+                revm::handler::FrameResult::Call(revm::interpreter::CallOutcome {
+                    result: InterpreterResult {
+                        result: revm::interpreter::InstructionResult::Continue,
+                        output: Bytes::new(),
+                        gas: revm::interpreter::Gas::new(0),
+                    },
+                    memory_offset: Default::default(),
+                });
+
+            // inject the valid frame as the frame result
+            revm::inspector::handler::frame_end(
+                &mut self.inner.ctx,
+                &mut self.inner.inspector,
+                &frame,
+                &mut frame_result,
+            );
+        }
 
         Ok(Either::Left(result_state))
     }
