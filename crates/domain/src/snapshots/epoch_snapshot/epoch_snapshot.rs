@@ -1,5 +1,5 @@
 use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
-use crate::{EpochBlockData, StorageModuleInfo};
+use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
 use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -17,6 +17,7 @@ use irys_types::{
 };
 use openssl::sha;
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 use tracing::{debug, error, trace, warn};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
@@ -114,10 +115,6 @@ impl EpochSnapshot {
             expired_partition_hashes: Vec::new(),
         };
 
-        if Self::validate_commitments(&genesis_block, &commitments).is_err() {
-            panic!("Cannot validate genesis block commitments");
-        }
-
         match new_self.perform_epoch_tasks(&None, &genesis_block, commitments) {
             Ok(_) => debug!("Initialized Epoch Snapshot"),
             Err(e) => {
@@ -171,6 +168,17 @@ impl EpochSnapshot {
         // Verify that each commitment transaction ID referenced in the commitments ledger has a
         // corresponding commitment transaction in the replay data
         if let Some(commitment_ledger) = commitment_ledger {
+            // Ensure the counts match exactly - no extra commitments allowed
+            if commitment_ledger.tx_ids.len() != commitments.len() {
+                return Err(eyre::eyre!(
+                    "Commitment count mismatch for block {:?}: ledger has {} commitments, but {} commitments provided",
+                    block_header.block_hash,
+                    commitment_ledger.tx_ids.len(),
+                    commitments.len()
+                ));
+            }
+
+            // Verify each commitment transaction ID in the ledger has a corresponding commitment
             for txid in commitment_ledger.tx_ids.iter() {
                 // If we can't find the commitment transaction for a referenced txid, return an error
                 if !commitments.iter().any(|c| c.id == *txid) {
@@ -180,6 +188,27 @@ impl EpochSnapshot {
                         block_header.block_hash.0.to_base58()
                     ));
                 }
+            }
+
+            // Also check the other way around to verify each provided commitment is referenced in
+            // the ledger (no extra commitments)
+            for commitment in commitments.iter() {
+                if !commitment_ledger.tx_ids.contains(&commitment.id) {
+                    return Err(eyre::eyre!(
+                        "Extra commitment transaction {} not referenced in block {} ledger",
+                        commitment.id.0.to_base58(),
+                        block_header.block_hash.0.to_base58()
+                    ));
+                }
+            }
+        } else {
+            // If no commitment ledger exists, there should be no commitments provided
+            if !commitments.is_empty() {
+                return Err(eyre::eyre!(
+                    "Block {} has no commitment ledger, but {} commitments were provided",
+                    block_header.block_hash.0.to_base58(),
+                    commitments.len()
+                ));
             }
         }
         Ok(())
@@ -867,81 +896,148 @@ impl EpochSnapshot {
             .unwrap()
             .submodule_paths;
 
+        // Collect existing storage module packing info
+        let mut sm_packing_info = self.collect_packing_info(paths);
+        debug!("{:#?}", sm_packing_info);
+
         let mut module_infos = Vec::new();
 
         // STEP 1: Publish ledger
-        for pa in assignments
-            .iter()
-            .filter(|pa| pa.ledger_id == Some(DataLedger::Publish as u32))
-        {
-            let id = module_infos.len();
-            let path = match paths.get(id) {
-                Some(p) => p.clone(),
-                None => {
-                    error!("No available storage modules for partition assignment!");
-                    return module_infos;
-                }
-            };
-            module_infos.push(StorageModuleInfo {
-                id,
-                partition_assignment: Some(*pa),
-                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
-            });
-        }
+        self.process_storage_module_assignments(
+            &assignments,
+            &mut sm_packing_info,
+            &mut module_infos,
+            Some(DataLedger::Publish as u32),
+            miner,
+            num_chunks,
+        );
 
         // STEP 2: Submit ledger
-        for pa in assignments
-            .iter()
-            .filter(|pa| pa.ledger_id == Some(DataLedger::Submit as u32))
-        {
-            let id = module_infos.len();
-            let path = match paths.get(id) {
-                Some(p) => p.clone(),
-                None => {
-                    error!("No available storage modules for partition assignment!");
-                    return module_infos;
-                }
-            };
-            module_infos.push(StorageModuleInfo {
-                id,
-                partition_assignment: Some(*pa),
-                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
-            });
-        }
+        self.process_storage_module_assignments(
+            &assignments,
+            &mut sm_packing_info,
+            &mut module_infos,
+            Some(DataLedger::Submit as u32),
+            miner,
+            num_chunks,
+        );
 
-        // STEP 3: Capacity
-        let remaining = paths.len().saturating_sub(module_infos.len());
-        for pa in assignments
-            .iter()
-            .filter(|pa| pa.ledger_id.is_none())
-            .take(remaining)
-        {
-            let id = module_infos.len();
-            let path = match paths.get(id) {
-                Some(p) => p.clone(),
-                None => {
-                    error!("No available storage modules for partition assignment!");
-                    return module_infos;
-                }
-            };
-            module_infos.push(StorageModuleInfo {
-                id,
-                partition_assignment: Some(*pa),
-                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
-            });
-        }
+        // STEP 3: Capacity (with remaining slots limit)
+        self.process_storage_module_assignments(
+            &assignments,
+            &mut sm_packing_info,
+            &mut module_infos,
+            None, // Capacity assignments have no ledger_id
+            miner,
+            num_chunks,
+        );
 
         // STEP 4: Unassigned
-        for (idx, path) in paths.iter().enumerate().skip(module_infos.len()) {
-            // Create StorageModuleInfo entries without partition assignments
+        for (original_idx, (path, _)) in sm_packing_info
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, params))| params.is_none())
+        {
             module_infos.push(StorageModuleInfo {
-                id: idx,
-                partition_assignment: None, // No partition assignment
+                id: original_idx,
+                partition_assignment: None,
                 submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path.clone())],
             });
         }
 
         module_infos
+    }
+
+    /// Loops though all the paths in the storage_submodules.toml and attempts to read the existing
+    /// packing params from that path, building a list of (PathBuf, Option<PackingParams>) whose
+    /// indexes map to the index of the path in the .toml
+    fn collect_packing_info(&self, paths: &[PathBuf]) -> Vec<(PathBuf, Option<PackingParams>)> {
+        paths
+            .iter()
+            .map(|path| {
+                let sub_base_path = self.config.node_config.base_directory.join(path.clone());
+                let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+
+                let params = if params_path.exists() {
+                    Some(PackingParams::from_toml(&params_path).expect("packing params to load"))
+                } else {
+                    None
+                };
+
+                (path.clone(), params)
+            })
+            .collect()
+    }
+
+    /// Processes partition assignments for a specific ledger, creating StorageModuleInfo entries and updating packing state.
+    /// The StorageModuleInfos will reference existing storage modules if that store the partition assignment or use the first
+    /// available storage module index with no partition assignments.
+    fn process_storage_module_assignments(
+        &self,
+        assignments: &[PartitionAssignment],
+        sm_packing_info: &mut [(PathBuf, Option<PackingParams>)],
+        module_infos: &mut Vec<StorageModuleInfo>,
+        target_ledger_id: Option<u32>,
+        miner: Address,
+        num_chunks: u32,
+    ) {
+        let filtered_assignments = assignments
+            .iter()
+            .filter(|pa| pa.ledger_id == target_ledger_id);
+
+        let assignments_to_process = filtered_assignments.collect::<Vec<_>>();
+
+        for pa in assignments_to_process {
+            let id = self.find_or_assign_storage_module(sm_packing_info, pa);
+
+            if id.is_none() {
+                error!("No available storage modules for partition assignment!");
+                return;
+            }
+
+            let id = id.unwrap();
+            let path = sm_packing_info[id].0.clone();
+
+            module_infos.push(StorageModuleInfo {
+                id,
+                partition_assignment: Some(*pa),
+                submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
+            });
+
+            // Update packing info (so this storage module doesn't get assigned to something else)
+            sm_packing_info[id].1 = Some(PackingParams {
+                packing_address: miner,
+                partition_hash: Some(pa.partition_hash),
+                ledger: pa.ledger_id,
+                slot: pa.slot_index,
+            });
+        }
+    }
+
+    /// Finds storage module index for partition: returns existing assignment or first
+    /// available storage module index with no partition assignment.
+    fn find_or_assign_storage_module(
+        &self,
+        sm_packing_info: &[(PathBuf, Option<PackingParams>)],
+        pa: &PartitionAssignment,
+    ) -> Option<usize> {
+        // Try to find existing partition assignment
+        let existing_id = sm_packing_info.iter().position(|(_, params)| {
+            params
+                .as_ref()
+                .is_some_and(|pp| pp.partition_hash == Some(pa.partition_hash))
+        });
+
+        // If not found, find first available storage module index/id with no assignment
+        existing_id.or_else(|| {
+            sm_packing_info.iter().position(|(_, params)| match params {
+                // If there's no packing params its a fresh storage module
+                None => true,
+                // but on restart the storage module may have an "empty" packing params
+                // See StorageModule::new() for why.
+                Some(p) => p.partition_hash.is_none(),
+            })
+        })
     }
 
     /// Gets a partitions assignment to a data partition by partition hash
@@ -1037,6 +1133,54 @@ mod tests {
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
+        }
+    }
+
+    mod validate_commitments {
+        use crate::EpochSnapshot;
+        use irys_database::SystemLedger;
+        use irys_types::{ConsensusConfig, H256List, SystemTransactionLedger};
+
+        #[test]
+        fn should_check_that_all_commitments_are_included() {
+            let config = ConsensusConfig::testing();
+            let mut mocked_block = irys_types::IrysBlockHeader::new_mock_header();
+            let mut comm_tx_1 = irys_types::CommitmentTransaction::new(&config);
+            let mut comm_tx_2 = irys_types::CommitmentTransaction::new(&config);
+            let mut unrelated_tx = irys_types::CommitmentTransaction::new(&config);
+
+            comm_tx_1.id = [1; 32].into();
+            comm_tx_2.id = [2; 32].into();
+            unrelated_tx.id = [3; 32].into();
+
+            mocked_block.system_ledgers.push(SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List(vec![comm_tx_1.id, comm_tx_2.id]),
+            });
+
+            let valid_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone()];
+            let too_few_commitments = vec![comm_tx_1.clone()];
+            let too_many_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone(), comm_tx_2];
+            let valid_count_but_invalid_id = vec![comm_tx_1, unrelated_tx];
+
+            let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
+            assert!(res.is_ok());
+
+            let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_few_commitments)
+                .expect_err("Expected error for too many commitments")
+                .to_string();
+            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 1 commitments provided");
+
+            let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_many_commitments)
+                .expect_err("Expected error for too many commitments")
+                .to_string();
+            assert_eq!(&err_str, "Commitment count mismatch for block 11111111111111111111111111111111: ledger has 2 commitments, but 3 commitments provided");
+
+            let err_str =
+                EpochSnapshot::validate_commitments(&mocked_block, &valid_count_but_invalid_id)
+                    .expect_err("Expected error for the wrong commitment ids")
+                    .to_string();
+            assert_eq!(err_str, "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111");
         }
     }
 }

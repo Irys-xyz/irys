@@ -748,11 +748,11 @@ where
                     return Err(PeerListServiceError::NoPeersAvailable);
                 }
 
-                // Try up to 5 peers to get the block
+                // Try up to 5 iterations over the peer list to get the block
                 let mut last_error = None;
 
-                for peer in peers {
-                    for attempt in 1..=5 {
+                for attempt in 1..=5 {
+                    for peer in &peers {
                         let address = &peer.0;
                         debug!(
                             "Attempting to fetch {:?} from peer {} (attempt {}/5)",
@@ -761,7 +761,7 @@ where
 
                         match gossip_client
                             .make_get_data_request_and_update_the_score(
-                                &peer,
+                                peer,
                                 data_request.clone(),
                                 &peer_list,
                             )
@@ -790,13 +790,12 @@ where
                                     last_error.as_ref().unwrap()
                                 );
 
-                                // Continue trying with the same peer if not the last attempt
-                                if attempt < 5 {
-                                    continue;
-                                }
+                                // Move on to the next peer
+                                continue;
                             }
                         }
                     }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
 
                 Err(PeerListServiceError::FailedToRequestData(format!(

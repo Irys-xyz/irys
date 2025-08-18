@@ -140,6 +140,13 @@ pub async fn last_step_checkpoints_is_valid(
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
 ) -> eyre::Result<()> {
+    // Validate that global_step_number is greater than 0 to prevent arithmetic underflow
+    if vdf_info.global_step_number == 0 {
+        return Err(eyre::eyre!(
+            "Invalid global_step_number: must be greater than 0"
+        ));
+    }
+
     let reset_seed = vdf_info.seed;
     let last_step = vdf_info
         .steps

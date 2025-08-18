@@ -78,6 +78,7 @@ rust_decimal_macros.workspace = true
 semver.workspace = true
 thiserror.workspace = true
 itertools.workspace = true
+alloy-rpc-types-trace.workspace = true
 
 
 [package.metadata.cargo-machete]
