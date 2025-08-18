@@ -248,6 +248,9 @@ pub struct IrysBlockHeader {
     /// $IRYS token price expressed in $USD, updated only on EMA recalculation blocks.
     /// This is what the protocol uses for different pricing calculation purposes.
     pub ema_irys_price: IrysTokenPrice,
+
+    /// Treasury balance tracking
+    pub treasury: U256,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -333,6 +336,14 @@ impl IrysBlockHeader {
             );
         }
         data_txids
+    }
+
+    /// Returns the transaction IDs for a specific data ledger in their original order
+    pub fn get_data_ledger_tx_ids_ordered(&self, ledger_id: DataLedger) -> Option<&[H256]> {
+        self.data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == ledger_id as u32)
+            .map(|l| l.tx_ids.0.as_slice())
     }
 }
 
@@ -581,6 +592,7 @@ impl IrysBlockHeader {
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
+            treasury: U256::zero(),
             ..Default::default()
         }
     }

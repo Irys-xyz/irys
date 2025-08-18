@@ -15,7 +15,7 @@ use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
@@ -251,8 +251,8 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         let peer2_genesis_block =
             block_header_by_hash(&ctx_peer2_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
 
-        assert!(genesis_genesis_block == peer1_genesis_block);
-        assert!(genesis_genesis_block == peer2_genesis_block);
+        assert_eq!(genesis_genesis_block, peer1_genesis_block);
+        assert_eq!(genesis_genesis_block, peer2_genesis_block);
     }
 
     //
@@ -546,6 +546,7 @@ async fn poll_until_fetch_at_block_index_height(
         }
 
         let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        debug!("Fetched info endpoint response: {:?}", json_response);
         if required_blocks_height > json_response.block_index_height {
             tracing::debug!(
                 "{} attempt {} checking {}. required_blocks_height > json_response.block_index_height {} > {}",

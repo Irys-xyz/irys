@@ -192,6 +192,7 @@ where
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord, Hash, Eq, PartialEq, Arbitrary,
 )]
+#[serde(deny_unknown_fields)]
 pub struct PeerAddress {
     pub gossip: SocketAddr,
     pub api: SocketAddr,
