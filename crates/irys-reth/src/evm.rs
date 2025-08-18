@@ -38,7 +38,7 @@ use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus, EvmStorageSlot};
 use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
-use tracing::debug;
+use tracing::trace;
 
 // External crate imports - Other
 
@@ -1277,7 +1277,7 @@ where
         let tx_envelope_input_buf = &tx.data;
 
         if to_address != *SHADOW_TX_DESTINATION_ADDR {
-            debug!("Not a shadow tx");
+            trace!("Not a shadow tx");
             return Ok(Either::Right(tx));
         };
 
@@ -1286,7 +1286,7 @@ where
             .strip_prefix(IRYS_SHADOW_EXEC)
             .is_none()
         {
-            debug!("Not a shadow tx");
+            trace!("Not a shadow tx");
             return Ok(Either::Right(tx));
         };
 
