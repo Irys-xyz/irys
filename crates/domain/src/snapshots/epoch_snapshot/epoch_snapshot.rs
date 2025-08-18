@@ -148,11 +148,53 @@ impl EpochSnapshot {
 
             // Store the owned block_header, not a reference
             previous_epoch_block = Some(block_header);
+
+            // Ensure the current state of the partition assignments is written to disk during replay so the correct
+            // storage modules are re-used when partition assignments move between the capacity pool and ledger slots
+            // on subsequent epoch blocks
+            let storage_module_infos = self.map_storage_modules_to_partition_assignments();
+            self.write_packing_params_to_storage_modules(&storage_module_infos);
         }
 
         let storage_module_info = self.map_storage_modules_to_partition_assignments();
-
         Ok(storage_module_info)
+    }
+
+    fn write_packing_params_to_storage_modules(&self, storage_module_infos: &[StorageModuleInfo]) {
+        let miner = self.config.node_config.miner_address();
+        let paths = &self
+            .storage_submodules_config
+            .as_ref()
+            .unwrap()
+            .submodule_paths;
+
+        for sm_info in storage_module_infos {
+            // Update storage module packing_params.toml files
+            let pa = sm_info.partition_assignment;
+            if let Some(pa) = pa {
+                let params = PackingParams {
+                    packing_address: miner,
+                    partition_hash: Some(pa.partition_hash),
+                    ledger: pa.ledger_id,
+                    slot: pa.slot_index,
+                };
+
+                // Use the existing storage module id to look up the storage module path
+                // from the index in the storage_submodules.toml
+                let sub_base_path = self
+                    .config
+                    .node_config
+                    .base_directory
+                    .join(paths[sm_info.id].clone());
+
+                // Use the path so the packing params get written to the correct drive/storage_module
+                let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+
+                // Write it to disk, this allows the existing storage module to update
+                // when partition assignments change at a future epoch
+                params.write_to_disk(&params_path);
+            }
+        }
     }
 
     fn validate_commitments(
