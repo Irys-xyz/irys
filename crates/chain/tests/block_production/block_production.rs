@@ -395,7 +395,6 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
     let debug_api = reth_context.rpc.inner.debug_api();
-    let debug_api = reth_context.rpc.inner.debug_api();
 
     for tx in block_txs {
         let trace = debug_api
