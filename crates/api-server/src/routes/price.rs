@@ -55,10 +55,11 @@ pub async fn get_price(
             let ema = tree
                 .get_ema_snapshot(&tip)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
-            
+
             // Get the expires field from the latest block's Submit ledger
             let epochs_for_storage = if let Some(tip_block) = tree.get_block(&tip) {
-                tip_block.data_ledgers
+                tip_block
+                    .data_ledgers
                     .iter()
                     .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
                     .and_then(|ledger| ledger.expires)
@@ -67,7 +68,7 @@ pub async fn get_price(
                 // Fallback to config value if we can't get the block
                 state.config.consensus.epoch.submit_ledger_epoch_length
             };
-            
+
             drop(tree);
 
             // Calculate term fee using the dynamic epoch count

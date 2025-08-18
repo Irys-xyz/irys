@@ -740,16 +740,23 @@ pub trait BlockProdStrategy {
                     max_chunk_offset: submit_max_chunk_offset,
                     expires: {
                         // Calculate remaining epochs using modulo arithmetic
-                        let num_blocks_in_epoch = self.inner().config.consensus.epoch.num_blocks_in_epoch;
-                        let submit_ledger_epoch_length = self.inner().config.consensus.epoch.submit_ledger_epoch_length;
-                        
+                        let num_blocks_in_epoch =
+                            self.inner().config.consensus.epoch.num_blocks_in_epoch;
+                        let submit_ledger_epoch_length = self
+                            .inner()
+                            .config
+                            .consensus
+                            .epoch
+                            .submit_ledger_epoch_length;
+
                         // Calculate position in the term ledger cycle
-                        let blocks_per_term_cycle = submit_ledger_epoch_length * num_blocks_in_epoch;
+                        let blocks_per_term_cycle =
+                            submit_ledger_epoch_length * num_blocks_in_epoch;
                         let position_in_cycle = block_height % blocks_per_term_cycle;
-                        
+
                         // Calculate which epoch we're in within this cycle
                         let epoch_in_cycle = position_in_cycle / num_blocks_in_epoch;
-                        
+
                         // Remaining epochs = total epochs - current epoch in cycle
                         Some(submit_ledger_epoch_length - epoch_in_cycle)
                     },

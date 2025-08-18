@@ -527,8 +527,8 @@ pub fn calculate_term_fee(
 
     // Apply duration (no decay for short-term storage)
     let zero_decay = Amount::percentage(Decimal::ZERO)?;
-    let cost_per_chunk_duration = cost_per_chunk_per_epoch
-        .cost_per_replica(epochs_for_storage, zero_decay)?;
+    let cost_per_chunk_duration =
+        cost_per_chunk_per_epoch.cost_per_replica(epochs_for_storage, zero_decay)?;
 
     // Apply same replica count as perm storage
     let cost_with_replicas =
@@ -1824,7 +1824,7 @@ mod tests {
             let mut previous_fee = U256::zero();
             for (epochs, description) in test_cases {
                 let fee = calculate_term_fee(bytes_to_store, epochs, &config, irys_price)?;
-                
+
                 // Fee should increase with more epochs
                 assert!(
                     fee > previous_fee || epochs == 1,
@@ -1833,13 +1833,14 @@ mod tests {
                     fee,
                     previous_fee
                 );
-                
+
                 // Verify the fee is proportional to epochs (no decay for term storage)
                 if epochs == 1 {
                     let fee_1_epoch = fee;
                     let fee_5_epochs = calculate_term_fee(bytes_to_store, 5, &config, irys_price)?;
-                    let fee_10_epochs = calculate_term_fee(bytes_to_store, 10, &config, irys_price)?;
-                    
+                    let fee_10_epochs =
+                        calculate_term_fee(bytes_to_store, 10, &config, irys_price)?;
+
                     // With no decay, 5 epochs should cost ~5x one epoch
                     let ratio_5 = fee_5_epochs / fee_1_epoch;
                     assert!(
@@ -1847,7 +1848,7 @@ mod tests {
                         "5 epochs should cost ~5x one epoch, got ratio: {}",
                         ratio_5
                     );
-                    
+
                     // With no decay, 10 epochs should cost ~10x one epoch
                     let ratio_10 = fee_10_epochs / fee_1_epoch;
                     assert!(
@@ -1856,7 +1857,7 @@ mod tests {
                         ratio_10
                     );
                 }
-                
+
                 previous_fee = fee;
             }
 
@@ -1871,7 +1872,8 @@ mod tests {
             let irys_price = Amount::token(dec!(2.5))?; // $2.50 per IRYS token
 
             // Calculate using the old function
-            let fee_from_config = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let fee_from_config =
+                calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
 
             // Calculate using the new function with same epoch count
             let fee_dynamic = calculate_term_fee(

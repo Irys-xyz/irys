@@ -25,9 +25,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{
-    calculate_perm_fee_from_config, Amount,
-};
+use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
 use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
@@ -1438,14 +1436,19 @@ pub async fn data_txs_are_valid(
         // Calculate expected fees based on data size using block's EMA
         // Calculate term fee first as it's needed for perm fee calculation
         // Get the epochs from the Submit ledger in the block
-        let epochs_for_storage = block.data_ledgers
+        let epochs_for_storage = block
+            .data_ledgers
             .iter()
             .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
             .and_then(|ledger| ledger.expires)
             .unwrap_or(config.consensus.epoch.submit_ledger_epoch_length);
-            
-        let expected_term_fee =
-            calculate_term_storage_base_network_fee(tx.data_size, epochs_for_storage, &block_ema, config)?;
+
+        let expected_term_fee = calculate_term_storage_base_network_fee(
+            tx.data_size,
+            epochs_for_storage,
+            &block_ema,
+            config,
+        )?;
         let expected_perm_fee =
             calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)?;
 
