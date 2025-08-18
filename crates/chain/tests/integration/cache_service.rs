@@ -3,15 +3,7 @@ use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{
-    get_cache_size,
-    tables::{CachedChunks, IngressProofs},
-    walk_all,
-};
-use irys_types::irys::IrysSigner;
-use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
-use reth_db::Database as _;
+use irys_types::{irys::IrysSigner, Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use std::time::Duration;
 use tracing::info;
 
@@ -133,34 +125,17 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    // confirm that we have the right number of CachedChunks in mdbx table
-    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
-        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
-    })?;
+    // Wait for ingress proofs to be generated before proceeding
+    node.wait_for_ingress_proofs(vec![tx.header.id], 10).await?;
 
-    assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
-
-    // confirm that we have the right number of IngressProofs in mdbx table
-    let expected_proofs = 1;
-    let mut ingress_proofs = vec![];
-    for _ in 0..20 {
-        ingress_proofs = node
-            .node_ctx
-            .db
-            .view(walk_all::<IngressProofs, _>)
-            .unwrap()
-            .unwrap();
-        if ingress_proofs.len() == expected_proofs {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert_eq!(ingress_proofs.len(), expected_proofs);
+    // Wait until the chunks have been migrated/persisted before asserting cache count
+    node.wait_for_chunk_cache_count(tx.chunks.len() as u64, 10)
+        .await?;
 
     // now chunks have been posted. mine some blocks to get the publish ledger to be updated in the latest block
     node.mine_blocks(3).await?;
 
-    // confirm that we have one entry in CachedChunks mdbx table
+    // confirm that we have one entry in CachedChunks mdbx table (proof pipeline processed)
     node.wait_for_chunk_cache_count(1, 10).await?;
 
     // mine enough blocks to cause block and chunk migration
