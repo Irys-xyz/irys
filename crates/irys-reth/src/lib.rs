@@ -485,7 +485,7 @@ mod tests {
     /// - The shadow tx from node b is not included in the block.
     /// - The normal tx from node a is included in the block.
     #[test_log::test(tokio::test)]
-    async fn stale_shadow_txs_dont_get_included_in_fcus() -> eyre::Result<()> {
+    async fn stale_shadow_txs_dont_get_included_in_focus() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (((mut node_a, shadow_tx_store_a), (mut node_b, shadow_tx_store_b)), ctx) =
             ctx.get_two_nodes()?;
