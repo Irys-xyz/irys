@@ -1380,7 +1380,7 @@ where
             Err(execution_result) => execution_result,
         };
 
-        // instead of "commiting" the new state (which we can't do from this type-erased context minus some shenannigans), we just need to return it as part of the return type
+        // instead of "committing" the new state (which we can't do from this type-erased context minus some shenannigans), we just need to return it as part of the return type
         // do not use the journal for state checkpointing/unwinding
         // it doesn't have cases for all the operations we need to do
         // (notably arbitrary add/remove of balance)
