@@ -21,14 +21,14 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: alloy_core::primitives::U256::from(690000000000000000_u128),
+                balance: alloy_core::primitives::U256::from(1000000000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             account1.address(),
             GenesisAccount {
-                balance: alloy_core::primitives::U256::from(420000000000000_u128),
+                balance: alloy_core::primitives::U256::from(100000000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -72,6 +72,8 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .await
         .expect("Failed to get price");
 
+    println!("Price info: {:?}", price_info);
+
     let tx = account1
         .create_publish_transaction(
             data_bytes.clone(),
@@ -83,11 +85,12 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let tx = account1.sign_transaction(tx).unwrap();
 
     // post tx header
-    let resp = client
+    let mut resp = client
         .post(format!("{}/v1/tx", http_url))
         .send_json(&tx.header)
         .await
         .unwrap();
+    println!("Response: {:?}", resp.body().await);
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Check that tx has been sent
