@@ -52,6 +52,13 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
+            expired_ledger_fees: std::collections::BTreeMap<
+                irys_types::Address,
+                (
+                    irys_types::U256,
+                    irys_actors::shadow_tx_generator::RollingHash,
+                ),
+            >,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(
@@ -62,6 +69,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     data_txs_with_proofs,
                     reward_amount,
                     self.invalid_timestamp,
+                    expired_ledger_fees,
                 )
                 .await
         }

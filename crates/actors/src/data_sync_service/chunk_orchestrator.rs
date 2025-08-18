@@ -88,8 +88,17 @@ impl ChunkOrchestrator {
     }
 
     pub fn tick(&mut self) -> eyre::Result<()> {
-        self.populate_request_queue();
-        self.dispatch_chunk_requests();
+        // Only need to tick the Orchestrator if the partition is still assigned to a ledger.
+        // Capacity partitions don't need to sync data.
+        if self
+            .storage_module
+            .partition_assignment()
+            .is_some_and(|pa| pa.ledger_id.is_some())
+        {
+            self.populate_request_queue();
+            self.dispatch_chunk_requests();
+        }
+
         Ok(())
     }
 

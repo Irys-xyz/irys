@@ -189,6 +189,7 @@ impl BlockIndex {
         Ok(block_bounds)
     }
 
+    /// Returns the block height + block index item
     pub fn get_block_index_item(
         &self,
         ledger: DataLedger,
@@ -198,9 +199,10 @@ impl BlockIndex {
             let last_max = last_item.ledgers[ledger as usize].max_chunk_offset;
             eyre::ensure!(
                 chunk_offset < last_max,
-                "chunk_offset {} beyond last block's max_chunk_offset {}",
+                "chunk_offset {} beyond last block's max_chunk_offset {}, last block height {}",
                 chunk_offset,
-                last_max
+                last_max,
+                self.items.len()
             );
         }
 

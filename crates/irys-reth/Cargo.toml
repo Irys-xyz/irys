@@ -65,6 +65,7 @@ futures.workspace = true
 alloy-signer-local.workspace = true
 reth-engine-local = { workspace = true }
 reth-db = { workspace = true, features = ["test-utils"] }
+alloy-rpc-types-trace.workspace = true
 
 [features]
 test-utils = ["reth-e2e-test-utils", "reth-engine-local", "serde_json"]
