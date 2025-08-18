@@ -422,9 +422,16 @@ impl DataSyncServiceInner {
             return Vec::new();
         }
 
-        // Extract partition assignment - safe to unwrap since orchestrators are only
-        // created for storage modules with valid data partition assignments
+        // Extract partition assignment
         let pa = storage_module.partition_assignment().unwrap();
+
+        // Check to see that the partition hash hasn't been re-assigned to capacity and no longer
+        // has any data to sync
+        if pa.ledger_id.is_none() {
+            // We don't remove the orchestrator for the partition because it's not hurting anything to keep it around...
+            return Vec::new();
+        }
+
         let ledger_id = pa.ledger_id.unwrap();
 
         // Find all peers that are assigned to store data for the same ledger slot
