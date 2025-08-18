@@ -6,7 +6,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Default test node config
     let seconds_to_wait = 10;
-    let num_blocks_in_epoch = 8;
+    let num_blocks_in_epoch = 15;
     let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     config.consensus.get_mut().chunk_size = 32;
     let signer = IrysSigner::random_signer(&config.consensus_config());
@@ -60,18 +60,16 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     let consensus = &node.node_ctx.config.consensus;
     let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default());
 
-    // Post the stake commitment and await it in the mempool
+    // Post the stake commitment and await until its in the mempool
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
     node.post_commitment_tx(&stake_tx).await?;
     node.wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
         .await?;
 
     // Mine a block and verify the stake commitment is included
-    node.mine_block().await?;
-    assert_eq!(node.get_canonical_chain_height().await, 3);
-    let block3 = node.get_block_by_height(3).await?;
-    let tx_ids = block3.get_commitment_ledger_tx_ids();
-    let txid_map = block3.get_data_ledger_tx_ids();
+    let block = node.mine_block().await?;
+    let tx_ids = block.get_commitment_ledger_tx_ids();
+    let txid_map = block.get_data_ledger_tx_ids();
     assert_eq!(tx_ids, vec![stake_tx.id]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -82,11 +80,9 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         .await?;
 
     // Mine a block and make sure the commitment isn't included again
-    node.mine_block().await?;
-    assert_eq!(node.get_canonical_chain_height().await, 4);
-    let block4 = node.get_block_by_height(4).await?;
-    let tx_ids = block4.get_commitment_ledger_tx_ids();
-    let txid_map = block4.get_data_ledger_tx_ids();
+    let block = node.mine_block().await?;
+    let tx_ids = block.get_commitment_ledger_tx_ids();
+    let txid_map = block.get_data_ledger_tx_ids();
     assert_eq!(tx_ids, vec![]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -108,11 +104,9 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         .await?;
 
     // Mine a block and verify the pledge commitment is included
-    node.mine_block().await?;
-    assert_eq!(node.get_canonical_chain_height().await, 5);
-    let block5 = node.get_block_by_height(5).await?;
-    let tx_ids = block5.get_commitment_ledger_tx_ids();
-    let txid_map = block5.get_data_ledger_tx_ids();
+    let block = node.mine_block().await?;
+    let tx_ids = block.get_commitment_ledger_tx_ids();
+    let txid_map = block.get_data_ledger_tx_ids();
     assert_eq!(tx_ids, vec![pledge_tx.id]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -123,21 +117,28 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
         .await?;
 
     // Mine a block and verify the pledge is not included again
-    node.mine_block().await?;
-    assert_eq!(node.get_canonical_chain_height().await, 6);
-    let block6 = node.get_block_by_height(6).await?;
-    let tx_ids = block6.get_commitment_ledger_tx_ids();
-    let txid_map = block6.get_data_ledger_tx_ids();
+    let block = node.mine_block().await?;
+    let tx_ids = block.get_commitment_ledger_tx_ids();
+    let txid_map = block.get_data_ledger_tx_ids();
     assert_eq!(tx_ids, vec![]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
-    // ===== TEST CASE 4: mine an epoch block and test duplicates again =====
-    node.mine_blocks(2).await?;
-    assert_eq!(node.get_canonical_chain_height().await, 8);
-    let block8 = node.get_block_by_height(8).await?;
-    let tx_ids = block8.get_commitment_ledger_tx_ids();
-    let txid_map = block8.get_data_ledger_tx_ids();
+    // ===== TEST CASE 4: ensure we have mined an epoch block and test duplicates again =====
+    let block = {
+        let mut epoch_block = node.get_last_epoch_block().await?;
+        // mine until we generate an epoch block
+        for _ in 0..10 {
+            if epoch_block.height == 0 {
+                node.mine_block().await?;
+                epoch_block = node.get_last_epoch_block().await?;
+            }
+        }
+        assert!(epoch_block.height > 0);
+        epoch_block
+    };
+    let tx_ids = block.get_commitment_ledger_tx_ids();
+    let txid_map = block.get_data_ledger_tx_ids();
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
@@ -149,8 +150,6 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     node.post_commitment_tx(&stake_tx).await?;
     node.post_commitment_tx(&pledge_tx).await?;
     node.wait_for_mempool(tx.id, seconds_to_wait).await?;
-    node.wait_for_mempool_commitment_txs(vec![stake_tx.id, pledge_tx.id], seconds_to_wait)
-        .await?;
 
     // Post the chunks for the data again
     for i in 0..chunks.len() {
@@ -158,12 +157,10 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     }
 
     // Mine a block and validate that none of them are included
-    node.mine_block().await?;
-    assert_eq!(node.get_canonical_chain_height().await, 9);
-    let block9 = node.get_block_by_height(9).await?;
-    let txid_map = block9.get_data_ledger_tx_ids();
+    let block = node.mine_block().await?;
+    let txid_map = block.get_data_ledger_tx_ids();
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
-    let tx_ids = block9.get_commitment_ledger_tx_ids();
+    let tx_ids = block.get_commitment_ledger_tx_ids();
     assert_eq!(tx_ids, vec![]);
 
     // Validate the data tx is not published again

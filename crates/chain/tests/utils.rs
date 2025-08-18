@@ -889,6 +889,37 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    /// Returns the most recent epoch boundary block (the "last epoch block")
+    /// according to the canonical chain head.
+    ///
+    /// Strategy:
+    /// - Prefer the tip's `last_epoch_hash` pointer, which directly references
+    ///   the epoch boundary block for the current epoch.
+    /// - If the pointer is zero (rare in tests with custom genesis), fall back
+    ///   to height arithmetic: floor(H / N) * N where N = num_blocks_in_epoch.
+    pub async fn get_last_epoch_block(&self) -> eyre::Result<IrysBlockHeader> {
+        // Get canonical tip
+        let (chain, _) = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .map_err(|e| eyre!("failed to get canonical chain: {}", e))?;
+        let tip = chain.last().ok_or_eyre("Empty canonical chain")?;
+        let tip_block = self.get_block_by_height(tip.height).await?;
+
+        // Primary path: follow last_epoch_hash pointer
+        if tip_block.last_epoch_hash != H256::zero() {
+            return self.get_block_by_hash(&tip_block.last_epoch_hash);
+        }
+
+        // Fallback: compute the last epoch boundary height by modulo
+        let blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+        if blocks_in_epoch == 0 {
+            return Err(eyre!("num_blocks_in_epoch is zero"));
+        }
+        let boundary_height = (tip_block.height / blocks_in_epoch) * blocks_in_epoch;
+
+        self.get_block_by_height(boundary_height).await
+    }
+
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
