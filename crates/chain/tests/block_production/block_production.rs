@@ -14,7 +14,6 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
 use irys_types::{IrysTransactionCommon as _, H256};
-use reth::rpc::eth::EthApiServer;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
@@ -38,7 +37,7 @@ const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 // Test account balances
 const ZERO_BALANCE: U256 = U256::ZERO;
-const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
+const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([3_000_000_000_000_000_000, 0, 0, 0]); // 3 IRYS
 
 #[test_log::test(actix::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -317,6 +316,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // - recipient: will receive the EVM transfer from account1
     let account1 = IrysSigner::random_signer(&config.consensus_config());
     let chain_id = config.consensus_config().chain_id;
+
     let recipient = IrysSigner::random_signer(&config.consensus_config());
     let initial_balance = TEST_USER_BALANCE_IRYS;
     config.consensus.extend_genesis_accounts(vec![(
@@ -342,12 +342,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         ..Default::default()
     };
     let tx_env = TransactionTestContext::sign_tx(account1.clone().into(), evm_tx_req).await;
+
     let evm_tx_hash = reth_context
         .rpc
         .inject_tx(tx_env.encoded_2718().into())
         .await
         .expect("tx should be accepted");
     let data_bytes = "Hello, world!".as_bytes().to_vec();
+
     let irys_tx = node
         .create_publish_data_tx(&account1, data_bytes.clone())
         .await?;

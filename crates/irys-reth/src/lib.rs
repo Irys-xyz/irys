@@ -85,6 +85,7 @@ pub fn compose_shadow_tx(
     TxEip1559 {
         access_list: AccessList::default(),
         chain_id,
+        // TODO: now that we control the EVM (muhahaha), we can _probably_ bypass these gas validations
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
         input: shadow_tx_buf.into(),
@@ -394,10 +395,12 @@ where
     type EVM = evm::IrysEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
+        // TODO: figure out if this needs to be EthEvmConfig<IrysEvmFactory> - so far it doesn't seem like it needs to.
         let evm_config = EthEvmConfig::new(ctx.chain_spec())
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
+
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::default();
+        let evm_factory = IrysEvmFactory::new();
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -2513,6 +2516,7 @@ pub mod test_utils {
     }
 
     /// Helper for asserting balance changes
+    #[track_caller]
     pub fn assert_balance_change(
         node: &NodeHelperType<IrysEthereumNode>,
         address: Address,
