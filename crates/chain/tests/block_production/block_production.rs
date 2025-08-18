@@ -37,7 +37,7 @@ const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 // Test account balances
 const ZERO_BALANCE: U256 = U256::ZERO;
-const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([3_000_000_000_000_000_000, 0, 0, 0]); // 3 IRYS
+const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
 
 #[test_log::test(actix::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -395,7 +395,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
     let debug_api = reth_context.rpc.inner.debug_api();
-    let res = debug_api
+    let trace = debug_api
         .debug_trace_transaction(
             evm_tx_hash,
             alloy_rpc_types_trace::geth::GethDebugTracingOptions::new_tracer(
@@ -403,7 +403,8 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
             ),
         )
         .await?;
-    debug!("GOT TRACE FOR {} {:?}", &evm_tx_hash, &res);
+    // we expect to be able to get a trace
+    debug!("Got trace for {}: {:?}", &evm_tx_hash, &trace);
     // Verify recipient received the transfer
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount

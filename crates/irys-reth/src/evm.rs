@@ -1597,7 +1597,7 @@ where
                 original_balance = %original_balance,
                 new_balance = %account.info.balance,
                 fee_amount = %fee,
-                "JESSEDEBUG3 Incrementing beneficiary balance with priority fee"
+                "Incrementing beneficiary balance with priority fee"
             );
 
             Ok((account, false))
@@ -1816,7 +1816,10 @@ where
         // handle a case when an account has never existed (0 balance, no data stored on it)
         // We don't even create a receipt in this case (eth does the same with native txs)
         let Some(mut new_account_info) = account else {
-            tracing::warn!("account does not exist");
+            tracing::warn!(
+                "account {} does not exist for balance decrement",
+                &balance_decrement.target
+            );
             return Err(Self::create_invalid_tx_error(
                 *tx_hash,
                 InvalidTransaction::OverflowPaymentInTransaction,
