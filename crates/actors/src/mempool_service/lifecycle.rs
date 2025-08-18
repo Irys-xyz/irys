@@ -586,6 +586,48 @@ impl Inner {
 
         let mempool_state = &self.mempool_state.clone();
 
+        // Flush pending chunks for migrated transactions now that headers are in the database.
+        // This ensures any chunks buffered pre-confirmation are persisted and will trigger
+        // ingress proof generation once the full set is available.
+        {
+            // First collect the data_roots to flush while holding a read lock, then drop it.
+            let data_roots_to_flush = {
+                let mem_state = mempool_state.read().await;
+                let mut roots = Vec::new();
+                for txid in submit_tx_ids.iter().chain(publish_tx_ids.iter()) {
+                    if let Some(header) = mem_state.valid_submit_ledger_tx.get(txid) {
+                        roots.push(header.data_root);
+                    }
+                }
+                roots
+            };
+
+            // Now take ownership of pending chunks for those roots with a write lock.
+            let to_flush = {
+                let mut mem_state = mempool_state.write().await;
+                let mut chunks = Vec::new();
+                for data_root in data_roots_to_flush {
+                    if let Some(chunks_map) = mem_state.pending_chunks.pop(&data_root) {
+                        for (_, chunk) in chunks_map.into_iter() {
+                            chunks.push(chunk);
+                        }
+                    }
+                }
+                chunks
+            };
+
+            // Finally, re-ingest the chunks so they get persisted/gossiped under confirmed headers.
+            for chunk in to_flush {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                let _ = self
+                    .handle_message(crate::mempool_service::MempoolServiceMessage::IngestChunk(
+                        chunk, oneshot_tx,
+                    ))
+                    .await;
+                let _ = oneshot_rx.await;
+            }
+        }
+
         // Remove the submit tx from the pending valid_submit_ledger_tx pool
         {
             let mut mempool_state_write_guard = mempool_state.write().await;

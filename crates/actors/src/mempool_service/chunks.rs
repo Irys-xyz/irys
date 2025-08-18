@@ -258,23 +258,37 @@ impl Inner {
             }
         }
 
-        let is_confirmed = match &cached_txids {
-            Some(txids) => {
-                let mut confirmed = false;
-                for txid in txids {
-                    match irys_database::tx_header_by_txid(&read_tx, txid) {
-                        Ok(Some(_)) => {
-                            confirmed = true;
-                            break;
-                        }
-                        Ok(None) => {}
-                        Err(_) => return Err(ChunkIngressError::DatabaseError),
+        // Consider a data_root confirmed if either:
+        // - We have a tx header persisted in the DB (included in a block), or
+        // - The mempool has a published header (ingress_proofs present) for this data_root
+        let mut is_confirmed = false;
+
+        // 1) Check DB for any tx header associated with this data_root (cached_txids comes from CachedDataRoots)
+        if let Some(txids) = &cached_txids {
+            for txid in txids {
+                match irys_database::tx_header_by_txid(&read_tx, txid) {
+                    Ok(Some(_)) => {
+                        is_confirmed = true;
+                        break;
                     }
+                    Ok(None) => {}
+                    Err(_) => return Err(ChunkIngressError::DatabaseError),
                 }
-                confirmed
             }
-            None => false,
-        };
+        }
+
+        // 2) If not confirmed by DB, check mempool for a header that has ingress_proofs (treated as publish-confirmed)
+        if !is_confirmed {
+            let guard = self.mempool_state.read().await;
+            if let Some(_published) = guard
+                .valid_submit_ledger_tx
+                .values()
+                .find(|h| h.data_root == chunk.data_root && h.ingress_proofs.is_some())
+            {
+                is_confirmed = true;
+            }
+            drop(guard);
+        }
         if is_confirmed {
             // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
             if let Err(e) = self
@@ -433,8 +447,9 @@ impl Inner {
             }
         };
 
-        // Only generate ingress proofs and gossip when the transaction is confirmed on-chain
-
+        // Only generate ingress proofs and gossip when the transaction is confirmed
+        // (DB-confirmed, mempool-published with ingress_proofs, or observed in recent canonical blocks)
+        // (either on-chain or via mempool-published header with ingress_proofs present)
         if is_confirmed && chunk_count == expected_chunk_count {
             // we *should* have all the chunks
             // dispatch a ingress proof task
