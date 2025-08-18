@@ -23,7 +23,7 @@ use reth::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::utils::{
     mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
@@ -395,16 +395,20 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
     let debug_api = reth_context.rpc.inner.debug_api();
-    let trace = debug_api
-        .debug_trace_transaction(
-            evm_tx_hash,
-            alloy_rpc_types_trace::geth::GethDebugTracingOptions::new_tracer(
-                alloy_rpc_types_trace::geth::GethDebugBuiltInTracerType::CallTracer,
-            ),
-        )
-        .await?;
-    // we expect to be able to get a trace
-    debug!("Got trace for {}: {:?}", &evm_tx_hash, &trace);
+    let debug_api = reth_context.rpc.inner.debug_api();
+
+    for tx in block_txs {
+        let trace = debug_api
+            .debug_trace_transaction(
+                *tx.hash(),
+                alloy_rpc_types_trace::geth::GethDebugTracingOptions::new_tracer(
+                    alloy_rpc_types_trace::geth::GethDebugBuiltInTracerType::CallTracer,
+                ),
+            )
+            .await?;
+        // we expect to be able to get a trace
+        info!("Got trace for {}: {:?}", &tx.hash(), &trace);
+    }
 
     let _block_trace = debug_api
         .debug_trace_block(
