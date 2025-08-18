@@ -1390,8 +1390,8 @@ mod tests {
         chain_id = 1270
         token_price_safe_range = 1.0
         genesis_price = 1.0
-        cost_per_chunk_per_epoch = 0.00000001
-        decay_rate_per_year =  0.01
+        annual_cost_per_gb = 0.01
+        decay_rate_per_year = 0.01
         chunk_size = 32
         block_migration_depth = 6
         block_tree_depth = 50
@@ -1518,7 +1518,7 @@ mod tests {
         [oracle]
         type = "mock"
         initial_price = 1.0
-        incremental_change = 0.00000000000001
+        incremental_change = 0.00000001
         smoothing_interval = 15
 
         [storage]
