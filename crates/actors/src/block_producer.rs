@@ -738,13 +738,21 @@ pub trait BlockProdStrategy {
                     tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                     tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                     max_chunk_offset: submit_max_chunk_offset,
-                    expires: Some(
-                        self.inner()
-                            .config
-                            .consensus
-                            .epoch
-                            .submit_ledger_epoch_length,
-                    ),
+                    expires: {
+                        // Calculate remaining epochs using modulo arithmetic
+                        let num_blocks_in_epoch = self.inner().config.consensus.epoch.num_blocks_in_epoch;
+                        let submit_ledger_epoch_length = self.inner().config.consensus.epoch.submit_ledger_epoch_length;
+                        
+                        // Calculate position in the term ledger cycle
+                        let blocks_per_term_cycle = submit_ledger_epoch_length * num_blocks_in_epoch;
+                        let position_in_cycle = block_height % blocks_per_term_cycle;
+                        
+                        // Calculate which epoch we're in within this cycle
+                        let epoch_in_cycle = position_in_cycle / num_blocks_in_epoch;
+                        
+                        // Remaining epochs = total epochs - current epoch in cycle
+                        Some(submit_ledger_epoch_length - epoch_in_cycle)
+                    },
                     proofs: None,
                 },
             ],

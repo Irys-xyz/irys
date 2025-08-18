@@ -23,8 +23,16 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
         let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        // Convert annual decay rate to per-epoch
+        let epochs_per_year =
+            irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
+        let decay_rate_per_epoch =
+            irys_types::storage_pricing::Amount::new(irys_types::storage_pricing::safe_div(
+                ctx.node_ctx.config.consensus.decay_rate_per_year.amount,
+                epochs_per_year,
+            )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
-            .cost_per_replica(epochs_for_storage, ctx.node_ctx.config.consensus.decay_rate)?
+            .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -92,8 +100,16 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
         let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        // Convert annual decay rate to per-epoch
+        let epochs_per_year =
+            irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
+        let decay_rate_per_epoch =
+            irys_types::storage_pricing::Amount::new(irys_types::storage_pricing::safe_div(
+                ctx.node_ctx.config.consensus.decay_rate_per_year.amount,
+                epochs_per_year,
+            )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
-            .cost_per_replica(epochs_for_storage, ctx.node_ctx.config.consensus.decay_rate)?
+            .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -185,8 +201,16 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
         let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        // Convert annual decay rate to per-epoch
+        let epochs_per_year =
+            irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
+        let decay_rate_per_epoch =
+            irys_types::storage_pricing::Amount::new(irys_types::storage_pricing::safe_div(
+                ctx.node_ctx.config.consensus.decay_rate_per_year.amount,
+                epochs_per_year,
+            )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
-            .cost_per_replica(epochs_for_storage, ctx.node_ctx.config.consensus.decay_rate)?
+            .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
             .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(

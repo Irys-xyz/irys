@@ -5,6 +5,7 @@
 //! - `Amount<(IrysPrice, Usd)>` - Cost in $USD of a single $IRYS token, the data retrieved form oracles
 //! - `Amount<(NetworkFee, Irys)>` - The cost in $IRYS that the user will have to pay to store his data on Irys
 
+use crate::ConsensusConfig;
 pub use crate::U256;
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
@@ -514,9 +515,46 @@ impl<T> Debug for Amount<T> {
     }
 }
 
-// ===== Fee Calculation Functions =====
+/// Calculate term fee for temporary storage with dynamic epoch count
+/// Uses the same replica count as permanent storage but for the specified number of epochs
+pub fn calculate_term_fee(
+    bytes_to_store: u64,
+    epochs_for_storage: u64,
+    config: &ConsensusConfig,
+    ema_price: Amount<(IrysPrice, Usd)>,
+) -> Result<U256> {
+    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
 
-use crate::ConsensusConfig;
+    // Apply duration (no decay for short-term storage)
+    let zero_decay = Amount::percentage(Decimal::ZERO)?;
+    let cost_per_chunk_duration = cost_per_chunk_per_epoch
+        .cost_per_replica(epochs_for_storage, zero_decay)?;
+
+    // Apply same replica count as perm storage
+    let cost_with_replicas =
+        cost_per_chunk_duration.replica_count(config.number_of_ingress_proofs)?;
+
+    // Calculate base network fee using current EMA price
+    let base_fee = cost_with_replicas.base_network_fee(
+        U256::from(bytes_to_store),
+        config.chunk_size,
+        ema_price,
+    )?;
+
+    // Ensure minimum fee in USD terms
+    // Convert minimum USD to IRYS tokens using the current EMA price
+    let min_fee_irys = config.minimum_term_fee_usd.base_network_fee(
+        U256::from(config.chunk_size), // 1 chunk worth
+        config.chunk_size,
+        ema_price,
+    )?;
+
+    if base_fee.amount < min_fee_irys.amount {
+        Ok(min_fee_irys.amount)
+    } else {
+        Ok(base_fee.amount)
+    }
+}
 
 /// Calculate term fee for temporary storage using ConsensusConfig
 /// Uses the same replica count as permanent storage but for submit_ledger_epoch_length duration
@@ -525,38 +563,12 @@ pub fn calculate_term_fee_from_config(
     config: &ConsensusConfig,
     ema_price: Amount<(IrysPrice, Usd)>,
 ) -> Result<U256> {
-    let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
-    
-    // Apply duration (no decay for short-term storage)
-    let zero_decay = Amount::percentage(Decimal::ZERO)?;
-    let cost_per_chunk_duration = cost_per_chunk_per_epoch.cost_per_replica(
-        config.epoch.submit_ledger_epoch_length, 
-        zero_decay
-    )?;
-    
-    // Apply same replica count as perm storage
-    let cost_with_replicas = cost_per_chunk_duration.replica_count(config.number_of_ingress_proofs)?;
-    
-    // Calculate base network fee using current EMA price
-    let base_fee = cost_with_replicas.base_network_fee(
-        U256::from(bytes_to_store),
-        config.chunk_size,
+    calculate_term_fee(
+        bytes_to_store,
+        config.epoch.submit_ledger_epoch_length,
+        config,
         ema_price,
-    )?;
-    
-    // Ensure minimum fee in USD terms
-    // Convert minimum USD to IRYS tokens using the current EMA price
-    let min_fee_irys = config.minimum_term_fee_usd.base_network_fee(
-        U256::from(config.chunk_size), // 1 chunk worth
-        config.chunk_size,
-        ema_price,
-    )?;
-    
-    if base_fee.amount < min_fee_irys.amount {
-        Ok(min_fee_irys.amount)
-    } else {
-        Ok(base_fee.amount)
-    }
+    )
 }
 
 /// Calculate permanent storage fee including base network fee and ingress proof rewards
@@ -567,29 +579,38 @@ pub fn calculate_perm_fee_from_config(
     term_fee: U256,
 ) -> Result<Amount<(NetworkFee, Irys)>> {
     let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
-    
+
     // Calculate epochs for storage duration
     let epochs_for_storage = config.safe_minimum_number_of_years * config.epochs_per_year();
-    
+
+    // Convert annual decay rate to per-epoch decay rate
+    // The decay_rate is annual (e.g., 0.01 = 1% per year) stored in PRECISION_SCALE
+    // We need to convert it to per-epoch: decay_per_epoch = decay_annual / epochs_per_year
+    let epochs_per_year = U256::from(config.epochs_per_year());
+    let decay_rate_per_epoch = Amount::new(safe_div(
+        config.decay_rate_per_year.amount,
+        epochs_per_year,
+    )?);
+
     // Apply decay over storage duration
     let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
-        .cost_per_replica(epochs_for_storage, config.decay_rate)?
+        .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
         .replica_count(config.number_of_ingress_proofs)?;
-    
+
     // Calculate base network fee
     let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
         U256::from(bytes_to_store),
         config.chunk_size,
         ema_price,
     )?;
-    
+
     // Add ingress proof rewards to the base network fee
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
         config.number_of_ingress_proofs,
         config.immediate_tx_inclusion_reward_percent,
     )?;
-    
+
     Ok(total_perm_fee)
 }
 
@@ -837,14 +858,16 @@ mod tests {
             // Setup:
             // This test verifies the mathematical formula produces consistent results
             // Golden values from original test: 0.01 cost, 200 periods, 1% decay = 0.8661 total
-            
+
             // We use abstract values that match the original test to maintain golden values
             let cost_per_period = Amount::token(dec!(0.01)).unwrap();
-            let decay_rate = Amount::percentage(dec!(0.01)).unwrap(); // 1% per period
+            let decay_rate_per_year = Amount::percentage(dec!(0.01)).unwrap(); // 1% per period
             let periods = 200;
 
             // Action
-            let total_cost = cost_per_period.cost_per_replica(periods, decay_rate)?.replica_count(1)?;
+            let total_cost = cost_per_period
+                .cost_per_replica(periods, decay_rate_per_year)?
+                .replica_count(1)?;
 
             // Convert the result to Decimal for comparison
             let actual = total_cost.token_to_decimal().unwrap();
@@ -875,18 +898,24 @@ mod tests {
         }
 
         #[test]
-        // r = 0 => division by zero => should error.
-        fn test_zero_decay_rate() {
+        // r = 0 => no decay, cost is simply epochs * cost_per_epoch
+        fn test_zero_decay_rate() -> Result<()> {
             // cost_per_epoch = 1000 (scaled 1e18)
-            // decay = 0 BPS => division by zero.
+            // decay = 0 => no decay over time
             let cost_per_epoch = Amount::token(dec!(1000)).unwrap();
             let decay = Amount::percentage(dec!(0)).unwrap();
             let epochs = 10;
 
-            let result = cost_per_epoch.cost_per_replica(epochs, decay);
+            let result = cost_per_epoch.cost_per_replica(epochs, decay)?;
 
-            // Expect an error.
-            assert!(result.is_err(), "Expected an error for r=0, got Ok(...)");
+            // With zero decay, total = cost_per_epoch * epochs = 1000 * 10 = 10000
+            let expected = dec!(10000);
+            let actual = result.token_to_decimal()?;
+            assert_eq!(
+                actual, expected,
+                "With zero decay, cost should be epochs * cost_per_epoch"
+            );
+            Ok(())
         }
 
         #[test]
@@ -934,7 +963,9 @@ mod tests {
             let decay = Amount::percentage(dec!(0.05)).unwrap(); // 5%
             let epochs = 0;
 
-            let total = cost_per_epoch.cost_per_replica(epochs, decay)?.replica_count(1)?;
+            let total = cost_per_epoch
+                .cost_per_replica(epochs, decay)?
+                .replica_count(1)?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             let expected_dec = Decimal::ZERO;
@@ -951,7 +982,9 @@ mod tests {
             let decay = Amount::percentage(dec!(0.05)).unwrap(); // 5%
             let epochs = 10;
 
-            let total = cost_per_epoch.cost_per_replica(epochs, decay)?.replica_count(1)?;
+            let total = cost_per_epoch
+                .cost_per_replica(epochs, decay)?
+                .replica_count(1)?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             assert_eq!(
@@ -979,8 +1012,11 @@ mod tests {
             let fee_percentage = Amount::percentage(dec!(0.05)).unwrap(); // 5%
 
             // Action
-            let network_fee = cost_per_chunk_adjusted
-                .base_network_fee(U256::from(bytes_to_store), chunk_size, price_irys)?;
+            let network_fee = cost_per_chunk_adjusted.base_network_fee(
+                U256::from(bytes_to_store),
+                chunk_size,
+                price_irys,
+            )?;
             let price_with_network_reward = network_fee.add_multiplier(fee_percentage)?;
 
             // Convert results for checking
@@ -1278,6 +1314,767 @@ mod tests {
                 "exp(-x) * exp(x) = {}, expected 1.0",
                 product_dec
             );
+            Ok(())
+        }
+    }
+
+    mod term_fee_calculations {
+        use super::*;
+        use crate::ConsensusConfig;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn test_term_fee_single_chunk() -> Result<()> {
+            // Setup: Use testnet config as baseline
+            let config = ConsensusConfig::testnet();
+            let chunk_size = config.chunk_size; // 256 KB
+            let bytes_to_store = chunk_size; // Single chunk
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate term fee
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Convert to decimal for verification
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+            // The minimum fee is $0.01 USD
+            // With IRYS at $1, minimum fee should be 0.01 IRYS
+            let expected_min = dec!(0.01);
+
+            assert!(
+                term_fee_dec >= expected_min,
+                "Term fee {} should be at least minimum fee {}",
+                term_fee_dec,
+                expected_min
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_term_fee_16tb() -> Result<()> {
+            // Setup: 16TB = 16 * 1024^4 bytes
+            let config = ConsensusConfig::testnet();
+            let tb_in_bytes = 1024_u64.pow(4);
+            let bytes_to_store = 16 * tb_in_bytes; // 16TB
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate term fee
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Convert to decimal for verification
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+            // Golden data calculation for 16TB with testnet config:
+            // - 16TB = 17,592,186,044,416 bytes = 67,108,864 chunks (at 256KB/chunk)
+            // - Annual cost: $0.01/GB/year
+            // - Cost per chunk per epoch: ~$0.0000000000929
+            // - Duration: 5 epochs (submit_ledger_epoch_length)
+            // - Replicas: 10 (number_of_ingress_proofs)
+            // - No decay for term storage (0% decay rate)
+            //
+            // Expected cost = 67,108,864 chunks * $0.0000000000929 * 5 epochs * 10 replicas
+            //               = $0.3117199391 USD
+            // With IRYS at $1, cost = 0.3117199391 IRYS
+            let expected_fee = dec!(0.3117199391);
+
+            // Allow small tolerance for floating point precision
+            let diff = (term_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.0000001),
+                "16TB term fee should be {} IRYS, got {} IRYS (diff: {})",
+                expected_fee,
+                term_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_term_fee_below_minimum() -> Result<()> {
+            // Setup: Create a config with very low cost to trigger minimum fee
+            let mut config = ConsensusConfig::testnet();
+            config.annual_cost_per_gb = Amount::token(dec!(0.0000001))?; // Very low cost
+
+            let bytes_to_store = 1; // Just 1 byte
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate term fee
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Convert to decimal
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+            // Should be exactly the minimum fee ($0.01 with IRYS at $1)
+            let expected = dec!(0.01);
+
+            assert_eq!(
+                term_fee_dec, expected,
+                "Fee below minimum should be rounded up to minimum"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_term_fee_with_different_prices() -> Result<()> {
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = config.chunk_size; // 1 chunk
+
+            // Test with different IRYS prices
+            let prices = vec![
+                (dec!(0.10), dec!(0.10)),   // IRYS at $0.10, min fee = 0.10 IRYS
+                (dec!(1.00), dec!(0.01)),   // IRYS at $1.00, min fee = 0.01 IRYS
+                (dec!(10.00), dec!(0.001)), // IRYS at $10.00, min fee = 0.001 IRYS
+            ];
+
+            for (price_usd, expected_min_irys) in prices {
+                let irys_price = Amount::token(price_usd)?;
+                let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+                let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+                // Minimum fee is $0.01 USD, so in IRYS tokens = 0.01 / price_usd
+                assert!(
+                    (term_fee_dec - expected_min_irys).abs() < dec!(0.0000001),
+                    "With IRYS at ${}, minimum fee should be {} IRYS, got {}",
+                    price_usd,
+                    expected_min_irys,
+                    term_fee_dec
+                );
+            }
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_term_fee_1tb() -> Result<()> {
+            // Setup: 1TB - common user scenario that's above minimum fee
+            let config = ConsensusConfig::testnet();
+            let tb_in_bytes = 1024_u64.pow(4); // 1TB = 1,099,511,627,776 bytes
+            let bytes_to_store = tb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate term fee
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+            // Golden data: 1TB = 4,194,304 chunks
+            // With testnet config: 12s blocks, 100 blocks/epoch = 1200s/epoch
+            // Epochs per year = 365*24*60*60 / 1200 = 26280
+            // Cost per chunk per epoch = 0.01 / 4096 / 26280 = 9.292532e-11
+            // Term cost = 4194304 * 9.292532e-11 * 5 * 10 = 0.0194824961523712
+            let expected_fee = dec!(0.0194824961523712);
+
+            let diff = (term_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.0000000001),
+                "1TB term fee should be {} IRYS, got {} IRYS (diff: {})",
+                expected_fee,
+                term_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_term_fee_1pb_extreme() -> Result<()> {
+            // Setup: 1PB - extreme case to test large numbers
+            let config = ConsensusConfig::testnet();
+            let pb_in_bytes = 1024_u64.pow(5); // 1PB = 1,125,899,906,842,624 bytes
+            let bytes_to_store = pb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate term fee
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+            // Golden data: 1PB = 4,294,967,296 chunks
+            // Cost = 4,294,967,296 * $0.0000000000929 * 5 epochs * 10 replicas
+            //      = $19.9500761035 USD
+            let expected_fee = dec!(19.9500761035);
+
+            let diff = (term_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.0000001),
+                "1PB term fee should be {} IRYS, got {} IRYS (diff: {})",
+                expected_fee,
+                term_fee_dec,
+                diff
+            );
+
+            // Verify it's still reasonable and didn't overflow
+            assert!(
+                term_fee_dec < dec!(100000),
+                "1PB fee should be reasonable, not astronomical"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_term_fee_chunk_boundaries() -> Result<()> {
+            let config = ConsensusConfig::testnet();
+            let chunk_size = config.chunk_size;
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            // Use 10 million chunks to be well above minimum fee ($0.01)
+            // 10 million chunks = ~2.5TB, cost ~$0.046
+            let bytes_10m_chunks = 10_000_000 * chunk_size;
+            let fee_10m = calculate_term_fee_from_config(bytes_10m_chunks, &config, irys_price)?;
+            let fee_10m_dec = Amount::<Irys>::new(fee_10m).token_to_decimal()?;
+
+            // Test 10 million chunks + 1 byte (should round up to 10,000,001 chunks)
+            let bytes_10m_plus_1 = (10_000_000 * chunk_size) + 1;
+            let fee_10m_plus =
+                calculate_term_fee_from_config(bytes_10m_plus_1, &config, irys_price)?;
+            let fee_10m_plus_dec = Amount::<Irys>::new(fee_10m_plus).token_to_decimal()?;
+
+            // The difference should be exactly the cost of 1 chunk
+            let expected_ratio = dec!(10000001) / dec!(10000000);
+            let actual_ratio = fee_10m_plus_dec / fee_10m_dec;
+            let ratio_diff = (actual_ratio - expected_ratio).abs();
+
+            assert!(
+                ratio_diff < dec!(0.0000001),
+                "Adding 1 byte should increase cost by exactly 1 chunk. Expected ratio {}, got {}",
+                expected_ratio,
+                actual_ratio
+            );
+
+            // Verify that we're above minimum fee
+            assert!(
+                fee_10m_dec > dec!(0.04),
+                "Test should use enough chunks to be above minimum fee, got {}",
+                fee_10m_dec
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_extreme_token_prices() -> Result<()> {
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 100 * config.chunk_size; // 100 chunks
+
+            // Test with very cheap IRYS ($0.001)
+            let cheap_price = Amount::token(dec!(0.001))?;
+            let cheap_fee = calculate_term_fee_from_config(bytes_to_store, &config, cheap_price)?;
+            let cheap_fee_dec = Amount::<Irys>::new(cheap_fee).token_to_decimal()?;
+
+            // Test with very expensive IRYS ($1000)
+            let expensive_price = Amount::token(dec!(1000))?;
+            let expensive_fee =
+                calculate_term_fee_from_config(bytes_to_store, &config, expensive_price)?;
+            let expensive_fee_dec = Amount::<Irys>::new(expensive_fee).token_to_decimal()?;
+
+            // The fees in IRYS should be inversely proportional to price
+            // cheap_fee * 0.001 = expensive_fee * 1000 (both in USD)
+            let cheap_usd = cheap_fee_dec * dec!(0.001);
+            let expensive_usd = expensive_fee_dec * dec!(1000);
+            let usd_diff = (cheap_usd - expensive_usd).abs();
+
+            assert!(
+                usd_diff < dec!(0.0000001),
+                "USD value should be the same regardless of token price. Got {} vs {}",
+                cheap_usd,
+                expensive_usd
+            );
+
+            // At $0.001/IRYS, minimum $0.01 = 10 IRYS
+            assert!(
+                cheap_fee_dec >= dec!(10),
+                "At $0.001/IRYS, minimum should be 10 IRYS"
+            );
+
+            // At $1000/IRYS, minimum $0.01 = 0.00001 IRYS
+            let expected_min_expensive = dec!(0.00001);
+            if expensive_fee_dec <= expected_min_expensive * dec!(2) {
+                // If we're near minimum, verify it's correct
+                assert!(
+                    (expensive_fee_dec - expected_min_expensive).abs() < dec!(0.0000001),
+                    "At $1000/IRYS, minimum should be 0.00001 IRYS"
+                );
+            }
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_spreadsheet_golden_data_1tb_1epoch() -> Result<()> {
+            // Golden data from pricing spreadsheet:
+            // - Total Fee Per Epoch Storage Price (TB): $0.0753
+            // - 1TB @ 1 epoch = $0.0753
+
+            // To match the spreadsheet, we need to reverse-engineer the annual cost
+            // Spreadsheet shows $0.0753 per TB per epoch with 10 replicas
+            // This means $0.00753 per TB per epoch per replica
+
+            // Create custom config matching spreadsheet economics
+            let mut config = ConsensusConfig::testnet();
+
+            // Calculate the required annual_cost_per_gb to achieve $0.0753/TB/epoch
+            // With testnet config: 26280 epochs/year
+            // $0.00753 per TB per epoch per replica = $197.9064 per TB per year per replica
+            // $197.9064 per TB per year = $0.193245 per GB per year
+            config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
+
+            // Term storage: 1 epoch (not 5), 10 replicas, 0% decay
+            let tb_in_bytes = 1024_u64.pow(4); // 1TB
+            let bytes_to_store = tb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate for 1 epoch (not using the standard term fee function which uses 5 epochs)
+            let epochs_for_storage = 1_u64;
+            let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
+            let decay_rate = Amount::percentage(dec!(0.0))?; // No decay for term storage
+
+            let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
+                .cost_per_replica(epochs_for_storage, decay_rate)?
+                .replica_count(config.number_of_ingress_proofs)?;
+
+            let term_fee = cost_per_chunk_adjusted.base_network_fee(
+                U256::from(bytes_to_store),
+                config.chunk_size,
+                irys_price,
+            )?;
+
+            let term_fee_dec = Amount::<Irys>::new(term_fee.amount).token_to_decimal()?;
+
+            // Expected from spreadsheet: $0.0753 for 1TB @ 1 epoch
+            let expected_fee = dec!(0.0753);
+
+            // Allow reasonable tolerance for rounding differences
+            let diff = (term_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.0001),
+                "1TB @ 1 epoch should be {} IRYS (spreadsheet value), got {} IRYS (diff: {})",
+                expected_fee,
+                term_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_spreadsheet_golden_data_1tb_5epochs() -> Result<()> {
+            // Golden data from pricing spreadsheet:
+            // - 1TB @ 5 epochs = $0.3767
+
+            // Create custom config matching spreadsheet economics
+            let mut config = ConsensusConfig::testnet();
+
+            // Use the same annual cost that achieves $0.0753/TB/epoch
+            config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
+
+            // Term storage: 5 epochs, 10 replicas, 0% decay
+            let tb_in_bytes = 1024_u64.pow(4); // 1TB
+            let bytes_to_store = tb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Use the standard term fee calculation (5 epochs)
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+
+            // Expected from spreadsheet: $0.3767 for 1TB @ 5 epochs
+            let expected_fee = dec!(0.3767);
+
+            // Allow reasonable tolerance for rounding differences
+            let diff = (term_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.0003),
+                "1TB @ 5 epochs should be {} IRYS (spreadsheet value), got {} IRYS (diff: {})",
+                expected_fee,
+                term_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_spreadsheet_golden_data_per_gb() -> Result<()> {
+            // Golden data from pricing spreadsheet:
+            // - Per GB pricing should be $0.00007358 per epoch
+
+            // Create custom config matching spreadsheet economics
+            let mut config = ConsensusConfig::testnet();
+
+            // Use annual cost that gives us the target per-GB price
+            // $0.00007358 per GB per epoch with 10 replicas
+            // = $0.000007358 per GB per epoch per replica
+            // With 26280 epochs/year: $0.193368 per GB per year
+            config.annual_cost_per_gb = Amount::token(dec!(0.193368))?;
+
+            let gb_in_bytes = 1024_u64.pow(3); // 1GB
+            let bytes_to_store = gb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate for 1 epoch
+            let epochs_for_storage = 1_u64;
+            let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
+            let decay_rate = Amount::percentage(dec!(0.0))?; // No decay for term storage
+
+            let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
+                .cost_per_replica(epochs_for_storage, decay_rate)?
+                .replica_count(config.number_of_ingress_proofs)?;
+
+            let term_fee = cost_per_chunk_adjusted.base_network_fee(
+                U256::from(bytes_to_store),
+                config.chunk_size,
+                irys_price,
+            )?;
+
+            let term_fee_dec = Amount::<Irys>::new(term_fee.amount).token_to_decimal()?;
+
+            // Expected from spreadsheet: $0.00007358 per GB per epoch with 10 replicas
+            // This is the total cost for 1GB for 1 epoch across all replicas
+            let expected_fee = dec!(0.00007358);
+
+            // Allow reasonable tolerance for rounding differences
+            let diff = (term_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.00000001),
+                "1GB @ 1 epoch should be {} IRYS (spreadsheet value), got {} IRYS (diff: {})",
+                expected_fee,
+                term_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_spreadsheet_golden_data_daily_cost() -> Result<()> {
+            // Golden data from pricing spreadsheet:
+            // - Daily Cost per TB: $0.0075 (without replicas)
+            // - This translates to specific epoch costs based on epoch duration
+
+            // Create custom config matching spreadsheet economics
+            let mut config = ConsensusConfig::testnet();
+
+            // Daily cost per TB (single replica) = $0.0075
+            // Annual cost = $0.0075 * 365 = $2.7375 per TB
+            // = $0.00267333984375 per GB per year
+            config.annual_cost_per_gb = Amount::token(dec!(0.00267333984375))?;
+
+            // Calculate daily cost per TB (single replica)
+            // Annual cost per TB = $2.75
+            // Daily cost per TB = $2.75 / 365 = $0.00753424657...
+
+            let tb_in_bytes = 1024_u64.pow(4); // 1TB
+            let bytes_to_store = tb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Calculate epochs per day
+            // With 12s blocks and 100 blocks/epoch = 1200s/epoch = 20 minutes/epoch
+            // 24 hours = 1440 minutes = 72 epochs per day
+            let epochs_per_day = 72_u64;
+
+            let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
+            let decay_rate = Amount::percentage(dec!(0.0))?; // No decay for term storage
+
+            // Calculate for 72 epochs (1 day) with 1 replica
+            let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
+                .cost_per_replica(epochs_per_day, decay_rate)?
+                .replica_count(1)?; // Single replica to match spreadsheet daily cost
+
+            let daily_fee = cost_per_chunk_adjusted.base_network_fee(
+                U256::from(bytes_to_store),
+                config.chunk_size,
+                irys_price,
+            )?;
+
+            let daily_fee_dec = Amount::<Irys>::new(daily_fee.amount).token_to_decimal()?;
+
+            // Expected daily cost from spreadsheet: $0.0075 per TB (single replica)
+            let expected_fee = dec!(0.0075);
+
+            // Allow reasonable tolerance for rounding differences
+            let diff = (daily_fee_dec - expected_fee).abs();
+            assert!(
+                diff < dec!(0.00001),
+                "1TB daily cost (single replica) should be close to {} IRYS, got {} IRYS (diff: {})",
+                expected_fee,
+                daily_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_dynamic_epoch_count() -> Result<()> {
+            // Test that the new calculate_term_fee function correctly uses different epoch counts
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 1024_u64.pow(4) * 100; // 100TB - large enough to avoid minimum fee
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // Test with different epoch counts
+            let test_cases = vec![
+                (1_u64, "1 epoch"),
+                (3_u64, "3 epochs"),
+                (5_u64, "5 epochs (default)"),
+                (10_u64, "10 epochs"),
+                (100_u64, "100 epochs"),
+            ];
+
+            let mut previous_fee = U256::zero();
+            for (epochs, description) in test_cases {
+                let fee = calculate_term_fee(bytes_to_store, epochs, &config, irys_price)?;
+                
+                // Fee should increase with more epochs
+                assert!(
+                    fee > previous_fee || epochs == 1,
+                    "Fee for {} should be greater than previous: {} vs {}",
+                    description,
+                    fee,
+                    previous_fee
+                );
+                
+                // Verify the fee is proportional to epochs (no decay for term storage)
+                if epochs == 1 {
+                    let fee_1_epoch = fee;
+                    let fee_5_epochs = calculate_term_fee(bytes_to_store, 5, &config, irys_price)?;
+                    let fee_10_epochs = calculate_term_fee(bytes_to_store, 10, &config, irys_price)?;
+                    
+                    // With no decay, 5 epochs should cost ~5x one epoch
+                    let ratio_5 = fee_5_epochs / fee_1_epoch;
+                    assert!(
+                        ratio_5 >= U256::from(4) && ratio_5 <= U256::from(6),
+                        "5 epochs should cost ~5x one epoch, got ratio: {}",
+                        ratio_5
+                    );
+                    
+                    // With no decay, 10 epochs should cost ~10x one epoch
+                    let ratio_10 = fee_10_epochs / fee_1_epoch;
+                    assert!(
+                        ratio_10 >= U256::from(9) && ratio_10 <= U256::from(11),
+                        "10 epochs should cost ~10x one epoch, got ratio: {}",
+                        ratio_10
+                    );
+                }
+                
+                previous_fee = fee;
+            }
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_dynamic_epoch_vs_config() -> Result<()> {
+            // Verify that calculate_term_fee with config epochs matches calculate_term_fee_from_config
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 1024_u64.pow(3) * 500; // 500GB
+            let irys_price = Amount::token(dec!(2.5))?; // $2.50 per IRYS token
+
+            // Calculate using the old function
+            let fee_from_config = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Calculate using the new function with same epoch count
+            let fee_dynamic = calculate_term_fee(
+                bytes_to_store,
+                config.epoch.submit_ledger_epoch_length,
+                &config,
+                irys_price,
+            )?;
+
+            // Should be exactly the same
+            assert_eq!(
+                fee_from_config, fee_dynamic,
+                "Dynamic function should match config function when using same epochs"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_zero_epochs() -> Result<()> {
+            // Test edge case: 0 epochs should still charge minimum fee
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = config.chunk_size; // 1 chunk
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            let fee = calculate_term_fee(bytes_to_store, 0, &config, irys_price)?;
+            let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
+
+            // Should be exactly the minimum fee ($0.01 with IRYS at $1)
+            let expected_min = dec!(0.01);
+            assert_eq!(
+                fee_dec, expected_min,
+                "Zero epochs should still charge minimum fee"
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_very_large_epoch_count() -> Result<()> {
+            // Test that large epoch counts don't cause overflow
+            let config = ConsensusConfig::testnet();
+            let bytes_to_store = 1024_u64.pow(3); // 1GB
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            // Test with a year's worth of epochs (~26280 epochs)
+            let epochs_per_year = config.epochs_per_year();
+            let fee = calculate_term_fee(bytes_to_store, epochs_per_year, &config, irys_price)?;
+            let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
+
+            // Should be reasonable (not astronomical due to overflow)
+            assert!(
+                fee_dec < dec!(1000),
+                "Fee for 1GB for 1 year should be reasonable, got {}",
+                fee_dec
+            );
+
+            // Should be more than minimum fee of $0.01
+            assert!(
+                fee_dec > dec!(0.01),
+                "Fee for 1GB for 1 year should be more than minimum, got {}",
+                fee_dec
+            );
+
+            Ok(())
+        }
+    }
+
+    mod perm_fee_calculations {
+        use super::*;
+        use crate::ConsensusConfig;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn test_perm_fee_16tb() -> Result<()> {
+            // Setup: 16TB - same as term test for comparison
+            let config = ConsensusConfig::testnet();
+            let tb_in_bytes = 1024_u64.pow(4);
+            let bytes_to_store = 16 * tb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
+
+            // First calculate term fee (needed for perm fee calculation)
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Calculate permanent fee
+            let perm_fee =
+                calculate_perm_fee_from_config(bytes_to_store, &config, irys_price, term_fee)?;
+            let perm_fee_dec = perm_fee.token_to_decimal()?;
+
+            // Golden data: 16TB = 67,108,864 chunks
+            // Base cost: $141,666.6756358678
+            // Ingress rewards: $0.1558599696
+            // Total: $141,666.8314958374 USD
+            let expected_total = dec!(141666.8314958374);
+
+            let diff = (perm_fee_dec - expected_total).abs();
+            assert!(
+                diff < dec!(1), // Allow $1 tolerance for large numbers
+                "16TB perm fee should be {} IRYS, got {} IRYS (diff: {})",
+                expected_total,
+                perm_fee_dec,
+                diff
+            );
+
+            // Verify it's massively more expensive than term
+            let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
+            let ratio = perm_fee_dec / term_fee_dec;
+            assert!(
+                ratio > dec!(400000),
+                "Permanent should be >400,000x more expensive than term, got {}x",
+                ratio
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_perm_fee_1tb() -> Result<()> {
+            // Setup: 1TB - reasonable size for permanent storage
+            let config = ConsensusConfig::testnet();
+            let tb_in_bytes = 1024_u64.pow(4);
+            let bytes_to_store = tb_in_bytes;
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            // Calculate term fee first
+            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+
+            // Calculate permanent fee
+            let perm_fee =
+                calculate_perm_fee_from_config(bytes_to_store, &config, irys_price, term_fee)?;
+            let perm_fee_dec = perm_fee.token_to_decimal()?;
+
+            // Golden data: 1TB = 4,194,304 chunks
+            // With 200 years and 1% decay, and 26280 epochs/year:
+            // Decay factor ≈ 2,272,339
+            // Base cost: $8854.1672272417
+            // Term fee: $0.0194824962
+            // Ingress rewards: $0.0097412481
+            // Total: $8854.1769684898 USD
+            let expected_total = dec!(8854.1769684898);
+
+            let diff = (perm_fee_dec - expected_total).abs();
+            assert!(
+                diff < dec!(1),
+                "1TB perm fee should be {} IRYS, got {} IRYS (diff: {})",
+                expected_total,
+                perm_fee_dec,
+                diff
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_perm_fee_decay_calculation() -> Result<()> {
+            // Test the decay formula explicitly
+            let config = ConsensusConfig::testnet();
+
+            // Use a large size to avoid minimum fee effects
+            let bytes_to_store = 10000 * config.chunk_size; // 10000 chunks
+            let irys_price = Amount::token(dec!(1.0))?;
+
+            // Calculate the base storage cost (without ingress rewards)
+            let epochs_for_storage = config.years_to_epochs(config.safe_minimum_number_of_years);
+            let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
+
+            // Calculate with decay (convert annual decay to per-epoch)
+            let epochs_per_year = U256::from(config.epochs_per_year());
+            let decay_rate_per_epoch = Amount::new(safe_div(
+                config.decay_rate_per_year.amount,
+                epochs_per_year,
+            )?);
+            let cost_with_decay = cost_per_chunk_per_epoch
+                .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
+                .replica_count(config.number_of_ingress_proofs)?;
+            let base_fee_with_decay = cost_with_decay.base_network_fee(
+                U256::from(bytes_to_store),
+                config.chunk_size,
+                irys_price,
+            )?;
+
+            // Calculate without decay (decay_rate_per_year =  0)
+            let cost_no_decay = cost_per_chunk_per_epoch
+                .cost_per_replica(epochs_for_storage, Amount::percentage(dec!(0))?)?
+                .replica_count(config.number_of_ingress_proofs)?;
+            let base_fee_no_decay = cost_no_decay.base_network_fee(
+                U256::from(bytes_to_store),
+                config.chunk_size,
+                irys_price,
+            )?;
+
+            let decay_amount = base_fee_with_decay.token_to_decimal()?;
+            let no_decay_amount = base_fee_no_decay.token_to_decimal()?;
+            let ratio = decay_amount / no_decay_amount;
+
+            // With 1% decay over 200 years, the decay factor is approximately 0.432
+            // (1 - (1-0.01/26298)^5259600) / (0.01/26298) / 5259600 ≈ 0.432
+            assert!(
+                ratio > dec!(0.43) && ratio < dec!(0.44),
+                "Decay should reduce cost to ~43.2% of no-decay. Got ratio: {}",
+                ratio
+            );
+
             Ok(())
         }
     }
