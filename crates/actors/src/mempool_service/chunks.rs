@@ -258,37 +258,9 @@ impl Inner {
             }
         }
 
-        // Consider a data_root confirmed if either:
-        // - We have a tx header persisted in the DB (included in a block), or
-        // - The mempool has a published header (ingress_proofs present) for this data_root
-        let mut is_confirmed = false;
-
-        // 1) Check DB for any tx header associated with this data_root (cached_txids comes from CachedDataRoots)
-        if let Some(txids) = &cached_txids {
-            for txid in txids {
-                match irys_database::tx_header_by_txid(&read_tx, txid) {
-                    Ok(Some(_)) => {
-                        is_confirmed = true;
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(_) => return Err(ChunkIngressError::DatabaseError),
-                }
-            }
-        }
-
-        // 2) If not confirmed by DB, check mempool for a header that has ingress_proofs (treated as publish-confirmed)
-        if !is_confirmed {
-            let guard = self.mempool_state.read().await;
-            if let Some(_published) = guard
-                .valid_submit_ledger_tx
-                .values()
-                .find(|h| h.data_root == chunk.data_root && h.ingress_proofs.is_some())
-            {
-                is_confirmed = true;
-            }
-            drop(guard);
-        }
+        let is_confirmed = self
+            .is_data_root_confirmed(chunk.data_root, &cached_txids)
+            .await?;
         if is_confirmed {
             // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
             if let Err(e) = self
@@ -511,6 +483,57 @@ impl Inner {
         }
 
         Ok(())
+    }
+
+    /// Determines whether a data_root is considered "confirmed" for the purposes of
+    /// persisting chunks, generating ingress proofs, and gossiping.
+    ///
+    /// Confirmation criteria (any one is sufficient), checked in this order for speed:
+    /// 1) The mempool contains a header for this data_root that already has ingress_proofs,
+    ///    which indicates it has been published/promoted in the canonical chain and is safe
+    ///    to treat as confirmed for chunk persistence and proof/gossip gating.
+    /// 2) A transaction header for any txid associated with this data_root exists in the DB
+    ///    (indicating it has been included in a block and migrated to the database).
+    ///
+    ///
+    /// Returns:
+    /// - Ok(true) if the data_root meets any of the above criteria
+    /// - Ok(false) if none of the criteria are met
+    /// - Err(DatabaseError) if a database read fails while checking
+    async fn is_data_root_confirmed(
+        &self,
+        data_root: DataRoot,
+        cached_txids: &Option<Vec<H256>>,
+    ) -> Result<bool, ChunkIngressError> {
+        // 1) Check mempool for a header that has ingress_proofs (treated as publish-confirmed)
+        {
+            let guard = self.mempool_state.read().await;
+            let found = guard
+                .valid_submit_ledger_tx
+                .values()
+                .any(|h| h.data_root == data_root && h.ingress_proofs.is_some());
+            if found {
+                return Ok(true);
+            }
+        }
+
+        // 2) Check DB for any tx header associated with this data_root (cached_txids comes from CachedDataRoots)
+        if let Some(txids) = cached_txids {
+            let read_tx = self
+                .read_tx()
+                .map_err(|_| ChunkIngressError::DatabaseError)?;
+            for txid in txids {
+                match irys_database::tx_header_by_txid(&read_tx, txid) {
+                    Ok(Some(_)) => return Ok(true),
+                    Ok(None) => {}
+                    Err(_) => return Err(ChunkIngressError::DatabaseError),
+                }
+            }
+        }
+
+        // No further checks; absence in mempool and DB means not confirmed yet.
+
+        Ok(false)
     }
 }
 
