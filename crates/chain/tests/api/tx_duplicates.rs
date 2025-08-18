@@ -49,17 +49,12 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // Wait for mempool should return immediately because the transaction is already known
     node.wait_for_mempool(txid, seconds_to_wait).await?;
 
-    // Mine a block and verify the duplicate tx is not included again
-    node.mine_block().await?;
-    let block2 = node.get_block_by_height(2).await?;
-    assert_eq!(node.get_canonical_chain_height().await, 2);
-    let txid_map = block2.get_data_ledger_tx_ids();
-    assert!(!txid_map.get(&DataLedger::Submit).unwrap().contains(&txid));
+    // Wait for ingress proofs using the shared helper, then mine the next block to publish
+    node.wait_for_ingress_proofs(vec![txid], seconds_to_wait)
+        .await?;
 
-    // Verify the tx is published
-    assert!(txid_map.get(&DataLedger::Publish).unwrap().contains(&txid));
-    assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
-    assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 1);
+    // loop through the block chain and confirm the tx was in Submit, and then Publish ledgers.
+    node.assert_tx_progresses_submit_then_publish(txid).await?;
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
     let consensus = &node.node_ctx.config.consensus;

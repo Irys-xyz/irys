@@ -721,6 +721,66 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    /// Verify that a txid first appears in the Submit ledger and later in the Publish ledger
+    /// by scanning the canonical chain in order.
+    ///
+    /// This helper asserts:
+    /// - The transaction appears in Submit in some block
+    /// - The transaction appears in Publish in some subsequent block (height strictly greater)
+    pub async fn assert_tx_progresses_submit_then_publish(&self, txid: H256) -> eyre::Result<()> {
+        // Get canonical chain snapshot
+        let (chain, _) = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
+            .await
+            .map_err(|e| eyre!("failed to read canonical chain: {}", e))?;
+
+        // Track first sightings
+        let mut submit_height: Option<u64> = None;
+        let mut publish_height: Option<u64> = None;
+
+        for entry in chain.iter() {
+            let block = self
+                .get_block_by_height(entry.height)
+                .await
+                .map_err(|e| eyre!("failed to get block at height {}: {}", entry.height, e))?;
+            let txid_map = block.get_data_ledger_tx_ids();
+
+            if submit_height.is_none() {
+                if let Some(submit_ids) = txid_map.get(&DataLedger::Submit) {
+                    if submit_ids.contains(&txid) {
+                        submit_height = Some(entry.height);
+                        // Don't continue to publish check in the same block
+                        continue;
+                    }
+                }
+            }
+
+            if submit_height.is_some() && publish_height.is_none() {
+                if let Some(publish_ids) = txid_map.get(&DataLedger::Publish) {
+                    if publish_ids.contains(&txid) {
+                        publish_height = Some(entry.height);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let submit_height =
+            submit_height.ok_or_else(|| eyre!("transaction {} never appeared in Submit", txid))?;
+        let publish_height = publish_height
+            .ok_or_else(|| eyre!("transaction {} never appeared in Publish", txid))?;
+
+        if publish_height <= submit_height {
+            return Err(eyre!(
+                "transaction {} published at height {} not after submit height {}",
+                txid,
+                publish_height,
+                submit_height
+            ));
+        }
+
+        Ok(())
+    }
+
     pub fn get_block_index_height(&self) -> u64 {
         self.node_ctx.block_index_guard.read().latest_height()
     }
