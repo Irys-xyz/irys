@@ -567,7 +567,7 @@ pub fn hash_ingress_sha256(message: &[u8], address: Address) -> [u8; 32] {
 
 /// Returns a SHA256 hash of the the concatenated SHA256 hashes of a vector of messages.
 pub fn hash_all_sha256(messages: Vec<&[u8]>) -> [u8; 32] {
-    let hash: Vec<u8> = messages.into_iter().flat_map(|m| hash_sha256(m)).collect();
+    let hash: Vec<u8> = messages.into_iter().flat_map(hash_sha256).collect();
     hash_sha256(&hash)
 }
 
