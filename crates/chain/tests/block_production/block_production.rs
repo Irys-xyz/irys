@@ -405,6 +405,14 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await?;
     // we expect to be able to get a trace
     debug!("Got trace for {}: {:?}", &evm_tx_hash, &trace);
+
+    let _block_trace = debug_api
+        .debug_trace_block(
+            alloy_eips::BlockId::Hash(reth_block.hash().into()),
+            Default::default(),
+        )
+        .await?;
+
     // Verify recipient received the transfer
     let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
