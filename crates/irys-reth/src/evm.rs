@@ -1393,7 +1393,7 @@ where
         // HACK so that inspecting using trace returns a valid frame
         // as we don't call the "traditional" EVM methods, the inspector returns a default, invalid, frame.
         if self.inspect && result_state.result.is_success() {
-            // insert a fake frame with the success
+            // create the initial frame
             let mut frame = revm::handler::execution::create_init_frame(
                 &tx,
                 self.ctx().cfg().spec(),
@@ -1418,7 +1418,7 @@ where
                     memory_offset: Default::default(),
                 });
 
-            // inject the valid frame
+            // inject the valid frame as the frame result
             revm::inspector::handler::frame_end(
                 &mut self.inner.ctx,
                 &mut self.inner.inspector,
