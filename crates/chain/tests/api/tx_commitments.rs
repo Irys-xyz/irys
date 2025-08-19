@@ -7,7 +7,7 @@ use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, CommitmentType, NodeConfig, H256,
+    irys::IrysSigner, Address, CommitmentTransaction, CommitmentType, NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -25,7 +25,7 @@ macro_rules! assert_ok {
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
 
     // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
@@ -33,6 +33,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // 1. Stake and pledge commitments are correctly processed across multiple epoch transitions
     // 2. Partition assignments are properly created and maintained for all pledges
     // 3. The commitment state correctly tracks stake and pledge relationships
+    // 4. Capacity pledges can migrate to ledger slots and maintain their storage_module.id mappings
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
@@ -41,6 +42,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let block_migration_depth = num_blocks_in_epoch - 1;
     // set block migration depth so epoch blocks go to index correctly
     config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    config.consensus.get_mut().num_chunks_in_partition = 20;
+    config.consensus.get_mut().num_chunks_in_recall_range = 5;
 
     // Create multiple signers to test different commitment scenarios
     let signer1 = IrysSigner::random_signer(&config.consensus_config());
@@ -54,6 +57,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let genesis_parts_before;
     let signer1_parts_before;
     let signer2_parts_before;
+    let sm_infos_before;
 
     let node = {
         // Start a test node with custom configuration
@@ -118,14 +122,20 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         let expected_ids = [stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id];
         let block_1 = node.get_block_by_height(1).await.unwrap();
         let commitments_1 = block_1.get_commitment_ledger_tx_ids();
-        debug!("Block - height: {:?}\n{:#?}", block_1.height, commitments_1,);
+        debug!(
+            "Block commitments - height: {:?}\n{:#?}",
+            block_1.height, commitments_1,
+        );
         assert_eq!(commitments_1.len(), 4);
         assert!(expected_ids.iter().all(|id| commitments_1.contains(id)));
 
         // Block height: 2 is an epoch block and should have the same commitments and no more
         let block_2 = node.get_block_by_height(2).await.unwrap();
         let commitments_2 = block_2.get_commitment_ledger_tx_ids();
-        debug!("Block - height: {:?}\n{:#?}", block_2.height, commitments_2);
+        debug!(
+            "Block commitments - height: {:?}\n{:#?}",
+            block_2.height, commitments_2
+        );
         assert_eq!(commitments_2.len(), expected_ids.len());
         assert!(expected_ids.iter().all(|id| commitments_2.contains(id)));
 
@@ -178,6 +188,39 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         let pledge3 = post_pledge_commitment(&node, &signer2, H256::default()).await;
         info!("signer2: {} post pledge: {}", signer2_address, pledge3.id);
 
+        // Add some data so that the submit ledger grows and a capacity
+        // partition is assigned to submit ledger slot 1
+
+        // Create data chunks for this partition to store
+        // Make sure the data chunks fill > 50% of a partition to trigger ledger growth
+        let num_chunks = config.consensus.get_mut().num_chunks_in_partition / 2 + 2;
+        let chunk_size = config.consensus.get_mut().chunk_size;
+
+        let mut data = Vec::with_capacity((chunk_size * num_chunks) as usize);
+        for chunk_index in 0..num_chunks {
+            let chunk_data = vec![chunk_index as u8; chunk_size as usize];
+            data.extend(chunk_data);
+        }
+
+        // DATA TX: Create the data transaction from the chunks
+        let mut data_tx = signer1
+            .create_transaction(data, Some(genesis_block.block_hash))
+            .expect("To make a data transaction");
+
+        data_tx.header.perm_fee = Some(U256::from(4_000_000_000_000_u64));
+        data_tx.header.term_fee = U256::from(1_000_000_000_u32);
+
+        // Sign the data transaction
+        let data_tx = signer1
+            .sign_transaction(data_tx)
+            .expect("data tx should be signable");
+
+        // Post the data transaction to the nodes mempool
+        node.post_data_tx_raw(&data_tx.header).await;
+
+        let res = node.wait_for_mempool(data_tx.header.id, 5).await;
+        assert_matches!(res, Ok(()));
+
         // Mine enough blocks to reach the second epoch boundary
         info!("MINE SECOND EPOCH BLOCK:");
         node.mine_blocks(num_blocks_in_epoch + 2).await?;
@@ -210,6 +253,13 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             "signer2",
             &signer2_address,
         ));
+
+        sm_infos_before = node
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .map_storage_modules_to_partition_assignments();
 
         node.wait_until_height_confirmed(6, 10).await?;
 
@@ -281,6 +331,15 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(genesis_parts_after, genesis_parts_before);
     assert_eq!(signer1_parts_after, signer1_parts_before);
     assert_eq!(signer2_parts_after, signer2_parts_before);
+
+    let sm_infos_after = restarted_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot()
+        .map_storage_modules_to_partition_assignments();
+
+    assert_eq!(sm_infos_before, sm_infos_after);
 
     // ===== TEST CLEANUP =====
     restarted_node.node_ctx.stop().await;
@@ -518,6 +577,8 @@ async fn post_pledge_commitment(
     pledge_tx
 }
 
+/// Validates that the partition_hashes associated with pledges in the EpochSnapshot::commitment_state are reflected
+/// in the EpochSnapshot::partition_assignments which maps partition_hashes to ledger or capacity.
 fn validate_pledge_assignments(
     epoch_snapshot: Arc<EpochSnapshot>,
     address_name: &str,
@@ -548,7 +609,7 @@ fn validate_pledge_assignments(
     };
 
     debug!(
-        "\nGot partition_hashes from pledges for {} : address {}\nPartition Assignments in epoch_service:\n{:#?}\nPledge Status in CommitmentState:\n{:#?}",
+        "\nGot partition_hashes from pledges for {} : address {}\nPartition Assignments in epoch snapshot:\n{:#?}\nPledge Status in CommitmentState:\n{:#?}",
         address_name, address, partition_hashes, direct
     );
 

@@ -57,6 +57,7 @@ pub struct CombinedConfigInner {
 /// These parameters determine how the network operates, including pricing,
 /// storage requirements, and data validation mechanisms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
     pub chain_id: u64,
@@ -191,6 +192,7 @@ pub struct ConsensusConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenesisConfig {
     /// The timestamp in milliseconds used for the genesis block
     #[serde(
@@ -226,6 +228,7 @@ fn default_max_future_timestamp_drift_millis() -> u128 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
     #[serde(
         deserialize_with = "serde_utils::token_amount",
@@ -236,6 +239,7 @@ pub struct BlockRewardConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RethChainSpec {
     /// The type of chain.
     pub chain: Chain,
@@ -249,6 +253,7 @@ pub struct RethChainSpec {
 /// to participate in the network. This includes network mode, consensus rules,
 /// pricing parameters, and system resource allocations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
     pub mode: NodeMode,
@@ -317,6 +322,7 @@ impl From<NodeConfig> for Config {
 /// Defines how the node participates in the network - either as a genesis node
 /// that starts a new network or as a peer that syncs with existing nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
@@ -332,6 +338,7 @@ pub enum NodeMode {
 ///
 /// Specifies where the node should obtain its consensus rules from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ConsensusOptions {
     /// Load consensus configuration from a file at the specified path
     Path(PathBuf),
@@ -368,7 +375,7 @@ impl ConsensusOptions {
 ///
 /// Defines how the node obtains and processes external price information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
 pub enum OracleConfig {
     /// A simulated price oracle for testing and development
     Mock {
@@ -395,6 +402,7 @@ pub enum OracleConfig {
 ///
 /// Controls how token prices are smoothed over time to reduce volatility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmaConfig {
     /// Number of blocks between EMA price recalculations
     /// Lower values make prices more responsive, higher values provide more stability
@@ -405,6 +413,7 @@ pub struct EmaConfig {
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VdfConfig {
     /// VDF reset frequency in global steps
     /// Formula: blocks_between_resets × vdf_steps_per_block
@@ -437,6 +446,7 @@ impl VdfConfig {
 ///
 /// Controls the timing and parameters for network epochs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
     /// Affects how network capacity is calculated and projected
@@ -453,6 +463,7 @@ pub struct EpochConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
@@ -460,6 +471,7 @@ pub struct StorageSyncConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DataSyncServiceConfig {
     pub max_pending_chunk_requests: u64,
     pub max_storage_throughput_bps: u64,
@@ -479,6 +491,7 @@ pub struct DataSyncServiceConfig {
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MempoolConfig {
     /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
@@ -506,6 +519,16 @@ pub struct MempoolConfig {
     /// Prevents memory exhaustion from excessive chunk storage for a single transaction
     pub max_chunks_per_item: usize,
 
+    /// Maximum number of pre-header chunks to keep per data root before the header arrives
+    /// Limits speculative storage window for out-of-order chunks
+    #[serde(default)]
+    pub max_preheader_chunks_per_item: usize,
+
+    /// Maximum allowed pre-header data_path bytes for chunk proofs
+    /// Mitigates DoS on speculative chunk storage before header arrival
+    #[serde(default)]
+    pub max_preheader_data_path_bytes: usize,
+
     /// Maximum number of valid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_valid_items: usize,
@@ -522,6 +545,7 @@ pub struct MempoolConfig {
 ///
 /// Settings for peer-to-peer communication between nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GossipConfig {
     /// The IP address that's going to be announced to other peers
     pub public_ip: String,
@@ -537,6 +561,7 @@ pub struct GossipConfig {
 ///
 /// Settings that are passed to the reth node
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RethConfig {
     pub use_random_ports: bool,
 }
@@ -545,6 +570,7 @@ pub struct RethConfig {
 ///
 /// Controls how data is compressed and packed for storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
@@ -557,6 +583,7 @@ pub struct PackingConfig {
 ///
 /// Settings for in-memory caching to improve performance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheConfig {
     /// Number of blocks cache cleaning will lag behind block finalization
     /// Higher values keep more data in cache but use more memory
@@ -567,6 +594,7 @@ pub struct CacheConfig {
 ///
 /// Settings for the node's HTTP server that provides API access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// The IP address visible to the outside world
     pub public_ip: String,
@@ -582,6 +610,7 @@ pub struct HttpConfig {
 ///
 /// Controls how mining difficulty changes over time to maintain target block times.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DifficultyAdjustmentConfig {
     /// Target time between blocks in seconds
     pub block_time: u64,
@@ -643,6 +672,8 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -769,6 +800,8 @@ impl ConsensusConfig {
                 max_pledges_per_item: 100,
                 max_pending_chunk_items: 30,
                 max_chunks_per_item: 500,
+                max_preheader_chunks_per_item: 64,
+                max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 commitment_fee: 100,
@@ -1363,7 +1396,8 @@ mod tests {
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
         max_chunks_per_item = 500
-        max_pending_anchor_items = 100
+        max_preheader_chunks_per_item = 64
+        max_preheader_data_path_bytes = 65536
         max_invalid_items = 10000
         max_valid_items = 10000
         commitment_fee = 100
@@ -1445,8 +1479,6 @@ mod tests {
         bandwidth_adjustment_interval = "5s"
         chunk_request_timeout = "10s"
 
-        [pricing]
-        fee_percentage = 0.01
 
         [gossip]
         bind_ip = "127.0.0.1"
