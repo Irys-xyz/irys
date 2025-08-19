@@ -2231,7 +2231,7 @@ mod tests {
 
         // Trim to actual data size for hash calculation (chunk_size might be larger)
         let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
-        let entropy_packed_hash = hash_sha256(trimmed_hacked).expect("Expected to hash data");
+        let entropy_packed_hash = hash_sha256(trimmed_hacked);
 
         // Calculate the correct offset for this chunk position
         let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
