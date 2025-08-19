@@ -83,8 +83,15 @@ where
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct CachedBlock {
+    pub(crate) header: Arc<IrysBlockHeader>,
+    pub(crate) is_processing: bool,
+    pub(crate) is_fast_tracking: bool,
+}
+
+#[derive(Clone, Debug)]
 struct BlockCacheInner {
-    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, Arc<IrysBlockHeader>>,
+    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, CachedBlock>,
     pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
 }
@@ -101,8 +108,8 @@ impl BlockCacheGuard {
         }
     }
 
-    async fn add_block(&self, block_header: Arc<IrysBlockHeader>) {
-        self.inner.write().await.add_block(block_header);
+    async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
+        self.inner.write().await.add_block(block_header, is_fast_tracking);
     }
 
     async fn remove_block(&self, block_hash: &BlockHash) {
@@ -112,7 +119,7 @@ impl BlockCacheGuard {
     async fn get_block_header_cloned(
         &self,
         block_hash: &BlockHash,
-    ) -> Option<Arc<IrysBlockHeader>> {
+    ) -> Option<CachedBlock> {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
@@ -144,7 +151,7 @@ impl BlockCacheGuard {
     async fn orphaned_blocks_by_parent_cloned(
         &self,
         block_hash: &BlockHash,
-    ) -> Option<Arc<IrysBlockHeader>> {
+    ) -> Option<CachedBlock> {
         self.inner
             .write()
             .await
@@ -176,6 +183,17 @@ impl BlockCacheGuard {
         guard.block_hash_to_parent_hash.clear();
         guard.requested_blocks.clear();
     }
+
+    async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
+        self.inner.write().await.block_is_processing(block_hash)
+    }
+
+    async fn change_block_processing_status(&self, block_hash: BlockHash, is_processing: bool) {
+        self.inner
+            .write()
+            .await
+            .change_block_processing_status(block_hash, is_processing);
+    }
 }
 
 impl BlockCacheInner {
@@ -191,11 +209,33 @@ impl BlockCacheInner {
         }
     }
 
-    fn add_block(&mut self, block_header: Arc<IrysBlockHeader>) {
+    fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
         self.block_hash_to_parent_hash
             .put(block_header.block_hash, block_header.previous_block_hash);
         self.orphaned_blocks_by_parent
-            .put(block_header.previous_block_hash, block_header);
+            .put(block_header.previous_block_hash, CachedBlock {
+                header: block_header,
+                is_processing: true,
+                is_fast_tracking: fast_track,
+            });
+    }
+
+    fn block_is_processing(&mut self, block_hash: &BlockHash) -> bool {
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
+            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
+                return header.is_processing;
+            }
+        }
+
+        false
+    }
+
+    fn change_block_processing_status(&mut self, block_hash: BlockHash, is_processing: bool) {
+        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
+            if let Some(header) = self.orphaned_blocks_by_parent.get_mut(parent_hash) {
+                header.is_processing = is_processing;
+            }
+        }
     }
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
@@ -204,10 +244,10 @@ impl BlockCacheInner {
         }
     }
 
-    fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<Arc<IrysBlockHeader>> {
+    fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<CachedBlock> {
         if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
             if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return Some(Arc::clone(header));
+                return Some(header.clone());
             }
         }
 
@@ -410,9 +450,12 @@ where
             block_header.height,
         )?;
 
-        // Adding the block to the pool, so if a block depending on that block arrives,
-        // this block won't be requested from the network
-        self.blocks_cache.add_block(block_header.clone()).await;
+        let is_processing = self.blocks_cache.is_block_processing(&block_header.block_hash).await;
+        if is_processing {
+            warn!("Block pool: Block {:?} is already being processed or fast-tracked, skipping", block_header.block_hash);
+        } else {
+            self.blocks_cache.add_block(block_header.clone(), skip_validation_for_fast_track).await;
+        }
         debug!(
             "Block pool: Processing block {:?} (height {})",
             block_header.block_hash, block_header.height,
@@ -432,6 +475,7 @@ where
         );
 
         if !previous_block_status.is_processed() {
+            self.blocks_cache.change_block_processing_status(block_header.block_hash, false).await;
             debug!(
                 "Parent block for block {:?} is not found in the db",
                 current_block_hash
@@ -634,7 +678,7 @@ where
         block_hash: &BlockHash,
     ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {
         if let Some(header) = self.blocks_cache.get_block_header_cloned(block_hash).await {
-            return Ok(Some(header));
+            return Ok(Some(Arc::clone(&header.header)));
         }
 
         match self.mempool.get_block_header(*block_hash, true).await {
@@ -658,7 +702,7 @@ where
     pub(crate) async fn get_orphaned_block_by_parent(
         &self,
         parent_hash: &BlockHash,
-    ) -> Option<Arc<IrysBlockHeader>> {
+    ) -> Option<CachedBlock> {
         self.blocks_cache
             .orphaned_blocks_by_parent_cloned(parent_hash)
             .await
