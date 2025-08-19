@@ -72,6 +72,8 @@ pub enum BlockDiscoveryError {
     InvalidEpochBlock(String),
     #[error("Invalid commitment transaction: {0}")]
     InvalidCommitmentTransaction(String),
+    #[error("Invalid data ledgers length: expected {0} ledgers, got {1}")]
+    InvalidDataLedgersLength(u32, usize),
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -325,11 +327,18 @@ impl BlockDiscoveryServiceInner {
         // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
+        //
+        let submit_ledger = new_block_header
+            .data_ledgers
+            .get(DataLedger::Submit as usize)
+            .ok_or_else(|| {
+                BlockDiscoveryError::InvalidDataLedgersLength(
+                    DataLedger::Submit.into(),
+                    new_block_header.data_ledgers.len(),
+                )
+            })?;
 
-        let submit_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .0
-            .clone();
+        let submit_tx_ids_to_check = submit_ledger.tx_ids.0.clone();
 
         let (tx, rx) = oneshot::channel();
         mempool
@@ -371,10 +380,17 @@ impl BlockDiscoveryServiceInner {
         //    This keeps the transaction from getting re-promoted each block.
         //    (this last step performed in mempool after the block is confirmed)
 
-        let publish_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .0
-            .clone();
+        let publish_ledger = new_block_header
+            .data_ledgers
+            .get(DataLedger::Publish as usize)
+            .ok_or_else(|| {
+                BlockDiscoveryError::InvalidDataLedgersLength(
+                    DataLedger::Publish.into(),
+                    new_block_header.data_ledgers.len(),
+                )
+            })?;
+
+        let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
 
         let (tx, rx) = oneshot::channel();
         mempool
@@ -407,7 +423,7 @@ impl BlockDiscoveryServiceInner {
         }
 
         if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
+            let publish_proofs = match &publish_ledger.proofs {
                 Some(proofs) => proofs,
                 None => {
                     return Err(BlockDiscoveryError::BlockValidationError(
