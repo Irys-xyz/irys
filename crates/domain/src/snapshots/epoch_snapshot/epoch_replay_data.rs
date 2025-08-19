@@ -61,7 +61,7 @@ impl EpochReplayData {
             let Some(item) = block_index.get_item(block_height) else {
                 // missing epoch block index entry. Panic!
                 panic!(
-                    "Missing epoch block from block index, tried to retrieve height {}",
+                    "Missing epoch block @ {} from block index",
                     block_height
                 );
             };
