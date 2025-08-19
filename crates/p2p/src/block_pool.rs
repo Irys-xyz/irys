@@ -109,17 +109,17 @@ impl BlockCacheGuard {
     }
 
     async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
-        self.inner.write().await.add_block(block_header, is_fast_tracking);
+        self.inner
+            .write()
+            .await
+            .add_block(block_header, is_fast_tracking);
     }
 
     async fn remove_block(&self, block_hash: &BlockHash) {
         self.inner.write().await.remove_block(block_hash);
     }
 
-    async fn get_block_header_cloned(
-        &self,
-        block_hash: &BlockHash,
-    ) -> Option<CachedBlock> {
+    async fn get_block_header_cloned(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
@@ -212,12 +212,14 @@ impl BlockCacheInner {
     fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
         self.block_hash_to_parent_hash
             .put(block_header.block_hash, block_header.previous_block_hash);
-        self.orphaned_blocks_by_parent
-            .put(block_header.previous_block_hash, CachedBlock {
+        self.orphaned_blocks_by_parent.put(
+            block_header.previous_block_hash,
+            CachedBlock {
                 header: block_header,
                 is_processing: true,
                 is_fast_tracking: fast_track,
-            });
+            },
+        );
     }
 
     fn block_is_processing(&mut self, block_hash: &BlockHash) -> bool {
@@ -450,11 +452,19 @@ where
             block_header.height,
         )?;
 
-        let is_processing = self.blocks_cache.is_block_processing(&block_header.block_hash).await;
+        let is_processing = self
+            .blocks_cache
+            .is_block_processing(&block_header.block_hash)
+            .await;
         if is_processing {
-            warn!("Block pool: Block {:?} is already being processed or fast-tracked, skipping", block_header.block_hash);
+            warn!(
+                "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
+                block_header.block_hash
+            );
         } else {
-            self.blocks_cache.add_block(block_header.clone(), skip_validation_for_fast_track).await;
+            self.blocks_cache
+                .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+                .await;
         }
         debug!(
             "Block pool: Processing block {:?} (height {})",
@@ -475,7 +485,9 @@ where
         );
 
         if !previous_block_status.is_processed() {
-            self.blocks_cache.change_block_processing_status(block_header.block_hash, false).await;
+            self.blocks_cache
+                .change_block_processing_status(block_header.block_hash, false)
+                .await;
             debug!(
                 "Parent block for block {:?} is not found in the db",
                 current_block_hash
@@ -562,7 +574,10 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, false);
+            self.handle_execution_payload_for_prevalidated_block(
+                block_header.evm_block_hash,
+                false,
+            );
         }
 
         debug!(
