@@ -1,5 +1,4 @@
 use actix::MessageResponse;
-use base58::ToBase58 as _;
 use irys_database::block_header_by_hash;
 use irys_types::DatabaseProvider;
 use reth_db::Database as _;
@@ -61,27 +60,15 @@ impl BlockIndexReadGuard {
             let block = match block_header_by_hash(&tx, &block_hash, false) {
                 Ok(Some(block)) => block,
                 Ok(None) => {
-                    error!(
-                        "Block header not found in DB for hash {}",
-                        block_hash.0.to_base58()
-                    );
+                    error!("Block header not found in DB for hash {}", block_hash);
                     continue;
                 }
                 Err(e) => {
-                    error!(
-                        "DB error fetching block header for {}: {:?}",
-                        block_hash.0.to_base58(),
-                        e
-                    );
+                    error!("DB error fetching block header for {}: {:?}", block_hash, e);
                     continue;
                 }
             };
-            debug!(
-                "index: {} height: {} hash: {}",
-                i,
-                block.height,
-                block_hash.0.to_base58()
-            );
+            debug!("index: {} height: {} hash: {}", i, block.height, block_hash);
             if i != block.height {
                 error!("Block index and height do not match!");
             }
