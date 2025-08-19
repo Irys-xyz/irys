@@ -220,7 +220,7 @@ impl Inner {
                         .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
                 }
                 MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                    let response_value = self.handle_ingest_ingress_proof_message(ingress_proof);
+                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1112,6 +1112,9 @@ pub enum IngressProofError {
     /// There was a database error storing the proof
     #[error("Database error")]
     DatabaseError,
+    /// The proof does not come from a staked address
+    #[error("Unstaked address")]
+    UnstakedAddress,
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),

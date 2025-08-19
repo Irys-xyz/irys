@@ -5,17 +5,29 @@ use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
 use crate::mempool_service::{IngressProofError, Inner};
 
 impl Inner {
-    pub fn handle_ingest_ingress_proof_message(
+    pub fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
-        // TODO: Validate signature
-        // Validate Address is staked
+        // Validate the proofs signature and basic details
+        let address = ingress_proof
+            .pre_validate(&ingress_proof.data_root)
+            .map_err(|_| IngressProofError::InvalidSignature)?;
+
+        // Validate the proof address is a staked address
+        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+        let commitment_snapshot = self
+            .block_tree_read_guard
+            .read()
+            .canonical_commitment_snapshot();
+
+        if !epoch_snapshot.is_staked(address) {
+            if !commitment_snapshot.is_staked(address) {
+                return Err(IngressProofError::UnstakedAddress);
+            }
+        }
 
         let db = self.irys_db.clone();
-        let address = ingress_proof
-            .recover_signer()
-            .map_err(|_| IngressProofError::InvalidSignature)?;
 
         let res = db
             .update(|rw_tx| -> Result<(), DatabaseError> {

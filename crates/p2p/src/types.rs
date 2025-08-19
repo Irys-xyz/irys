@@ -38,6 +38,9 @@ impl From<IngressProofError> for GossipError {
             }
             IngressProofError::DatabaseError => Self::Internal(InternalGossipError::Database),
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            IngressProofError::UnstakedAddress => {
+                Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
+            }
         }
     }
 }
