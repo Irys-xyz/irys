@@ -696,8 +696,8 @@ impl fmt::Debug for H256List {
             }
             first = false;
 
-            // Write the base58-encoded version of the hash
-            f.write_str(&item.0.to_base58())?;
+            // Write the hash using hex formatting to avoid base58
+            write!(f, "{:x}", item)?;
         }
 
         f.write_str("\n])")?;

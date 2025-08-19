@@ -132,10 +132,10 @@ impl GossipData {
                 format!("chunk data root {}", chunk.data_root)
             }
             Self::Transaction(tx) => {
-                format!("transaction {}", tx.id.0.to_base58())
+                format!("transaction {}", tx.id)
             }
             Self::CommitmentTransaction(commitment_tx) => {
-                format!("commitment transaction {}", commitment_tx.id.0.to_base58())
+                format!("commitment transaction {}", commitment_tx.id)
             }
             Self::Block(block) => {
                 format!("block {} height: {}", block.block_hash, block.height)

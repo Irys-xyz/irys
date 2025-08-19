@@ -737,8 +737,7 @@ async fn handle_get_data(
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {}",
-                    block_hash.0.to_base58(),
-                    res
+                    block_hash, res
                 );
                 HttpResponse::Ok()
                     .content_type("application/json")

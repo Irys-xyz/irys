@@ -54,11 +54,7 @@ impl Inner {
         &mut self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        debug!(
-            "received tx {:?} (data_root {:?})",
-            &tx.id.0.to_base58(),
-            &tx.data_root.0.to_base58()
-        );
+        debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
         // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
         tx.ingress_proofs = None;
         let mempool_state_read_guard = self.mempool_state.read().await;
@@ -191,16 +187,13 @@ impl Inner {
             Ok(()) => {
                 info!(
                     "Successfully cached data_root {:?} for tx {:?}",
-                    tx.data_root,
-                    tx.id.0.to_base58()
+                    tx.data_root, tx.id
                 );
             }
             Err(db_error) => {
                 error!(
                     "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                    tx.data_root,
-                    tx.id.0.to_base58(),
-                    db_error
+                    tx.data_root, tx.id, db_error
                 );
             }
         };

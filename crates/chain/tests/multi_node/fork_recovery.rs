@@ -215,13 +215,13 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     debug!(
         "\nPEER1\n    before: {} c_diff: {}\n    after:  {} c_diff: {}\nPEER2\n    before: {} c_diff: {}\n    after:  {} c_diff: {}",
-        peer1_block.block_hash.0.to_base58(),
+        peer1_block.block_hash,
         peer1_block.cumulative_diff,
-        peer1_block_after.block_hash.0.to_base58(),
+        peer1_block_after.block_hash,
         peer1_block_after.cumulative_diff,
-        peer2_block.block_hash.0.to_base58(),
+        peer2_block.block_hash,
         peer2_block.cumulative_diff,
-        peer2_block_after.block_hash.0.to_base58(),
+        peer2_block_after.block_hash,
         peer2_block_after.cumulative_diff,
     );
     debug!(

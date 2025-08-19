@@ -54,7 +54,7 @@ impl Inner {
             drop(mempool_state_guard);
             tracing::warn!(
                 "Commitment tx {} failed fee validation: {}",
-                commitment_tx.id.0.to_base58(),
+                commitment_tx.id,
                 e
             );
             return Err(TxIngressError::CommitmentValidationError(e));
@@ -69,7 +69,7 @@ impl Inner {
             drop(mempool_state_guard);
             tracing::warn!(
                 "Commitment tx {} failed value validation: {}",
-                commitment_tx.id.0.to_base58(),
+                commitment_tx.id,
                 e
             );
             return Err(TxIngressError::CommitmentValidationError(e));
@@ -345,10 +345,7 @@ impl Inner {
 
         // Reject unsupported commitment types
         if matches!(cache_status, CommitmentSnapshotStatus::Unsupported) {
-            warn!(
-                "Commitment is unsupported: {}",
-                commitment_tx.id.0.to_base58()
-            );
+            warn!("Commitment is unsupported: {}", commitment_tx.id);
             return CommitmentSnapshotStatus::Unsupported;
         }
 
@@ -370,10 +367,7 @@ impl Inner {
             }
 
             // No pending stakes found
-            warn!(
-                "Pledge Commitment is unstaked: {}",
-                commitment_tx.id.0.to_base58()
-            );
+            warn!("Pledge Commitment is unstaked: {}", commitment_tx.id);
             return CommitmentSnapshotStatus::Unstaked;
         }
 

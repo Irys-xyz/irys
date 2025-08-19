@@ -1,4 +1,3 @@
-use base58::ToBase58 as _;
 use eyre::OptionExt as _;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
@@ -47,9 +46,7 @@ impl ChunkProvider {
 
         debug!(
             "getting ledger: {:?}, data_root: {}, offset: {}",
-            &ledger,
-            &data_root.0.to_base58(),
-            &data_tx_offset
+            &ledger, &data_root, &data_tx_offset
         );
         // map hashes to SMs
         let binding = self.storage_modules_guard.read();
@@ -88,11 +85,7 @@ impl ChunkProvider {
         ledger: DataLedger,
         data_root: DataRoot,
     ) -> eyre::Result<Option<Vec<u64>>> {
-        debug!(
-            "getting ledger: {:?}, data_root: {}",
-            &ledger,
-            &data_root.0.to_base58(),
-        );
+        debug!("getting ledger: {:?}, data_root: {}", &ledger, &data_root,);
 
         // get all SMs for this ledger
         let binding = self.storage_modules_guard.read();
