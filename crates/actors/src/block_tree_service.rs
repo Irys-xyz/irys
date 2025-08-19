@@ -147,8 +147,8 @@ impl BlockTreeService {
                 ) {
                     Ok(c) => c,
                     Err(e) => {
-                        error!("Failed to restore BlockTree from DB: {}", e);
-                        return;
+                        // Choosing to panic and stop the node, if we cannot restore BlockTree, we cannot continue
+                        panic!("Failed to restore BlockTree from DB: {}", e);
                     }
                 };
 
