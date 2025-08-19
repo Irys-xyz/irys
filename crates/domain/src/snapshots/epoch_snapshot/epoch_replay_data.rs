@@ -118,7 +118,7 @@ impl EpochReplayData {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .expect("Able to fetch all commitment transactions from database for epoch block");
+                .unwrap_or_else(|_| panic!("Able to fetch all commitment transactions from database for epoch block {} at height {}", block.block_hash, block.height));
 
             epoch_block_data.push_back(EpochBlockData {
                 epoch_block: block,
@@ -134,7 +134,8 @@ impl EpochReplayData {
 
             if genesis_block_data.epoch_block.height > 0 {
                 panic!(
-                    "Missing genesis block from epoch blocks, first block was height {}",
+                    "Missing genesis block from epoch blocks, first block was hash {} height {}",
+                    genesis_block_data.epoch_block.block_hash,
                     genesis_block_data.epoch_block.height
                 );
             }
