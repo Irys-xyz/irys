@@ -1,5 +1,5 @@
 use crate::block_pool::BlockPoolError;
-use irys_actors::mempool_service::TxIngressError;
+use irys_actors::mempool_service::{IngressProofError, TxIngressError};
 use irys_types::CommitmentValidationError;
 use std::fmt::Debug;
 use thiserror::Error;
@@ -27,6 +27,21 @@ pub enum GossipError {
 impl From<InternalGossipError> for GossipError {
     fn from(value: InternalGossipError) -> Self {
         Self::Internal(value)
+    }
+}
+
+impl From<IngressProofError> for GossipError {
+    fn from(value: IngressProofError) -> Self {
+        match value {
+            IngressProofError::InvalidSignature => {
+                Self::InvalidData(InvalidDataError::IngressProofSignature)
+            }
+            IngressProofError::DatabaseError => Self::Internal(InternalGossipError::Database),
+            IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            IngressProofError::UnstakedAddress => {
+                Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
+            }
+        }
     }
 }
 
@@ -96,6 +111,8 @@ pub enum InvalidDataError {
     InvalidBlockSignature,
     #[error("Execution payload hash mismatch")]
     ExecutionPayloadHashMismatch,
+    #[error("Invalid ingress proof signature")]
+    IngressProofSignature,
 }
 
 #[derive(Debug, Error, Clone)]

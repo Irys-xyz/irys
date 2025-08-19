@@ -2,6 +2,7 @@ pub mod chunks;
 pub mod commitment_txs;
 pub mod data_txs;
 pub mod facade;
+pub mod ingress_proofs;
 pub mod inner;
 pub mod lifecycle;
 pub mod pledge_provider;

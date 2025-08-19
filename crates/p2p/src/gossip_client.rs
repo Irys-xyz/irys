@@ -157,6 +157,13 @@ impl GossipClient {
                 )
                 .await?;
             }
+            GossipData::IngressProof(ingress_proof) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/ingress_proof", peer.address.gossip),
+                    &ingress_proof,
+                )
+                .await?;
+            }
         };
 
         Ok(())

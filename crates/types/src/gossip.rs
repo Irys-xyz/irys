@@ -1,6 +1,6 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    IrysTransactionId, UnpackedChunk,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
+    IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::{Address, B256};
 use base58::ToBase58 as _;
@@ -58,6 +58,14 @@ impl From<CommitmentTransaction> for GossipBroadcastMessage {
     }
 }
 
+impl From<IngressProof> for GossipBroadcastMessage {
+    fn from(ingress_proof: IngressProof) -> Self {
+        let key = GossipCacheKey::ingress_proof(&ingress_proof);
+        let value = GossipData::IngressProof(ingress_proof);
+        Self::new(key, value)
+    }
+}
+
 impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessage {
     fn from(block: Arc<IrysBlockHeader>) -> Self {
         let key = GossipCacheKey::irys_block(&block);
@@ -72,6 +80,7 @@ pub enum GossipCacheKey {
     Transaction(IrysTransactionId),
     Block(BlockHash),
     ExecutionPayload(B256),
+    IngressProof(H256),
 }
 
 impl GossipCacheKey {
@@ -94,6 +103,10 @@ impl GossipCacheKey {
     pub fn sealed_evm_block(sealed_block: &SealedBlock<Block>) -> Self {
         Self::ExecutionPayload(sealed_block.hash())
     }
+
+    pub fn ingress_proof(ingress_proof: &IngressProof) -> Self {
+        Self::IngressProof(ingress_proof.proof)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +116,7 @@ pub enum GossipData {
     CommitmentTransaction(CommitmentTransaction),
     Block(Arc<IrysBlockHeader>),
     ExecutionPayload(Block),
+    IngressProof(IngressProof),
 }
 
 impl From<SealedBlock<Block>> for GossipData {
@@ -130,6 +144,13 @@ impl GossipData {
                 format!(
                     "execution payload for EVM block number {:?}",
                     execution_payload_data.number
+                )
+            }
+            Self::IngressProof(ingress_proof) => {
+                format!(
+                    "ingress proof for data_root: {:?} from {:?}",
+                    ingress_proof.data_root,
+                    ingress_proof.recover_signer()
                 )
             }
         }
