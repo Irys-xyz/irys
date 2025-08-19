@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
     async_trait, block_tree_service::BlockTreeServiceMessage,
@@ -7,10 +5,12 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
+use irys_types::storage_pricing::Amount;
 use irys_types::{
-    CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
+    H256List, IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
+use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
@@ -75,6 +75,60 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
                 std::collections::BTreeMap::new(), // No expired ledger fees
             ))
         }
+
+        // async fn create_evm_block(&self, prev_block_header: &IrysBlockHeader, perv_evm_block: &Block, commitment_txs_to_bill: &[CommitmentTransaction], submit_txs: &[DataTransactionHeader], publish_txs: &mut PublishLedgerWithTxs, reward_amount: Amount<Irys>, timestamp_ms: u128, expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>) -> eyre::Result<(EthBuiltPayload, U256)> {
+        //     let block_height = prev_block_header.height + 1;
+        //     let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
+        //
+        //     // Get treasury balance from previous block
+        //     let initial_treasury_balance = prev_block_header.treasury;
+        //
+        //     // Generate expected shadow transactions using shared logic
+        //     let mut shadow_tx_generator = ShadowTxGenerator::new(
+        //         &block_height,
+        //         &self.inner().config.node_config.reward_address,
+        //         &reward_amount.amount,
+        //         prev_block_header,
+        //         &self.inner().config.consensus,
+        //         commitment_txs_to_bill,
+        //         submit_txs,
+        //         publish_txs,
+        //         initial_treasury_balance,
+        //         &expired_ledger_fees,
+        //     );
+        //
+        //     let mut shadow_txs = Vec::new();
+        //     for tx_result in shadow_tx_generator.by_ref() {
+        //         let metadata = tx_result?;
+        //         let mut tx_raw = compose_shadow_tx(
+        //             self.inner().config.consensus.chain_id,
+        //             &metadata.shadow_tx,
+        //             metadata.transaction_fee,
+        //         );
+        //         let signature = local_signer
+        //             .sign_transaction_sync(&mut tx_raw)
+        //             .expect("shadow tx must always be signable");
+        //         let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
+        //             .try_into_recovered()
+        //             .expect("shadow tx must always be signable");
+        //
+        //         shadow_txs.push(EthPooledTransaction::new(tx, 300));
+        //     }
+        //
+        //     // Get the final treasury balance after all transactions
+        //     let final_treasury_balance = shadow_tx_generator.treasury_balance();
+        //
+        //     let payload = self
+        //         .build_and_submit_reth_payload(
+        //             prev_block_header,
+        //             timestamp_ms,
+        //             shadow_txs,
+        //             perv_evm_block.header.mix_hash,
+        //         )
+        //         .await?;
+        //
+        //     Ok((payload, final_treasury_balance))
+        // }
     }
 
     // Configure a test network
@@ -109,11 +163,35 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
-    // Create block with evil strategy
+    let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
+
+    let mut evil_config = genesis_node.node_ctx.config.node_config.clone();
+    evil_config
+        .consensus
+        .get_mut()
+        .immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+
+    // Create a block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
-            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+            inner: Arc::new(BlockProducerInner {
+                config: Config::new(evil_config),
+                db: genesis_block_prod.db.clone(),
+                block_discovery: genesis_block_prod.block_discovery.clone(),
+                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
+                service_senders: genesis_block_prod.service_senders.clone(),
+                reward_curve: genesis_block_prod.reward_curve.clone(),
+                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
+                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
+                price_oracle: genesis_block_prod.price_oracle.clone(),
+                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
+                reth_provider: genesis_block_prod.reth_provider.clone(),
+                shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
+                reth_service: genesis_block_prod.reth_service.clone(),
+                beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
+                block_index: genesis_block_prod.block_index.clone(),
+            }),
         },
     };
 
@@ -148,18 +226,14 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     test_signer.sign_block_header(&mut irys_block)?;
     block = Arc::new(irys_block);
 
-    println!("Biba 5");
-
+    println!("Heha 1");
     // Send block directly to block tree service for validation
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
-    println!("Biba 6");
-
+    println!("heah 2");
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     // This should still be rejected because the perm_fee is insufficient
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
-
-    println!("Biba 7");
 
     genesis_node.stop().await;
 
