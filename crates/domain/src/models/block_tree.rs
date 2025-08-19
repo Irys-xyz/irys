@@ -198,7 +198,6 @@ impl BlockTree {
             let end = block_index.num_blocks();
             let start_block_hash = block_index
                 .get_item(start)
-                .cloned()
                 .ok_or_else(|| eyre::eyre!("missing block index entry at start height {}", start))?
                 .block_hash;
             (start, end, start_block_hash)
