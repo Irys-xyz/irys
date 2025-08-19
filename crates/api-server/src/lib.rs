@@ -24,6 +24,8 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
+use crate::routes::anchor;
+
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
@@ -102,6 +104,7 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(tx::get_tx_local_start_offset),
         )
         .route("/version", web::post().to(post_version::post_version))
+        .route("/anchor", web::get().to(anchor::anchor_route))
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
