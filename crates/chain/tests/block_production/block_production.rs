@@ -2,16 +2,11 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use irys_actors::mempool_service::TxIngressError;
-use irys_actors::mempool_service::TxIngressError;
-use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{
-    async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    async_trait, mempool_service::TxIngressError, reth_ethereum_primitives,
+    shadow_tx_generator::PublishLedgerWithTxs, shadow_tx_generator::RollingHash, BlockProdStrategy,
+    BlockProducerInner, ProductionStrategy,
 };
-use irys_database::SystemLedger;
-use irys_database::SystemLedger;
-use irys_database::SystemLedger;
 use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -21,8 +16,8 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256, U256 as IrysU256,
+    irys::IrysSigner, storage_pricing::Amount, Address, CommitmentTransaction,
+    DataTransactionHeader, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -30,9 +25,9 @@ use reth::{
     providers::{
         AccountReader as _, BlockReader as _, ReceiptProvider as _, TransactionsProvider as _,
     },
-    rpc::types::{TransactionRequest, TransactionTrait as _},
+    rpc::types::TransactionRequest,
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -44,12 +39,11 @@ use crate::utils::{
 // EVM test constants
 const EVM_GAS_PRICE: u128 = 20_000_000_000; // 20 gwei
 const EVM_GAS_LIMIT: u64 = 21_000;
-const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from(1u64);
+const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::ONE;
 
 // Test account balances
-const ZERO_BALANCE: AlloyU256 = AlloyU256::ZERO;
-const TEST_USER_BALANCE_IRYS: AlloyU256 =
-    AlloyU256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
+const ZERO_BALANCE: U256 = U256::ZERO;
+const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
 
 #[test_log::test(actix::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
@@ -1092,13 +1086,14 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         async fn create_evm_block(
             &self,
             prev_block_header: &IrysBlockHeader,
-            perv_evm_block: &reth_ethereum_primitives::Block,
+            prev_evm_block: &reth_ethereum_primitives::Block,
             commitment_txs_to_bill: &[CommitmentTransaction],
             submit_txs: &[DataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-        ) -> eyre::Result<(EthBuiltPayload, U256)> {
+            expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
+        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
             let mut submit_txs = submit_txs.to_vec();
             if submit_txs.len() >= 2 {
@@ -1108,12 +1103,13 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             self.prod
                 .create_evm_block(
                     prev_block_header,
-                    perv_evm_block,
+                    prev_evm_block,
                     commitment_txs_to_bill,
                     &submit_txs,
                     data_txs_with_proofs,
                     reward_amount,
                     timestamp_ms,
+                    expired_ledger_fees,
                 )
                 .await
         }
