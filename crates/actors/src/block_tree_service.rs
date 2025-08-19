@@ -424,7 +424,9 @@ impl BlockTreeServiceInner {
     async fn try_notify_services_of_block_migration(&self, arc_block: &Arc<IrysBlockHeader>) {
         let migrated_hash = {
             let binding = self.cache.clone();
-            let cache = binding.write().expect("block tree cache write lock poisoned");
+            let cache = binding
+                .write()
+                .expect("block tree cache write lock poisoned");
             let migration_depth = self.config.consensus.block_migration_depth as usize;
 
             // Skip if block isn't deep enough for migration
@@ -636,7 +638,10 @@ impl BlockTreeServiceInner {
 
         if validation_result == ValidationResult::Invalid {
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
-            let mut cache = self.cache.write().expect("block tree cache write lock poisoned");
+            let mut cache = self
+                .cache
+                .write()
+                .expect("block tree cache write lock poisoned");
 
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
             let Some(block_entry) = cache.get_block(&block_hash) else {
