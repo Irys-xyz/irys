@@ -1619,7 +1619,7 @@ fn read_latest_block_data(
     block_index: &BlockIndex,
     irys_db: &DatabaseProvider,
 ) -> (u64, Arc<IrysBlockHeader>) {
-    // Read latest from the block index; if missing, return a clear error rather than scanning DB
+    // Read latest from the block index; if no entries, panic
     let latest_block_index = block_index
         .get_latest_item()
         .cloned()
