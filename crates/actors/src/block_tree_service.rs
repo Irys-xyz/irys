@@ -683,7 +683,7 @@ impl BlockTreeServiceInner {
             let old_tip = cache.tip;
             let old_tip_block = cache
                 .get_block(&old_tip)
-                .expect("old tip block not found in cache")
+                .unwrap_or_else(|| panic!("old tip block {old_tip} not found in cache"))
                 .clone();
 
             // Mark block as validated in cache, this will update the canonical chain
@@ -719,7 +719,7 @@ impl BlockTreeServiceInner {
             let block_entry = cache
                 .blocks
                 .get(&block_hash)
-                .expect("block entry not found in cache");
+                .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
             let arc_block = Arc::new(block_entry.block.clone());
 
             // Now do mutable operations
@@ -747,7 +747,7 @@ impl BlockTreeServiceInner {
                         .block_hash;
                     let fork_block = cache
                         .get_block(&fork_hash)
-                        .expect("fork block not found in cache");
+                        .unwrap_or_else(|| panic!("fork block {fork_hash} not found in cache"));
                     let fork_height = fork_block.height;
 
                     // Convert orphaned blocks to BlockTreeEntry to make a snapshot of the old canonical chain
@@ -784,7 +784,12 @@ impl BlockTreeServiceInner {
                         .map(|e| {
                             let mut block = cache
                                 .get_block(&e.block_hash)
-                                .expect("block not found in cache while preparing reorg event")
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "block {} not found in cache while preparing reorg event",
+                                        e.block_hash
+                                    )
+                                })
                                 .clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)
@@ -796,7 +801,12 @@ impl BlockTreeServiceInner {
                         .map(|e| {
                             let mut block = cache
                                 .get_block(&e.block_hash)
-                                .expect("block not found in cache while preparing reorg event")
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "block {} not found in cache while preparing reorg event",
+                                        e.block_hash
+                                    )
+                                })
                                 .clone();
                             block.poa.chunk = None; // Remove chunk data to reduce memory footprint
                             Arc::new(block)

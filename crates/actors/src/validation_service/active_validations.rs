@@ -323,7 +323,12 @@ impl ActiveValidations {
                 let (hash, task) = self
                     .vdf_pending_queue
                     .remove(&task.block_hash)
-                    .expect("Expected processing task to have an entry in the vdf_pending queue");
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Expected processing task to have an entry {} in the vdf_pending queue",
+                            &task.block_hash
+                        )
+                    });
                 // do NOT send anything to the block tree
 
                 debug!(
@@ -339,7 +344,12 @@ impl ActiveValidations {
                 let (invalid_hash, invalid_item) = self
                     .vdf_pending_queue
                     .remove(&task.block_hash)
-                    .expect("Expected processing task to have an entry in the vdf_pending queue");
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Expected processing task to have an entry {} in the vdf_pending queue",
+                            &task.block_hash
+                        )
+                    });
                 error!(block_hash = %invalid_hash, "Error validating VDF - {}", &err);
                 // notify the block tree
                 invalid_item
