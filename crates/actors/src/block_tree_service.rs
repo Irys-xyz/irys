@@ -275,11 +275,13 @@ impl BlockTreeServiceInner {
         //  Notify reth service
         let tip_hash = {
             let block_index = self.block_index_guard.read();
-            if let Some(item) = block_index.get_latest_item() {
-                item.block_hash
-            } else {
-                // Fallback: if the block index is empty or out of sync, use the cache tip
-                self.cache.read().expect("cache read lock poisoned").tip
+
+            match block_index.get_latest_item() {
+                Some(block_index_item) => block_index_item.block_hash,
+                None => {
+                    // if the block index is empty or out of sync, panic to cause a node restart
+                    panic!("the block index is empty or out of sync");
+                }
             }
         };
 
