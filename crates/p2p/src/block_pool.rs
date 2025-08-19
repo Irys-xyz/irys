@@ -481,6 +481,11 @@ where
             return Ok(());
         }
 
+        if skip_validation_for_fast_track {
+            // Preemptively handle reth payload for trusted sync path
+            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
+        }
+
         info!(
             "Found parent block for block {:?}, checking if tree has enough capacity",
             current_block_hash
@@ -510,8 +515,11 @@ where
             current_block_hash
         );
 
-        // Request the execution payload for the block if it is not already stored locally
-        self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, false);
+        if !skip_validation_for_fast_track {
+            // If skip validation is true, we handle it preemptively above, if it isn't, it's a
+            //  good idea to request it here
+            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, false);
+        }
 
         debug!(
             "Block pool: Marking block {:?} as processed",
