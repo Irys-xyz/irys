@@ -59,8 +59,11 @@ impl EpochReplayData {
 
             // Retrieve the epoch block header from the index hash; if index missing, skip
             let Some(item) = block_index.get_item(block_height) else {
-                // Skip missing epoch block index entries to avoid panics during recovery
-                continue;
+                // missing epoch block index entry. Panic!
+                panic!(
+                    "Missing epoch block from block index, tried to retrieve height {}",
+                    block_height
+                );
             };
             let block = db
                 .view_eyre(|tx| block_header_by_hash(tx, &item.block_hash, false))?
