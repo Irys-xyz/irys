@@ -73,6 +73,7 @@ pub enum MempoolServiceMessage {
         UnpackedChunk,
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Ingress Pre-validated Block
     IngestBlocks {
         prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
@@ -217,6 +218,12 @@ impl Inner {
                     let _ = response
                         .send(Arc::clone(&self.mempool_state))
                         .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
+                }
+                MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
+                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
                 }
             }
             Ok(())
@@ -1095,4 +1102,20 @@ pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
     pub submit_tx: Vec<DataTransactionHeader>,
     pub publish_tx: PublishLedgerWithTxs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofError {
+    /// The proofs signature is invalid
+    #[error("Ingress proof signature is invalid")]
+    InvalidSignature,
+    /// There was a database error storing the proof
+    #[error("Database error")]
+    DatabaseError,
+    /// The proof does not come from a staked address
+    #[error("Unstaked address")]
+    UnstakedAddress,
+    /// Catch-all variant for other errors.
+    #[error("Ingress proof error: {0}")]
+    Other(String),
 }

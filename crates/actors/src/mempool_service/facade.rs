@@ -1,9 +1,10 @@
 use crate::block_tree_service::BlockMigratedEvent;
 use crate::mempool_service::{
-    ChunkIngressError, MempoolServiceMessage, TxIngressError, TxReadError,
+    ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
 use crate::services::ServiceSenders;
 use eyre::eyre;
+use irys_types::IngressProof;
 use irys_types::{
     chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     H256,
@@ -24,6 +25,10 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
+    async fn handle_ingest_ingress_proof(
+        &self,
+        ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError>;
     async fn get_block_header(
         &self,
         block_hash: H256,
@@ -95,6 +100,25 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx
             .await
             .expect("to process CommitmentTxIngressMessage")
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))
+            .map_err(|_| {
+                IngressProofError::Other("Error sending IngestIngressProof message ".to_owned())
+            })?;
+
+        oneshot_rx
+            .await
+            .expect("to process IngestIngressProof message")
     }
 
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
