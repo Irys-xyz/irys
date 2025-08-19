@@ -228,6 +228,7 @@ impl BlockValidationTask {
     /// Perform block validation
     #[tracing::instrument(skip_all, err, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
+        let skip_vdf_validation = self.skip_vdf_validation;
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
         let block = &self.block;
@@ -259,6 +260,9 @@ impl BlockValidationTask {
             let block_hash = self.block.block_hash;
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
+                if skip_vdf_validation {
+                    return Ok(ValidationResult::Valid);
+                }
                 poa_is_valid(
                     &poa,
                     &block_index_guard,
