@@ -1,5 +1,5 @@
 use crate::{
-    ingress, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
     IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::{Address, B256};

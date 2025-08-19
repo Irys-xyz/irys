@@ -34,11 +34,9 @@ impl From<IngressProofError> for GossipError {
     fn from(value: IngressProofError) -> Self {
         match value {
             IngressProofError::InvalidSignature => {
-                GossipError::InvalidData(InvalidDataError::IngressProofSignature)
+                Self::InvalidData(InvalidDataError::IngressProofSignature)
             }
-            IngressProofError::DatabaseError => {
-                GossipError::Internal(InternalGossipError::Database)
-            }
+            IngressProofError::DatabaseError => Self::Internal(InternalGossipError::Database),
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
         }
     }
