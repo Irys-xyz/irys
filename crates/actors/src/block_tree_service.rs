@@ -911,7 +911,12 @@ impl BlockTreeServiceInner {
             .expect("cache read lock poisoned")
             .get_epoch_snapshot(&epoch_block.block_hash);
 
-        let epoch_snapshot = epoch_snapshot.expect("Epoch block should have a snapshot in cache");
+        let epoch_snapshot = epoch_snapshot.unwrap_or_else(|| {
+            panic!(
+                "Epoch block {} should have a snapshot in cache",
+                epoch_block.block_hash
+            )
+        });
         let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
 
         // Let the mining actors know about expired partitions
