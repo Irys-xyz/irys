@@ -229,9 +229,9 @@ impl BlockIndex {
     pub fn print_items(&self) {
         for height in 0..self.num_blocks() {
             if let Some(item) = self.get_item(height) {
-                info!("height: {} hash: {}", height, item.block_hash.0.to_base58());
+                tracing::info!("height: {} hash: {}", height, item.block_hash.0.to_base58());
             } else {
-                error!("height: {} missing in block index", height);
+                tracing::error!("height: {} missing in block index", height);
             }
         }
     }
