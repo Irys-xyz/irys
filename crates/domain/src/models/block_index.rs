@@ -231,7 +231,7 @@ impl BlockIndex {
             if let Some(item) = self.get_item(height) {
                 info!("height: {} hash: {}", height, item.block_hash.0.to_base58());
             } else {
-                println!("height: {} missing in block index", height);
+                error!("height: {} missing in block index", height);
             }
         }
     }
