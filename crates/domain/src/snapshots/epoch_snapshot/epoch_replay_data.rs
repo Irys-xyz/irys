@@ -1,7 +1,7 @@
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
-use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, H256};
+use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database as _;
 use std::collections::VecDeque;
 
@@ -117,64 +117,31 @@ impl EpochReplayData {
                 .collect::<Result<Vec<_>, _>>()
                 .expect("Able to fetch all commitment transactions from database for epoch block");
 
-            // Skip genesis block to avoid double-counting its commitments
-            if block.height > 0 {
-                epoch_block_data.push_back(EpochBlockData {
-                    epoch_block: block,
-                    commitments: commitments_tx,
-                });
-            }
+            epoch_block_data.push_back(EpochBlockData {
+                epoch_block: block,
+                commitments: commitments_tx,
+            });
         }
 
-        // Build a valid genesis header and commitments:
-        // Prefer index item at height 0; otherwise fall back to zero hash if present
-        let genesis_block_header = {
-            let block_index = block_index_guard.read();
-            if let Some(item) = block_index.get_item(0) {
-                db.view_eyre(|tx| block_header_by_hash(tx, &item.block_hash, false))?
-                    .ok_or_else(|| {
-                        eyre::eyre!(
-                            "Expected to find genesis block header for indexed hash {}",
-                            item.block_hash
-                        )
-                    })?
-            } else {
-                db.view_eyre(|tx| block_header_by_hash(tx, &H256::zero(), false))?
-                    .ok_or_else(|| eyre::eyre!("Expected to find genesis block header"))?
-            }
-        };
+        // Separate genesis data from subsequent epoch blocks
+        let genesis_data = {
+            let genesis_block_data = epoch_block_data
+                .pop_front()
+                .expect("Expected at least one epoch block (genesis) in the replay data");
 
-        // Collect commitment transactions referenced by the genesis block's commitment ledger
-        let genesis_commitments: Vec<CommitmentTransaction> = {
-            if let Some(commitment_ledger) = genesis_block_header
-                .system_ledgers
-                .iter()
-                .find(|b| b.ledger_id == SystemLedger::Commitment)
-            {
-                let read_tx = db
-                    .tx()
-                    .expect("Expected to create a valid database transaction");
-                commitment_ledger
-                    .tx_ids
-                    .iter()
-                    .map(|txid| {
-                        commitment_tx_by_txid(&read_tx, txid)?.ok_or_else(|| {
-                            eyre::eyre!(
-                                "Commitment transaction not found in DB for genesis txid={}",
-                                txid
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                // No commitment ledger present on genesis (allowed in some test configs)
-                Vec::new()
+            if genesis_block_data.epoch_block.height > 0 {
+                panic!(
+                    "Missing genesis block from epoch blocks, first block was height {}",
+                    genesis_block_data.epoch_block.height
+                );
             }
+
+            genesis_block_data
         };
 
         Ok(Self {
-            genesis_block_header,
-            genesis_commitments,
+            genesis_block_header: genesis_data.epoch_block,
+            genesis_commitments: genesis_data.commitments,
             epoch_blocks: epoch_block_data.into(),
         })
     }
