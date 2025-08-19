@@ -235,6 +235,10 @@ impl BlockValidationTask {
 
         // Recall range validation
         let recall_task = async move {
+            if skip_vdf_validation {
+                tracing::debug!("Skipping recall range validation due to skip_vdf_validation flag");
+                return ValidationResult::Valid;
+            }
             recall_recall_range_is_valid(
                 block,
                 &self.service_inner.config.consensus,
@@ -261,6 +265,7 @@ impl BlockValidationTask {
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
+                    tracing::debug!("Skipping POA validation due to skip_vdf_validation flag");
                     return Ok(ValidationResult::Valid);
                 }
                 poa_is_valid(
@@ -331,6 +336,11 @@ impl BlockValidationTask {
 
         // Commitment transaction ordering validation
         let commitment_ordering_task = async move {
+            if skip_vdf_validation {
+                tracing::debug!("Skipping commitment ordering validation due to skip_vdf_validation flag");
+                return ValidationResult::Valid;
+            }
+
             commitment_txs_are_valid(
                 config,
                 service_senders,
@@ -347,6 +357,11 @@ impl BlockValidationTask {
 
         // Data transaction fee validation
         let data_txs_validation_task = async move {
+            if skip_vdf_validation {
+                tracing::debug!("Skipping data tx validation due to skip_vdf_validation flag");
+                return ValidationResult::Valid;
+            }
+
             data_txs_are_valid(
                 config,
                 service_senders,
