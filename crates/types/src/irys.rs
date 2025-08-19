@@ -1,3 +1,4 @@
+use crate::storage_pricing::TERM_FEE;
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
     DataLedger, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
@@ -46,10 +47,32 @@ impl IrysSigner {
     ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize)?;
 
-        // TODO: These should be calculated from some pricing params passed in
-        // as a parameter
-        transaction.header.perm_fee = Some(U256::from(1));
-        transaction.header.term_fee = U256::from(1);
+        // Compute realistic fees using config defaults and pricing helpers
+        // Term fee: placeholder constant used across pricing until full dynamic pricing is wired
+        let term_fee = TERM_FEE;
+
+        // Use consensus defaults and genesis price to approximate perm fee (suitable for tests)
+        let config = crate::ConsensusConfig::testing();
+        let bytes_to_store = U256::from(transaction.header.data_size);
+
+        // Calculate base network fee for permanent storage
+        let cost_per_gb_per_year = config
+            .annual_cost_per_gb
+            .cost_per_replica(config.safe_minimum_number_of_years, config.decay_rate)?
+            .replica_count(config.number_of_ingress_proofs)?;
+        let base_network_fee =
+            cost_per_gb_per_year.base_network_fee(bytes_to_store, config.genesis_price)?;
+
+        // Add ingress proof rewards to get total perm_fee
+        let perm_fee = base_network_fee.add_ingress_proof_rewards(
+            term_fee,
+            config.number_of_ingress_proofs,
+            config.immediate_tx_inclusion_reward_percent,
+        )?;
+
+        // Set computed fees on the header
+        transaction.header.term_fee = term_fee;
+        transaction.header.perm_fee = Some(perm_fee.amount);
 
         // Fetch and set last_tx if not provided (primarily for testing).
         #[expect(clippy::manual_unwrap_or_default, reason = "TODO")]
