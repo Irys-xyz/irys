@@ -1,3 +1,4 @@
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
 use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
@@ -56,22 +57,19 @@ impl EpochReplayData {
         for i in 0..num_epoch_blocks {
             let block_height = i * num_blocks_in_epoch;
 
-            // Get the block hash from the block index
-            let block_item = block_index.get_item(block_height).unwrap_or_else(|| {
-                panic!(
-                    "Expected block index to contain an item at the epoch block height: {}",
-                    block_height
-                )
-            });
-
-            // Retrieve the block header from the database
+            // Retrieve the epoch block header from the index hash; if index missing, skip
+            let Some(item) = block_index.get_item(block_height) else {
+                // missing epoch block index entry. Panic!
+                panic!("Missing epoch block @ {} from block index", block_height);
+            };
             let block = db
-                .view(|tx| block_header_by_hash(tx, &block_item.block_hash, false))
-                .unwrap()
-                .unwrap()
-                .expect(
-                    "Expected to find block header in database matching the hash from block index",
-                );
+                .view_eyre(|tx| block_header_by_hash(tx, &item.block_hash, false))?
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Expected to find block header in database for indexed hash {}",
+                        item.block_hash
+                    )
+                })?;
 
             // Ensure block height matches expected position in the chain
             if block.height != block_height {
@@ -79,7 +77,7 @@ impl EpochReplayData {
                     "Block height mismatch: stored={}, expected={} for hash={}",
                     block.height,
                     block_height,
-                    block_item.block_hash
+                    block.block_hash
                 ));
             }
 
@@ -117,11 +115,8 @@ impl EpochReplayData {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .expect(
-                    "Expected to find all commitment transactions referenced by the epoch block",
-                );
+                .unwrap_or_else(|_| panic!("Able to fetch all commitment transactions from database for epoch block {} at height {}", block.block_hash, block.height));
 
-            // Store the epoch block and its commitments
             epoch_block_data.push_back(EpochBlockData {
                 epoch_block: block,
                 commitments: commitments_tx,
@@ -129,11 +124,22 @@ impl EpochReplayData {
         }
 
         // Separate genesis data from subsequent epoch blocks
-        let genesis_data = epoch_block_data
-            .pop_front()
-            .expect("Expected at least one epoch block (genesis) in the replay data");
+        let genesis_data = {
+            let genesis_block_data = epoch_block_data
+                .pop_front()
+                .expect("Expected at least one epoch block (genesis) in the replay data");
 
-        // Convert remaining VecDeque to Vec for subsequent epoch blocks
+            if genesis_block_data.epoch_block.height > 0 {
+                panic!(
+                    "Missing genesis block from epoch blocks, first block was hash {} height {}",
+                    genesis_block_data.epoch_block.block_hash,
+                    genesis_block_data.epoch_block.height
+                );
+            }
+
+            genesis_block_data
+        };
+
         Ok(Self {
             genesis_block_header: genesis_data.epoch_block,
             genesis_commitments: genesis_data.commitments,

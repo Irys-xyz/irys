@@ -817,12 +817,19 @@ where
     let mempool_future = {
         let tx_ids = tx_ids_clone.clone();
         async move {
-            let x = get_data_txs(tx_ids)
+            let results = get_data_txs(tx_ids.clone())
                 .await
-                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
+
+            let x = tx_ids
                 .into_iter()
-                .filter(Option::is_some)
-                .map(|v| (v.clone().unwrap().id, v.unwrap()))
+                .zip(results.into_iter())
+                .map(|(id, opt)| {
+                    let header = opt.unwrap_or_else(|| {
+                        panic!("tx header missing after filter for id {:?}", id)
+                    });
+                    (id, header)
+                })
                 .collect::<HashMap<IrysTransactionId, DataTransactionHeader>>();
             Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }

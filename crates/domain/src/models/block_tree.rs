@@ -177,26 +177,29 @@ impl BlockTree {
     /// ## Returns
     /// Fully initialized block tree cache with all snapshots ready for use (Self)
     ///
-    /// ## Panics
-    /// Panics if the block index is empty or if database queries fail unexpectedly
+    /// ## Errors
+    /// Returns an error if the block index is empty or if database queries fail unexpectedly
     pub fn restore_from_db(
         block_index_guard: BlockIndexReadGuard,
         epoch_replay_data: EpochReplayData,
         db: DatabaseProvider,
         storage_submodules_config: &StorageSubmodulesConfig,
         config: Config,
-    ) -> Self {
+    ) -> eyre::Result<Self> {
         let consensus_config = &config.consensus;
         // Extract block range and start block info
         let (start, end, start_block_hash) = {
             let block_index = block_index_guard.read();
-            assert!(block_index.num_blocks() > 0, "Block list must not be empty");
+            eyre::ensure!(block_index.num_blocks() > 0, "Block list must not be empty");
 
             let start = block_index
                 .num_blocks()
                 .saturating_sub(consensus_config.block_tree_depth - 1);
             let end = block_index.num_blocks();
-            let start_block_hash = block_index.get_item(start).unwrap().block_hash;
+            let start_block_hash = block_index
+                .get_item(start)
+                .ok_or_else(|| eyre::eyre!("missing block index entry at start height {}", start))?
+                .block_hash;
             (start, end, start_block_hash)
         };
 
@@ -221,10 +224,14 @@ impl BlockTree {
             .expect("epoch_replay_data to be replayed");
         let arc_epoch_snapshot = Arc::new(epoch_snapshot);
 
-        let tx = db.tx().unwrap();
+        let tx = db
+            .tx()
+            .map_err(|e| eyre::eyre!("failed to open db tx for restore_from_db: {}", e))?;
         let start_block = block_header_by_hash(&tx, &start_block_hash, false)
-            .unwrap()
-            .unwrap();
+            .map_err(|e| eyre::eyre!("db error loading start block {}: {}", start_block_hash, e))?
+            .ok_or_else(|| {
+                eyre::eyre!("start block header not found for hash {}", start_block_hash)
+            })?;
 
         debug!(
             "block tree start block - hash: {} height: {}",
@@ -257,11 +264,21 @@ impl BlockTree {
         // Get the latest block from index for EMA snapshot
         let latest_block_hash = {
             let block_index = block_index_guard.read();
-            block_index.get_item(end - 1).unwrap().block_hash
+            block_index
+                .get_item(end - 1)
+                .ok_or_else(|| {
+                    eyre::eyre!("missing latest block index entry at height {}", end - 1)
+                })?
+                .block_hash
         };
         let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
-            .unwrap()
-            .unwrap();
+            .map_err(|e| eyre::eyre!("db error loading latest block {}: {}", latest_block_hash, e))?
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "latest block header not found for hash {}",
+                    latest_block_hash
+                )
+            })?;
 
         // Create EMA cache for start block
         let ema_snapshot =
@@ -360,7 +377,13 @@ impl BlockTree {
             block_index.get_latest_item().unwrap().block_hash
         };
 
-        block_tree_cache.mark_tip(&tip_hash).unwrap();
+        block_tree_cache.mark_tip(&tip_hash).map_err(|e| {
+            eyre::eyre!(
+                "failed to mark tip {} during restore_from_db: {}",
+                tip_hash,
+                e
+            )
+        })?;
 
         // Prune the cache after restoration to ensure correct depth
         // Subtract 1 to ensure we keep exactly `depth` blocks.
@@ -368,7 +391,7 @@ impl BlockTree {
         // equation, so it's always tip + `depth` that's kept around
         block_tree_cache.prune(consensus_config.block_tree_depth.saturating_sub(1));
 
-        block_tree_cache
+        Ok(block_tree_cache)
     }
 
     pub fn add_common(
@@ -1143,9 +1166,8 @@ fn build_current_ema_snapshot_from_index(
     chain_blocks.reverse();
 
     // Pass the collected blocks to create_ema_snapshot_from_chain_history
-    create_ema_snapshot_from_chain_history(&chain_blocks, config).unwrap_or_else(|err| {
-        panic!("Failed to create EMA snapshot from chain history: {}", err);
-    })
+    create_ema_snapshot_from_chain_history(&chain_blocks, config)
+        .expect("Failed to create EMA snapshot from chain history")
 }
 
 pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<(H256, u64)>> {
