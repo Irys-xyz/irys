@@ -21,10 +21,8 @@ impl Inner {
             .read()
             .canonical_commitment_snapshot();
 
-        if !epoch_snapshot.is_staked(address) {
-            if !commitment_snapshot.is_staked(address) {
-                return Err(IngressProofError::UnstakedAddress);
-            }
+        if !epoch_snapshot.is_staked(address) && !commitment_snapshot.is_staked(address) {
+            return Err(IngressProofError::UnstakedAddress);
         }
 
         let db = self.irys_db.clone();
