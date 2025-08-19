@@ -634,7 +634,7 @@ impl BlockTreeServiceInner {
 
         if validation_result == ValidationResult::Invalid {
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
-            let mut cache = self.cache.write().expect("cache write lock poisoned");
+            let mut cache = self.cache.write().expect("block tree cache write lock poisoned");
 
             error!(block_hash = %block_hash.0.to_base58(),"invalid block");
             let Some(block_entry) = cache.get_block(&block_hash) else {
