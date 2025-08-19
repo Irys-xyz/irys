@@ -630,7 +630,7 @@ impl BlockTreeServiceInner {
             .read()
             .expect("cache read lock poisoned")
             .get_block(&block_hash)
-            .expect("block to be in cache")
+            .unwrap_or_else(|| panic!("block {} to be in cache", block_hash))
             .height;
 
         debug!(
