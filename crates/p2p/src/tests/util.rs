@@ -11,6 +11,7 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
+use irys_actors::mempool_service::IngressProofError;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
@@ -25,7 +26,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipDataRequest, GossipRequest, IrysBlockHeader,
+    GossipBroadcastMessage, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
     IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
     PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
 };
@@ -95,6 +96,13 @@ impl MempoolFacade for MempoolStub {
         &self,
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
+        Ok(())
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        _ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
         Ok(())
     }
 

@@ -15,7 +15,8 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipDataRequest,
-    GossipRequest, IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    GossipRequest, IngressProof, IrysBlockHeader, IrysTransactionResponse, PeerListItem,
+    UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -186,6 +187,53 @@ where
             }
             Err(error) => {
                 error!("Error when sending transaction to mempool: {:?}", error);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn handle_ingress_proof(
+        &self,
+        proof_request: GossipRequest<IngressProof>,
+    ) -> GossipResult<()> {
+        debug!(
+            "Node {}: Gossip ingress_proof received from peer {}: {:?}",
+            self.gossip_client.mining_address,
+            proof_request.miner_address,
+            proof_request.data.proof
+        );
+
+        let proof = proof_request.data;
+        let source_miner_address = proof_request.miner_address;
+
+        let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof.proof)?;
+        self.cache.record_seen(
+            source_miner_address,
+            GossipCacheKey::IngressProof(proof.proof),
+        )?;
+
+        if already_seen {
+            debug!(
+                "Node {}: Ingress Proof {} is already recorded in the cache, skipping",
+                self.gossip_client.mining_address, proof.proof
+            );
+            return Ok(());
+        }
+
+        // TODO: Check to see if this proof is in the DB LRU Cache
+
+        match self
+            .mempool
+            .handle_ingest_ingress_proof(proof)
+            .await
+            .map_err(GossipError::from)
+        {
+            Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
+                debug!("Ingress Proof sent to mempool");
+                Ok(())
+            }
+            Err(error) => {
+                error!("Error when sending ingress proof to mempool: {:?}", error);
                 Err(error)
             }
         }
