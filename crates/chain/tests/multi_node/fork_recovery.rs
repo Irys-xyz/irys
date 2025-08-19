@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use crate::utils::IrysNodeTest;
-use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};

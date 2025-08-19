@@ -1,6 +1,5 @@
 use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
-use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};

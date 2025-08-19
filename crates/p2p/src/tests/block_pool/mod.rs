@@ -5,7 +5,6 @@ use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use async_trait::async_trait;
-use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;

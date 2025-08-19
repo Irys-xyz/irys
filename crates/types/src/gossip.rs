@@ -3,7 +3,6 @@ use crate::{
     IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::{Address, B256};
-use base58::ToBase58 as _;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};

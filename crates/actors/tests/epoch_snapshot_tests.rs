@@ -1,6 +1,5 @@
 use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
 use actix::{Actor as _, SystemService as _};
-use base58::ToBase58 as _;
 use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,

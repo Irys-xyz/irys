@@ -10,7 +10,6 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, SystemLedger};

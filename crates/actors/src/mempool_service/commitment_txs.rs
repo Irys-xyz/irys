@@ -1,5 +1,4 @@
 use crate::mempool_service::{Inner, MempoolServiceMessage, TxIngressError, TxReadError};
-use base58::ToBase58 as _;
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;

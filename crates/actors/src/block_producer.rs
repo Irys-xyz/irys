@@ -16,7 +16,6 @@ use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
 };
 use alloy_signer_local::LocalSigner;
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{

@@ -4,7 +4,6 @@ use crate::{
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
-use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,

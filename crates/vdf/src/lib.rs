@@ -341,7 +341,7 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base58::{FromBase58 as _, ToBase58 as _};
+    use base58::FromBase58 as _;
     use irys_types::ConsensusConfig;
     use tracing::debug;
 

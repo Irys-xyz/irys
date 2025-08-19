@@ -3,7 +3,6 @@ use crate::block_validation::calculate_perm_storage_total_fee;
 use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;

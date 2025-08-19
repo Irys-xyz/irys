@@ -1,6 +1,5 @@
 use crate::utils::*;
 use assert_matches::assert_matches;
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::packing::wait_for_packing;
 use irys_chain::IrysNodeCtx;

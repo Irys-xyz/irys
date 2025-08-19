@@ -1,4 +1,3 @@
-use base58::ToBase58 as _;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;

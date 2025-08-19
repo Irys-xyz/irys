@@ -10,7 +10,6 @@ use actix_web::{
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::{BlockHashOrNumber, BlockId};
 use awc::{body::MessageBody, http::StatusCode};
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
