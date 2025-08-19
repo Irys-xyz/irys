@@ -44,7 +44,7 @@ impl Inner {
             return Err(IngressProofError::DatabaseError);
         }
 
-        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
+        let gossip_sender = &self.service_senders.gossip_broadcast;
         let gossip_broadcast_message = GossipBroadcastMessage::from(ingress_proof);
 
         if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
