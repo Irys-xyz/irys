@@ -267,7 +267,6 @@ impl BlockTree {
             let block_index = block_index_guard.read();
             block_index
                 .get_item(end - 1)
-                .cloned()
                 .ok_or_else(|| {
                     eyre::eyre!("missing latest block index entry at height {}", end - 1)
                 })?
