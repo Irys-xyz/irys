@@ -115,9 +115,7 @@ impl EpochReplayData {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .expect(
-                    "Able to fetch all commitment transactions from mempool or database for epoch block",
-                );
+                .expect("Able to fetch all commitment transactions from database for epoch block");
 
             // Skip genesis block to avoid double-counting its commitments
             if block.height > 0 {
