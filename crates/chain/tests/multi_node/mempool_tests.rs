@@ -530,6 +530,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     let chunks3 = [[rng.gen(); 32], [rng.gen(); 32], [rng.gen(); 32]];
     let data3: Vec<u8> = chunks3.concat();
 
+    println!("Popa 6");
     // Post a transaction that should be gossiped to all peers
     let shared_tx = genesis_node
         .post_data_tx(
@@ -546,6 +547,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
     peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
 
+    println!("Popa 5");
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
         .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
@@ -974,6 +976,7 @@ async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     // B: Tx & Block 2
 
+    println!("Popa 2");
     // don't upload chunks, we want this in the submit ledger
     let b_blk2_tx1 = b_node
         .post_data_tx(
@@ -1476,13 +1479,22 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let chain_id = genesis_config.consensus_config().chain_id;
 
     // Fund genesis accounts for EVM transactions
-    genesis_config.consensus.extend_genesis_accounts(vec![(
-        rich_account.address(),
-        GenesisAccount {
-            balance: U256::from(1000000000000000000_u128), // 1 IRYS
-            ..Default::default()
-        },
-    )]);
+    genesis_config.consensus.extend_genesis_accounts(vec![
+        (
+            rich_account.address(),
+            GenesisAccount {
+                balance: U256::from(100000000000000000000_u128), // 100 IRYS
+                ..Default::default()
+            },
+        ),
+        // (
+        //     recipient2.address(),
+        //     GenesisAccount {
+        //         balance: U256::from(1000000000000000000_u128), // 1 IRYS
+        //         ..Default::default()
+        //     },
+        // ),
+    ]);
 
     // Fund the peer signers for network participation
     genesis_config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
@@ -1520,7 +1532,10 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .rpc
         .get_balance(recipient2.address(), None)?;
     assert_eq!(recipient1_init_balance, U256::from(0));
-    assert_eq!(recipient2_init_balance, U256::from(0));
+    assert_eq!(
+        recipient2_init_balance,
+        U256::from(0)
+    );
 
     // need to stake & pledge peers before they can mine
     let post_wait_stake_commitment =
@@ -1577,7 +1592,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
-        value: Some(U256::from(1000000000000000_u128)),
+        value: Some(U256::from(1000000000000000000_u128)),
         nonce: Some(1),
         chain_id: Some(chain_id),
         ..Default::default()
@@ -1669,7 +1684,8 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     wait_for_evm_tx(&peer2_reth_context, tx_env2.hash()).await?;
 
-    expected_recipient2_balance += U256::from(1000000000000000_u128);
+    // Initial balance + received value
+    expected_recipient2_balance += U256::from(1000000000000000000_u128);
 
     // Mine blocks on both peers in parallel to create a fork
     let (result1, result2) = tokio::join!(

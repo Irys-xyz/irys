@@ -117,6 +117,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
         },
     };
 
+    // This is the line that doesn't work
     let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
         .await?
@@ -147,12 +148,18 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     test_signer.sign_block_header(&mut irys_block)?;
     block = Arc::new(irys_block);
 
+    println!("Biba 5");
+
     // Send block directly to block tree service for validation
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+
+    println!("Biba 6");
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     // This should still be rejected because the perm_fee is insufficient
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
+
+    println!("Biba 7");
 
     genesis_node.stop().await;
 

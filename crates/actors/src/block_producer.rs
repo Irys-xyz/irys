@@ -381,6 +381,7 @@ pub trait BlockProdStrategy {
             EthBuiltPayload,
         )>,
     > {
+        println!("Boba 1");
         let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
@@ -392,6 +393,8 @@ pub trait BlockProdStrategy {
             mut publish_txs,
             expired_ledger_fees,
         ) = self.get_mempool_txs(&prev_block_header).await?;
+
+        println!("Boba 2");
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -407,6 +410,7 @@ pub trait BlockProdStrategy {
             .await?;
         let evm_block = eth_built_payload.block();
 
+        println!("Boba 3");
         let block_result = self
             .produce_block_without_broadcasting(
                 solution,
@@ -422,6 +426,7 @@ pub trait BlockProdStrategy {
             )
             .await?;
 
+        println!("Boba 4");
         let Some((block, stats)) = block_result else {
             return Ok(None);
         };
