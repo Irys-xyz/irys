@@ -29,7 +29,6 @@ irys-reth-node-bridge.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
 irys-testing-utils.workspace = true
-base58.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
 reqwest.workspace = true
