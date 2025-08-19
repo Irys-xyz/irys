@@ -133,8 +133,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        // IMPORTANT: You have to keep the debug format here, since normal to_string of H256
-        //  encodes just first 4 and last 4 bytes with a placeholder in the middle
+        // H256 Display prints full base58; using Display here is correct.
         let path = format!("/tx/{}", tx_id);
         self.make_request(peer, Method::GET, &path, None::<&()>)
             .await?
