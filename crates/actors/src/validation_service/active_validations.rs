@@ -346,7 +346,7 @@ impl ActiveValidations {
                     .remove(&task.block_hash)
                     .unwrap_or_else(|| {
                         panic!(
-                            "Expected processing task to have an entry {} in the vdf_pending queue",
+                            "Expected processing task to have an entry for block {} in the vdf_pending queue",
                             &task.block_hash
                         )
                     });
