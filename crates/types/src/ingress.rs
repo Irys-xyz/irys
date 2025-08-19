@@ -182,7 +182,7 @@ mod tests {
             testing_config.chunk_size as usize,
         )?;
         let interleave_value = signer.address();
-        let interleave_hash = hash_sha256(&interleave_value.0 .0)?;
+        let interleave_hash = hash_sha256(&interleave_value.0 .0);
 
         // interleave the interleave hash with the leaves
         // TODO improve
@@ -192,7 +192,7 @@ mod tests {
             interleaved.push(leaf.id)
         }
 
-        let _interleaved_hash = hash_sha256(interleaved.concat().as_slice())?;
+        let _interleaved_hash = hash_sha256(interleaved.concat().as_slice());
         Ok(())
     }
 

@@ -64,7 +64,7 @@ impl UnpackedChunk {
     }
 
     pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
-        hash_sha256(data_path).unwrap().into()
+        hash_sha256(data_path).into()
     }
 
     /// a Chunk's tx relative end byte offset
