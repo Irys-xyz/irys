@@ -61,7 +61,7 @@ pub enum CommitmentValidationError {
 /// We include the Irys prefix to differentiate from EVM transactions.
 #[serde(rename_all = "camelCase", default)]
 pub struct DataTransactionHeader {
-    /// A SHA-256 hash of the transaction signature.
+    /// A 256-bit hash of the transaction signature.
     #[rlp(skip)]
     #[rlp(default)]
     // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
