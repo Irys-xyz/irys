@@ -468,14 +468,16 @@ impl BlockTreeServiceInner {
                         // Already finalized in index, nothing to do
                         return;
                     } else {
-                        debug!(
-                            "Block tree and index out of sync at height {} (index has {}, expected {}), continuing migration",
+                        // panic and hope a node restart solves this problem
+                        panic!(
+                            "Block tree and index out of sync at height {} (index has {}, expected {})",
                             migration_height, migrated.block_hash, migrated_hash
                         );
                     }
                 } else {
-                    debug!(
-                        "Block index missing item at height {} while finalizing {}, continuing migration",
+                    // panic and hope a node restart solves this problem
+                    panic!(
+                        "Block index missing item at height {} while migrating {}",
                         migration_height, migrated_hash
                     );
                 }
