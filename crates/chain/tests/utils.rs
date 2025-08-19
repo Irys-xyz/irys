@@ -95,10 +95,12 @@ pub async fn capacity_chunk_solution(
 
     for _ in 0..max_scan_steps {
         // Get steps for (current_step - 1, current_step)
-        let steps: H256List = match vdf_steps_guard
-            .read()
-            .get_steps(ii(current_step.saturating_sub(1), current_step))
-        {
+        let get_steps = {
+            vdf_steps_guard
+                .read()
+                .get_steps(ii(current_step.saturating_sub(1), current_step))
+        };
+        let steps: H256List = match get_steps {
             Ok(s) => s,
             Err(_) => {
                 // If steps are not yet available, wait briefly and try again
@@ -157,7 +159,7 @@ pub async fn capacity_chunk_solution(
             // solution_hash = sha256(poa_chunk || offset_le || vdf_output)
             let mut hasher_sol = Sha256::new();
             hasher_sol.update(&entropy_chunk);
-            hasher_sol.update(&partition_chunk_offset.to_le_bytes());
+            hasher_sol.update(partition_chunk_offset.to_le_bytes());
             hasher_sol.update(steps[1].as_bytes());
             let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
@@ -180,7 +182,7 @@ pub async fn capacity_chunk_solution(
 
         // Advance to next step and wait a bit to allow VDF to progress
         let next_step_target = current_step.saturating_add(1);
-        let mut tries = 0u8;
+        let mut tries = 0_u8;
         while vdf_steps_guard.read().global_step < next_step_target && tries < 10 {
             sleep(Duration::from_millis(200)).await;
             tries += 1;
@@ -216,7 +218,7 @@ pub async fn capacity_chunk_solution(
 
     let mut hasher_sol = Sha256::new();
     hasher_sol.update(&entropy_chunk);
-    hasher_sol.update(&partition_chunk_offset.to_le_bytes());
+    hasher_sol.update(partition_chunk_offset.to_le_bytes());
     hasher_sol.update(steps[1].as_bytes());
     let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
@@ -2170,7 +2172,7 @@ pub async fn solution_context_with_poa_chunk(
     // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
     let mut hasher_sol = Sha256::new();
     hasher_sol.update(&poa_chunk);
-    hasher_sol.update(&partition_chunk_offset.to_le_bytes());
+    hasher_sol.update(partition_chunk_offset.to_le_bytes());
     hasher_sol.update(steps[1].as_bytes());
     let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
@@ -2186,7 +2188,6 @@ pub async fn solution_context_with_poa_chunk(
         checkpoints: H256List(checkpoints),
         seed: Seed(steps[1]),
         solution_hash,
-        ..Default::default()
     })
 }
 

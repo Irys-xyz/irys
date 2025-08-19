@@ -122,7 +122,7 @@ fn solution_hash_link_valid_ok() {
     let mut block = IrysBlockHeader::new_mock_header();
     // choose deterministic inputs
     block.poa.partition_chunk_offset = 7;
-    block.vdf_limiter_info.output = H256::from([1u8; 32]);
+    block.vdf_limiter_info.output = H256::from([1_u8; 32]);
 
     let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
 
@@ -142,7 +142,7 @@ fn solution_hash_link_valid_ok() {
 fn solution_hash_link_invalid_when_inputs_tampered() {
     let mut block = IrysBlockHeader::new_mock_header();
     block.poa.partition_chunk_offset = 7;
-    block.vdf_limiter_info.output = H256::from([1u8; 32]);
+    block.vdf_limiter_info.output = H256::from([1_u8; 32]);
 
     let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
 

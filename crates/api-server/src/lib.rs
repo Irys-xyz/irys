@@ -217,7 +217,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 
 //     // Create 2.5 chunks worth of data *  fill the data with random bytes
 //     let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
-//     let mut data_bytes = vec![0u8; data_size];
+//     let mut data_bytes = vec![0_u8; data_size];
 //     rand::thread_rng().fill(&mut data_bytes[..]);
 
 //     // Create a new Irys API instance & a signed transaction
