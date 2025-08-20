@@ -269,8 +269,11 @@ where
                             debug!("Peer {:?} is offline", mining_addr);
                             act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
                         }
-                        Err(GossipClientError::HealthCheckFailed(u,e)) => {
-                            debug!("Peer {:?}{} healthcheck failed with status {}", mining_addr,u,e);
+                        Err(GossipClientError::HealthCheckFailed(u, e)) => {
+                            debug!(
+                                "Peer {:?}{} healthcheck failed with status {}",
+                                mining_addr, u, e
+                            );
                             act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
                         }
                         Err(e) => {
