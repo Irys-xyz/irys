@@ -26,7 +26,7 @@
 /// - 5% of term_fee for each ingress-proof provided. These rewards are included in the transaction's `perm_fee` field along with the base permanent storage cost.
 /// - perm_fee total value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 use crate::ingress::IngressProof;
-use crate::storage_pricing::{mul_div, BPS_SCALE};
+use crate::storage_pricing::{mul_div, PRECISION_SCALE};
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
@@ -64,7 +64,7 @@ impl TermFeeCharges {
         let block_producer_reward = mul_div(
             term_fee,
             config.immediate_tx_inclusion_reward_percent.amount,
-            BPS_SCALE,
+            PRECISION_SCALE,
         )?;
 
         // The rest of the fee goes to the treasury
@@ -149,7 +149,7 @@ impl PublishFeeCharges {
         let per_ingress_reward = mul_div(
             term_fee,
             config.immediate_tx_inclusion_reward_percent.amount,
-            BPS_SCALE,
+            PRECISION_SCALE,
         )
         .unwrap_or(U256::from(0));
 

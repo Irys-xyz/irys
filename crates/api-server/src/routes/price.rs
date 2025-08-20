@@ -3,12 +3,8 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
-use eyre::OptionExt as _;
 use irys_types::{
-    storage_pricing::{
-        phantoms::{Irys, NetworkFee},
-        Amount, TERM_FEE,
-    },
+    storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
 };
@@ -20,9 +16,7 @@ use crate::ApiState;
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceInfo {
-    // Protocol-enforced permanent storage cost
     pub perm_fee: U256,
-    // Term storage fee with base fee + size-based calculation
     pub term_fee: U256,
     pub ledger: u32,
     pub bytes: u64,
@@ -55,12 +49,48 @@ pub async fn get_price(
 
     match data_ledger {
         DataLedger::Publish => {
-            // Calculate term fee first as it's needed for perm fee calculation
-            let term_fee = calculate_term_fee(bytes_to_store, &state.config.consensus);
+            // Get the latest EMA for pricing calculations and the tip block
+            let tree = state.block_tree.read();
+            let tip = tree.tip;
+            let ema = tree
+                .get_ema_snapshot(&tip)
+                .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+
+            // Get the expires field from the latest block's Submit ledger
+            let epochs_for_storage = if let Some(tip_block) = tree.get_block(&tip) {
+                tip_block
+                    .data_ledgers
+                    .iter()
+                    .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
+                    .and_then(|ledger| ledger.expires)
+                    .unwrap_or(state.config.consensus.epoch.submit_ledger_epoch_length)
+            } else {
+                // Fallback to config value if we can't get the block
+                state.config.consensus.epoch.submit_ledger_epoch_length
+            };
+
+            drop(tree);
+
+            // Calculate term fee using the dynamic epoch count
+            let term_fee = calculate_term_fee(
+                bytes_to_store,
+                epochs_for_storage,
+                &state.config.consensus,
+                ema.ema_for_public_pricing(),
+            )
+            .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {:?}", e)))?;
 
             // If the cost calculation fails, return 400 with the error text
-            let total_perm_cost = cost_of_perm_storage(state, bytes_to_store, term_fee)
-                .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
+            let total_perm_cost = {
+                let ema: &irys_domain::EmaSnapshot = &ema;
+                calculate_perm_fee_from_config(
+                    bytes_to_store,
+                    &state.config.consensus,
+                    ema.ema_for_public_pricing(),
+                    term_fee,
+                )
+            }
+            .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: total_perm_cost.amount,
@@ -72,54 +102,6 @@ pub async fn get_price(
         // TODO: support other term ledgers here
         DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
     }
-}
-
-fn cost_of_perm_storage(
-    state: web::Data<ApiState>,
-    bytes_to_store: u64,
-    term_fee: U256,
-) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    // get the latest EMA to use for pricing
-    let tree = state.block_tree.read();
-    let tip = tree.tip;
-    let ema = tree
-        .get_ema_snapshot(&tip)
-        .ok_or_eyre("tip block should still remain in state")?;
-    drop(tree);
-
-    // Calculate the cost per GB (take into account replica count & cost per replica)
-    // NOTE: this value can be memoised because it is deterministic based on the config
-    let cost_per_gb_per_year = state
-        .config
-        .consensus
-        .annual_cost_per_gb
-        .cost_per_replica(
-            state.config.consensus.safe_minimum_number_of_years,
-            state.config.consensus.decay_rate,
-        )?
-        .replica_count(state.config.consensus.number_of_ingress_proofs)?;
-
-    // calculate the base network fee (protocol cost)
-    let base_network_fee = cost_per_gb_per_year
-        .base_network_fee(U256::from(bytes_to_store), ema.ema_for_public_pricing())?;
-
-    // Add ingress proof rewards to the base network fee
-    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
-    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
-        term_fee,
-        state.config.consensus.number_of_ingress_proofs,
-        state.config.consensus.immediate_tx_inclusion_reward_percent,
-    )?;
-
-    Ok(total_perm_fee)
-}
-
-/// Calculate term fee with base 0.001 IRYS plus size-based adjustments
-/// The fee distribution logic from fee_distribution.rs is applied here
-/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION
-fn calculate_term_fee(_bytes_to_store: u64, _config: &irys_types::ConsensusConfig) -> U256 {
-    // todo: when doing the calculations, if the final fee is lower than $0.01 then we must round upwards
-    TERM_FEE
 }
 
 pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResponse> {
