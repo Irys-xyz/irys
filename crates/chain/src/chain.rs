@@ -1619,10 +1619,11 @@ fn read_latest_block_data(
     block_index: &BlockIndex,
     irys_db: &DatabaseProvider,
 ) -> (u64, Arc<IrysBlockHeader>) {
+    // Read latest from the block index; if no entries, panic
     let latest_block_index = block_index
         .get_latest_item()
         .cloned()
-        .expect("the block index must have at least one entry");
+        .expect("block index must have at least one entry");
     let latest_block_height = block_index.latest_height();
     let latest_block = Arc::new(
         database::block_header_by_hash(
