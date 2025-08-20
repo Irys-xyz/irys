@@ -18,7 +18,7 @@ use irys_types::{
     IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `DataTransactionHeader` type,
