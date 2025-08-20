@@ -8,7 +8,7 @@ use actix_web::{
     web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
-use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_actors::{mempool_service::MempoolServiceMessage, pledge_provider::MempoolPledgeProvider};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
 use irys_reth_node_bridge::node::RethNodeProvider;
@@ -37,7 +37,7 @@ pub struct ApiState {
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
     pub sync_state: ChainSyncState,
-    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
+    pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
 }
 
 impl ApiState {

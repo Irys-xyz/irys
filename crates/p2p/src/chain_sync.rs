@@ -1,6 +1,6 @@
 use crate::{BlockPool, GossipError};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};

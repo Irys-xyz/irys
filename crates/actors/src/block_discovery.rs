@@ -1,8 +1,8 @@
 use crate::{
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{prevalidate_block, PreValidationError},
-    mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
+    MempoolServiceMessage,
 };
 use actix::prelude::*;
 use async_trait::async_trait;

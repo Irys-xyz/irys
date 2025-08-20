@@ -1,10 +1,11 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use actix::Addr;
+use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::block_validation::shadow_transactions_are_valid;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
+use irys_actors::MempoolFacade;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;

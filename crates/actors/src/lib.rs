@@ -20,6 +20,7 @@ pub mod validation_service;
 pub use addresses::*;
 pub use block_producer::*;
 pub use data_sync_service::*;
+pub use mempool_service::*;
 pub use reth_ethereum_primitives;
 pub use shadow_tx_generator::ShadowMetadata;
 pub use storage_module_service::*;
