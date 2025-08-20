@@ -15,8 +15,14 @@ use std::sync::Arc;
 use tracing::error;
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("Gossip client error: {0}")]
-pub struct GossipClientError(String);
+pub enum GossipClientError {
+    #[error("Get request to {0} failed with reason {1}")]
+    GetRequestFailed(String, String),
+    #[error("Health check to {0} failed with status code {1}")]
+    HealthCheckFailed(String, reqwest::StatusCode),
+    #[error("Failed to get json response payload from {0} with reason {1}")]
+    GetJsonResponsePayloadFailed(String, String),
+}
 
 #[derive(Debug, Clone)]
 pub struct GossipClient {
@@ -93,25 +99,27 @@ impl GossipClient {
 
     pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
+        let peer_addr = peer.gossip.to_string();
 
         let response = self
             .internal_client()
             .get(&url)
             .send()
             .await
-            .map_err(|error| GossipClientError(error.to_string()))?;
+            .map_err(|error| {
+                GossipClientError::GetRequestFailed(peer_addr.clone(), error.to_string())
+            })?;
 
         if !response.status().is_success() {
-            return Err(GossipClientError(format!(
-                "Health check failed with status: {}",
-                response.status()
-            )));
+            return Err(GossipClientError::HealthCheckFailed(
+                peer_addr,
+                response.status(),
+            ));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|error| GossipClientError(error.to_string()))
+        response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayloadFailed(peer_addr, error.to_string())
+        })
     }
 
     /// Send data to a peer
