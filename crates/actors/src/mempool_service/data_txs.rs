@@ -2,6 +2,7 @@ use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
 use eyre::eyre;
+use irys_database::db_cache::DataRootLRUEntry;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::DataRootLRU, tx_header_by_txid,
 };
@@ -148,7 +149,13 @@ impl Inner {
             );
 
             self.irys_db
-                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
+                .update(|write_tx| {
+                    let updated_expiry = DataRootLRUEntry {
+                        last_height: new_expiry,
+                        ..old_expiry
+                    };
+                    write_tx.put::<DataRootLRU>(tx.data_root, updated_expiry)
+                })
                 .map_err(|e| {
                     error!(
                         "Error updating ingress proof expiry for {} - {}",
