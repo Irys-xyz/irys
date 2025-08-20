@@ -17,11 +17,11 @@ use tracing::error;
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
     #[error("Get request to {0} failed with reason {1}")]
-    GetRequestFailed(String, String),
+    GetRequest(String, String),
     #[error("Health check to {0} failed with status code {1}")]
-    HealthCheckFailed(String, reqwest::StatusCode),
+    HealthCheck(String, reqwest::StatusCode),
     #[error("Failed to get json response payload from {0} with reason {1}")]
-    GetJsonResponsePayloadFailed(String, String),
+    GetJsonResponsePayload(String, String),
 }
 
 #[derive(Debug, Clone)]
@@ -106,19 +106,14 @@ impl GossipClient {
             .get(&url)
             .send()
             .await
-            .map_err(|error| {
-                GossipClientError::GetRequestFailed(peer_addr.clone(), error.to_string())
-            })?;
+            .map_err(|error| GossipClientError::GetRequest(peer_addr.clone(), error.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(GossipClientError::HealthCheckFailed(
-                peer_addr,
-                response.status(),
-            ));
+            return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
         }
 
         response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayloadFailed(peer_addr, error.to_string())
+            GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
         })
     }
 
@@ -266,13 +261,13 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             Self {
-                client: GossipClient::new(Duration::from_secs(1), Address::from([1u8; 20])),
+                client: GossipClient::new(Duration::from_secs(1), Address::from([1_u8; 20])),
             }
         }
 
         fn with_timeout(timeout: Duration) -> Self {
             Self {
-                client: GossipClient::new(timeout, Address::from([1u8; 20])),
+                client: GossipClient::new(timeout, Address::from([1_u8; 20])),
             }
         }
     }
@@ -368,7 +363,7 @@ mod tests {
 
             assert!(result.is_err());
             match result.unwrap_err() {
-                GossipClientError::GetRequestFailed(addr, reason) => {
+                GossipClientError::GetRequest(addr, reason) => {
                     assert_eq!(addr, peer.gossip.to_string());
                     assert!(
                         reason.to_lowercase().contains("connection refused"),
@@ -376,7 +371,7 @@ mod tests {
                         reason
                     );
                 }
-                err => panic!("Expected GetRequestFailed error, got: {:?}", err),
+                err => panic!("Expected GetRequest error, got: {:?}", err),
             }
         }
 
@@ -390,14 +385,11 @@ mod tests {
 
             assert!(result.is_err());
             match result.unwrap_err() {
-                GossipClientError::GetRequestFailed(addr, reason) => {
+                GossipClientError::GetRequest(addr, reason) => {
                     assert_eq!(addr, peer.gossip.to_string());
                     assert!(!reason.is_empty(), "Expected timeout error message");
                 }
-                err => panic!(
-                    "Expected GetRequestFailed error for timeout, got: {:?}",
-                    err
-                ),
+                err => panic!("Expected GetRequest error for timeout, got: {:?}", err),
             }
         }
     }
@@ -414,12 +406,12 @@ mod tests {
 
             assert!(result.is_err());
             match result.unwrap_err() {
-                GossipClientError::HealthCheckFailed(addr, status) => {
+                GossipClientError::HealthCheck(addr, status) => {
                     assert_eq!(addr, peer.gossip.to_string());
                     assert_eq!(status, expected_status);
                 }
                 err => panic!(
-                    "Expected HealthCheckFailed error for status {}, got: {:?}",
+                    "Expected HealthCheck error for status {}, got: {:?}",
                     status_code, err
                 ),
             }
@@ -451,7 +443,7 @@ mod tests {
 
             assert!(result.is_err());
             match result.unwrap_err() {
-                GossipClientError::GetJsonResponsePayloadFailed(addr, reason) => {
+                GossipClientError::GetJsonResponsePayload(addr, reason) => {
                     assert_eq!(addr, peer.gossip.to_string());
                     assert!(
                         reason.contains("expected")
@@ -461,10 +453,7 @@ mod tests {
                         reason
                     );
                 }
-                err => panic!(
-                    "Expected GetJsonResponsePayloadFailed error, got: {:?}",
-                    err
-                ),
+                err => panic!("Expected GetJsonResponsePayload error, got: {:?}", err),
             }
         }
 
@@ -484,7 +473,7 @@ mod tests {
             assert!(result.is_err());
             assert!(matches!(
                 result.unwrap_err(),
-                GossipClientError::GetJsonResponsePayloadFailed(_, _)
+                GossipClientError::GetJsonResponsePayload(_, _)
             ));
         }
     }
