@@ -50,7 +50,10 @@ pub enum VdfValidationResult {
 #[derive(Debug)]
 pub enum ValidationServiceMessage {
     /// Validate a block
-    ValidateBlock { block: Arc<IrysBlockHeader> },
+    ValidateBlock {
+        block: Arc<IrysBlockHeader>,
+        skip_vdf_validation: bool,
+    },
 }
 
 /// Main validation service structure
@@ -188,16 +191,14 @@ impl ValidationService {
                 // Receive new validation messages (only when validation is enabled)
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => {
-                            // Transform message to validation task
-                            let Some(task) = self.inner.clone().create_validation_task(msg, &active_validations) else {
+                        Some(ValidationServiceMessage::ValidateBlock { block, skip_vdf_validation }) => {
+                            let Some(task) = self.inner.clone().create_validation_task(block, &active_validations, skip_vdf_validation) else {
                                 // validation task was not created. The task failed during vdf validation
                                 continue;
                             };
 
                             // push this task to the VDF pending queue
                             active_validations.vdf_pending_queue.push(task.block.block_hash, std::cmp::Reverse(task));
-
                         }
                         None => {
                             // Channel closed
@@ -256,28 +257,31 @@ impl ValidationServiceInner {
     #[instrument(skip_all, fields(block_hash, block_height))]
     fn create_validation_task(
         self: Arc<Self>,
-        msg: ValidationServiceMessage,
+        block: Arc<IrysBlockHeader>,
         active_validations: &ActiveValidations,
+        skip_vdf_validation: bool,
     ) -> Option<BlockValidationTask> {
-        match msg {
-            ValidationServiceMessage::ValidateBlock { block } => {
-                let block_hash = block.block_hash;
-                let block_height = block.height;
+        let block_hash = block.block_hash;
+        let block_height = block.height;
 
-                tracing::Span::current().record("block_hash", tracing::field::display(&block_hash));
-                tracing::Span::current().record("block_height", block_height);
+        tracing::Span::current().record("block_hash", tracing::field::display(&block_hash));
+        tracing::Span::current().record("block_height", block_height);
 
-                debug!("validating block");
+        debug!("validating block");
 
-                // schedule validation task
-                let block_tree_guard = self.block_tree_guard.clone();
+        // schedule validation task
+        let block_tree_guard = self.block_tree_guard.clone();
 
-                let priority: std::cmp::Reverse<active_validations::BlockPriorityMeta> =
-                    active_validations.calculate_priority(&block);
-                let task = BlockValidationTask::new(block, self, block_tree_guard, priority.0);
-                Some(task)
-            }
-        }
+        let priority: std::cmp::Reverse<active_validations::BlockPriorityMeta> =
+            active_validations.calculate_priority(&block);
+        let task = BlockValidationTask::new(
+            block,
+            self,
+            block_tree_guard,
+            priority.0,
+            skip_vdf_validation,
+        );
+        Some(task)
     }
 
     #[instrument(skip_all, fields(%step=desired_step_number))]
@@ -309,6 +313,7 @@ impl ValidationServiceInner {
         self: Arc<Self>,
         block: &IrysBlockHeader,
         cancel: Arc<AtomicU8>,
+        skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
         debug!("Verifying VDF info");
 
@@ -332,6 +337,7 @@ impl ValidationServiceInner {
             vdf_info.prev_output,
         );
 
+        // Spawn VDF validation task unless skipping
         // Early guard: validate seeds against parent before heavy VDF work
         let vdf_reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
         {
@@ -351,18 +357,24 @@ impl ValidationServiceInner {
         // Spawn VDF validation task
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let vdf_state = self.vdf_state.clone();
-        {
+        if !skip_vdf_validation {
             let vdf_info = vdf_info.clone();
+            let this_inner = Arc::clone(&self);
             tokio::task::spawn_blocking(move || {
                 vdf_steps_are_valid(
-                    &self.pool,
+                    &this_inner.pool,
                     &vdf_info,
-                    &self.config.consensus.vdf,
-                    &self.vdf_state,
+                    &this_inner.config.consensus.vdf,
+                    &this_inner.vdf_state,
                     cancel,
                 )
             })
             .await??;
+        } else {
+            debug!(
+                "Skipping vdf_steps_are_valid for block {:?}",
+                block.block_hash
+            );
         }
 
         // Fast forward VDF steps

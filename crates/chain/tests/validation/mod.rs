@@ -20,6 +20,7 @@ async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
     commitment_txs: Vec<CommitmentTransaction>,
+    skip_vdf_validation: bool,
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -29,6 +30,7 @@ async fn send_block_to_block_tree(
         .send(BlockTreeServiceMessage::BlockPreValidated {
             block,
             commitment_txs: Arc::new(commitment_txs),
+            skip_vdf_validation,
             response: response_tx,
         })?;
 
@@ -118,7 +120,13 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         .unwrap();
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![invalid_pledge]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        vec![invalid_pledge],
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -211,7 +219,13 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         .unwrap();
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![invalid_pledge]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        vec![invalid_pledge],
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -316,7 +330,13 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     block = Arc::new(irys_block);
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![pledge, stake]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        vec![pledge, stake],
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -411,6 +431,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         &genesis_node.node_ctx,
         block.clone(),
         vec![wrong_commitment],
+        false,
     )
     .await?;
 
@@ -457,7 +478,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     block = Arc::new(irys_block);
 
     // Send the malformed block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
@@ -504,7 +525,13 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     let block_after_epoch = Arc::new(tampered);
 
     // Step 4: Send and expect rejection
-    send_block_to_block_tree(&genesis_node.node_ctx, block_after_epoch.clone(), vec![]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block_after_epoch.clone(),
+        vec![],
+        false,
+    )
+    .await?;
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &block_after_epoch.block_hash).await;
@@ -614,7 +641,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     dbg!(&block);
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(outcome, BlockValidationOutcome::Discarded);

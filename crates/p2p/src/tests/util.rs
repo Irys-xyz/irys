@@ -10,7 +10,6 @@ use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
-use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::mempool_service::IngressProofError;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
@@ -171,6 +170,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.blocks
             .write()
@@ -317,7 +317,6 @@ pub(crate) struct GossipServiceTestFixture {
     pub block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
-    pub vdf_state_stub: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
@@ -404,7 +403,7 @@ impl GossipServiceTestFixture {
         let vdf_state_stub =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
-        let vdf_state = vdf_state_stub.clone();
+        let vdf_state = vdf_state_stub;
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
         tokio::spawn(async move {
             loop {
@@ -427,18 +426,6 @@ impl GossipServiceTestFixture {
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
-                if let BlockTreeServiceMessage::FastTrackBlockMigration {
-                    block_header: _,
-                    response,
-                } = message
-                {
-                    // Simulate processing the block header
-                    response
-                        .send(Ok(None))
-                        .expect("to send a response for FastTrackStorageFinalized");
-                } else {
-                    debug!("Received unsupported BlockTreeServiceMessage");
-                }
             }
             debug!("BlockTreeServiceMessage channel closed");
         });
@@ -464,7 +451,6 @@ impl GossipServiceTestFixture {
             block_status_provider: block_status_provider_mock,
             execution_payload_provider,
             config,
-            vdf_state_stub,
             service_senders,
             gossip_receiver: Some(service_receivers.gossip_broadcast),
             sync_tx,
@@ -524,7 +510,6 @@ impl GossipServiceTestFixture {
                 gossip_listener,
                 self.block_status_provider.clone(),
                 execution_payload_provider,
-                self.vdf_state_stub.clone(),
                 self.config.clone(),
                 self.service_senders.clone(),
                 self.sync_tx.clone(),

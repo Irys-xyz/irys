@@ -43,15 +43,12 @@ pub enum BlockTreeServiceMessage {
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
+        skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
     },
     BlockValidationFinished {
         block_hash: H256,
         validation_result: ValidationResult,
-    },
-    FastTrackBlockMigration {
-        block_header: IrysBlockHeader,
-        response: oneshot::Sender<eyre::Result<Option<Addr<RethServiceActor>>>>,
     },
     ReloadCacheFromDb {
         response: oneshot::Sender<eyre::Result<()>>,
@@ -231,9 +228,10 @@ impl BlockTreeServiceInner {
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
                 commitment_txs,
+                skip_vdf_validation: skip_vdf,
                 response,
             } => {
-                let result = self.on_block_prevalidated(block, commitment_txs);
+                let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::BlockValidationFinished {
@@ -242,13 +240,6 @@ impl BlockTreeServiceInner {
             } => {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
-            }
-            BlockTreeServiceMessage::FastTrackBlockMigration {
-                block_header,
-                response,
-            } => {
-                let result = self.fast_track_block_migration(block_header).await;
-                let _ = response.send(result);
             }
             BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
                 let res = self.reload_cache_from_db().await;
@@ -294,44 +285,6 @@ impl BlockTreeServiceInner {
             .expect("could not send message to `RethServiceActor`");
 
         Ok(())
-    }
-
-    /// Fast tracks block migration by retrieving transaction headers. Do
-    /// after the block has been migrated.
-    async fn fast_track_block_migration(
-        &self,
-        block_header: IrysBlockHeader,
-    ) -> eyre::Result<Option<Addr<RethServiceActor>>> {
-        let submit_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
-            .await?;
-        let publish_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
-            .await?;
-
-        let mut all_txs = vec![];
-        all_txs.extend(publish_txs);
-        all_txs.extend(submit_txs);
-
-        info!(
-            "Migrating to block_index - hash: {} height: {}",
-            &block_header.block_hash.0.to_base58(),
-            &block_header.height
-        );
-
-        // HACK
-        System::set_current(self.system.clone());
-
-        let chunk_migration = ChunkMigrationService::from_registry();
-        let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: Arc::new(block_header),
-            all_txs: Arc::new(all_txs),
-        };
-
-        block_index.do_send(block_finalized_message.clone());
-        chunk_migration.do_send(block_finalized_message);
-        Ok(Some(self.reth_service_actor.clone()))
     }
 
     /// Sends block-migration notifications to services after a block reaches migration depth.
@@ -526,7 +479,8 @@ impl BlockTreeServiceInner {
         &mut self,
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-    ) -> Result<(), PreValidationError> {
+        skip_vdf: bool,
+    ) -> eyre::Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
         let mut cache = self.cache.write().expect("cache lock poisoned");
 
@@ -579,6 +533,7 @@ impl BlockTreeServiceInner {
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
                     block: block.clone(),
+                    skip_vdf_validation: skip_vdf,
                 })
                 .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
 
