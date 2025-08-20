@@ -1656,9 +1656,24 @@ async fn get_previous_tx_inclusions(
             None => {
                 let header = db
                     .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .unwrap()
-                    .unwrap()
-                    .expect("to find the parent block header in the database");
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "database returned error fetching parent block header {}",
+                            &block.0
+                        )
+                    })
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "db view error while fetching parent block header {}",
+                            &block.0
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "to find the parent block header {} in the database",
+                            &block.0
+                        )
+                    });
                 update_states(&header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
             }
@@ -1710,7 +1725,7 @@ mod tests {
     use super::*;
     use crate::{
         block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        BlockFinalizedMessage,
+        BlockMigrationMessage,
     };
     use actix::{prelude::*, SystemRegistry};
     use irys_config::StorageSubmodulesConfig;
@@ -1801,7 +1816,7 @@ mod tests {
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
-        let msg = BlockFinalizedMessage {
+        let msg = BlockMigrationMessage {
             block_header: arc_genesis.clone(),
             all_txs: Arc::new(vec![]),
         };
@@ -2059,7 +2074,7 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: block.clone(),
             all_txs: Arc::clone(&txs),
         };
@@ -2231,7 +2246,7 @@ mod tests {
 
         // Trim to actual data size for hash calculation (chunk_size might be larger)
         let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
-        let entropy_packed_hash = hash_sha256(trimmed_hacked).expect("Expected to hash data");
+        let entropy_packed_hash = hash_sha256(trimmed_hacked);
 
         // Calculate the correct offset for this chunk position
         let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
@@ -2313,7 +2328,7 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockFinalizedMessage {
+        let block_finalized_message = BlockMigrationMessage {
             block_header: block.clone(),
             all_txs: Arc::clone(&txs),
         };

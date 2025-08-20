@@ -20,13 +20,13 @@ pub struct RethServiceActor {
     pub handle: IrysRethNodeAdapter,
     pub db: DatabaseProvider,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
-    // we store a copy of the latest FCU so we can always provide reth with a "full" FCU, as the finalized field is used to control the block persistence mechanism.
+    // we store a copy of the latest FCU so we can always provide reth with a "full" FCU; in Irys terms this corresponds to the migrated height, though reth still uses the `finalized` field to control block persistence.
     pub latest_fcu: ForkChoiceUpdate,
 }
 
 impl Default for RethServiceActor {
     fn default() -> Self {
-        panic!("Don't rely on the default constructor for RethServiceActor, use the `new` method instead");
+        panic!("expected RethServiceActor::new() to be used instead of Default");
     }
 }
 

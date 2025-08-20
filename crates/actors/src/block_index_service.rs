@@ -1,4 +1,4 @@
-use crate::BlockFinalizedMessage;
+use crate::BlockMigrationMessage;
 use actix::prelude::*;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
@@ -24,7 +24,10 @@ impl Handler<GetBlockIndexGuardMessage> for BlockIndexService {
         if self.block_index.is_none() {
             error!("block_index service not initialized");
         }
-        let binding = self.block_index.clone().unwrap();
+        let binding = self
+            .block_index
+            .clone()
+            .expect("block_index must be initialized");
         BlockIndexReadGuard::new(binding)
     }
 }
@@ -81,7 +84,7 @@ impl BlockIndexService {
         }
     }
 
-    /// Adds a finalized block and its associated transactions to the block index.
+    /// Adds a migrated block and its associated transactions to the block index.
     ///
     /// # Safety Considerations
     /// This function expects `all_txs` to contain transaction headers for every transaction ID
@@ -94,10 +97,10 @@ impl BlockIndexService {
     /// - Invalid chunk calculations
     ///
     /// # Arguments
-    /// * `block` - The finalized block header to be added
+    /// * `block` - The migrated block header to be added
     /// * `all_txs` - Complete list of transaction headers, where the first `n` entries
     ///               correspond to the submit ledger's transaction IDs
-    pub fn add_finalized_block(
+    pub fn migrate_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<DataTransactionHeader>>,
@@ -111,9 +114,9 @@ impl BlockIndexService {
 
         self.block_index
             .clone()
-            .unwrap()
+            .expect("block_index must be initialized")
             .write()
-            .unwrap()
+            .expect("block_index write lock poisoned")
             .push_block(block, all_txs, chunk_size)
             .expect("expect to add the block to the index");
 
@@ -152,15 +155,15 @@ impl BlockIndexService {
     }
 }
 
-impl Handler<BlockFinalizedMessage> for BlockIndexService {
+impl Handler<BlockMigrationMessage> for BlockIndexService {
     type Result = eyre::Result<()>;
-    fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Collect working variables to move into the closure
         let block = msg.block_header;
         let all_txs = msg.all_txs;
 
-        // Do something with the block
-        self.add_finalized_block(&block, &all_txs);
+        // migrate the block
+        self.migrate_block(&block, &all_txs);
 
         Ok(())
     }
@@ -183,8 +186,11 @@ impl Handler<GetLatestBlockIndexMessage> for BlockIndexService {
             return None;
         }
 
-        let binding = self.block_index.clone().unwrap();
-        let bi = binding.read().unwrap();
+        let binding = self
+            .block_index
+            .clone()
+            .expect("block_index must be initialized");
+        let bi = binding.read().expect("block_index read lock poisoned");
         let block_height = bi.num_blocks().max(1) - 1;
         Some(bi.get_item(block_height)?.clone())
     }

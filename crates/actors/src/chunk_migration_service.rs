@@ -19,7 +19,7 @@ use tracing::{error, instrument};
 
 use crate::services::Stop;
 use crate::{
-    block_producer::BlockFinalizedMessage, cache_service::CacheServiceAction,
+    block_producer::BlockMigrationMessage, cache_service::CacheServiceAction,
     services::ServiceSenders,
 };
 
@@ -82,10 +82,10 @@ impl SystemService for ChunkMigrationService {
     }
 }
 
-impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
+impl Handler<BlockMigrationMessage> for ChunkMigrationService {
     type Result = ResponseFuture<eyre::Result<()>>;
 
-    fn handle(&mut self, msg: BlockFinalizedMessage, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Early return if not initialized
         if self.block_index.is_none() || self.db.is_none() {
             error!("chunk_migration service not initialized");
@@ -135,7 +135,7 @@ impl Handler<BlockFinalizedMessage> for ChunkMigrationService {
             // forward the finalization message to the cache service for cleanup
             let _ = service_senders
                 .chunk_cache
-                .send(CacheServiceAction::OnFinalizedBlock(block_height, None));
+                .send(CacheServiceAction::OnBlockMigrated(block_height, None));
 
             Ok(())
         })
@@ -255,8 +255,10 @@ fn get_block_range(
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
-        let prev_item = index_reader.get_item(block.height - 1).unwrap();
-        prev_item.ledgers[ledger].max_chunk_offset
+        index_reader
+            .get_item(block.height - 1)
+            .map(|prev| prev.ledgers[ledger].max_chunk_offset)
+            .unwrap_or(0)
     } else {
         0
     };

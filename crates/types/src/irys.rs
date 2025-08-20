@@ -264,7 +264,7 @@ mod tests {
 
             // Ensure the data_hash is valid by hashing the chunk data
             let chunk_bytes: &[u8] = &data_bytes[min..max];
-            let computed_hash = hash_sha256(chunk_bytes).unwrap();
+            let computed_hash = hash_sha256(chunk_bytes);
             let data_hash = chunk_node.data_hash.unwrap();
 
             assert_eq!(data_hash, computed_hash);

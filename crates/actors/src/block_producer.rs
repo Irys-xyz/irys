@@ -578,8 +578,14 @@ pub trait BlockProdStrategy {
             })?
             .map_err(|e| eyre!("Failed to build payload: {}", e))?;
 
+        let evm_block_hash = built_payload.block().hash();
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap();
+        let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
+            panic!(
+                "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
+                evm_block_hash, e
+            )
+        });
         let new_payload_result = beacon_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
@@ -801,7 +807,7 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block))
+            .handle_block(Arc::clone(&block), false)
             .await
         {
             Ok(()) => Ok(()),
@@ -1137,13 +1143,13 @@ pub struct BlockConfirmedMessage(
 
 /// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
 /// acts as a placeholder for when the node will maintain a block tree of
-/// confirmed blocks and produce finalized blocks for the canonical chain when
+/// confirmed blocks and produce migrated blocks for the canonical chain when
 ///  enough confirmations have occurred. Chunks are moved from the in-memory
-/// index to the storage modules when a block is finalized.
+/// index to the storage modules when a block is migrated.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "eyre::Result<()>")]
-pub struct BlockFinalizedMessage {
-    /// Block being finalized
+pub struct BlockMigrationMessage {
+    /// Block being migrated
     pub block_header: Arc<IrysBlockHeader>,
     /// Include all the blocks transaction headers [Submit, Publish]
     pub all_txs: Arc<Vec<DataTransactionHeader>>,

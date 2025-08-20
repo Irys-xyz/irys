@@ -1336,7 +1336,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         irys_block_header: &IrysBlockHeader,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(irys_block_header.clone()))
+            .handle_block(Arc::new(irys_block_header.clone()), false)
             .await
         {
             Ok(_) => Ok(()),
@@ -1421,7 +1421,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Deliver block header
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(irys_block_header.clone()))
+            .handle_block(Arc::new(irys_block_header.clone()), false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 

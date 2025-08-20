@@ -72,6 +72,8 @@ pub enum BlockDiscoveryError {
     InvalidEpochBlock(String),
     #[error("Invalid commitment transaction: {0}")]
     InvalidCommitmentTransaction(String),
+    #[error("Invalid data ledgers length: expected {0} ledgers, got {1}")]
+    InvalidDataLedgersLength(u32, usize),
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -98,7 +100,11 @@ pub enum BlockDiscoveryInternalError {
 
 #[async_trait::async_trait]
 pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
-    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError>;
+    async fn handle_block(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        skip_vdf: bool,
+    ) -> Result<(), BlockDiscoveryError>;
 }
 
 #[derive(Debug, Clone)]
@@ -114,10 +120,18 @@ impl BlockDiscoveryFacadeImpl {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
-    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError> {
+    async fn handle_block(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        skip_vdf: bool,
+    ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(BlockDiscoveryMessage::BlockDiscovered(block, Some(tx)))
+            .send(BlockDiscoveryMessage::BlockDiscovered(
+                block,
+                skip_vdf,
+                Some(tx),
+            ))
             .map_err(BlockDiscoveryInternalError::SenderError)?;
 
         rx.await.map_err(BlockDiscoveryInternalError::RecvError)?
@@ -127,7 +141,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
 /// a network peer, this message is broadcast.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "Result<(), BlockDiscoveryError>")]
-pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>);
+pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>, pub bool);
 
 /// Sent when a discovered block is pre-validated
 #[derive(Message, Debug, Clone)]
@@ -236,8 +250,12 @@ impl BlockDiscoveryService {
     #[tracing::instrument(skip_all)]
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
-            BlockDiscoveryMessage::BlockDiscovered(irys_block_header, sender) => {
-                let result = self.inner.clone().block_discovered(irys_block_header).await;
+            BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
+                let result = self
+                    .inner
+                    .clone()
+                    .block_discovered(irys_block_header, skip_vdf)
+                    .await;
                 if let Some(sender) = sender {
                     if let Err(e) = sender.send(result) {
                         tracing::error!("sender error: {:?}", e);
@@ -255,6 +273,7 @@ impl BlockDiscoveryService {
 pub enum BlockDiscoveryMessage {
     BlockDiscovered(
         Arc<IrysBlockHeader>,
+        bool,
         Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
     ),
 }
@@ -263,6 +282,7 @@ impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
+        skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
         let new_block_header = block;
@@ -325,11 +345,18 @@ impl BlockDiscoveryServiceInner {
         // to retrieve and validate them from the block producer.
         // TODO: in the future we'll retrieve the missing transactions from the block
         // producer and validate them.
+        //
+        let submit_ledger = new_block_header
+            .data_ledgers
+            .get(DataLedger::Submit as usize)
+            .ok_or_else(|| {
+                BlockDiscoveryError::InvalidDataLedgersLength(
+                    DataLedger::Submit.into(),
+                    new_block_header.data_ledgers.len(),
+                )
+            })?;
 
-        let submit_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .0
-            .clone();
+        let submit_tx_ids_to_check = submit_ledger.tx_ids.0.clone();
 
         let (tx, rx) = oneshot::channel();
         mempool
@@ -371,10 +398,17 @@ impl BlockDiscoveryServiceInner {
         //    This keeps the transaction from getting re-promoted each block.
         //    (this last step performed in mempool after the block is confirmed)
 
-        let publish_tx_ids_to_check = new_block_header.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .0
-            .clone();
+        let publish_ledger = new_block_header
+            .data_ledgers
+            .get(DataLedger::Publish as usize)
+            .ok_or_else(|| {
+                BlockDiscoveryError::InvalidDataLedgersLength(
+                    DataLedger::Publish.into(),
+                    new_block_header.data_ledgers.len(),
+                )
+            })?;
+
+        let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
 
         let (tx, rx) = oneshot::channel();
         mempool
@@ -407,7 +441,7 @@ impl BlockDiscoveryServiceInner {
         }
 
         if !publish_txs.is_empty() {
-            let publish_proofs = match &new_block_header.data_ledgers[DataLedger::Publish].proofs {
+            let publish_proofs = match &publish_ledger.proofs {
                 Some(proofs) => proofs,
                 None => {
                     return Err(BlockDiscoveryError::BlockValidationError(
@@ -644,6 +678,7 @@ impl BlockDiscoveryServiceInner {
                     .send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
                         commitment_txs: arc_commitment_txs,
+                        skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })
                     .map_err(|channel_error| {
@@ -801,12 +836,19 @@ where
     let mempool_future = {
         let tx_ids = tx_ids_clone.clone();
         async move {
-            let x = get_data_txs(tx_ids)
+            let results = get_data_txs(tx_ids.clone())
                 .await
-                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
+                .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
+
+            let x = tx_ids
                 .into_iter()
-                .filter(Option::is_some)
-                .map(|v| (v.clone().unwrap().id, v.unwrap()))
+                .zip(results.into_iter())
+                .map(|(id, opt)| {
+                    let header = opt.unwrap_or_else(|| {
+                        panic!("tx header missing after filter for id {:?}", id)
+                    });
+                    (id, header)
+                })
                 .collect::<HashMap<IrysTransactionId, DataTransactionHeader>>();
             Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }
