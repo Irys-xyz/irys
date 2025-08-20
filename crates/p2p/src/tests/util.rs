@@ -10,7 +10,6 @@ use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
-use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::mempool_service::IngressProofError;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
