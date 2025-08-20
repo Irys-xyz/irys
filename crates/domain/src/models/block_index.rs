@@ -1,7 +1,6 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
 use actix::dev::MessageResponse;
-use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerIndexItem,
@@ -228,11 +227,11 @@ impl BlockIndex {
 
     pub fn print_items(&self) {
         for height in 0..self.num_blocks() {
-            println!(
-                "height: {} hash: {}",
-                height,
-                self.get_item(height).unwrap().block_hash.0.to_base58()
-            );
+            if let Some(item) = self.get_item(height) {
+                tracing::info!("height: {} hash: {}", height, item.block_hash);
+            } else {
+                tracing::error!("height: {} missing in block index", height);
+            }
         }
     }
 }

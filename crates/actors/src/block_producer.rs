@@ -578,8 +578,14 @@ pub trait BlockProdStrategy {
             })?
             .map_err(|e| eyre!("Failed to build payload: {}", e))?;
 
+        let evm_block_hash = built_payload.block().hash();
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap();
+        let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
+            panic!(
+                "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
+                evm_block_hash, e
+            )
+        });
         let new_payload_result = beacon_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
