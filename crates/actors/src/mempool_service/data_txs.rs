@@ -3,7 +3,8 @@ use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tables::DataRootLRU, tx_header_by_txid,
+    block_header_by_hash, db::IrysDatabaseExt as _, db_cache::DataRootLRUEntry,
+    tables::DataRootLRU, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -142,27 +143,35 @@ impl Inner {
                 .mempool
                 .anchor_expiry_depth as u64;
             let new_expiry = anchor_height + anchor_expiry_depth;
-            debug!(
-                "Updating ingress proof for data root {} expiry from {} -> {}",
-                &tx.data_root, &old_expiry.last_height, &new_expiry
-            );
-
-            self.irys_db
-                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?;
+            if old_expiry.last_height == new_expiry {
+                debug!(
+                    "Updating ingress proof for data root {} expiry from {} -> {}",
+                    &tx.data_root, &old_expiry.last_height, &new_expiry
+                );
+            } else {
+                self.irys_db
+                    .update(|write_tx| {
+                        let updated_expiry = DataRootLRUEntry {
+                            last_height: new_expiry,
+                            ..old_expiry
+                        };
+                        write_tx.put::<DataRootLRU>(tx.data_root, updated_expiry)
+                    })
+                    .map_err(|e| {
+                        error!(
+                            "Error updating ingress proof expiry for {} - {}",
+                            &tx.data_root, &e
+                        );
+                        TxIngressError::DatabaseError
+                    })?
+                    .map_err(|e| {
+                        error!(
+                            "Error updating ingress proof expiry for {} - {}",
+                            &tx.data_root, &e
+                        );
+                        TxIngressError::DatabaseError
+                    })?;
+            }
         }
 
         // Check account balance
