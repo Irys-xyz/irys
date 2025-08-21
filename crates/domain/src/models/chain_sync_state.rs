@@ -39,7 +39,6 @@ impl ChainSyncState {
     }
 
     pub fn set_syncing_from(&self, height: usize) {
-        self.set_is_syncing(true);
         self.set_sync_target_height(height);
         self.mark_processed(height.saturating_sub(1));
     }

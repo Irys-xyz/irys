@@ -10,6 +10,7 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -86,6 +87,11 @@ pub struct ChainSyncServiceInner<T: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     config: irys_types::Config,
     block_index: BlockIndexReadGuard,
     block_pool: Arc<BlockPool<B, M>>,
+    /// This field signifies when the sync task is already spawned, but the sync has not started yet.
+    ///  The time gap between spawning the task and starting the sync can be significant. The node
+    ///  needs to fetch the tip of the block index from the network to figure out how
+    ///  much behind the network we are, if at all.
+    is_sync_task_spawned: Arc<AtomicBool>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -157,11 +163,34 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             config,
             block_index,
             block_pool,
+            is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Perform a sync operation
-    async fn spawn_chain_sync_task(&self, response: Option<oneshot::Sender<ChainSyncResult<()>>>) {
+    async fn spawn_chain_sync_task(
+        &self,
+        response: Option<oneshot::Sender<ChainSyncResult<()>>>,
+        is_initial_sync: bool,
+    ) {
+        let is_already_syncing = !is_initial_sync && self.sync_state.is_syncing();
+        let is_task_spawned_but_has_not_started_syncing_yet =
+            self.is_sync_task_spawned.load(Ordering::Relaxed);
+
+        if is_already_syncing || is_task_spawned_but_has_not_started_syncing_yet {
+            debug!("Sync task: Sync already in progress, skipping the new sync request");
+            if let Some(response_sender) = response {
+                if let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
+                    "Sync already in progress".to_string(),
+                ))) {
+                    error!("Failed to send the sync response: {:?}", e);
+                }
+            }
+            return;
+        }
+
+        self.is_sync_task_spawned.store(true, Ordering::Relaxed);
+
         let start_sync_from_height = self.block_index.read().latest_height();
         // Clear any pending blocks from the cache
         self.block_pool.block_cache_guard().clear().await;
@@ -170,6 +199,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
         let api_client = self.api_client.clone();
+        let is_sync_task_spawned = self.is_sync_task_spawned.clone();
 
         tokio::spawn(async move {
             let res = sync_chain(
@@ -182,6 +212,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 &config,
             )
             .await;
+
+            is_sync_task_spawned.store(false, Ordering::Relaxed);
 
             match &res {
                 Ok(()) => info!("Sync task completed successfully"),
@@ -366,7 +398,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
                 self.inner
-                    .spawn_chain_sync_task(Some(response_sender))
+                    .spawn_chain_sync_task(Some(response_sender), true)
                     .await;
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
@@ -410,12 +442,6 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
     }
 
     async fn handle_periodic_sync_check(&self) {
-        // Skip if already syncing
-        if self.inner.sync_state.is_syncing() {
-            debug!("Periodic sync check: Already syncing, skipping");
-            return;
-        }
-
         debug!("Starting a periodic sync check routine");
         // Check if we're behind the network
         match is_local_index_is_behind_trusted_peers(
@@ -428,7 +454,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None).await;
+                self.inner.spawn_chain_sync_task(None, false).await;
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");
@@ -438,7 +464,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
                     e
                 );
-                self.inner.spawn_chain_sync_task(None).await;
+                self.inner.spawn_chain_sync_task(None, false).await;
             }
         }
     }
@@ -505,6 +531,7 @@ async fn sync_chain(
             }
         };
     } else {
+        sync_state.set_is_syncing(true);
         peer_list.wait_for_active_peers().await;
     }
 
@@ -559,6 +586,10 @@ async fn sync_chain(
     if block_queue.is_empty() {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
+        sync_state.finish_sync();
+        return Ok(());
+    } else {
+        sync_state.set_is_syncing(true);
     }
 
     while let Some(block) = block_queue.pop_front() {

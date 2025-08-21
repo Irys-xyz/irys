@@ -1,6 +1,6 @@
 use irys_chain::{utils::load_config, IrysNode};
 use irys_testing_utils::setup_panic_hook;
-use tracing::info;
+use tracing::{info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
     layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
@@ -41,8 +41,9 @@ async fn main() -> eyre::Result<()> {
 
 fn init_tracing() -> eyre::Result<()> {
     let subscriber = Registry::default();
-    let filter =
-        EnvFilter::new("info").add_directive(EnvFilter::from_default_env().to_string().parse()?);
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .try_from_env()?;
 
     let output_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)
