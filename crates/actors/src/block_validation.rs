@@ -10,7 +10,6 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, SystemLedger};
@@ -148,7 +147,7 @@ pub async fn prevalidate_block(
     parent_ema_snapshot: &EmaSnapshot,
 ) -> Result<(), PreValidationError> {
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "Prevalidating block",
     );
@@ -171,7 +170,7 @@ pub async fn prevalidate_block(
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "prev_output_is_valid",
     );
@@ -179,7 +178,7 @@ pub async fn prevalidate_block(
     // Check block height continuity
     height_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "height_is_valid",
     );
@@ -206,7 +205,7 @@ pub async fn prevalidate_block(
     )?;
 
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "difficulty_is_valid",
     );
@@ -214,7 +213,7 @@ pub async fn prevalidate_block(
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "previous_cumulative_difficulty_is_valid",
     );
@@ -222,7 +221,7 @@ pub async fn prevalidate_block(
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "cumulative_difficulty_is_valid",
     );
@@ -233,7 +232,7 @@ pub async fn prevalidate_block(
     // Check the solution_hash
     solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "solution_hash_is_valid",
     );
@@ -241,7 +240,7 @@ pub async fn prevalidate_block(
     // Check the previous solution hash references the parent correctly
     previous_solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "previous_solution_hash_is_valid",
     );
@@ -264,7 +263,7 @@ pub async fn prevalidate_block(
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "last_epoch_hash_is_valid",
     );
@@ -1656,9 +1655,24 @@ async fn get_previous_tx_inclusions(
             None => {
                 let header = db
                     .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .unwrap()
-                    .unwrap()
-                    .expect("to find the parent block header in the database");
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "database returned error fetching parent block header {}",
+                            &block.0
+                        )
+                    })
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "db view error while fetching parent block header {}",
+                            &block.0
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "to find the parent block header {} in the database",
+                            &block.0
+                        )
+                    });
                 update_states(&header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
             }

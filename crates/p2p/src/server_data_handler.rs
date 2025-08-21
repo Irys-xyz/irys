@@ -4,18 +4,15 @@ use crate::{
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
-use base58::ToBase58 as _;
 use core::net::SocketAddr;
-use irys_actors::{
-    block_discovery::BlockDiscoveryFacade,
-    mempool_service::{ChunkIngressError, MempoolFacade},
-};
+use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData, GossipDataRequest,
-    GossipRequest, IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    GossipRequest, IngressProof, IrysBlockHeader, IrysTransactionResponse, PeerListItem,
+    UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -137,7 +134,7 @@ where
             "Node {}: Gossip transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
             transaction_request.miner_address,
-            transaction_request.data.id.0.to_base58()
+            transaction_request.data.id
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
@@ -150,8 +147,7 @@ where
         if already_seen {
             debug!(
                 "Node {}: Transaction {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address,
-                tx_id.0.to_base58()
+                self.gossip_client.mining_address, tx_id
             );
             return Ok(());
         }
@@ -191,6 +187,53 @@ where
         }
     }
 
+    pub(crate) async fn handle_ingress_proof(
+        &self,
+        proof_request: GossipRequest<IngressProof>,
+    ) -> GossipResult<()> {
+        debug!(
+            "Node {}: Gossip ingress_proof received from peer {}: {:?}",
+            self.gossip_client.mining_address,
+            proof_request.miner_address,
+            proof_request.data.proof
+        );
+
+        let proof = proof_request.data;
+        let source_miner_address = proof_request.miner_address;
+
+        let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof.proof)?;
+        self.cache.record_seen(
+            source_miner_address,
+            GossipCacheKey::IngressProof(proof.proof),
+        )?;
+
+        if already_seen {
+            debug!(
+                "Node {}: Ingress Proof {} is already recorded in the cache, skipping",
+                self.gossip_client.mining_address, proof.proof
+            );
+            return Ok(());
+        }
+
+        // TODO: Check to see if this proof is in the DB LRU Cache
+
+        match self
+            .mempool
+            .handle_ingest_ingress_proof(proof)
+            .await
+            .map_err(GossipError::from)
+        {
+            Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
+                debug!("Ingress Proof sent to mempool");
+                Ok(())
+            }
+            Err(error) => {
+                error!("Error when sending ingress proof to mempool: {:?}", error);
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) async fn handle_commitment_tx(
         &self,
         transaction_request: GossipRequest<CommitmentTransaction>,
@@ -199,7 +242,7 @@ where
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
             transaction_request.miner_address,
-            transaction_request.data.id.0.to_base58()
+            transaction_request.data.id
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
@@ -212,8 +255,7 @@ where
         if already_seen {
             debug!(
                 "Node {}: Commitment Transaction {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address,
-                tx_id.0.to_base58()
+                self.gossip_client.mining_address, tx_id
             );
             return Ok(());
         }
@@ -293,8 +335,7 @@ where
         if has_block_already_been_received && !is_block_requested_by_the_pool {
             debug!(
                 "Node {}: Block {} already seen and not requested by the pool, skipping",
-                self.gossip_client.mining_address,
-                block_header.block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_header.block_hash
             );
             return Ok(());
         }
@@ -304,8 +345,7 @@ where
         if !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
-                self.gossip_client.mining_address,
-                block_header.block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_header.block_hash
             );
             self.peer_list
                 .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
@@ -327,16 +367,14 @@ where
         if has_block_already_been_processed {
             debug!(
                 "Node {}: Block {} has already been processed, skipping",
-                self.gossip_client.mining_address,
-                block_header.block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_header.block_hash
             );
             return Ok(());
         }
 
         debug!(
             "Node {}: Block {} has not been processed yet, starting processing",
-            self.gossip_client.mining_address,
-            block_header.block_hash.0.to_base58()
+            self.gossip_client.mining_address, block_header.block_hash
         );
 
         let mut missing_tx_ids = Vec::new();

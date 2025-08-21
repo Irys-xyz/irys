@@ -97,7 +97,11 @@ impl StorageModuleServiceInner {
 
         for sm_info in storage_module_infos.iter() {
             // Get the existing StorageModule
-            let existing = &current_modules[sm_info.id];
+            // TODO: this fix works and we don't know why :)
+            let existing = current_modules
+                .iter()
+                .find(|sm| sm.id == sm_info.id)
+                .expect("StorageModuleInfo should only reference valid storage module ids");
 
             // Did this storage module get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {

@@ -5,9 +5,7 @@ use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use async_trait::async_trait;
-use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
-use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -109,7 +107,11 @@ impl BlockDiscoveryStub {
 
 #[async_trait]
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
-    async fn handle_block(&self, block: Arc<IrysBlockHeader>) -> Result<(), BlockDiscoveryError> {
+    async fn handle_block(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        _skip_vdf: bool,
+    ) -> Result<(), BlockDiscoveryError> {
         self.block_status_provider
             .add_block_to_index_and_tree_for_testing(&block);
         self.received_blocks
@@ -127,7 +129,6 @@ struct MockedServices {
     db: DatabaseProvider,
     execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
-    vdf_state_stub: VdfStateReadonly,
     service_senders: ServiceSenders,
 }
 
@@ -177,7 +178,7 @@ impl MockedServices {
         let (service_senders, service_receivers) = ServiceSenders::new();
 
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
-        let vdf_state = vdf_state_stub.clone();
+        let vdf_state = vdf_state_stub;
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
@@ -200,18 +201,6 @@ impl MockedServices {
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
-                if let BlockTreeServiceMessage::FastTrackBlockMigration {
-                    block_header: _,
-                    response,
-                } = message
-                {
-                    // Simulate processing the block header
-                    response
-                        .send(Ok(None))
-                        .expect("to send response for FastTrackBlockMigration");
-                } else {
-                    debug!("Received unsupported BlockTreeServiceMessage");
-                }
             }
             debug!("BlockTreeServiceMessage channel closed");
         });
@@ -223,7 +212,6 @@ impl MockedServices {
             db,
             execution_payload_provider,
             mempool_stub,
-            vdf_state_stub,
             service_senders,
         }
     }
@@ -240,7 +228,6 @@ async fn should_process_block() {
         db,
         execution_payload_provider,
         mempool_stub,
-        vdf_state_stub,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -256,7 +243,6 @@ async fn should_process_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config,
         service_senders,
     );
@@ -269,10 +255,7 @@ async fn should_process_block() {
     //  block producer
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
 
-    debug!(
-        "Previous block hash: {:?}",
-        test_header.previous_block_hash.0.to_base58()
-    );
+    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let test_header = Arc::new(test_header.clone());
 
@@ -338,7 +321,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         db,
         execution_payload_provider,
         mempool_stub,
-        vdf_state_stub,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -373,7 +355,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config.clone(),
         service_senders,
     ));
@@ -404,7 +385,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     gossip_server.set_on_block_data_request(move |block_hash| {
         let block = block_for_server.clone();
         let pool = pool_for_server.clone();
-        debug!("Receive get block: {:?}", block_hash.0.to_base58());
+        debug!("Receive get block: {:?}", block_hash);
         tokio::spawn(async move {
             debug!("Send block to block pool");
             pool.process_block(Arc::new(block.clone()), false)
@@ -454,7 +435,6 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         db,
         execution_payload_provider,
         mempool_stub,
-        vdf_state_stub,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -471,7 +451,6 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider,
-        vdf_state_stub,
         config,
         service_senders,
     );
@@ -531,7 +510,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         db,
         execution_payload_provider,
         mempool_stub,
-        vdf_state_stub,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -575,7 +553,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         sync_state.clone(),
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config.clone(),
         service_senders,
     ));
@@ -642,7 +619,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             .find(|block| block.block_hash == block_hash)
             .cloned();
         let pool = block_pool_for_server.clone();
-        debug!("Receive get block: {:?}", block_hash.0.to_base58());
+        debug!("Receive get block: {:?}", block_hash);
         let errors_sender = errors_sender.clone();
         if let Some(block) = block {
             tokio::spawn(async move {
@@ -691,7 +668,6 @@ async fn should_fast_track_block() {
         db,
         execution_payload_provider,
         mempool_stub,
-        vdf_state_stub,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -708,7 +684,6 @@ async fn should_fast_track_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config,
         service_senders,
     );
@@ -721,10 +696,7 @@ async fn should_fast_track_block() {
     //  block producer
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
 
-    debug!(
-        "Previous block hash: {:?}",
-        test_header.previous_block_hash.0.to_base58()
-    );
+    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     service
         .process_block(Arc::new(test_header.clone()), true)
@@ -732,16 +704,16 @@ async fn should_fast_track_block() {
         .expect("can't process block");
 
     let blocks_in_discovery = block_discovery_stub.get_blocks();
-    // No blocks should be in discovery service, since we've fast tracked the block
-    assert_eq!(blocks_in_discovery.len(), 0);
+    // Fast-track now only skips VDF verification; block still goes through discovery
+    assert_eq!(blocks_in_discovery.len(), 1);
+    assert_eq!(blocks_in_discovery[0].block_hash, test_header.block_hash);
 
     let migrated_blocks = mempool_stub
         .migrated_blocks
         .read()
         .expect("to lock migrated blocks");
-    // The block should be migrated to the mempool
-    assert_eq!(migrated_blocks.len(), 1);
-    assert_eq!(migrated_blocks[0].block_hash, test_header.block_hash);
+    // No direct migration is performed in fast-track mode anymore
+    assert_eq!(migrated_blocks.len(), 0);
 }
 
 #[actix_rt::test]
@@ -755,7 +727,6 @@ async fn should_not_fast_track_block_already_in_index() {
         db,
         execution_payload_provider,
         mempool_stub,
-        vdf_state_stub,
         service_senders,
     } = MockedServices::new(&config).await;
 
@@ -772,7 +743,6 @@ async fn should_not_fast_track_block_already_in_index() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        vdf_state_stub,
         config,
         service_senders,
     );
@@ -786,10 +756,7 @@ async fn should_not_fast_track_block_already_in_index() {
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&test_header);
 
-    debug!(
-        "Previous block hash: {:?}",
-        test_header.previous_block_hash.0.to_base58()
-    );
+    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let err = service
         .process_block(Arc::new(test_header.clone()), true)
