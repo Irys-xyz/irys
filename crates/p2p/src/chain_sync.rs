@@ -564,7 +564,85 @@ async fn sync_chain(
     while let Some(block) = block_queue.pop_front() {
         if sync_state.is_queue_full() {
             debug!("Sync task: Block queue is full, waiting for an empty slot");
-            sync_state.wait_for_an_empty_queue_slot().await;
+
+            // Retry logic for wait_for_an_empty_queue_slot
+            let retry_attempts = 3;
+            let mut wait_success = false;
+
+            for attempt in 1..=retry_attempts {
+                debug!("Sync task: Wait attempt {} for empty queue slot", attempt);
+
+                match sync_state.wait_for_an_empty_queue_slot().await {
+                    Ok(()) => {
+                        debug!(
+                            "Sync task: Queue slot became available on attempt {}",
+                            attempt
+                        );
+                        wait_success = true;
+                        break;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Sync task: Timeout on attempt {} waiting for queue slot",
+                            attempt
+                        );
+
+                        if attempt < retry_attempts {
+                            // Try to request the block at height = last synced + 1 to trigger processing
+                            let retry_height = sync_state.highest_processed_block() + 1;
+                            debug!("Sync task: Attempting to request block at height {} to trigger processing", retry_height);
+
+                            match get_block_index(
+                                peer_list,
+                                &api_client,
+                                retry_height,
+                                1, // Just get one block
+                                3, // 3 retries for the network call
+                                fetch_index_from_the_trusted_peer,
+                            )
+                            .await
+                            {
+                                Ok(retry_index) if !retry_index.is_empty() => {
+                                    let retry_block = &retry_index[0];
+                                    debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
+
+                                    // Request the block from the network to trigger processing
+                                    match peer_list
+                                        .request_block_from_the_network(
+                                            retry_block.block_hash,
+                                            sync_state.is_syncing_from_a_trusted_peer(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
+                                        }
+                                        Err(e) => {
+                                            warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    warn!("Sync task: Retry attempt returned empty index for height {}", retry_height);
+                                }
+                                Err(e) => {
+                                    warn!("Sync task: Failed to get retry block index for height {}: {}", retry_height, e);
+                                }
+                            }
+
+                            // Wait a bit before next retry
+                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                        }
+                    }
+                }
+            }
+
+            if !wait_success {
+                error!("Sync task: All wait attempts failed, exiting sync");
+                return Err(ChainSyncError::Internal(
+                    "Failed to get queue slot after timeout and retries".to_string(),
+                ));
+            }
         }
 
         let peer_list_clone = peer_list.clone();
