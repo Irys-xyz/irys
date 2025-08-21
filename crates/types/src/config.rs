@@ -189,6 +189,11 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::u128_millis_to_u64"
     )]
     pub max_future_timestamp_drift_millis: u128,
+
+    /// Whitelist of addresses that are allowed to post stake/pledge transactions
+    /// If empty, all addresses are allowed
+    #[serde(default)]
+    pub stake_pledge_whitelist: Vec<Address>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,6 +759,7 @@ impl ConsensusConfig {
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
             max_future_timestamp_drift_millis: 15_000,
+            stake_pledge_whitelist: vec![],
         }
     }
 
@@ -874,6 +880,7 @@ impl ConsensusConfig {
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
             max_future_timestamp_drift_millis: 15_000,
+            stake_pledge_whitelist: vec![], // Empty whitelist for testnet - all addresses allowed
         }
     }
 }
@@ -1355,6 +1362,10 @@ mod tests {
         pledge_base_value = 950.0
         pledge_decay = 0.9
         immediate_tx_inclusion_reward_percent = 0.05
+        stake_pledge_whitelist = [
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32",
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+        ]
 
         [genesis]
         miner_address = "0x0000000000000000000000000000000000000000"
