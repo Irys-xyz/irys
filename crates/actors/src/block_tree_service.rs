@@ -872,7 +872,11 @@ impl BlockTreeServiceInner {
                 epoch_block.block_hash
             )
         });
-        let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
+        let expired_partition_hashes: Vec<_> = epoch_snapshot
+            .expired_partition_infos
+            .iter()
+            .map(|i| i.partition_hash)
+            .collect();
 
         // Let the mining actors know about expired partitions
         System::set_current(self.system.clone());

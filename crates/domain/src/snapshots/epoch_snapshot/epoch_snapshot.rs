@@ -41,8 +41,8 @@ pub struct EpochSnapshot {
     pub epoch_block: IrysBlockHeader,
     /// The prior epoch block
     pub previous_epoch_block: Option<IrysBlockHeader>,
-    /// Partition hashes that expired with this snapshot
-    pub expired_partition_hashes: Vec<PartitionHash>,
+    /// Partition that expired with this snapshot (only happens at epoch boundaries)
+    pub expired_partition_infos: Vec<ExpiredPartitionInfo>,
 }
 
 impl Clone for EpochSnapshot {
@@ -57,7 +57,7 @@ impl Clone for EpochSnapshot {
             commitment_state: self.commitment_state.clone(),
             epoch_block: self.epoch_block.clone(),
             previous_epoch_block: self.previous_epoch_block.clone(),
-            expired_partition_hashes: self.expired_partition_hashes.clone(),
+            expired_partition_infos: self.expired_partition_infos.clone(),
         }
     }
 }
@@ -76,7 +76,7 @@ impl Default for EpochSnapshot {
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
-            expired_partition_hashes: Vec::new(),
+            expired_partition_infos: Vec::new(),
         }
     }
 }
@@ -112,7 +112,7 @@ impl EpochSnapshot {
             commitment_state: Default::default(),
             epoch_block: genesis_block.clone(),
             previous_epoch_block: None,
-            expired_partition_hashes: Vec::new(),
+            expired_partition_infos: Vec::new(),
         };
 
         match new_self.perform_epoch_tasks(&None, &genesis_block, commitments) {
@@ -347,10 +347,11 @@ impl EpochSnapshot {
     /// Stores a vec of expired partition hashes in the epoch snapshot
     fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
-        let expired_hashes: Vec<H256> = self.ledgers.get_expired_partition_hashes(epoch_height);
+        let expired_partitions: Vec<ExpiredPartitionInfo> =
+            self.ledgers.expire_term_partitions(epoch_height);
 
         // Return early if there's no more work to do
-        if expired_hashes.is_empty() {
+        if expired_partitions.is_empty() {
             return;
         }
 
@@ -362,11 +363,11 @@ impl EpochSnapshot {
         // )));
 
         // Update expired data partitions assignments marking them as capacity partitions
-        for partition_hash in expired_hashes.iter() {
-            self.return_expired_partition_to_capacity(*partition_hash);
+        for partition_info in expired_partitions.iter() {
+            self.return_expired_partition_to_capacity(partition_info.partition_hash);
         }
 
-        self.expired_partition_hashes = expired_hashes;
+        self.expired_partition_infos = expired_partitions;
     }
 
     /// Loops though all the ledgers both perm and term, checking to see if any
@@ -1097,7 +1098,7 @@ mod tests {
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
-            expired_partition_hashes: Vec::new(),
+            expired_partition_infos: Vec::new(),
         };
 
         // Allocate four slots in the submit ledger so `slot_count()` returns 4.
