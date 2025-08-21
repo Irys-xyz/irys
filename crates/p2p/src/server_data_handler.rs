@@ -5,10 +5,7 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::{
-    block_discovery::BlockDiscoveryFacade,
-    mempool_service::{ChunkIngressError, MempoolFacade},
-};
+use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};

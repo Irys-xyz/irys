@@ -8,6 +8,7 @@ use irys_actors::block_discovery::{
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
+use irys_actors::pledge_provider::MempoolPledgeProvider;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
@@ -110,7 +111,7 @@ pub struct IrysNodeCtx {
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
-    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
+    pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub sync_service_facade: SyncChainServiceFacade,
 }
 
@@ -979,11 +980,10 @@ impl IrysNode {
             .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
 
         // Create the MempoolPledgeProvider
-        let mempool_pledge_provider =
-            Arc::new(irys_actors::mempool_service::MempoolPledgeProvider::new(
-                mempool_state,
-                block_tree_guard.clone(),
-            ));
+        let mempool_pledge_provider = Arc::new(MempoolPledgeProvider::new(
+            mempool_state,
+            block_tree_guard.clone(),
+        ));
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
@@ -1059,7 +1059,6 @@ impl IrysNode {
             gossip_listener,
             block_status_provider.clone(),
             execution_payload_cache,
-            vdf_state_readonly.clone(),
             config.clone(),
             service_senders.clone(),
             chain_sync_tx.clone(),
@@ -1721,7 +1720,7 @@ async fn stake_and_pledge(
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     latest_block_hash: BlockHash,
-    mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
+    mempool_pledge_provider: Arc<MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
