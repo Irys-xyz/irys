@@ -49,6 +49,7 @@ pub(crate) struct BlockValidationTask {
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub priority: BlockPriorityMeta,
+    pub skip_vdf_validation: bool,
 }
 
 impl Ord for BlockValidationTask {
@@ -76,12 +77,14 @@ impl BlockValidationTask {
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         meta: BlockPriorityMeta,
+        skip_vdf_validation: bool,
     ) -> Self {
         Self {
             block,
             service_inner,
             block_tree_guard,
             priority: meta,
+            skip_vdf_validation,
         }
     }
 
@@ -114,12 +117,18 @@ impl BlockValidationTask {
     pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
+        let skip_validation = self.skip_vdf_validation;
 
         // run the VDF validation
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
         let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
-            async move { inner.ensure_vdf_is_valid(&block, cancel2).await }.in_current_span(),
+            async move {
+                inner
+                    .ensure_vdf_is_valid(&block, cancel2, skip_validation)
+                    .await
+            }
+            .in_current_span(),
         )
         .await
         .expect("Failed to join ensure_vdf_is_valid task");
@@ -219,6 +228,7 @@ impl BlockValidationTask {
     /// Perform block validation
     #[tracing::instrument(skip_all, err, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
+        let skip_vdf_validation = self.skip_vdf_validation;
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
         let block = &self.block;
@@ -250,6 +260,10 @@ impl BlockValidationTask {
             let block_hash = self.block.block_hash;
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
+                if skip_vdf_validation {
+                    debug!("Skipping POA validation due to skip_vdf_validation flag for block {block_hash:?}");
+                    return Ok(ValidationResult::Valid);
+                }
                 poa_is_valid(
                     &poa,
                     &block_index_guard,

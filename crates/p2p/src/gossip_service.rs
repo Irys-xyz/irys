@@ -26,7 +26,6 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
-use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -156,7 +155,6 @@ impl P2PService {
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadCache,
-        vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
         chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
@@ -176,7 +174,6 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
-            vdf_state,
             config,
             service_senders,
         );

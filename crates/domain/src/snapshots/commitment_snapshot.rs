@@ -244,6 +244,16 @@ impl CommitmentSnapshot {
         all_commitments.sort();
         all_commitments
     }
+
+    pub fn is_staked(&self, miner_address: Address) -> bool {
+        let commitments_for_address = self.commitments.get_key_value(&miner_address);
+        if let Some((_, commitments)) = commitments_for_address {
+            if commitments.stake.is_some() {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]

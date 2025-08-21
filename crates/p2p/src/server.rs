@@ -18,7 +18,7 @@ use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
     Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
-    IrysBlockHeader, PeerListItem, UnpackedChunk,
+    IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
@@ -287,6 +287,42 @@ where
         HttpResponse::Ok().finish()
     }
 
+    async fn handle_ingress_proof(
+        server: Data<Self>,
+        proof_json: web::Json<GossipRequest<IngressProof>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let data_root = proof_json.0.data.data_root;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
+                node_id, data_root
+            );
+            return HttpResponse::Forbidden().finish();
+        }
+        let gossip_request = proof_json.0;
+        let source_miner_address = gossip_request.miner_address;
+
+        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
+            Ok(peer_address) => peer_address,
+            Err(error_response) => return error_response,
+        };
+
+        if let Err(error) = server
+            .data_handler
+            .handle_ingress_proof(gossip_request)
+            .await
+        {
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            error!("Failed to send ingress proof: {}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
+
+        debug!("Gossip data handled");
+        HttpResponse::Ok().finish()
+    }
+
     #[expect(
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
@@ -381,6 +417,7 @@ where
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
                         .route("/block", web::post().to(Self::handle_block))
+                        .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
                         .route(
                             "/execution_payload",
                             web::post().to(Self::handle_execution_payload),

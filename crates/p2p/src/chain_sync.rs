@@ -1,6 +1,6 @@
 use crate::{BlockPool, GossipError};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
@@ -209,11 +209,11 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         if let Some(orphaned_block) = maybe_orphaned_block {
             info!(
                 "Start processing orphaned ancestor block: {:?}",
-                orphaned_block.block_hash
+                orphaned_block.header.block_hash
             );
 
             self.block_pool
-                .process_block(orphaned_block, false)
+                .process_block(orphaned_block.header, orphaned_block.is_fast_tracking)
                 .await
                 .map_err(|e| ChainSyncError::Internal(format!("Block processing error: {:?}", e)))
         } else {

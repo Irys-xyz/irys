@@ -155,7 +155,7 @@ pub fn validate_path(
             &branch_proof.left_id,
             &branch_proof.right_id,
             &branch_proof.offset().to_note_vec(),
-        ])?;
+        ]);
 
         // Proof is invalid if the calculated path_hash doesn't match expected
         if path_hash != expected_path_hash {
@@ -192,7 +192,7 @@ pub fn validate_path(
     let leaf_node_id = hash_all_sha256(vec![
         &leaf_proof.data_hash,
         &leaf_proof.offset().to_note_vec(),
-    ])?;
+    ]);
     let path_hash_matches_leaf = leaf_node_id == expected_path_hash;
 
     debug!(
@@ -253,7 +253,7 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
             &branch_proof.left_id,
             &branch_proof.right_id,
             &branch_proof.offset().to_note_vec(),
-        ])?;
+        ]);
 
         let offset = branch_proof.offset() as u128;
         let is_right_of_offset = target_offset > offset;
@@ -325,7 +325,7 @@ pub fn validate_chunk(
                     &branch_proof.left_id,
                     &branch_proof.right_id,
                     &branch_proof.offset().to_note_vec(),
-                ])?;
+                ]);
 
                 // Ensure calculated id correct.
                 if id != root_id {
@@ -347,7 +347,7 @@ pub fn validate_chunk(
             }
 
             // Validate leaf root id is correct
-            let id = hash_all_sha256(vec![data_hash, &max_byte_range.to_note_vec()])?;
+            let id = hash_all_sha256(vec![data_hash, &max_byte_range.to_note_vec()]);
             if id != root_id {
                 return Err(eyre!("Invalid Leaf Proof: root mismatch"));
             }
@@ -376,10 +376,10 @@ pub fn generate_leaves_from_chunks(
     let mut min_byte_range = 0;
     for chunk in chunks {
         let chunk = chunk?;
-        let data_hash = hash_sha256(&chunk)?;
+        let data_hash = hash_sha256(&chunk);
         let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &offset])?;
+        let id = hash_all_sha256(vec![&data_hash, &offset]);
 
         leaves.push(Node {
             id,
@@ -407,10 +407,10 @@ pub fn generate_ingress_leaves(
     for chunk in chunks {
         let chunk = chunk?;
         let chunk = chunk.as_ref(); // double-binding required
-        let data_hash = hash_ingress_sha256(chunk, address)?;
+        let data_hash = hash_ingress_sha256(chunk, address);
         let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &offset])?;
+        let id = hash_all_sha256(vec![&data_hash, &offset]);
 
         leaves.push(Node {
             id,
@@ -422,8 +422,8 @@ pub fn generate_ingress_leaves(
         });
 
         if and_regular {
-            let data_hash = hash_sha256(chunk)?;
-            let id = hash_all_sha256(vec![&data_hash, &offset])?;
+            let data_hash = hash_sha256(chunk);
+            let id = hash_all_sha256(vec![&data_hash, &offset]);
             regular_leaves.push(Node {
                 id,
                 data_hash: Some(data_hash),
@@ -452,7 +452,7 @@ pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<V
         let data_root_hash = &data_root.data_root.0;
         let max_byte_range = min_byte_range + data_root.tx_size;
         let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![data_root_hash, &offset])?;
+        let id = hash_all_sha256(vec![data_root_hash, &offset]);
 
         leaves.push(Node {
             id,
@@ -471,7 +471,7 @@ pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<V
 /// Hashes together a single branch node from a pair of child nodes.
 pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
     let max_byte_range = left.max_byte_range.to_note_vec();
-    let id = hash_all_sha256(vec![&left.id, &right.id, &max_byte_range])?;
+    let id = hash_all_sha256(vec![&left.id, &right.id, &max_byte_range]);
     Ok(Node {
         id,
         data_hash: None,
@@ -552,29 +552,23 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
     }
 }
 
-pub fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
+pub fn hash_sha256(message: &[u8]) -> [u8; 32] {
     let mut hasher = sha::Sha256::new();
     hasher.update(message);
-    let result = hasher.finish();
-    Ok(result)
+    hasher.finish()
 }
 
-pub fn hash_ingress_sha256(message: &[u8], address: Address) -> Result<[u8; 32], Error> {
+pub fn hash_ingress_sha256(message: &[u8], address: Address) -> [u8; 32] {
     let mut hasher = sha::Sha256::new();
     hasher.update(message);
     hasher.update(address.as_slice());
-    let result = hasher.finish();
-    Ok(result)
+    hasher.finish()
 }
 
 /// Returns a SHA256 hash of the the concatenated SHA256 hashes of a vector of messages.
-pub fn hash_all_sha256(messages: Vec<&[u8]>) -> Result<[u8; 32], Error> {
-    let hash: Vec<u8> = messages
-        .into_iter()
-        .flat_map(|m| hash_sha256(m).unwrap())
-        .collect();
-    let hash = hash_sha256(&hash)?;
-    Ok(hash)
+pub fn hash_all_sha256(messages: Vec<&[u8]>) -> [u8; 32] {
+    let hash: Vec<u8> = messages.into_iter().flat_map(hash_sha256).collect();
+    hash_sha256(&hash)
 }
 
 #[cfg(test)]
