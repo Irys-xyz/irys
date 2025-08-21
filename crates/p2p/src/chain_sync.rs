@@ -322,7 +322,6 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner,
-                    is_sync_task_spawned: AtomicBool::new(false),
                 };
                 service
                     .start()
