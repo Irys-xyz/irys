@@ -1,6 +1,5 @@
 use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
-use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
@@ -184,8 +183,8 @@ impl EpochSnapshot {
                 if !commitments.iter().any(|c| c.id == *txid) {
                     return Err(eyre::eyre!(
                         "Missing commitment transaction {} for block {}",
-                        txid.0.to_base58(),
-                        block_header.block_hash.0.to_base58()
+                        txid,
+                        block_header.block_hash
                     ));
                 }
             }
@@ -196,8 +195,8 @@ impl EpochSnapshot {
                 if !commitment_ledger.tx_ids.contains(&commitment.id) {
                     return Err(eyre::eyre!(
                         "Extra commitment transaction {} not referenced in block {} ledger",
-                        commitment.id.0.to_base58(),
-                        block_header.block_hash.0.to_base58()
+                        commitment.id,
+                        block_header.block_hash
                     ));
                 }
             }
@@ -206,7 +205,7 @@ impl EpochSnapshot {
             if !commitments.is_empty() {
                 return Err(eyre::eyre!(
                     "Block {} has no commitment ledger, but {} commitments were provided",
-                    block_header.block_hash.0.to_base58(),
+                    block_header.block_hash,
                     commitments.len()
                 ));
             }
@@ -258,7 +257,7 @@ impl EpochSnapshot {
 
         debug!(
             height = new_epoch_block.height,
-            block_hash = %new_epoch_block.block_hash.0.to_base58(),
+            block_hash = %new_epoch_block.block_hash,
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
@@ -536,8 +535,8 @@ impl EpochSnapshot {
             let next_part_hash = H256(hash_sha256(&prev_partition_hash.0).unwrap());
             trace!(
                 "Adding partition with hash: {} (prev: {})",
-                next_part_hash.0.to_base58(),
-                prev_partition_hash.0.to_base58()
+                next_part_hash,
+                prev_partition_hash
             );
             self.all_active_partitions.push(next_part_hash);
             // All partition_hashes begin as unassigned capacity partitions
@@ -583,9 +582,7 @@ impl EpochSnapshot {
     ) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
-            &partition_hash.0.to_base58(),
-            &slot_index,
-            &ledger
+            &partition_hash, &slot_index, &ledger
         );
         if let Some(mut assignment) = self
             .partition_assignments

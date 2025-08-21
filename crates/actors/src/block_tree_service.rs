@@ -10,7 +10,6 @@ use crate::{
     BlockMigrationMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
@@ -327,8 +326,7 @@ impl BlockTreeServiceInner {
 
         info!(
             "Migrating to block_index - hash: {} height: {}",
-            &block_header.block_hash.0.to_base58(),
-            &block_header.height
+            &block_header.block_hash, &block_header.height
         );
 
         // HACK
@@ -594,13 +592,13 @@ impl BlockTreeServiceInner {
         );
 
         if validation_result == ValidationResult::Invalid {
-            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            error!(block_hash = %block_hash,"invalid block");
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            error!(block_hash = %block_hash,"invalid block");
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());

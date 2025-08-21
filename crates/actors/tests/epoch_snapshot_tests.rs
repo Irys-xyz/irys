@@ -1,6 +1,5 @@
 use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
 use actix::{Actor as _, SystemService as _};
-use base58::ToBase58 as _;
 use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
@@ -1024,7 +1023,7 @@ async fn partitions_assignment_determinism_test() {
 
     // Check determinism in assigned partitions
     let publish_slot_0 = H256::from_base58("2F5eg8FE2VmXGcgpyUKTzBrLzSmVXMKqawUJeDgKC1vW");
-    debug!("expected publish[0] -> {}", publish_slot_0.0.to_base58());
+    debug!("expected publish[0] -> {}", publish_slot_0);
 
     if let Some(publish_assignment) = epoch_snapshot
         .partition_assignments
@@ -1049,7 +1048,7 @@ async fn partitions_assignment_determinism_test() {
 
     epoch_snapshot.partition_assignments.print_assignments();
 
-    debug!("expected publish[1] -> {}", publish_slot_1.0.to_base58());
+    debug!("expected publish[1] -> {}", publish_slot_1);
 
     if let Some(publish_assignment) = epoch_snapshot
         .partition_assignments

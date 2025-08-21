@@ -10,7 +10,6 @@ use actix_web::{
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::{BlockHashOrNumber, BlockId};
 use awc::{body::MessageBody, http::StatusCode};
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
@@ -783,7 +782,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                     reorg_event.old_fork.len(),
                     reorg_event.new_fork.len(),
                     reorg_event.fork_parent.height,
-                    reorg_event.new_tip.0.to_base58()
+                    reorg_event.new_tip
                 );
                     Ok(reorg_event)
                 }
@@ -1707,7 +1706,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
-        info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+        info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
         let api_uri = self.node_ctx.config.node_config.api_uri();
@@ -1733,7 +1732,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
-        info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+        info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
         self.post_commitment_tx(&pledge_tx)
@@ -1756,7 +1755,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-        info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
+        info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
         let api_uri = self.node_ctx.config.node_config.api_uri();
@@ -1790,7 +1789,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         api_uri: &str,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        info!("Posting Commitment TX: {}", commitment_tx.id.0.to_base58());
+        info!("Posting Commitment TX: {}", commitment_tx.id);
 
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);

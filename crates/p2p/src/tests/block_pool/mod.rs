@@ -5,7 +5,6 @@ use crate::tests::util::{FakeGossipServer, MempoolStub, MockRethServiceActor};
 use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use async_trait::async_trait;
-use base58::ToBase58 as _;
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
@@ -256,10 +255,7 @@ async fn should_process_block() {
     //  block producer
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
 
-    debug!(
-        "Previous block hash: {:?}",
-        test_header.previous_block_hash.0.to_base58()
-    );
+    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let test_header = Arc::new(test_header.clone());
 
@@ -389,7 +385,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     gossip_server.set_on_block_data_request(move |block_hash| {
         let block = block_for_server.clone();
         let pool = pool_for_server.clone();
-        debug!("Receive get block: {:?}", block_hash.0.to_base58());
+        debug!("Receive get block: {:?}", block_hash);
         tokio::spawn(async move {
             debug!("Send block to block pool");
             pool.process_block(Arc::new(block.clone()), false)
@@ -623,7 +619,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             .find(|block| block.block_hash == block_hash)
             .cloned();
         let pool = block_pool_for_server.clone();
-        debug!("Receive get block: {:?}", block_hash.0.to_base58());
+        debug!("Receive get block: {:?}", block_hash);
         let errors_sender = errors_sender.clone();
         if let Some(block) = block {
             tokio::spawn(async move {
@@ -700,10 +696,7 @@ async fn should_fast_track_block() {
     //  block producer
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
 
-    debug!(
-        "Previous block hash: {:?}",
-        test_header.previous_block_hash.0.to_base58()
-    );
+    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     service
         .process_block(Arc::new(test_header.clone()), true)
@@ -763,10 +756,7 @@ async fn should_not_fast_track_block_already_in_index() {
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&test_header);
 
-    debug!(
-        "Previous block hash: {:?}",
-        test_header.previous_block_hash.0.to_base58()
-    );
+    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let err = service
         .process_block(Arc::new(test_header.clone()), true)

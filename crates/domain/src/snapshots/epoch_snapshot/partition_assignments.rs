@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use base58::ToBase58 as _;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     DataLedger, H256,
@@ -61,7 +60,7 @@ impl PartitionAssignments {
                 "{:?}[{}] {} miner: {}",
                 ledger,
                 assignment.slot_index.unwrap(),
-                hash.0.to_base58(),
+                hash,
                 assignment.miner_address
             );
         }
@@ -79,7 +78,7 @@ impl PartitionAssignments {
                 "{:?}[{}] {} miner: {}",
                 ledger,
                 assignment.slot_index.unwrap(),
-                hash.0.to_base58(),
+                hash,
                 assignment.miner_address
             );
         }
@@ -88,9 +87,7 @@ impl PartitionAssignments {
         for (index, (hash, assignment)) in self.capacity_partitions.iter().enumerate() {
             debug!(
                 "Capacity[{}] {} miner: {}",
-                index,
-                hash.0.to_base58(),
-                assignment.miner_address
+                index, hash, assignment.miner_address
             );
         }
     }

@@ -15,7 +15,6 @@ use crate::block_validation::calculate_perm_storage_total_fee;
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
@@ -731,10 +730,7 @@ impl Inner {
             }
         }
 
-        let txs = &publish_txs
-            .iter()
-            .map(|h| h.id.0.to_base58())
-            .collect::<Vec<_>>();
+        let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
         debug!(?txs, "Publish transactions");
 
         Ok(PublishLedgerWithTxs {
@@ -864,7 +860,7 @@ impl Inner {
         let commitment_hash_map = self.get_all_commitment_tx().await;
         for tx in commitment_hash_map.values() {
             // Create a filepath for this transaction
-            let tx_path = commitment_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+            let tx_path = commitment_tx_path.join(format!("{}.json", tx.id));
 
             // Check to see if the file exists
             if tx_path.exists() {
@@ -886,7 +882,7 @@ impl Inner {
         let storage_hash_map = self.get_all_storage_tx().await;
         for tx in storage_hash_map.values() {
             // Create a filepath for this transaction
-            let tx_path = storage_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+            let tx_path = storage_tx_path.join(format!("{}.json", tx.id));
 
             // Check to see if the file exists
             if tx_path.exists() {

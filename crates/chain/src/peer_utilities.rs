@@ -1,4 +1,3 @@
-use base58::ToBase58 as _;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;
@@ -96,7 +95,7 @@ pub async fn fetch_txn(
     client: &awc::Client,
     txn_id: H256,
 ) -> Option<IrysTransactionResponse> {
-    let url = format!("http://{}/v1/tx/{}", peer, txn_id.0.to_base58());
+    let url = format!("http://{}/v1/tx/{}", peer, txn_id);
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {
@@ -128,11 +127,7 @@ pub async fn fetch_block(
     client: &awc::Client,
     block_index_item: &BlockIndexItem,
 ) -> Option<IrysBlockHeader> {
-    let url = format!(
-        "http://{}/v1/block/{}",
-        peer,
-        block_index_item.block_hash.0.to_base58(),
-    );
+    let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash,);
 
     match client.get(url.clone()).send().await {
         Ok(mut response) => {

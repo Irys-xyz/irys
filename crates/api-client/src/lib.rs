@@ -1,4 +1,3 @@
-use base58::ToBase58 as _;
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, DataTransactionHeader,
@@ -134,9 +133,8 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        // IMPORTANT: You have to keep the debug format here, since normal to_string of H256
-        //  encodes just first 4 and last 4 bytes with a placeholder in the middle
-        let path = format!("/tx/{}", tx_id.0.to_base58());
+        // H256 Display prints full base58; using Display here is correct.
+        let path = format!("/tx/{}", tx_id);
         self.make_request(peer, Method::GET, &path, None::<&()>)
             .await?
             .ok_or_else(|| eyre::eyre!("Expected transaction response to have a body: {}", tx_id))
@@ -194,7 +192,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = format!("/block/{}", block_hash.0.to_base58());
+        let path = format!("/block/{}", block_hash);
 
         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
             .await

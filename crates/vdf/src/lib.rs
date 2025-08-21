@@ -341,7 +341,7 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base58::{FromBase58 as _, ToBase58 as _};
+    use base58::FromBase58 as _;
     use irys_types::ConsensusConfig;
     use tracing::debug;
 
@@ -406,15 +406,9 @@ mod tests {
 
         println!(
             "---\nsteps: {} last_checkpoint: {}\n seed: {}",
-            vdf_info.steps[0].0.to_base58(),
-            vdf_info
-                .last_step_checkpoints
-                .0
-                .last()
-                .unwrap()
-                .0
-                .to_base58(),
-            vdf_info.prev_output.0.to_base58()
+            vdf_info.steps[0],
+            vdf_info.last_step_checkpoints.0.last().unwrap(),
+            vdf_info.prev_output
         );
         println!("x: {:?}", x);
     }
@@ -483,15 +477,9 @@ mod tests {
 
         println!(
             "---\nsteps: {} last_checkpoint: {}\n seed: {}",
-            vdf_info.steps[0].0.to_base58(),
-            vdf_info
-                .last_step_checkpoints
-                .0
-                .last()
-                .unwrap()
-                .0
-                .to_base58(),
-            vdf_info.prev_output.0.to_base58()
+            vdf_info.steps[0],
+            vdf_info.last_step_checkpoints.0.last().unwrap(),
+            vdf_info.prev_output
         );
         println!("x: {:?}", x);
     }
@@ -625,15 +613,9 @@ mod tests {
 
         println!(
             "---\nsteps: {} last_checkpoint: {}\n seed: {}",
-            vdf_info.steps[0].0.to_base58(),
-            vdf_info
-                .last_step_checkpoints
-                .0
-                .last()
-                .unwrap()
-                .0
-                .to_base58(),
-            vdf_info.prev_output.0.to_base58()
+            vdf_info.steps[0],
+            vdf_info.last_step_checkpoints.0.last().unwrap(),
+            vdf_info.prev_output
         );
         println!("x: {:?}", x);
     }

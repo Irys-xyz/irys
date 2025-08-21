@@ -3,7 +3,6 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
@@ -64,7 +63,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     let app = node.start_public_api().await;
 
     // Test storage transaction
-    let id: String = storage_tx.id.as_bytes().to_base58();
+    let id: String = storage_tx.id.to_string();
     let req = actix_web::test::TestRequest::get()
         .uri(&format!("/v1/tx/{}", &id))
         .to_request();
@@ -84,7 +83,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     assert_eq!(storage_tx, storage);
 
     // Test commitment transaction
-    let id: String = commitment_tx.id.as_bytes().to_base58();
+    let id: String = commitment_tx.id.to_string();
     let req = actix_web::test::TestRequest::get()
         .uri(&format!("/v1/tx/{}", &id))
         .to_request();

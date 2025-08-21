@@ -4,7 +4,6 @@ use crate::{
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
-use base58::ToBase58 as _;
 use core::net::SocketAddr;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
 use irys_api_client::ApiClient;
@@ -135,7 +134,7 @@ where
             "Node {}: Gossip transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
             transaction_request.miner_address,
-            transaction_request.data.id.0.to_base58()
+            transaction_request.data.id
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
@@ -148,8 +147,7 @@ where
         if already_seen {
             debug!(
                 "Node {}: Transaction {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address,
-                tx_id.0.to_base58()
+                self.gossip_client.mining_address, tx_id
             );
             return Ok(());
         }
@@ -244,7 +242,7 @@ where
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
             transaction_request.miner_address,
-            transaction_request.data.id.0.to_base58()
+            transaction_request.data.id
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
@@ -257,8 +255,7 @@ where
         if already_seen {
             debug!(
                 "Node {}: Commitment Transaction {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address,
-                tx_id.0.to_base58()
+                self.gossip_client.mining_address, tx_id
             );
             return Ok(());
         }
@@ -338,8 +335,7 @@ where
         if has_block_already_been_received && !is_block_requested_by_the_pool {
             debug!(
                 "Node {}: Block {} already seen and not requested by the pool, skipping",
-                self.gossip_client.mining_address,
-                block_header.block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_header.block_hash
             );
             return Ok(());
         }
@@ -349,8 +345,7 @@ where
         if !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
-                self.gossip_client.mining_address,
-                block_header.block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_header.block_hash
             );
             self.peer_list
                 .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
@@ -372,16 +367,14 @@ where
         if has_block_already_been_processed {
             debug!(
                 "Node {}: Block {} has already been processed, skipping",
-                self.gossip_client.mining_address,
-                block_header.block_hash.0.to_base58()
+                self.gossip_client.mining_address, block_header.block_hash
             );
             return Ok(());
         }
 
         debug!(
             "Node {}: Block {} has not been processed yet, starting processing",
-            self.gossip_client.mining_address,
-            block_header.block_hash.0.to_base58()
+            self.gossip_client.mining_address, block_header.block_hash
         );
 
         let mut missing_tx_ids = Vec::new();
