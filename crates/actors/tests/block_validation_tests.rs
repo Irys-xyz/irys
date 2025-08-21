@@ -3,10 +3,9 @@ use irys_actors::block_validation::{
 };
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
-    partition::PartitionAssignment, Address, Base64, BlockIndexItem, ConsensusConfig, DataLedger,
-    IrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    compute_solution_hash, partition::PartitionAssignment, Address, Base64, BlockIndexItem,
+    ConsensusConfig, DataLedger, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
 };
-use openssl::sha;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -127,13 +126,11 @@ fn solution_hash_link_valid_ok() {
     let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
 
     // compute expected solution_hash = sha256(poa_chunk || offset_le || seed)
-    let mut hasher = sha::Sha256::new();
-    hasher.update(&poa_chunk);
-    hasher.update(&block.poa.partition_chunk_offset.to_le_bytes());
-    hasher.update(block.vdf_limiter_info.output.as_bytes());
-    let expected = H256::from(hasher.finish());
-
-    block.solution_hash = expected;
+    block.solution_hash = compute_solution_hash(
+        &poa_chunk,
+        block.poa.partition_chunk_offset,
+        &block.vdf_limiter_info.output,
+    );
 
     assert!(solution_hash_link_is_valid(&block, &poa_chunk).is_ok());
 }
@@ -147,15 +144,14 @@ fn solution_hash_link_invalid_when_inputs_tampered() {
     let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
 
     // set correct solution hash first
-    let mut hasher = sha::Sha256::new();
-    hasher.update(&poa_chunk);
-    hasher.update(&block.poa.partition_chunk_offset.to_le_bytes());
-    hasher.update(block.vdf_limiter_info.output.as_bytes());
-    let expected = H256::from(hasher.finish());
-    block.solution_hash = expected;
+    block.solution_hash = compute_solution_hash(
+        &poa_chunk,
+        block.poa.partition_chunk_offset,
+        &block.vdf_limiter_info.output,
+    );
 
     // now tamper the inputs (e.g., change poa_chunk by one byte) to trigger mismatch
-    let mut tampered_chunk = poa_chunk.clone();
+    let mut tampered_chunk = poa_chunk;
     tampered_chunk[0] ^= 0x01;
 
     assert!(solution_hash_link_is_valid(&block, &tampered_chunk).is_err());
