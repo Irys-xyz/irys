@@ -70,7 +70,9 @@ pub async fn post_version(
     }
 
     // Fetch peers and handle potential errors
-    let peers = state.get_known_peers();
+    let mut peers = state.get_known_peers();
+    // Cap the number of peers returned to reduce abuse potential
+    peers.truncate(25);
 
     let peer_address = version_request.address;
     let mining_addr = version_request.mining_address;

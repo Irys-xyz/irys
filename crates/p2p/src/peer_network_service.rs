@@ -18,7 +18,36 @@ use tracing::{debug, error, info, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-const PEER_HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+// Handshake limits and backoff configuration
+const MAX_CONCURRENT_HANDSHAKES: usize = 32;
+const HANDSHAKE_MAX_PEERS_PER_RESPONSE: usize = 25;
+const HANDSHAKE_MAX_RETRIES: u32 = 8;
+const HANDSHAKE_BACKOFF_BASE_SECS: u64 = 1;
+const HANDSHAKE_BACKOFF_CAP_SECS: u64 = 60;
+const HANDSHAKE_BLACKLIST_TTL_SECS: u64 = 600;
+
+// Global helpers for concurrency limiting and backoff state
+static HANDSHAKE_SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+fn handshake_semaphore() -> std::sync::Arc<tokio::sync::Semaphore> {
+    HANDSHAKE_SEMAPHORE
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HANDSHAKES)))
+        .clone()
+}
+
+static HANDSHAKE_FAILURES: std::sync::OnceLock<std::sync::Mutex<HashMap<SocketAddr, u32>>> =
+    std::sync::OnceLock::new();
+fn handshake_failures() -> &'static std::sync::Mutex<HashMap<SocketAddr, u32>> {
+    HANDSHAKE_FAILURES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+static BLACKLIST_UNTIL: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>>,
+> = std::sync::OnceLock::new();
+fn blacklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>> {
+    BLACKLIST_UNTIL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
 where
@@ -431,7 +460,13 @@ where
 
         match peer_response {
             PeerResponse::Accepted(accepted_peers) => {
-                for peer in accepted_peers.peers {
+                // Limit and randomize peers from response to avoid resource exhaustion
+                let mut peers = accepted_peers.peers;
+                peers.shuffle(&mut rand::thread_rng());
+                if peers.len() > HANDSHAKE_MAX_PEERS_PER_RESPONSE {
+                    peers.truncate(HANDSHAKE_MAX_PEERS_PER_RESPONSE);
+                }
+                for peer in peers {
                     send_message_and_print_error(
                         NewPotentialPeer::new(peer.api),
                         peer_service_address.clone(),
@@ -626,16 +661,40 @@ where
         let needs_announce = msg.force_announce || !announcing_or_in_cache;
 
         if needs_announce {
+            // Skip if peer is currently blacklisted
+            if let Some(until) = blacklist_until()
+                .lock()
+                .unwrap()
+                .get(&msg.api_address)
+                .copied()
+            {
+                if std::time::Instant::now() < until {
+                    debug!(
+                        "Peer {:?} is blacklisted until {:?}, skipping announce",
+                        msg.api_address, until
+                    );
+                    return;
+                }
+            }
+
             debug!("Need to announce yourself to peer {:?}", msg.api_address);
             self.currently_running_announcements.insert(msg.api_address);
             let version_request = self.create_version_request();
             let peer_service_addr = ctx.address();
-            let handshake_task = Self::announce_yourself_to_address_task(
-                self.irys_api_client.clone(),
-                msg.api_address,
-                version_request,
-                peer_service_addr,
-            );
+            let api_client = self.irys_api_client.clone();
+            let addr = msg.api_address;
+            let semaphore = handshake_semaphore();
+            let handshake_task = async move {
+                // Limit concurrent handshakes globally
+                let _permit = semaphore.acquire().await.expect("semaphore closed");
+                Self::announce_yourself_to_address_task(
+                    api_client,
+                    addr,
+                    version_request,
+                    peer_service_addr,
+                )
+                .await;
+            };
             ctx.spawn(handshake_task.into_actor(self));
         }
     }
@@ -679,12 +738,44 @@ where
         if !msg.success && msg.retry {
             self.currently_running_announcements
                 .remove(&msg.peer_api_address);
+
+            // Update failure count and compute backoff
+            let attempts = {
+                let mut guard = handshake_failures().lock().unwrap();
+                let entry = guard.entry(msg.peer_api_address).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+
+            if attempts >= HANDSHAKE_MAX_RETRIES {
+                let until = std::time::Instant::now()
+                    + std::time::Duration::from_secs(HANDSHAKE_BLACKLIST_TTL_SECS);
+                blacklist_until()
+                    .lock()
+                    .unwrap()
+                    .insert(msg.peer_api_address, until);
+                handshake_failures()
+                    .lock()
+                    .unwrap()
+                    .remove(&msg.peer_api_address);
+                debug!(
+                    "Peer {:?} blacklisted until {:?} after {} failures",
+                    msg.peer_api_address, until, attempts
+                );
+                return;
+            }
+
+            let backoff_secs =
+                (1_u64 << (attempts - 1)).saturating_mul(HANDSHAKE_BACKOFF_BASE_SECS);
+            let backoff_secs = backoff_secs.min(HANDSHAKE_BACKOFF_CAP_SECS);
+            let backoff = std::time::Duration::from_secs(backoff_secs);
+
             let message = NewPotentialPeer::new(msg.peer_api_address);
             debug!(
-                "Waiting for {:?} to try to announce yourself again",
-                PEER_HANDSHAKE_RETRY_INTERVAL
+                "Waiting for {:?} to try to announce yourself again (attempt {})",
+                backoff, attempts
             );
-            ctx.run_later(PEER_HANDSHAKE_RETRY_INTERVAL, move |service, ctx| {
+            ctx.run_later(backoff, move |service, ctx| {
                 debug!("Trying to run an announcement again");
                 let address = ctx.address();
                 ctx.spawn(send_message_and_print_error(message, address).into_actor(service));
@@ -698,6 +789,15 @@ where
             self.successful_announcements
                 .insert(msg.peer_api_address, msg.clone());
             self.currently_running_announcements
+                .remove(&msg.peer_api_address);
+            // Reset failure/blacklist state on success
+            handshake_failures()
+                .lock()
+                .unwrap()
+                .remove(&msg.peer_api_address);
+            blacklist_until()
+                .lock()
+                .unwrap()
                 .remove(&msg.peer_api_address);
         }
     }
