@@ -31,7 +31,7 @@ pub enum GossipClientError {
 #[derive(Debug, Clone)]
 pub struct GossipClient {
     pub mining_address: Address,
-    client: Client,
+    client: Arc<Client>,
 }
 
 // TODO: Remove this when PeerList is no longer an actix service
@@ -46,10 +46,12 @@ impl GossipClient {
     pub fn new(timeout: Duration, mining_address: Address) -> Self {
         Self {
             mining_address,
-            client: Client::builder()
-                .timeout(timeout)
-                .build()
-                .expect("Failed to create reqwest client"),
+            client: Arc::new(
+                Client::builder()
+                    .timeout(timeout)
+                    .build()
+                    .expect("Failed to create reqwest client"),
+            ),
         }
     }
 
