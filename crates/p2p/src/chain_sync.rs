@@ -495,6 +495,7 @@ async fn sync_chain(
     }
     let is_trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
 
+    sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(is_trusted_mode);
 
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
@@ -551,7 +552,7 @@ async fn sync_chain(
     let block_index = match get_block_index(
         peer_list,
         &api_client,
-        start_sync_from_height,
+        sync_state.sync_target_height(),
         BLOCK_BATCH_SIZE,
         5,
         fetch_index_from_the_trusted_peer,
@@ -588,7 +589,7 @@ async fn sync_chain(
         sync_state.finish_sync();
         return Ok(());
     } else {
-        sync_state.set_syncing_from(start_sync_from_height);
+        sync_state.set_is_syncing(true);
     }
 
     while let Some(block) = block_queue.pop_front() {
