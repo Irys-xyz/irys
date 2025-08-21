@@ -21,7 +21,6 @@ use irys_types::{
     PartitionChunkOffset, PartitionChunkRange,
 };
 use irys_vdf::state::VdfStateReadonly;
-use openssl::sha;
 use tracing::{debug, error, info, warn, Span};
 
 #[derive(Debug, Clone)]
@@ -189,12 +188,12 @@ impl PartitionMiningActor {
             //     partition_hash, chunk_offset
             // );
 
-            let mut hasher = sha::Sha256::new();
-            hasher.update(chunk_bytes);
-            hasher.update(&partition_chunk_offset.to_le_bytes());
-            hasher.update(mining_seed.as_bytes());
-            let solution_hash = hasher.finish();
-            let test_solution = hash_to_number(&solution_hash);
+            let solution_hash = irys_types::compute_solution_hash(
+                chunk_bytes,
+                *partition_chunk_offset,
+                &mining_seed,
+            );
+            let test_solution = hash_to_number(&solution_hash.0);
 
             if test_solution >= self.difficulty {
                 info!(
@@ -218,7 +217,7 @@ impl PartitionMiningActor {
                     vdf_step,
                     checkpoints,
                     seed: Seed(mining_seed),
-                    solution_hash: H256::from(solution_hash),
+                    solution_hash,
                 };
 
                 // TODO: Let all partitions know to stop mining

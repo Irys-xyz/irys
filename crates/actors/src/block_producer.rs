@@ -721,11 +721,11 @@ pub trait BlockProdStrategy {
                     .expect("PoA chunk must be present when producing a block")
                     .0
                     .clone();
-                let mut hasher = sha::Sha256::new();
-                hasher.update(&poa_chunk_bytes);
-                hasher.update(&solution.chunk_offset.to_le_bytes());
-                hasher.update(solution.seed.0.as_bytes());
-                H256::from(hasher.finish())
+                irys_types::compute_solution_hash(
+                    &poa_chunk_bytes,
+                    solution.chunk_offset,
+                    &solution.seed.0,
+                )
             },
             previous_solution_hash: prev_block_header.solution_hash,
             last_epoch_hash,

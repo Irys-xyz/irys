@@ -525,12 +525,11 @@ pub fn solution_hash_link_is_valid(
     block: &IrysBlockHeader,
     poa_chunk: &[u8],
 ) -> Result<(), PreValidationError> {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(poa_chunk);
-    hasher.update(&block.poa.partition_chunk_offset.to_le_bytes());
-    hasher.update(block.vdf_limiter_info.output.as_bytes());
-    let computed = hasher.finish();
-    let expected = H256::from(computed);
+    let expected = irys_types::compute_solution_hash(
+        poa_chunk,
+        block.poa.partition_chunk_offset,
+        &block.vdf_limiter_info.output,
+    );
 
     if block.solution_hash == expected {
         Ok(())

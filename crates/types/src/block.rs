@@ -13,6 +13,7 @@ use crate::{
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -532,6 +533,30 @@ impl fmt::Display for IrysBlockHeader {
     }
 }
 
+/// Compute the solution hash as sha256(poa_chunk || offset_le || seed)
+///
+/// This is the canonical utility used across the codebase to avoid duplicate
+/// implementations of the hashing logic.
+///
+/// # Examples
+/// ```
+/// use irys_types::{compute_solution_hash, H256};
+///
+/// let poa_chunk = b"example chunk data";
+/// let offset = 42u32;
+/// let seed = H256::from([7u8; 32]);
+///
+/// // This should compile and produce a 32-byte hash.
+/// let _hash = compute_solution_hash(poa_chunk, offset, &seed);
+/// ```
+pub fn compute_solution_hash(poa_chunk: &[u8], offset_le: u32, seed: &H256) -> H256 {
+    let mut hasher = sha::Sha256::new();
+    hasher.update(poa_chunk);
+    hasher.update(&offset_le.to_le_bytes());
+    hasher.update(seed.as_bytes());
+    H256::from(hasher.finish())
+}
+
 impl IrysBlockHeader {
     pub fn new_mock_header() -> Self {
         use std::str::FromStr as _;
@@ -545,11 +570,11 @@ impl IrysBlockHeader {
         let default_partition_chunk_offset: u32 = 0;
         let default_vdf_output = H256::zero();
         let default_chunk_hash: H256 = H256(openssl::sha::sha256(&default_poa_chunk));
-        let mut hasher = openssl::sha::Sha256::new();
-        hasher.update(&default_poa_chunk);
-        hasher.update(&default_partition_chunk_offset.to_le_bytes());
-        hasher.update(default_vdf_output.as_bytes());
-        let default_solution_hash: H256 = H256::from(hasher.finish());
+        let default_solution_hash = compute_solution_hash(
+            &default_poa_chunk,
+            default_partition_chunk_offset,
+            &default_vdf_output,
+        );
 
         // Create a sample IrysBlockHeader object with mock data
         Self {
