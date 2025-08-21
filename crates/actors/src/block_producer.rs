@@ -714,19 +714,7 @@ pub trait BlockProdStrategy {
             diff,
             cumulative_diff: cumulative_difficulty,
             last_diff_timestamp,
-            solution_hash: {
-                let poa_chunk_bytes = poa
-                    .chunk
-                    .as_ref()
-                    .expect("PoA chunk must be present when producing a block")
-                    .0
-                    .clone();
-                irys_types::compute_solution_hash(
-                    &poa_chunk_bytes,
-                    solution.chunk_offset,
-                    &solution.seed.0,
-                )
-            },
+            solution_hash: solution.solution_hash,
             previous_solution_hash: prev_block_header.solution_hash,
             last_epoch_hash,
             chunk_hash: poa_chunk_hash,
