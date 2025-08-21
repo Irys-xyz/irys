@@ -1139,8 +1139,19 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         },
     };
 
-    // Produce block with valid PoA and difficulty, but invalid EVM payload (shadow tx ordering)
-    // Produce block with valid PoA/difficulty but invalid EVM payload (shadow txs tampered)
+    // Seed at least two Submit-ledger txs so reversing their order tampers the EVM payload
+    let data_tx1 = node
+        .post_data_tx(irys_types::H256::zero(), vec![1_u8; 64], &peer_signer)
+        .await;
+    node.wait_for_mempool(data_tx1.header.id, seconds_to_wait)
+        .await?;
+    let data_tx2 = node
+        .post_data_tx(irys_types::H256::zero(), vec![2_u8; 64], &peer_signer)
+        .await;
+    node.wait_for_mempool(data_tx2.header.id, seconds_to_wait)
+        .await?;
+
+    // Produce block with valid PoA/difficulty but invalid EVM payload (subit txs tampered to not match shadow tx order)
     let (evil_block, _eth_payload) = evil_strategy
         .fully_produce_new_block(solution_context(&node.node_ctx).await?)
         .await?
