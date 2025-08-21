@@ -10,6 +10,7 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -86,6 +87,7 @@ pub struct ChainSyncServiceInner<T: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     config: irys_types::Config,
     block_index: BlockIndexReadGuard,
     block_pool: Arc<BlockPool<B, M>>,
+    is_sync_task_spawned: Arc<AtomicBool>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -157,11 +159,26 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             config,
             block_index,
             block_pool,
+            is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Perform a sync operation
     async fn spawn_chain_sync_task(&self, response: Option<oneshot::Sender<ChainSyncResult<()>>>) {
+        if self.sync_state.is_syncing() || self.is_sync_task_spawned.load(Ordering::Relaxed) {
+            debug!("Sync task: Sync already in progress, skipping new sync request");
+            if let Some(response_sender) = response {
+                if let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
+                    "Sync already in progress".to_string(),
+                ))) {
+                    error!("Failed to send the sync response: {:?}", e);
+                }
+            }
+            return;
+        }
+
+        self.is_sync_task_spawned.store(true, Ordering::Relaxed);
+
         let start_sync_from_height = self.block_index.read().latest_height();
         // Clear any pending blocks from the cache
         self.block_pool.block_cache_guard().clear().await;
@@ -170,6 +187,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
         let api_client = self.api_client.clone();
+        let is_sync_task_spawned = self.is_sync_task_spawned.clone();
 
         tokio::spawn(async move {
             let res = sync_chain(
@@ -182,6 +200,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 &config,
             )
             .await;
+
+            is_sync_task_spawned.store(false, Ordering::Relaxed);
 
             match &res {
                 Ok(()) => info!("Sync task completed successfully"),
@@ -302,6 +322,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner,
+                    is_sync_task_spawned: AtomicBool::new(false),
                 };
                 service
                     .start()
@@ -410,12 +431,6 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
     }
 
     async fn handle_periodic_sync_check(&self) {
-        // Skip if already syncing
-        if self.inner.sync_state.is_syncing() {
-            debug!("Periodic sync check: Already syncing, skipping");
-            return;
-        }
-
         debug!("Starting a periodic sync check routine");
         // Check if we're behind the network
         match is_local_index_is_behind_trusted_peers(
@@ -469,7 +484,6 @@ async fn sync_chain(
     }
     let is_trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
 
-    sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(is_trusted_mode);
 
     let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
@@ -505,6 +519,7 @@ async fn sync_chain(
             }
         };
     } else {
+        sync_state.set_is_syncing(true);
         peer_list.wait_for_active_peers().await;
     }
 
@@ -525,7 +540,7 @@ async fn sync_chain(
     let block_index = match get_block_index(
         peer_list,
         &api_client,
-        sync_state.sync_target_height(),
+        start_sync_from_height,
         BLOCK_BATCH_SIZE,
         5,
         fetch_index_from_the_trusted_peer,
@@ -559,6 +574,10 @@ async fn sync_chain(
     if block_queue.is_empty() {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
+        sync_state.finish_sync();
+        return Ok(());
+    } else {
+        sync_state.set_syncing_from(start_sync_from_height);
     }
 
     while let Some(block) = block_queue.pop_front() {
