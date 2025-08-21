@@ -3,7 +3,6 @@ use actix_http::StatusCode;
 use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_types::{
@@ -125,7 +124,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         debug!("Response body: {:#?}", body);
         assert_eq!(status, StatusCode::OK);
     }
-    let id: String = tx.header.id.as_bytes().to_base58();
+    let id: String = tx.header.id.to_string();
     let mut attempts = 1;
     let max_attempts = 40;
 

@@ -4,7 +4,6 @@ use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
@@ -68,7 +67,7 @@ async fn heavy_data_promotion_test() {
             .create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)
             .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
-        println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
+        println!("tx[{}] {}", i, tx.header.id);
         txs.push(tx);
     }
 

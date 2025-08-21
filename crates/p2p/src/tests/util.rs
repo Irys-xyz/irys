@@ -6,7 +6,6 @@ use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
-use base58::ToBase58 as _;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use irys_actors::block_discovery::BlockDiscoveryError;
@@ -722,8 +721,7 @@ async fn handle_get_data(
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {}",
-                    block_hash.0.to_base58(),
-                    res
+                    block_hash, res
                 );
                 HttpResponse::Ok()
                     .content_type("application/json")
