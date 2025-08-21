@@ -1443,7 +1443,11 @@ mod tests {
         "#;
 
         // Create the expected config
-        let expected_config = ConsensusConfig::testing();
+        let mut expected_config = ConsensusConfig::testing();
+        expected_config.stake_pledge_whitelist = vec![
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32".parse().unwrap(),
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924".parse().unwrap(),
+        ];
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
         // for debugging purposes
         println!("{}", expected_toml_data);

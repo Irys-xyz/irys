@@ -2,7 +2,10 @@ use crate::mempool_service::{Inner, MempoolServiceMessage, TxIngressError, TxRea
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
-use irys_types::{Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage, IrysTransactionId, H256};
+use irys_types::{
+    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
+    IrysTransactionId, H256,
+};
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
@@ -20,8 +23,7 @@ impl Inner {
         if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
             warn!(
                 "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
-                commitment_tx.id,
-                commitment_tx.signer
+                commitment_tx.id, commitment_tx.signer
             );
             return Err(CommitmentValidationError::ForbiddenSigner.into());
         }

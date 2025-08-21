@@ -40,9 +40,7 @@ pub enum CommitmentValidationError {
         expected: U256,
         pledge_count: u64,
     },
-    #[error(
-        "Signer address is not allowed to stake/pledge"
-    )]
+    #[error("Signer address is not allowed to stake/pledge")]
     ForbiddenSigner,
 }
 
