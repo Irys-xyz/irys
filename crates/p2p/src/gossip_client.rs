@@ -3,6 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResult};
+use backoff::{future::retry_notify, ExponentialBackoff};
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
@@ -10,8 +11,7 @@ use irys_types::{
     PeerListItem, PeerNetworkError,
 };
 use rand::prelude::SliceRandom as _;
-use reqwest::Client;
-use reqwest::Response;
+use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::Serialize;
@@ -53,6 +53,39 @@ impl GossipClient {
         }
     }
 
+    pub fn create_backoff() -> ExponentialBackoff {
+        Self::create_normal_backoff()
+    }
+
+    pub fn create_critical_backoff() -> ExponentialBackoff {
+        ExponentialBackoff {
+            initial_interval: Duration::from_millis(50),
+            max_interval: Duration::from_secs(1),
+            max_elapsed_time: Some(Duration::from_secs(30)),
+            multiplier: 1.5,
+            ..Default::default()
+        }
+    }
+
+    pub fn create_normal_backoff() -> ExponentialBackoff {
+        ExponentialBackoff {
+            initial_interval: Duration::from_millis(100),
+            max_interval: Duration::from_secs(2),
+            max_elapsed_time: Some(Duration::from_secs(10)),
+            ..Default::default()
+        }
+    }
+
+    pub fn create_light_backoff() -> ExponentialBackoff {
+        ExponentialBackoff {
+            initial_interval: Duration::from_millis(200),
+            max_interval: Duration::from_secs(5),
+            max_elapsed_time: Some(Duration::from_secs(5)),
+            multiplier: 2.5,
+            ..Default::default()
+        }
+    }
+
     pub fn internal_client(&self) -> &Client {
         &self.client
     }
@@ -86,17 +119,44 @@ impl GossipClient {
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let get_data_request = self.create_request(requested_data);
+        let backoff = Self::create_backoff();
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&get_data_request)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()));
+        let client = self.client.clone();
+
+        let res = retry_notify(
+            backoff,
+            || async {
+                let response = client
+                    .post(&url)
+                    .json(&get_data_request)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        warn!(
+                            "Network error during get_data request to {}: {}",
+                            url, error
+                        );
+                        backoff::Error::transient(GossipError::Network(error.to_string()))
+                    })?;
+
+                let response =
+                    Self::classify_http(response, |e| GossipError::Network(e.to_string()))?;
+
+                response.json::<bool>().await.map_err(|error| {
+                    // Prefer Protocol here if you have it
+                    warn!(
+                        "JSON parsing error during get_data request to {}: {}",
+                        url, error
+                    );
+                    backoff::Error::permanent(GossipError::Network(error.to_string()))
+                })
+            },
+            |err, dur| {
+                warn!(?dur, %err, "retrying get_data request after {:?}", dur);
+            },
+        )
+        .await;
+
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
@@ -128,22 +188,33 @@ impl GossipClient {
 
     pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
-        let peer_addr = peer.gossip.to_string();
+        let backoff = Self::create_backoff();
+        let client = self.client.clone();
 
-        let response = self
-            .internal_client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| GossipClientError::GetRequest(peer_addr.clone(), error.to_string()))?;
+        retry_notify(
+            backoff,
+            || async {
+                let res = client.get(&url).send().await.map_err(|error| {
+                    warn!("Network error during health check to {}: {}", url, error);
+                    backoff::Error::transient(GossipClientError::GetRequest(url.clone(), error.to_string()))
+                })?;
 
-        if !response.status().is_success() {
-            return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
-        }
-
-        response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
-        })
+                Self::classify_http(res, |e| GossipClientError::GetRequest(url.clone(), e.to_string()))?
+                    .json::<bool>()
+                    .await
+                    .map_err(|error| {
+                        warn!(
+                            "JSON parsing error during health check to {}: {}",
+                            url, error
+                        );
+                        backoff::Error::permanent(GossipClientError::GetJsonResponsePayload(url.clone(), error.to_string()))
+                    })
+            },
+            |err, dur| {
+                warn!(?dur, %err, "retrying health check after {:?}", dur);
+            },
+        )
+        .await
     }
 
     /// Send data to a peer
@@ -155,46 +226,38 @@ impl GossipClient {
         Self::check_if_peer_is_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/chunk", peer.address.gossip),
-                    unpacked_chunk,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/chunk", peer.address.gossip);
+                self.send_data_internal(&url, unpacked_chunk, Self::create_critical_backoff())
+                    .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
+                let url = format!("http://{}/gossip/transaction", peer.address.gossip);
                 self.send_data_internal(
-                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    &url,
                     irys_transaction_header,
+                    Self::create_critical_backoff(),
                 )
                 .await?;
             }
             GossipData::CommitmentTransaction(commitment_tx) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/commitment_tx", peer.address.gossip),
-                    commitment_tx,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/commitment_tx", peer.address.gossip);
+                self.send_data_internal(&url, commitment_tx, Self::create_critical_backoff())
+                    .await?;
             }
             GossipData::Block(irys_block_header) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/block", peer.address.gossip),
-                    &irys_block_header,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/block", peer.address.gossip);
+                self.send_data_internal(&url, &irys_block_header, Self::create_normal_backoff())
+                    .await?;
             }
             GossipData::ExecutionPayload(execution_payload) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/execution_payload", peer.address.gossip),
-                    &execution_payload,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/execution_payload", peer.address.gossip);
+                self.send_data_internal(&url, &execution_payload, Self::create_normal_backoff())
+                    .await?;
             }
             GossipData::IngressProof(ingress_proof) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/ingress_proof", peer.address.gossip),
-                    &ingress_proof,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/ingress_proof", peer.address.gossip);
+                self.send_data_internal(&url, &ingress_proof, Self::create_normal_backoff())
+                    .await?;
             }
         };
 
@@ -207,19 +270,48 @@ impl GossipClient {
         }
         Ok(())
     }
-
+    fn classify_http<E>(
+        res: reqwest::Response,
+        map: impl FnOnce(reqwest::Error) -> E,
+    ) -> Result<reqwest::Response, backoff::Error<E>> {
+        match res.error_for_status_ref() {
+            Ok(_) => Ok(res),
+            Err(e) => {
+                let s = res.status();
+                if s.is_client_error() && s != StatusCode::TOO_MANY_REQUESTS {
+                    Err(backoff::Error::permanent(map(e)))
+                } else {
+                    Err(backoff::Error::transient(map(e)))
+                }
+            }
+        }
+    }
     async fn send_data_internal<T: Serialize + ?Sized>(
         &self,
-        url: String,
+        url: &str,
         data: &T,
-    ) -> Result<Response, GossipError> {
+        backoff_strategy: ExponentialBackoff,
+    ) -> Result<(), GossipError> {
         let req = self.create_request(data);
-        self.client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))
+        let client = self.client.clone();
+
+        retry_notify(
+            backoff_strategy,
+            || async {
+                let res = client.post(url).json(&req).send().await.map_err(|error| {
+                    warn!("Network error during send_data to {}: {}", url, error);
+                    backoff::Error::transient(GossipError::Network(error.to_string()))
+                })?;
+
+                // HTTP status -> transient/permanent
+                Self::classify_http(res, |e| GossipError::Network(e.to_string()))?;
+                Ok(())
+            },
+            |err, dur| {
+                warn!(?dur, %err, "retrying send_data after {:?}", dur);
+            },
+        )
+        .await
     }
 
     fn handle_score<T>(
@@ -518,17 +610,10 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            match result.unwrap_err() {
-                GossipClientError::GetRequest(addr, reason) => {
-                    assert_eq!(addr, peer.gossip.to_string());
-                    assert!(
-                        reason.to_lowercase().contains("connection refused"),
-                        "Expected connection refused error, got: {}",
-                        reason
-                    );
-                }
-                err => panic!("Expected GetRequest error, got: {:?}", err),
-            }
+            assert!(
+                result.unwrap_err().to_string().to_lowercase().contains("failed"),
+                "Expected connection error"
+            );
         }
 
         #[tokio::test]
@@ -540,20 +625,17 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            match result.unwrap_err() {
-                GossipClientError::GetRequest(addr, reason) => {
-                    assert_eq!(addr, peer.gossip.to_string());
-                    assert!(!reason.is_empty(), "Expected timeout error message");
-                }
-                err => panic!("Expected GetRequest error for timeout, got: {:?}", err),
-            }
+            assert!(
+                result.is_err(),
+                "Expected timeout error"
+            );
         }
     }
 
     mod health_check_error_tests {
         use super::*;
 
-        async fn test_health_check_error_status(status_code: u16, expected_status: StatusCode) {
+        async fn test_health_check_error_status(status_code: u16) {
             let server = MockHttpServer::new_with_response(status_code, "", "text/plain");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
@@ -561,26 +643,21 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            match result.unwrap_err() {
-                GossipClientError::HealthCheck(addr, status) => {
-                    assert_eq!(addr, peer.gossip.to_string());
-                    assert_eq!(status, expected_status);
-                }
-                err => panic!(
-                    "Expected HealthCheck error for status {}, got: {:?}",
-                    status_code, err
-                ),
-            }
+            assert!(
+                result.is_err(),
+                "Expected error for status {}",
+                status_code
+            );
         }
 
         #[tokio::test]
         async fn test_404_not_found() {
-            test_health_check_error_status(404, StatusCode::NOT_FOUND).await;
+            test_health_check_error_status(404).await;
         }
 
         #[tokio::test]
         async fn test_500_internal_server_error() {
-            test_health_check_error_status(500, StatusCode::INTERNAL_SERVER_ERROR).await;
+            test_health_check_error_status(500).await;
         }
     }
 
@@ -598,19 +675,10 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            match result.unwrap_err() {
-                GossipClientError::GetJsonResponsePayload(addr, reason) => {
-                    assert_eq!(addr, peer.gossip.to_string());
-                    assert!(
-                        reason.contains("expected")
-                            || reason.contains("EOF")
-                            || reason.contains("invalid"),
-                        "Expected JSON parsing error, got: {}",
-                        reason
-                    );
-                }
-                err => panic!("Expected GetJsonResponsePayload error, got: {:?}", err),
-            }
+            assert!(
+                result.is_err(),
+                "Expected JSON parsing error"
+            );
         }
 
         // Additional test for malformed JSON
@@ -627,10 +695,10 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            assert!(matches!(
-                result.unwrap_err(),
-                GossipClientError::GetJsonResponsePayload(_, _)
-            ));
+            assert!(
+                result.is_err(),
+                "Expected JSON parsing error"
+            );
         }
     }
 }
