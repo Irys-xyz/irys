@@ -3,16 +3,17 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResult};
+use backoff::{future::retry_notify, ExponentialBackoff};
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     Address, GossipData, GossipDataRequest, GossipRequest, PeerAddress, PeerListItem,
 };
 use reqwest::Client;
-use reqwest::Response;
+use reqwest::StatusCode;
 use serde::Serialize;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("Gossip client error: {0}")]
@@ -40,6 +41,39 @@ impl GossipClient {
                 .timeout(timeout)
                 .build()
                 .expect("Failed to create reqwest client"),
+        }
+    }
+
+    pub fn create_backoff() -> ExponentialBackoff {
+        Self::create_normal_backoff()
+    }
+
+    pub fn create_critical_backoff() -> ExponentialBackoff {
+        ExponentialBackoff {
+            initial_interval: Duration::from_millis(50),
+            max_interval: Duration::from_secs(1),
+            max_elapsed_time: Some(Duration::from_secs(30)),
+            multiplier: 1.5,
+            ..Default::default()
+        }
+    }
+
+    pub fn create_normal_backoff() -> ExponentialBackoff {
+        ExponentialBackoff {
+            initial_interval: Duration::from_millis(100),
+            max_interval: Duration::from_secs(2),
+            max_elapsed_time: Some(Duration::from_secs(10)),
+            ..Default::default()
+        }
+    }
+
+    pub fn create_light_backoff() -> ExponentialBackoff {
+        ExponentialBackoff {
+            initial_interval: Duration::from_millis(200),
+            max_interval: Duration::from_secs(5),
+            max_elapsed_time: Some(Duration::from_secs(5)),
+            multiplier: 2.5,
+            ..Default::default()
         }
     }
 
@@ -76,42 +110,77 @@ impl GossipClient {
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let get_data_request = self.create_request(requested_data);
+        let backoff = Self::create_backoff();
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&get_data_request)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()));
+        let client = self.client.clone();
+
+        let res = retry_notify(
+            backoff,
+            || async {
+                let response = client
+                    .post(&url)
+                    .json(&get_data_request)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        warn!(
+                            "Network error during get_data request to {}: {}",
+                            url, error
+                        );
+                        backoff::Error::transient(GossipError::Network(error.to_string()))
+                    })?;
+
+                let response =
+                    Self::classify_http(response, |e| GossipError::Network(e.to_string()))?;
+
+                response.json::<bool>().await.map_err(|error| {
+                    // Prefer Protocol here if you have it
+                    warn!(
+                        "JSON parsing error during get_data request to {}: {}",
+                        url, error
+                    );
+                    backoff::Error::permanent(GossipError::Network(error.to_string()))
+                })
+            },
+            |err, dur| {
+                warn!(?dur, %err, "retrying get_data request after {:?}", dur);
+            },
+        )
+        .await;
+
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
 
     pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
+        let backoff = Self::create_backoff();
+        let client = self.client.clone();
 
-        let response = self
-            .internal_client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| GossipClientError(error.to_string()))?;
+        retry_notify(
+            backoff,
+            || async {
+                let res = client.get(&url).send().await.map_err(|error| {
+                    warn!("Network error during health check to {}: {}", url, error);
+                    backoff::Error::transient(GossipClientError(error.to_string()))
+                })?;
 
-        if !response.status().is_success() {
-            return Err(GossipClientError(format!(
-                "Health check failed with status: {}",
-                response.status()
-            )));
-        }
-
-        response
-            .json()
-            .await
-            .map_err(|error| GossipClientError(error.to_string()))
+                Self::classify_http(res, |e| GossipClientError(e.to_string()))?
+                    .json::<bool>()
+                    .await
+                    .map_err(|error| {
+                        warn!(
+                            "JSON parsing error during health check to {}: {}",
+                            url, error
+                        );
+                        backoff::Error::permanent(GossipClientError(error.to_string()))
+                    })
+            },
+            |err, dur| {
+                warn!(?dur, %err, "retrying health check after {:?}", dur);
+            },
+        )
+        .await
     }
 
     /// Send data to a peer
@@ -123,46 +192,38 @@ impl GossipClient {
         Self::check_if_peer_is_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/chunk", peer.address.gossip),
-                    unpacked_chunk,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/chunk", peer.address.gossip);
+                self.send_data_internal(&url, unpacked_chunk, Self::create_critical_backoff())
+                    .await?;
             }
             GossipData::Transaction(irys_transaction_header) => {
+                let url = format!("http://{}/gossip/transaction", peer.address.gossip);
                 self.send_data_internal(
-                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    &url,
                     irys_transaction_header,
+                    Self::create_critical_backoff(),
                 )
                 .await?;
             }
             GossipData::CommitmentTransaction(commitment_tx) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/commitment_tx", peer.address.gossip),
-                    commitment_tx,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/commitment_tx", peer.address.gossip);
+                self.send_data_internal(&url, commitment_tx, Self::create_critical_backoff())
+                    .await?;
             }
             GossipData::Block(irys_block_header) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/block", peer.address.gossip),
-                    &irys_block_header,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/block", peer.address.gossip);
+                self.send_data_internal(&url, &irys_block_header, Self::create_normal_backoff())
+                    .await?;
             }
             GossipData::ExecutionPayload(execution_payload) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/execution_payload", peer.address.gossip),
-                    &execution_payload,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/execution_payload", peer.address.gossip);
+                self.send_data_internal(&url, &execution_payload, Self::create_normal_backoff())
+                    .await?;
             }
             GossipData::IngressProof(ingress_proof) => {
-                self.send_data_internal(
-                    format!("http://{}/gossip/ingress_proof", peer.address.gossip),
-                    &ingress_proof,
-                )
-                .await?;
+                let url = format!("http://{}/gossip/ingress_proof", peer.address.gossip);
+                self.send_data_internal(&url, &ingress_proof, Self::create_normal_backoff())
+                    .await?;
             }
         };
 
@@ -175,19 +236,48 @@ impl GossipClient {
         }
         Ok(())
     }
-
+    fn classify_http<E>(
+        res: reqwest::Response,
+        map: impl FnOnce(reqwest::Error) -> E,
+    ) -> Result<reqwest::Response, backoff::Error<E>> {
+        match res.error_for_status_ref() {
+            Ok(_) => Ok(res),
+            Err(e) => {
+                let s = res.status();
+                if s.is_client_error() && s != StatusCode::TOO_MANY_REQUESTS {
+                    Err(backoff::Error::permanent(map(e)))
+                } else {
+                    Err(backoff::Error::transient(map(e)))
+                }
+            }
+        }
+    }
     async fn send_data_internal<T: Serialize + ?Sized>(
         &self,
-        url: String,
+        url: &str,
         data: &T,
-    ) -> Result<Response, GossipError> {
+        backoff_strategy: ExponentialBackoff,
+    ) -> Result<(), GossipError> {
         let req = self.create_request(data);
-        self.client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))
+        let client = self.client.clone();
+
+        retry_notify(
+            backoff_strategy,
+            || async {
+                let res = client.post(url).json(&req).send().await.map_err(|error| {
+                    warn!("Network error during send_data to {}: {}", url, error);
+                    backoff::Error::transient(GossipError::Network(error.to_string()))
+                })?;
+
+                // HTTP status -> transient/permanent
+                Self::classify_http(res, |e| GossipError::Network(e.to_string()))?;
+                Ok(())
+            },
+            |err, dur| {
+                warn!(?dur, %err, "retrying send_data after {:?}", dur);
+            },
+        )
+        .await
     }
 
     fn handle_score<T>(
