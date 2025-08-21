@@ -1,6 +1,6 @@
 use irys_chain::{utils::load_config, IrysNode};
 use irys_testing_utils::setup_panic_hook;
-use tracing::info;
+use tracing::{info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
     layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
