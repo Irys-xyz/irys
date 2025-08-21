@@ -242,7 +242,7 @@ pub async fn prevalidate_block(
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
     solution_hash_link_is_valid(&block, &poa_chunk)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "solution_hash_link_is_valid",
     );
