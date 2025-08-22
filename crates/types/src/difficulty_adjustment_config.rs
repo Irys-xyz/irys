@@ -54,12 +54,12 @@ pub fn adjust_difficulty(
 
     // Calculate the raw adjustment ratio
     let raw_adjustment_ratio = (U256::from(actual_time_ms) * scale) / U256::from(target_time_ms);
-    
+
     // Convert max_adjustment_threshold (percentage) to ratio bounds
     // e.g., if max_adjustment_threshold = 400 (400%), then max_ratio = 4 * scale = 4000
     let max_ratio = U256::from(max_adjustment_threshold) * scale / U256::from(100);
     let min_ratio = scale * scale / max_ratio; // Reciprocal: 1000*1000 / 4000 = 250 (0.25 * scale)
-    
+
     // Clamp the adjustment ratio to be within [min_ratio, max_ratio]
     let adjustment_ratio = raw_adjustment_ratio.min(max_ratio).max(min_ratio);
 
@@ -221,8 +221,14 @@ mod tests {
         println!("Perform a difficulty adjustment with the new block_time");
         let target_time_ms = (consensus_config.difficulty_adjustment.block_time * 1000) as u128;
         let actual_time_ms = (block_time * 1000.0) as u128;
-        let max_threshold = (consensus_config.difficulty_adjustment.max_difficulty_adjustment_factor * dec![100.0]).try_into().unwrap();
-        let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
+        let max_threshold = (consensus_config
+            .difficulty_adjustment
+            .max_difficulty_adjustment_factor
+            * dec![100.0])
+        .try_into()
+        .unwrap();
+        let difficulty =
+            adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(block_time));
 
@@ -245,8 +251,14 @@ mod tests {
         println!("Adjust difficulty to account for hashpower doubling");
         let target_time_ms = (consensus_config.difficulty_adjustment.block_time * 1000) as u128;
         let actual_time_ms = (new_block_time * 1000.0) as u128;
-        let max_threshold = (consensus_config.difficulty_adjustment.max_difficulty_adjustment_factor * dec![100.0]).try_into().unwrap();
-        let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
+        let max_threshold = (consensus_config
+            .difficulty_adjustment
+            .max_difficulty_adjustment_factor
+            * dec![100.0])
+        .try_into()
+        .unwrap();
+        let difficulty =
+            adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
@@ -269,8 +281,14 @@ mod tests {
         println!("Apply difficulty adjustment");
         let target_time_ms = (consensus_config.difficulty_adjustment.block_time * 1000) as u128;
         let actual_time_ms = (new_block_time * 1000.0) as u128;
-        let max_threshold = (consensus_config.difficulty_adjustment.max_difficulty_adjustment_factor * dec![100.0]).try_into().unwrap();
-        let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
+        let max_threshold = (consensus_config
+            .difficulty_adjustment
+            .max_difficulty_adjustment_factor
+            * dec![100.0])
+        .try_into()
+        .unwrap();
+        let difficulty =
+            adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(block_time));
 
@@ -281,8 +299,14 @@ mod tests {
         println!("Apply difficulty adjustment");
         let target_time_ms = (consensus_config.difficulty_adjustment.block_time * 1000) as u128;
         let actual_time_ms = (block_time * 1000.0) as u128;
-        let max_threshold = (consensus_config.difficulty_adjustment.max_difficulty_adjustment_factor * dec![100.0]).try_into().unwrap();
-        let difficulty = adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
+        let max_threshold = (consensus_config
+            .difficulty_adjustment
+            .max_difficulty_adjustment_factor
+            * dec![100.0])
+        .try_into()
+        .unwrap();
+        let difficulty =
+            adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (mean, _seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
         println!(" block time: {:.2?}", seconds_to_duration(mean));
 
