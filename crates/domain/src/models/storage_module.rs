@@ -531,7 +531,6 @@ impl StorageModule {
                 self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
                 pending.remove(&chunk_offset); // Clean up written chunks
             }
-            drop(pending);
 
             // Save the updated intervals
             if self.write_intervals_to_submodules().is_err() {
@@ -1107,8 +1106,9 @@ impl StorageModule {
         chunk_type: ChunkType,
     ) -> eyre::Result<()> {
         let chunk_size = self.config.consensus.chunk_size;
+
         // Get the correct submodule reference based on chunk_offset
-        let (interval, submodule) = self.get_submodule_for_offset(chunk_offset).unwrap();
+        let (interval, submodule) = self.get_submodule_for_offset(chunk_offset)?;
 
         let start_time = Instant::now();
 
@@ -1116,29 +1116,38 @@ impl StorageModule {
         let submodule_offset = chunk_offset - interval.start();
         {
             // Lock to the submodules internal file handle & write the chunk
-
             let mut file = submodule.file.lock().unwrap();
 
             file.seek(SeekFrom::Start(u64::from(submodule_offset) * chunk_size))?;
-            let result = file.write(bytes.as_slice());
-            match result {
-                // TODO: better logging
-                Ok(_bytes_written) => {
-                    //info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
-                }
-                Err(err) => info!("{:?}", err),
+            let bytes_written = file.write(bytes.as_slice()).map_err(|e| {
+                error!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e);
+                eyre::eyre!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e)
+            })?;
+            // Ensure all bytes were written
+            if bytes_written != bytes.len() {
+                return Err(eyre::eyre!(
+                    "Incomplete write: expected {} bytes, wrote {} bytes @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}",
+                    bytes.len(),
+                    bytes_written
+                ));
             }
-            drop(file);
+
+            // Ensure data is flushed to disk prior to drop
+            file.sync_all()
+                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
         }
 
         // If successful, update the StorageModules interval state
-        let mut intervals = self.intervals.write().unwrap();
+        {
+            let mut intervals = self
+                .intervals
+                .write()
+                .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
 
-        let chunk_interval = ii(chunk_offset, chunk_offset);
-        let _ = intervals.cut(chunk_interval);
-        let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
-
-        drop(intervals);
+            let chunk_interval = ii(chunk_offset, chunk_offset);
+            let _ = intervals.cut(chunk_interval);
+            let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+        }
 
         let completion_time = Instant::now();
 
@@ -1151,7 +1160,7 @@ impl StorageModule {
 
         self.recent_chunk_times
             .write()
-            .unwrap()
+            .map_err(|e| eyre::eyre!("Failed to acquire write lock on recent_chunk_times: {}", e))?
             .push(chunk_time_record);
 
         Ok(())
