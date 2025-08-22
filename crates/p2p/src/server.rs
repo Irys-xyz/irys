@@ -3,7 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::{
-    server_data_handler::GossipServerDataHandler,
+    gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
     BlockPoolError,
 };
@@ -22,6 +22,7 @@ use irys_types::{
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
@@ -31,7 +32,7 @@ where
     B: BlockDiscoveryFacade,
     A: ApiClient,
 {
-    data_handler: GossipServerDataHandler<M, B, A>,
+    data_handler: Arc<GossipDataHandler<M, B, A>>,
     peer_list: PeerList,
 }
 
@@ -56,7 +57,7 @@ where
     A: ApiClient,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
+        gossip_server_data_handler: Arc<GossipDataHandler<M, B, A>>,
         peer_list: PeerList,
     ) -> Self {
         Self {
@@ -158,7 +159,7 @@ where
             let block_hash_string = gossip_request.data.block_hash;
             if let Err(error) = server
                 .data_handler
-                .handle_block_header_request(gossip_request, peer.address.api, source_socket_addr)
+                .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);

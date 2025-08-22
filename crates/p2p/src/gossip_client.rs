@@ -274,7 +274,7 @@ impl GossipClient {
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequest::Block(block_hash);
         self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
             .await
@@ -285,7 +285,7 @@ impl GossipClient {
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<Block, PeerNetworkError> {
+    ) -> Result<(Address, Block), PeerNetworkError> {
         let data_request = GossipDataRequest::ExecutionPayload(evm_payload_hash);
         self.pull_data_from_network(
             data_request,
@@ -322,7 +322,7 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
         map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
-    ) -> Result<T, PeerNetworkError> {
+    ) -> Result<(Address, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
             peer_list.trusted_peers()
         } else {
@@ -360,7 +360,7 @@ impl GossipClient {
                             data_request, address
                         );
                         match map_data(data) {
-                            Ok(data) => return Ok(data),
+                            Ok(data) => return Ok((*address, data)),
                             Err(err) => {
                                 warn!("Failed to map data from peer {}: {}", address, err);
                                 continue;

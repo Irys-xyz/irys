@@ -4,8 +4,7 @@ use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError,
-    PeerNetworkSender,
+    Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError, PeerNetworkSender,
 };
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
@@ -323,22 +322,6 @@ impl PeerList {
             .any(|socket_addr| socket_addr.ip() == peer_api_ip);
 
         ip_matches_cached_ip && ip_is_in_a_trusted_list
-    }
-
-    pub async fn request_block_from_the_network(
-        &self,
-        block_hash: BlockHash,
-        use_trusted_peers_only: bool,
-    ) -> Result<(), PeerNetworkError> {
-        let sender = self
-            .0
-            .read()
-            .expect("PeerListDataInner lock poisoned")
-            .peer_network_service_sender
-            .clone();
-        sender
-            .request_block_to_be_gossiped_from_network(block_hash, use_trusted_peers_only)
-            .await
     }
 
     pub async fn request_payload_from_the_network(

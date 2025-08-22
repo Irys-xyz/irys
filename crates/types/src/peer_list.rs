@@ -314,12 +314,12 @@ pub enum PeerNetworkServiceMessage {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum PeerNetworkError {
     #[error("Internal database error: {0}")]
     Database(DatabaseError),
     #[error("Peer list internal error: {0:?}")]
-    InternalSendError(SendError<PeerNetworkServiceMessage>),
+    InternalSendError(String),
     #[error("Peer list internal error: {0}")]
     OtherInternalError(String),
     #[error("Failed to request data from network: {0}")]
@@ -332,7 +332,7 @@ pub enum PeerNetworkError {
 
 impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
     fn from(err: SendError<PeerNetworkServiceMessage>) -> Self {
-        Self::InternalSendError(err)
+        Self::InternalSendError(format!("Failed to send a message: {:?}", err))
     }
 }
 
