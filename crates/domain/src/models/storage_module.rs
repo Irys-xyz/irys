@@ -629,8 +629,12 @@ impl StorageModule {
                 read_intervals_file(&file).expect("to read submodule intervals file");
 
             for (interval, chunk_type) in submodule_intervals {
+                let set_chunk_type = match chunk_type {
+                    ChunkType::Interrupted => ChunkType::Uninitialized,
+                    _ => chunk_type,
+                };
                 global_intervals
-                    .insert_merge_touching_if_values_equal(interval, chunk_type)
+                    .insert_merge_touching_if_values_equal(interval, set_chunk_type)
                     .expect("to insert interval into global intervals map");
             }
         }
@@ -1123,7 +1127,8 @@ impl StorageModule {
 
             let chunk_interval = ii(chunk_offset, chunk_offset);
             let _ = intervals.cut(chunk_interval);
-            let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, ChunkType::Interrupted);
+            let _ = intervals
+                .insert_merge_touching_if_values_equal(chunk_interval, ChunkType::Interrupted);
         }
 
         // Write the intervals file to persist the Interrupted status
