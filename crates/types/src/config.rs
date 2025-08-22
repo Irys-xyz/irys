@@ -1157,7 +1157,7 @@ pub struct P2PHandshakeConfig {
     pub max_retries: u32,
     pub backoff_base_secs: u64,
     pub backoff_cap_secs: u64,
-    pub blacklist_ttl_secs: u64,
+    pub blocklist_ttl_secs: u64,
     pub server_peer_list_cap: usize,
 }
 
@@ -1169,7 +1169,7 @@ impl Default for P2PHandshakeConfig {
             max_retries: 8,
             backoff_base_secs: 1,
             backoff_cap_secs: 60,
-            blacklist_ttl_secs: 600,
+            blocklist_ttl_secs: 600,
             server_peer_list_cap: 25,
         }
     }

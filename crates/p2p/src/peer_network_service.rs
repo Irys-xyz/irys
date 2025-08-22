@@ -763,7 +763,7 @@ where
             if attempts >= self.config.node_config.p2p_handshake.max_retries {
                 let until = std::time::Instant::now()
                     + std::time::Duration::from_secs(
-                        self.config.node_config.p2p_handshake.blacklist_ttl_secs,
+                        self.config.node_config.p2p_handshake.blocklist_ttl_secs,
                     );
                 blocklist_until()
                     .lock()
