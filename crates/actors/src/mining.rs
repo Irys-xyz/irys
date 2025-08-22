@@ -180,6 +180,9 @@ impl PartitionMiningActor {
                     .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
                 ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
+                },
+                ChunkType::Interrupted => {
+                    return Err(eyre::eyre!("Cannot mine interrupted chunks"))
                 }
             };
 

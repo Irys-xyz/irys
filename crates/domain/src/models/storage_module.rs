@@ -205,6 +205,8 @@ pub enum ChunkType {
     Data,
     /// Chunk has not been initialized
     Uninitialized,
+    /// Chunk write was interrupted, should be reinitialized
+    Interrupted,
 }
 
 // we can't put this in `types` due to dependency cycles
