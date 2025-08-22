@@ -180,7 +180,7 @@ where
     ) -> Self {
         let peer_list_data =
             PeerList::new(config, &db, service_sender).expect("Failed to load peer list data");
-        let _ = PEERS_LIMIT.get_or_init(|| config.node_config.p2p_handshake.max_peers_per_response);
+        PEERS_LIMIT.get_or_init(|| config.node_config.p2p_handshake.max_peers_per_response);
 
         Self {
             db,
