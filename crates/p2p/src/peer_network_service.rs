@@ -1,4 +1,4 @@
-use crate::GossipClient;
+use crate::{gossip_client::GossipClientError, GossipClient};
 use actix::prelude::*;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
@@ -267,6 +267,13 @@ where
                         }
                         Ok(false) => {
                             debug!("Peer {:?} is offline", mining_addr);
+                            act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
+                        }
+                        Err(GossipClientError::HealthCheck(u, e)) => {
+                            debug!(
+                                "Peer {:?}{} healthcheck failed with status {}",
+                                mining_addr, u, e
+                            );
                             act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
                         }
                         Err(e) => {
