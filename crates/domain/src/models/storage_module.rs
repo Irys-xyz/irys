@@ -1096,9 +1096,11 @@ impl StorageModule {
     ///
     /// Process:
     /// 1. Locates correct submodule for chunk offset
-    /// 2. Calculates physical storage position
-    /// 3. Writes chunk data to disk
-    /// 4. Updates interval tracking with new chunk state
+    /// 2. Sets the chunk status to Interrupted before writing
+    /// 3. Writes the intervals file to persist the Interrupted status
+    /// 4. Calculates physical storage position
+    /// 5. Writes chunk data to disk
+    /// 6. Updates interval tracking with new chunk state
     ///
     /// Note: Chunk size must match size in StorageModule.config
     fn write_chunk_internal(
@@ -1111,6 +1113,22 @@ impl StorageModule {
 
         // Get the correct submodule reference based on chunk_offset
         let (interval, submodule) = self.get_submodule_for_offset(chunk_offset)?;
+
+        // Set the chunk status to Interrupted before writing
+        {
+            let mut intervals = self
+                .intervals
+                .write()
+                .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+
+            let chunk_interval = ii(chunk_offset, chunk_offset);
+            let _ = intervals.cut(chunk_interval);
+            let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, ChunkType::Interrupted);
+        }
+
+        // Write the intervals file to persist the Interrupted status
+        self.write_intervals_to_submodules()
+            .map_err(|e| eyre::eyre!("Failed to write intervals file before chunk write: {}", e))?;
 
         let start_time = Instant::now();
 
@@ -1139,7 +1157,7 @@ impl StorageModule {
                 .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
         }
 
-        // If successful, update the StorageModules interval state
+        // If successful, update the StorageModules interval state with the actual chunk type
         {
             let mut intervals = self
                 .intervals
