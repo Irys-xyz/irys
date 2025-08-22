@@ -311,6 +311,7 @@ pub struct NodeConfig {
     pub consensus: ConsensusOptions,
 
     /// P2P handshake parameters
+    #[serde(default)]
     pub p2p_handshake: P2PHandshakeConfig,
 }
 
