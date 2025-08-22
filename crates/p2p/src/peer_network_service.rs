@@ -19,29 +19,75 @@ use tracing::{debug, error, info, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
-// Global helpers for concurrency limiting and backoff state
+/*
+Global singletons for handshake flow control and safety
+
+Why globals (process-wide):
+- Multiple actor instances/tasks may trigger handshakes concurrently. To avoid
+  per-actor throttling gaps, we enforce limits and backoff state process-wide.
+
+Why OnceLock + Mutex:
+- OnceLock provides thread-safe, lazy initialization without paying the cost
+  of static constructors on startup, and it prevents races on first-use.
+- Interior state is wrapped in a Mutex for low-contention, short critical
+  sections. The hot path (permit acquire) is handled by a Semaphore.
+
+Configuration and lifetime:
+- Some of these singletons use values derived from NodeConfig and are
+  initialized the first time the service starts in this process. Subsequent
+  instances reuse the same values (first-wins).
+*/
+
+/// Global semaphore limiting the total number of concurrent handshake tasks across
+/// the entire process. This prevents resource exhaustion (sockets, memory, CPU).
+/// Initialized once with the maximum from the first service that calls it — see
+/// `handshake_semaphore_with_max`. Subsequent calls reuse the same semaphore.
 static HANDSHAKE_SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
+
+/// Returns the global handshake semaphore, initializing it with `max` if this is
+/// the first call in the process. Note: configuration is first-wins; later calls
+/// will not resize the semaphore.
 fn handshake_semaphore_with_max(max: usize) -> std::sync::Arc<tokio::sync::Semaphore> {
     HANDSHAKE_SEMAPHORE
         .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(max)))
         .clone()
 }
 
+/// Global map of consecutive handshake failure counts per peer (by API SocketAddr).
+/// Used to compute exponential backoff intervals and to decide when to place a
+/// peer onto the temporary blocklist. Entries are cleared on successful handshakes
+/// or when a peer is moved to the blocklist.
 static HANDSHAKE_FAILURES: std::sync::OnceLock<std::sync::Mutex<HashMap<SocketAddr, u32>>> =
     std::sync::OnceLock::new();
+
+/// Accessor for the global handshake failures map.
 fn handshake_failures() -> &'static std::sync::Mutex<HashMap<SocketAddr, u32>> {
     HANDSHAKE_FAILURES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Global blocklist containing peers that should be skipped until a specific
+/// Instant in the future (i.e., a TTL-based block). The TTL duration is configured
+/// via NodeConfig.p2p_handshake.blacklist_ttl_secs. Peers are added after too
+/// many consecutive failures, and removed either on success or when the TTL elapses
+/// (checked at use sites).
 static BLOCKLIST_UNTIL: std::sync::OnceLock<
     std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>>,
 > = std::sync::OnceLock::new();
+
+/// Accessor for the global blocklist with expiry timestamps.
 fn blocklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>> {
     BLOCKLIST_UNTIL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Cached, per-process cap on how many peers we will process from a single
+/// Accepted handshake response. This is set once from NodeConfig when the
+/// service starts and then reused in the hot path to avoid repeated config
+/// lookups or cloning.
 static PEERS_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Returns the configured peer processing cap (first-wins). If not initialized
+/// yet via service startup, falls back to a config value
 fn peers_limit() -> usize {
     *PEERS_LIMIT
         .get_or_init(|| irys_types::config::P2PHandshakeConfig::default().max_peers_per_response)
