@@ -13,6 +13,7 @@ mod types;
 
 pub use block_pool::{BlockPool, BlockPoolError};
 pub use block_status_provider::{BlockStatus, BlockStatusProvider};
+pub use cache::GossipCache;
 pub use chain_sync::{
     ChainSyncError, ChainSyncResult, ChainSyncService, ChainSyncServiceInner,
     SyncChainServiceFacade, SyncChainServiceMessage,

@@ -988,6 +988,7 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_network_service::PeerNetworkService;
+        use crate::tests::util::data_handler_stub;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
@@ -1072,7 +1073,7 @@ mod tests {
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
             let peer_list_service = PeerNetworkService::new_with_custom_api_client(
-                db,
+                db.clone(),
                 &config,
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
@@ -1098,6 +1099,15 @@ mod tests {
                 true,
             );
 
+            let data_handler = data_handler_stub(
+                &config,
+                &peer_list_guard,
+                db.clone(),
+                api_client_stub.clone(),
+                sync_state.clone(),
+            )
+            .await;
+
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
@@ -1107,6 +1117,7 @@ mod tests {
                 &peer_list_guard,
                 10,
                 &config,
+                data_handler,
             )
             .await
             .expect("to finish catching up");
@@ -1179,7 +1190,7 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let peer_list_service = PeerNetworkService::new_with_custom_api_client(
-                db,
+                db.clone(),
                 &config,
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
@@ -1212,6 +1223,15 @@ mod tests {
                 true,
             );
 
+            let data_handler = data_handler_stub(
+                &config,
+                &peer_list,
+                db,
+                api_client_stub.clone(),
+                sync_state.clone(),
+            )
+            .await;
+
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
@@ -1221,6 +1241,7 @@ mod tests {
                 &peer_list,
                 start_from,
                 &config,
+                data_handler,
             )
             .await
             .expect("to finish catching up");

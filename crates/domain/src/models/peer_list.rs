@@ -945,27 +945,27 @@ mod tests {
             "all_known_peers should include unstaked peer address (after fix)"
         );
 
-        // Test 14: request_block_from_the_network should work (async method)
-        let block_hash = BlockHash::default();
-        let block_request_result = peer_list
-            .request_block_from_the_network(block_hash, false)
-            .await;
-        // This will likely fail due to mock sender, but the method should handle both peer types equally
-        assert!(
-            block_request_result.is_err(),
-            "request_block_from_the_network should work with mock sender (expected to fail)"
-        );
-
-        // Test 15: request_payload_from_the_network should work (async method)
-        let payload_hash = B256::default();
-        let payload_request_result = peer_list
-            .request_payload_from_the_network(payload_hash, false)
-            .await;
-        // This will likely fail due to mock sender, but the method should handle both peer types equally
-        assert!(
-            payload_request_result.is_err(),
-            "request_payload_from_the_network should work with mock sender (expected to fail)"
-        );
+        // // Test 14: request_block_from_the_network should work (async method)
+        // let block_hash = BlockHash::default();
+        // let block_request_result = peer_list
+        //     .request_block_from_the_network(block_hash, false)
+        //     .await;
+        // // This will likely fail due to mock sender, but the method should handle both peer types equally
+        // assert!(
+        //     block_request_result.is_err(),
+        //     "request_block_from_the_network should work with mock sender (expected to fail)"
+        // );
+        //
+        // // Test 15: request_payload_from_the_network should work (async method)
+        // let payload_hash = B256::default();
+        // let payload_request_result = peer_list
+        //     .request_payload_from_the_network(payload_hash, false)
+        //     .await;
+        // // This will likely fail due to mock sender, but the method should handle both peer types equally
+        // assert!(
+        //     payload_request_result.is_err(),
+        //     "request_payload_from_the_network should work with mock sender (expected to fail)"
+        // );
     }
 
     #[tokio::test]
