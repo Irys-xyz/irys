@@ -565,4 +565,29 @@ where
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
+
+    pub(crate) async fn handle_get_data_sync(
+        &self,
+        request: GossipRequest<GossipDataRequest>,
+    ) -> GossipResult<Option<GossipData>> {
+        match request.data {
+            GossipDataRequest::Block(block_hash) => {
+                let maybe_block = self
+                    .block_pool
+                    .get_block_data(&block_hash)
+                    .await
+                    .map_err(GossipError::BlockPool)?;
+                Ok(maybe_block.map(GossipData::Block))
+            }
+            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+                let maybe_evm_block = self
+                    .execution_payload_cache
+                    .get_locally_stored_evm_block(&evm_block_hash)
+                    .await;
+
+                Ok(maybe_evm_block.map(GossipData::ExecutionPayload))
+            }
+            GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
+        }
+    }
 }

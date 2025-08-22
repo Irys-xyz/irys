@@ -396,6 +396,37 @@ where
         }
     }
 
+    async fn handle_get_data_sync(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequest<GossipDataRequest>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled()
+            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
+        {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
+            return HttpResponse::Forbidden().finish();
+        }
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, data_request.miner_address)
+        {
+            return error_response;
+        };
+
+        match server
+            .data_handler
+            .handle_get_data_sync(data_request.0)
+            .await
+        {
+            Ok(maybe_data) => HttpResponse::Ok().json(maybe_data),
+            Err(error) => {
+                error!("Failed to handle get data request: {}", error);
+                HttpResponse::InternalServerError().finish()
+            }
+        }
+    }
+
     /// Start the gossip server
     ///
     /// # Errors
@@ -423,6 +454,7 @@ where
                             web::post().to(Self::handle_execution_payload),
                         )
                         .route("/get_data", web::post().to(Self::handle_get_data))
+                        .route("/get_data_sync", web::post().to(Self::handle_get_data_sync))
                         .route("/health", web::get().to(Self::handle_health_check)),
                 )
         })

@@ -373,7 +373,7 @@ impl PeerNetworkSender {
         self.send(message)
     }
 
-    pub async fn request_block_from_network(
+    pub async fn request_block_to_be_gossiped_from_network(
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
@@ -394,7 +394,7 @@ impl PeerNetworkSender {
         })?
     }
 
-    pub async fn request_payload_from_network(
+    pub async fn request_payload_to_be_gossiped_from_network(
         &self,
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,

@@ -337,7 +337,7 @@ impl PeerList {
             .peer_network_service_sender
             .clone();
         sender
-            .request_block_from_network(block_hash, use_trusted_peers_only)
+            .request_block_to_be_gossiped_from_network(block_hash, use_trusted_peers_only)
             .await
     }
 
@@ -353,7 +353,7 @@ impl PeerList {
             .peer_network_service_sender
             .clone();
         sender
-            .request_payload_from_network(evm_payload_hash, use_trusted_peers_only)
+            .request_payload_to_be_gossiped_from_network(evm_payload_hash, use_trusted_peers_only)
             .await
     }
 

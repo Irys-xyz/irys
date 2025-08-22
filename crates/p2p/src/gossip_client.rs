@@ -91,6 +91,31 @@ impl GossipClient {
         res
     }
 
+    /// Request specific data from the peer. Returns the data right away if the peer has it
+    /// and updates the peer's score based on the result.
+    pub async fn make_get_data_request_and_update_the_score_sync(
+        &self,
+        peer: &(Address, PeerListItem),
+        requested_data: GossipDataRequest,
+        peer_list: &PeerList,
+    ) -> GossipResult<Option<GossipData>> {
+        let url = format!("http://{}/gossip/get_data_sync", peer.1.address.gossip);
+        let get_data_request = self.create_request(requested_data);
+
+        let res = self
+            .client
+            .post(&url)
+            .json(&get_data_request)
+            .send()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()));
+        Self::handle_score(peer_list, &res, &peer.0);
+        res
+    }
+
     pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
 
