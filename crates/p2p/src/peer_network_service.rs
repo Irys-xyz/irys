@@ -1736,6 +1736,73 @@ mod tests {
         );
     }
 
+    // New test: handshake blacklist after max retries
+    #[actix_rt::test]
+    async fn test_handshake_blacklist_after_max_retries() {
+        use irys_api_client::test_utils::CountingMockClient;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut node_config = NodeConfig::testing();
+        node_config.trusted_peers = vec![];
+        let config = Config::new(node_config);
+
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_client = CountingMockClient {
+            post_version_calls: calls.clone(),
+        };
+
+        let mock_actor = MockRethServiceActor::new();
+        let mock_addr = mock_actor.start();
+
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let service = PeerNetworkService::new_with_custom_api_client(
+            db,
+            &config,
+            mock_client,
+            mock_addr,
+            receiver,
+            sender,
+        );
+        let service_addr = service.start();
+
+        let target_addr: std::net::SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let max_retries = config.node_config.p2p_handshake.max_retries;
+
+        for _ in 0..max_retries {
+            service_addr
+                .send(AnnounceFinished {
+                    peer_api_address: target_addr,
+                    success: false,
+                    retry: true,
+                })
+                .await
+                .expect("send AnnounceFinished");
+        }
+
+        // Try to force a new announcement after exceeding max retries (peer should be blacklisted)
+        service_addr
+            .send(NewPotentialPeer::force_announce(target_addr))
+            .await
+            .expect("send NewPotentialPeer");
+
+        // Give the actor a moment to process messages
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let calls_guard = calls.lock().await;
+        assert_eq!(
+            calls_guard.len(),
+            0,
+            "No handshake should be attempted while blacklisted"
+        );
+    }
+
     #[actix_rt::test]
     async fn should_prevent_infinite_handshake_loop() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);

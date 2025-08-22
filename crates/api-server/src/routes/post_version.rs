@@ -124,3 +124,29 @@ fn cap_peers(mut peers: Vec<irys_types::PeerAddress>, cap: usize) -> Vec<irys_ty
     peers
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::PeerAddress;
+
+    #[test]
+    fn caps_peers_to_limit() {
+        // Create more peers than the cap
+        let mut peers = Vec::new();
+        for _ in 0..100 {
+            peers.push(PeerAddress::default());
+        }
+        let capped = cap_peers(peers.clone(), 25);
+        assert_eq!(capped.len(), 25, "should truncate to requested cap");
+
+        let capped_zero = cap_peers(peers.clone(), 0);
+        assert_eq!(capped_zero.len(), 0, "zero cap should yield empty vec");
+
+        let capped_large = cap_peers(peers.clone(), 200);
+        assert_eq!(
+            capped_large.len(),
+            peers.len(),
+            "cap above length keeps all"
+        );
+    }
+}
