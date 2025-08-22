@@ -34,11 +34,11 @@ fn handshake_failures() -> &'static std::sync::Mutex<HashMap<SocketAddr, u32>> {
     HANDSHAKE_FAILURES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-static BLACKLIST_UNTIL: std::sync::OnceLock<
+static BLOCKLIST_UNTIL: std::sync::OnceLock<
     std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>>,
 > = std::sync::OnceLock::new();
-fn blacklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>> {
-    BLACKLIST_UNTIL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn blocklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>> {
+    BLOCKLIST_UNTIL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 static PEERS_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -668,9 +668,9 @@ where
 
         if needs_announce {
             // Skip if peer is currently blacklisted
-            if let Some(until) = blacklist_until()
+            if let Some(until) = blocklist_until()
                 .lock()
-                .expect("blacklist_until mutex poisoned")
+                .expect("blocklist_until mutex poisoned")
                 .get(&msg.api_address)
                 .copied()
             {
@@ -765,9 +765,9 @@ where
                     + std::time::Duration::from_secs(
                         self.config.node_config.p2p_handshake.blacklist_ttl_secs,
                     );
-                blacklist_until()
+                blocklist_until()
                     .lock()
-                    .expect("blacklist_until mutex poisoned")
+                    .expect("blocklist_until mutex poisoned")
                     .insert(msg.peer_api_address, until);
                 handshake_failures()
                     .lock()
@@ -811,9 +811,9 @@ where
                 .lock()
                 .expect("handshake_failures mutex poisoned")
                 .remove(&msg.peer_api_address);
-            blacklist_until()
+            blocklist_until()
                 .lock()
-                .expect("blacklist_until mutex poisoned")
+                .expect("blocklist_until mutex poisoned")
                 .remove(&msg.peer_api_address);
         }
     }
