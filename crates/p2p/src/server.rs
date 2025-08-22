@@ -354,7 +354,7 @@ where
         };
     }
 
-    async fn handle_get_data(
+    async fn handle_data_request(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
@@ -396,7 +396,7 @@ where
         }
     }
 
-    async fn handle_get_data_sync(
+    async fn handle_pull_data(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
@@ -453,8 +453,8 @@ where
                             "/execution_payload",
                             web::post().to(Self::handle_execution_payload),
                         )
-                        .route("/get_data", web::post().to(Self::handle_get_data))
-                        .route("/get_data_sync", web::post().to(Self::handle_get_data_sync))
+                        .route("/get_data", web::post().to(Self::handle_data_request))
+                        .route("/pull_data", web::post().to(Self::handle_pull_data))
                         .route("/health", web::get().to(Self::handle_health_check)),
                 )
         })

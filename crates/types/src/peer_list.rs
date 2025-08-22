@@ -322,6 +322,12 @@ pub enum PeerNetworkError {
     InternalSendError(SendError<PeerNetworkServiceMessage>),
     #[error("Peer list internal error: {0}")]
     OtherInternalError(String),
+    #[error("Failed to request data from network: {0}")]
+    FailedToRequestData(String),
+    #[error("No peers available to request data from")]
+    NoPeersAvailable,
+    #[error("Unexpected data received: {0}")]
+    UnexpectedData(String),
 }
 
 impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
