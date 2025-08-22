@@ -918,13 +918,14 @@ impl EpochSnapshot {
             num_chunks,
         );
 
-        // STEP 4: Unassigned
+        // STEP 4: Unassigned & assignments from the future
         for (original_idx, (path, _)) in
             sm_packing_info
                 .iter()
                 .enumerate()
                 .filter(|(_, (_, params))| {
                     params.is_none()
+                    // if an assignment exists, and is from the future, we pass it through
                         || params.is_some_and(|pa| {
                             pa.last_updated_height.unwrap_or(self.height + 1) > self.height
                         })
