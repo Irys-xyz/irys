@@ -227,6 +227,12 @@ fn default_max_future_timestamp_drift_millis() -> u128 {
     15_000
 }
 
+/// Default for `peer_filter_mode` when the field is not present in the provided TOML.
+/// This keeps legacy configurations working by defaulting to unrestricted mode.
+fn default_peer_filter_mode() -> PeerFilterMode {
+    PeerFilterMode::Unrestricted
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
@@ -272,6 +278,10 @@ pub struct NodeConfig {
 
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<PeerAddress>,
+
+    /// Controls how the node filters peer interactions
+    #[serde(default = "default_peer_filter_mode")]
+    pub peer_filter_mode: PeerFilterMode,
 
     pub reward_address: Address,
 
@@ -332,6 +342,23 @@ pub enum NodeMode {
 
     /// Trusted peer mode, where the node only connects to trusted peers
     TrustedPeerSync,
+}
+
+/// # Peer Filter Mode
+///
+/// Defines how the node filters which peers it will interact with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerFilterMode {
+    /// No restrictions - interact with any discovered peers (default behavior)
+    Unrestricted,
+
+    /// Only interact with peers specified in the `trusted_peers` list
+    TrustedOnly,
+
+    /// Interact with trusted peers and additional peers they return during handshake
+    /// The combination of trusted peers + handshake peers forms the whitelist
+    TrustedAndHandshake,
 }
 
 /// # Consensus Configuration Source
@@ -968,6 +995,7 @@ impl NodeConfig {
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             }],
+            peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -1064,6 +1092,7 @@ impl NodeConfig {
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
+            peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 8081,
@@ -1139,6 +1168,21 @@ impl NodeConfig {
                 .expect("valid SocketAddr expected"),
             execution: self.reth_peer_info,
         }
+    }
+
+    /// Check if the node should only interact with trusted peers
+    pub fn is_trusted_peers_only(&self) -> bool {
+        matches!(self.peer_filter_mode, PeerFilterMode::TrustedOnly)
+    }
+
+    /// Check if the node should interact with trusted peers and their handshake peers
+    pub fn is_trusted_and_handshake_mode(&self) -> bool {
+        matches!(self.peer_filter_mode, PeerFilterMode::TrustedAndHandshake)
+    }
+
+    /// Check if the node has peer filtering enabled (not unrestricted)
+    pub fn has_peer_filtering(&self) -> bool {
+        !matches!(self.peer_filter_mode, PeerFilterMode::Unrestricted)
     }
 }
 
@@ -1453,6 +1497,7 @@ mod tests {
         consensus = "Testing"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        peer_filter_mode = "trusted_and_handshake"
         genesis_peer_discovery_timeout_millis = 10000
         stake_pledge_drives = false
 
@@ -1510,6 +1555,7 @@ mod tests {
         let mut expected_config = NodeConfig::testing();
         expected_config.consensus = ConsensusOptions::Testing;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
+        expected_config.peer_filter_mode = PeerFilterMode::TrustedAndHandshake;
         expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
             peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
             peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
