@@ -19,20 +19,12 @@ use tracing::{debug, error, info, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
-// Handshake limits and backoff configuration
-const MAX_CONCURRENT_HANDSHAKES: usize = 32;
-const HANDSHAKE_MAX_PEERS_PER_RESPONSE: usize = 25;
-const HANDSHAKE_MAX_RETRIES: u32 = 8;
-const HANDSHAKE_BACKOFF_BASE_SECS: u64 = 1;
-const HANDSHAKE_BACKOFF_CAP_SECS: u64 = 60;
-const HANDSHAKE_BLACKLIST_TTL_SECS: u64 = 600;
-
 // Global helpers for concurrency limiting and backoff state
 static HANDSHAKE_SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
-fn handshake_semaphore() -> std::sync::Arc<tokio::sync::Semaphore> {
+fn handshake_semaphore_with_max(max: usize) -> std::sync::Arc<tokio::sync::Semaphore> {
     HANDSHAKE_SEMAPHORE
-        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HANDSHAKES)))
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(max)))
         .clone()
 }
 
@@ -47,6 +39,11 @@ static BLACKLIST_UNTIL: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 fn blacklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>> {
     BLACKLIST_UNTIL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+static PEERS_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+fn peers_limit() -> usize {
+    *PEERS_LIMIT.get_or_init(|| 25)
 }
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
@@ -136,6 +133,7 @@ where
     ) -> Self {
         let peer_list_data =
             PeerList::new(config, &db, service_sender).expect("Failed to load peer list data");
+        let _ = PEERS_LIMIT.get_or_init(|| config.node_config.p2p_handshake.max_peers_per_response);
 
         Self {
             db,
@@ -463,8 +461,9 @@ where
                 // Limit and randomize peers from response to avoid resource exhaustion
                 let mut peers = accepted_peers.peers;
                 peers.shuffle(&mut rand::thread_rng());
-                if peers.len() > HANDSHAKE_MAX_PEERS_PER_RESPONSE {
-                    peers.truncate(HANDSHAKE_MAX_PEERS_PER_RESPONSE);
+                let limit = peers_limit();
+                if peers.len() > limit {
+                    peers.truncate(limit);
                 }
                 for peer in peers {
                     send_message_and_print_error(
@@ -683,7 +682,12 @@ where
             let peer_service_addr = ctx.address();
             let api_client = self.irys_api_client.clone();
             let addr = msg.api_address;
-            let semaphore = handshake_semaphore();
+            let semaphore = handshake_semaphore_with_max(
+                self.config
+                    .node_config
+                    .p2p_handshake
+                    .max_concurrent_handshakes,
+            );
             let handshake_task = async move {
                 // Limit concurrent handshakes globally
                 let _permit = semaphore.acquire().await.expect("semaphore closed");
@@ -747,9 +751,11 @@ where
                 *entry
             };
 
-            if attempts >= HANDSHAKE_MAX_RETRIES {
+            if attempts >= self.config.node_config.p2p_handshake.max_retries {
                 let until = std::time::Instant::now()
-                    + std::time::Duration::from_secs(HANDSHAKE_BLACKLIST_TTL_SECS);
+                    + std::time::Duration::from_secs(
+                        self.config.node_config.p2p_handshake.blacklist_ttl_secs,
+                    );
                 blacklist_until()
                     .lock()
                     .unwrap()
@@ -765,9 +771,10 @@ where
                 return;
             }
 
+            let backoff_secs = (1_u64 << (attempts - 1))
+                .saturating_mul(self.config.node_config.p2p_handshake.backoff_base_secs);
             let backoff_secs =
-                (1_u64 << (attempts - 1)).saturating_mul(HANDSHAKE_BACKOFF_BASE_SECS);
-            let backoff_secs = backoff_secs.min(HANDSHAKE_BACKOFF_CAP_SECS);
+                backoff_secs.min(self.config.node_config.p2p_handshake.backoff_cap_secs);
             let backoff = std::time::Duration::from_secs(backoff_secs);
 
             let message = NewPotentialPeer::new(msg.peer_api_address);
