@@ -43,7 +43,8 @@ fn blocklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time:
 
 static PEERS_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 fn peers_limit() -> usize {
-    *PEERS_LIMIT.get_or_init(|| 25)
+    *PEERS_LIMIT
+        .get_or_init(|| irys_types::config::P2PHandshakeConfig::default().max_peers_per_response)
 }
 
 async fn send_message_and_print_error<T, A, R>(message: T, address: Addr<A>)
