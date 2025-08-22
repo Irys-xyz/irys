@@ -259,11 +259,10 @@ fn collect_expired_partitions(
     block_height: u64,
     target_ledger_type: DataLedger,
 ) -> eyre::Result<BTreeMap<SlotIndex, Vec<Address>>> {
-    let mut ledgers = epoch_snapshot.ledgers.clone();
     let partition_assignments = &epoch_snapshot.partition_assignments;
-    let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
+    let expired_partition_info = &epoch_snapshot.expired_partition_infos;
     let mut expired_ledger_slot_indexes = BTreeMap::new();
-    if expired_partition_hashes.is_empty() {
+    if expired_partition_info.is_empty() {
         return Ok(expired_ledger_slot_indexes);
     }
 
@@ -271,24 +270,16 @@ fn collect_expired_partitions(
         "collect_expired_partitions: block_height={}, target_ledger={:?}, found {} expired partition hashes",
         block_height,
         target_ledger_type,
-        expired_partition_hashes.len()
+        expired_partition_info.len()
     );
 
-    for expired_partition_hash in expired_partition_hashes {
+    for expired_partition in expired_partition_info {
         let partition = partition_assignments
-            .get_assignment(expired_partition_hash)
+            .get_assignment(expired_partition.partition_hash)
             .ok_or_eyre("could not get expired partition")?;
 
-        let ledger_id = partition
-            .ledger_id
-            .map(DataLedger::try_from)
-            .ok_or_eyre("ledger id must be present")??;
-
-        let slot_index = SlotIndex::new(
-            partition
-                .slot_index
-                .ok_or_eyre("slot index must be present")? as u64,
-        );
+        let ledger_id = expired_partition.ledger_id;
+        let slot_index = SlotIndex::new(expired_partition.slot_index as u64);
 
         // Only process partitions for the target ledger type
         if ledger_id == target_ledger_type {

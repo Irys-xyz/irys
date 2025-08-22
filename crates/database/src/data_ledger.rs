@@ -1,4 +1,4 @@
-use irys_types::{ConsensusConfig, DataLedger, H256};
+use irys_types::{partition::PartitionHash, ConsensusConfig, DataLedger, H256};
 use serde::Serialize;
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -18,6 +18,13 @@ pub struct LedgerSlot {
     pub is_expired: bool,
     /// Block height of most recently added transaction data (chunks)
     pub last_height: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExpiredPartitionInfo {
+    pub partition_hash: PartitionHash,
+    pub ledger_id: DataLedger,
+    pub slot_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -269,18 +276,25 @@ impl Ledgers {
     }
 
     /// Get all of the partition hashes that have expired out of term ledgers
-    pub fn get_expired_partition_hashes(&mut self, epoch_height: u64) -> Vec<H256> {
-        let mut expired_hashes: Vec<H256> = Vec::new();
+    pub fn expire_term_partitions(&mut self, epoch_height: u64) -> Vec<ExpiredPartitionInfo> {
+        let mut expired_partitions: Vec<ExpiredPartitionInfo> = Vec::new();
 
         // Collect expired partition hashes from term ledgers
         for term_ledger in &mut self.term {
+            let ledger_id = DataLedger::try_from(term_ledger.ledger_id).unwrap();
             for expired_index in term_ledger.expire_old_slots(epoch_height) {
-                // Add each partition hash from expired slots
-                expired_hashes.extend(term_ledger.slots[expired_index].partitions.iter().copied());
+                for partition_hash in term_ledger.slots[expired_index].partitions.iter() {
+                    // Add ExpiredPartitionInfo for each expired partition_hash
+                    expired_partitions.push(ExpiredPartitionInfo {
+                        partition_hash: *partition_hash,
+                        ledger_id,
+                        slot_index: expired_index,
+                    });
+                }
             }
         }
 
-        expired_hashes
+        expired_partitions
     }
 
     // Private helper methods for term ledger lookups
