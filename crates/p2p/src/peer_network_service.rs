@@ -663,7 +663,7 @@ where
             // Skip if peer is currently blacklisted
             if let Some(until) = blacklist_until()
                 .lock()
-                .unwrap()
+                .expect("blacklist_until mutex poisoned")
                 .get(&msg.api_address)
                 .copied()
             {
@@ -745,7 +745,9 @@ where
 
             // Update failure count and compute backoff
             let attempts = {
-                let mut guard = handshake_failures().lock().unwrap();
+                let mut guard = handshake_failures()
+                    .lock()
+                    .expect("handshake_failures mutex poisoned");
                 let entry = guard.entry(msg.peer_api_address).or_insert(0);
                 *entry += 1;
                 *entry
@@ -758,11 +760,11 @@ where
                     );
                 blacklist_until()
                     .lock()
-                    .unwrap()
+                    .expect("blacklist_until mutex poisoned")
                     .insert(msg.peer_api_address, until);
                 handshake_failures()
                     .lock()
-                    .unwrap()
+                    .expect("handshake_failures mutex poisoned")
                     .remove(&msg.peer_api_address);
                 debug!(
                     "Peer {:?} blacklisted until {:?} after {} failures",
@@ -800,11 +802,11 @@ where
             // Reset failure/blacklist state on success
             handshake_failures()
                 .lock()
-                .unwrap()
+                .expect("handshake_failures mutex poisoned")
                 .remove(&msg.peer_api_address);
             blacklist_until()
                 .lock()
-                .unwrap()
+                .expect("blacklist_until mutex poisoned")
                 .remove(&msg.peer_api_address);
         }
     }
