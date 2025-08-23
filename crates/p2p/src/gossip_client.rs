@@ -6,13 +6,17 @@ use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, GossipData, GossipDataRequest, GossipRequest, PeerAddress, PeerListItem,
+    Address, BlockHash, GossipData, GossipDataRequest, GossipRequest, IrysBlockHeader, PeerAddress,
+    PeerListItem, PeerNetworkError,
 };
+use rand::prelude::SliceRandom as _;
 use reqwest::Client;
 use reqwest::Response;
+use reth::primitives::Block;
+use reth::revm::primitives::B256;
 use serde::Serialize;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
@@ -81,6 +85,31 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
+        let get_data_request = self.create_request(requested_data);
+
+        let res = self
+            .client
+            .post(&url)
+            .json(&get_data_request)
+            .send()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()));
+        Self::handle_score(peer_list, &res, &peer.0);
+        res
+    }
+
+    /// Request specific data from the peer. Returns the data right away if the peer has it
+    /// and updates the peer's score based on the result.
+    async fn pull_data_and_update_the_score(
+        &self,
+        peer: &(Address, PeerListItem),
+        requested_data: GossipDataRequest,
+        peer_list: &PeerList,
+    ) -> GossipResult<Option<GossipData>> {
+        let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
         let get_data_request = self.create_request(requested_data);
 
         let res = self
@@ -241,6 +270,133 @@ impl GossipClient {
             miner_address: self.mining_address,
             data,
         }
+    }
+
+    pub async fn pull_block_from_network(
+        &self,
+        block_hash: BlockHash,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+        let data_request = GossipDataRequest::Block(block_hash);
+        self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
+            .await
+    }
+
+    pub async fn pull_payload_from_network(
+        &self,
+        evm_payload_hash: B256,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+    ) -> Result<(Address, Block), PeerNetworkError> {
+        let data_request = GossipDataRequest::ExecutionPayload(evm_payload_hash);
+        self.pull_data_from_network(
+            data_request,
+            use_trusted_peers_only,
+            peer_list,
+            Self::execution_payload,
+        )
+        .await
+    }
+
+    fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+        match gossip_data {
+            GossipData::Block(block) => Ok(block),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected IrysBlockHeader, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    fn execution_payload(gossip_data: GossipData) -> Result<Block, PeerNetworkError> {
+        match gossip_data {
+            GossipData::ExecutionPayload(block) => Ok(block),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected ExecutionPayload, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    pub async fn pull_data_from_network<T>(
+        &self,
+        data_request: GossipDataRequest,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+        map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
+    ) -> Result<(Address, T), PeerNetworkError> {
+        let mut peers = if use_trusted_peers_only {
+            peer_list.trusted_peers()
+        } else {
+            // Get the top 10 most active peers
+            peer_list.top_active_peers(Some(10), None)
+        };
+
+        // Shuffle peers to randomize the selection
+        peers.shuffle(&mut rand::thread_rng());
+        // Take random 5
+        peers.truncate(5);
+
+        if peers.is_empty() {
+            return Err(PeerNetworkError::NoPeersAvailable);
+        }
+
+        // Try up to 5 iterations over the peer list to get the block
+        let mut last_error = None;
+
+        for attempt in 1..=5 {
+            for peer in &peers {
+                let address = &peer.0;
+                debug!(
+                    "Attempting to fetch {:?} from peer {} (attempt {}/5)",
+                    data_request, address, attempt
+                );
+
+                match self
+                    .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
+                    .await
+                {
+                    Ok(Some(data)) => {
+                        info!(
+                            "Successfully requested {:?} from peer {}",
+                            data_request, address
+                        );
+                        match map_data(data) {
+                            Ok(data) => return Ok((*address, data)),
+                            Err(err) => {
+                                warn!("Failed to map data from peer {}: {}", address, err);
+                                continue;
+                            }
+                        };
+                    }
+                    Ok(None) => {
+                        // Peer doesn't have this block, try another peer
+                        debug!("Peer {} doesn't have {:?}", address, data_request);
+                        continue;
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                        warn!(
+                            "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
+                            data_request,
+                            address,
+                            attempt,
+                            last_error.as_ref().unwrap()
+                        );
+
+                        // Move on to the next peer
+                        continue;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err(PeerNetworkError::FailedToRequestData(format!(
+            "Failed to fetch {:?} after trying 5 peers: {:?}",
+            data_request, last_error
+        )))
     }
 }
 

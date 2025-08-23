@@ -16,7 +16,7 @@ const GOSSIP_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Tracks which peers have seen what data to avoid sending duplicates
 #[derive(Debug)]
-pub(crate) struct GossipCache {
+pub struct GossipCache {
     /// Maps data identifiers to a set of peer addresses that have seen the data
     chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<Address>>>>,
     transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<Address>>>>,
@@ -25,9 +25,15 @@ pub(crate) struct GossipCache {
     ingress_proofs: Cache<H256, Arc<RwLock<HashSet<Address>>>>,
 }
 
+impl Default for GossipCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GossipCache {
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             chunks: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             transactions: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),

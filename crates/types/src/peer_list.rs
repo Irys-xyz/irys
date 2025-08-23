@@ -314,19 +314,25 @@ pub enum PeerNetworkServiceMessage {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum PeerNetworkError {
     #[error("Internal database error: {0}")]
     Database(DatabaseError),
     #[error("Peer list internal error: {0:?}")]
-    InternalSendError(SendError<PeerNetworkServiceMessage>),
+    InternalSendError(String),
     #[error("Peer list internal error: {0}")]
     OtherInternalError(String),
+    #[error("Failed to request data from network: {0}")]
+    FailedToRequestData(String),
+    #[error("No peers available to request data from")]
+    NoPeersAvailable,
+    #[error("Unexpected data received: {0}")]
+    UnexpectedData(String),
 }
 
 impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
     fn from(err: SendError<PeerNetworkServiceMessage>) -> Self {
-        Self::InternalSendError(err)
+        Self::InternalSendError(format!("Failed to send a message: {:?}", err))
     }
 }
 
@@ -373,7 +379,7 @@ impl PeerNetworkSender {
         self.send(message)
     }
 
-    pub async fn request_block_from_network(
+    pub async fn request_block_to_be_gossiped_from_network(
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
@@ -394,7 +400,7 @@ impl PeerNetworkSender {
         })?
     }
 
-    pub async fn request_payload_from_network(
+    pub async fn request_payload_to_be_gossiped_from_network(
         &self,
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
