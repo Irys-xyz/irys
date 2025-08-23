@@ -1301,7 +1301,7 @@ pub fn calculate_perm_storage_total_fee(
             config.consensus.safe_minimum_number_of_years,
             config.consensus.decay_rate,
         )?
-        .replica_count(config.consensus.number_of_ingress_proofs)?;
+        .replica_count(config.consensus.number_of_ingress_proofs_total)?;
 
     // Calculate the base network fee (protocol cost) using the provided EMA snapshot
     let base_network_fee = cost_per_gb.base_network_fee(
@@ -1313,7 +1313,7 @@ pub fn calculate_perm_storage_total_fee(
     // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        config.consensus.number_of_ingress_proofs,
+        config.consensus.number_of_ingress_proofs_total,
         config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
