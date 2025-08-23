@@ -150,12 +150,13 @@ impl StorageModuleInfo {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 pub struct PackingParams {
     pub packing_address: Address,
     pub partition_hash: Option<H256>,
     pub ledger: Option<u32>,
     pub slot: Option<usize>,
+    pub last_updated_height: Option<u64>,
 }
 
 impl PackingParams {
@@ -385,7 +386,7 @@ impl StorageModule {
         })
     }
 
-    pub fn assign_partition(&self, partition_assignment: PartitionAssignment) {
+    pub fn assign_partition(&self, partition_assignment: PartitionAssignment, update_height: u64) {
         let mut pa = self.partition_assignment.write().unwrap();
         *pa = Some(partition_assignment);
 
@@ -396,6 +397,7 @@ impl StorageModule {
                 partition_hash: Some(partition_assignment.partition_hash),
                 ledger: partition_assignment.ledger_id,
                 slot: partition_assignment.slot_index,
+                last_updated_height: Some(update_height),
             };
 
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
