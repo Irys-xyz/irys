@@ -841,13 +841,13 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     let block_discovery_stub = BlockDiscoveryStub {
         blocks: Arc::new(RwLock::new(Vec::new())),
         internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
-        block_status_provider: block_status_provider_mock.clone(),
+        block_status_provider: block_status_provider_mock,
     };
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider.clone());
     let block_pool_stub = Arc::new(BlockPool::new(
         db.clone(),
-        block_discovery_stub.clone(),
+        block_discovery_stub,
         mempool_stub.clone(),
         sync_tx,
         sync_state.clone(),
@@ -868,6 +868,6 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
         span: Span::current(),
-        execution_payload_cache: execution_payload_cache.clone(),
+        execution_payload_cache,
     })
 }

@@ -195,7 +195,7 @@ impl P2PService {
             span: Span::current(),
             execution_payload_cache: execution_payload_provider,
         });
-        let server = GossipServer::new(Arc::clone(&gossip_data_handler.clone()), peer_list.clone());
+        let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 
         let server = server.run(listener)?;
         let server_handle = server.handle();

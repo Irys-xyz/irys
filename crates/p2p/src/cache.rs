@@ -25,6 +25,12 @@ pub struct GossipCache {
     ingress_proofs: Cache<H256, Arc<RwLock<HashSet<Address>>>>,
 }
 
+impl Default for GossipCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GossipCache {
     #[must_use]
     pub fn new() -> Self {
