@@ -995,8 +995,8 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, NodeConfig, PeerAddress, PeerListItem,
-            PeerNetworkSender, PeerScore,
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -1016,17 +1016,26 @@ mod tests {
             let block_requests_clone = block_requests.clone();
             let fake_gossip_server = FakeGossipServer::new();
             let sync_state_clone = sync_state.clone();
-            fake_gossip_server.set_on_block_data_request(move |block_hash| {
-                let mut block_requests = block_requests.lock().unwrap();
-                let requests_len = block_requests.len();
-                block_requests.push(block_hash);
+            fake_gossip_server.set_on_pull_data_request(move |data_request| {
+                match data_request {
+                    GossipDataRequest::ExecutionPayload(_) => None,
+                    GossipDataRequest::Block(block_hash) => {
+                        info!("Fake server pull data request: {block_hash:?}");
+                        let mut block_requests = block_requests.lock().unwrap();
+                        let requests_len = block_requests.len();
+                        block_requests.push(block_hash);
 
-                // Simulating one false response so the block gets requested again
-                if requests_len == 0 {
-                    false
-                } else {
-                    sync_state_clone.mark_processed(start_from + requests_len);
-                    true
+                        // Simulating one false response so the block gets requested again
+                        if requests_len == 0 {
+                            None
+                        } else {
+                            sync_state_clone.mark_processed(start_from + requests_len);
+                            Some(GossipData::Block(Arc::new(
+                                IrysBlockHeader::new_mock_header(),
+                            )))
+                        }
+                    }
+                    GossipDataRequest::Chunk(_) => None,
                 }
             });
             let fake_gossip_address = fake_gossip_server.spawn();
@@ -1050,7 +1059,7 @@ mod tests {
                 let calls_len = calls_ref.len();
                 calls_ref.push(query);
 
-                // Simulate process needing to make two calls
+                // Simulate a process needing to make two calls
                 if calls_len == 0 {
                     Ok(vec![BlockIndexItem {
                         block_hash: BlockHash::repeat_byte(1),

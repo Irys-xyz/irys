@@ -27,9 +27,10 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
-    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
+    IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -643,12 +644,14 @@ pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
 
 struct FakeGossipDataHandler {
     on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+    on_pull_data_request: Box<dyn Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync>,
 }
 
 impl FakeGossipDataHandler {
     fn new() -> Self {
         Self {
             on_block_data_request: Box::new(|_| false),
+            on_pull_data_request: Box::new(|_| None),
         }
     }
 
@@ -656,11 +659,22 @@ impl FakeGossipDataHandler {
         (self.on_block_data_request)(block_hash)
     }
 
+    fn call_on_pull_data_request(&self, data_request: GossipDataRequest) -> Option<GossipData> {
+        (self.on_pull_data_request)(data_request)
+    }
+
     fn set_on_block_data_request(
         &mut self,
         on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
     ) {
         self.on_block_data_request = on_block_data_request;
+    }
+
+    fn set_on_pull_data_request(
+        &mut self,
+        on_pull_data_request: Box<dyn Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync>,
+    ) {
+        self.on_pull_data_request = on_pull_data_request;
     }
 }
 
@@ -698,6 +712,16 @@ impl FakeGossipServer {
             .set_on_block_data_request(Box::new(on_block_data_request));
     }
 
+    pub(crate) fn set_on_pull_data_request(
+        &self,
+        on_pull_data_request: impl Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync + 'static,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .set_on_pull_data_request(Box::new(on_pull_data_request));
+    }
+
     /// Runs the fake server, returns the address on which the server has started, as well
     /// as the server handle
     pub(crate) fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
@@ -708,6 +732,7 @@ impl FakeGossipServer {
                 .app_data(web::Data::new(handler))
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
+                .service(web::resource("/gossip/pull_data").route(web::post().to(handle_pull_data)))
                 .default_service(web::to(|| async {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
@@ -759,6 +784,30 @@ async fn handle_get_data(
                     .json(false)
             }
         },
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process a request")
+        }
+    }
+}
+
+async fn handle_pull_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    warn!("Fake server got pull data request: {:?}", data_request.data);
+
+    match handler.read() {
+        Ok(handler) => {
+            let data_request = data_request.data.clone();
+            let response = handler.call_on_pull_data_request(data_request);
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .json(response)
+        }
         Err(e) => {
             warn!("Failed to acquire read lock on handler: {}", e);
             HttpResponse::InternalServerError()

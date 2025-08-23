@@ -14,8 +14,9 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    Config, DataTransactionHeader, DatabaseProvider, IrysTransactionResponse, NodeConfig, NodeInfo,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, VersionRequest, H256,
+    Config, DataTransactionHeader, DatabaseProvider, GossipData, GossipDataRequest,
+    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
+    PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -365,18 +366,26 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Set the fake server to mimic get_data -> gossip_service sends message to block pool
     let block_for_server = block2.clone();
     let pool_for_server = block_pool.clone();
-    gossip_server.set_on_block_data_request(move |block_hash| {
-        let block = block_for_server.clone();
-        let pool = pool_for_server.clone();
-        debug!("Receive get block: {:?}", block_hash);
-        tokio::spawn(async move {
-            debug!("Send block to block pool");
-            pool.process_block(Arc::new(block.clone()), false)
-                .await
-                .expect("to process block");
-        });
-        true
+    gossip_server.set_on_pull_data_request(move |data_request| match data_request {
+        GossipDataRequest::ExecutionPayload(_) => None,
+        GossipDataRequest::Block(block_hash) => {
+            let block = block_for_server.clone();
+            let block_for_response = block.clone();
+            let pool = pool_for_server.clone();
+            debug!("Receive get block: {:?}", block_hash);
+            tokio::spawn(async move {
+                debug!("Send block to block pool");
+                pool.process_block(Arc::new(block.clone()), false)
+                    .await
+                    .expect("to process block");
+            });
+            Some(GossipData::Block(Arc::new(block_for_response)))
+        }
+        GossipDataRequest::Chunk(_) => None,
     });
+    // gossip_server.set_on_block_data_request(move |block_hash| {
+    //
+    // });
 
     let block2 = Arc::new(block2.clone());
     let block3 = Arc::new(block3.clone());
