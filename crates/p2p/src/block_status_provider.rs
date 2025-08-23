@@ -58,11 +58,6 @@ impl BlockStatusProvider {
             .is_some()
     }
 
-    fn height_is_in_the_tree(&self, block_height: u64) -> bool {
-        let binding = self.block_tree_read_guard.read();
-        binding.get_hashes_for_height(block_height).is_some()
-    }
-
     /// Returns the status of a block based on its height and hash.
     /// Possible statuses:
     /// - `NotProcessed`: The block is not in the index or tree.
