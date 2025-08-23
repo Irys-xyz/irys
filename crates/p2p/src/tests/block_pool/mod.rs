@@ -773,6 +773,6 @@ async fn should_not_fast_track_block_already_in_index() {
 
     assert_eq!(
         err,
-        BlockPoolError::AlreadyProcessed(test_header.block_hash)
+        BlockPoolError::TryingToReprocessFinalizedBlock(test_header.block_hash)
     );
 }
