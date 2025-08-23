@@ -169,9 +169,9 @@ impl PeerList {
                 return;
             }
 
-            // Check for active peers every second
-            debug!("waiting for active peers...");
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Check for active peers
+            warn!("waiting for active peers...");
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
