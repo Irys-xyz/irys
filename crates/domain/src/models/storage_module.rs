@@ -1139,7 +1139,9 @@ impl StorageModule {
 
         // Get the submodule relative offset of the chunk
         let submodule_offset = chunk_offset - interval.start();
-        {
+
+        // Attempt to write the chunk data, handling errors by resetting to Uninitialized
+        let write_result = (|| -> eyre::Result<()> {
             // Lock to the submodules internal file handle & write the chunk
             let mut file = submodule.file.lock().unwrap();
 
@@ -1160,18 +1162,52 @@ impl StorageModule {
             // Ensure data is flushed to disk prior to drop
             file.sync_all()
                 .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
-        }
 
-        // If successful, update the StorageModules interval state with the actual chunk type
-        {
-            let mut intervals = self
-                .intervals
-                .write()
-                .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+            Ok(())
+        })();
 
-            let chunk_interval = ii(chunk_offset, chunk_offset);
-            let _ = intervals.cut(chunk_interval);
-            let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+        // Update the interval based on whether the write succeeded or failed
+        match write_result {
+            Ok(()) => {
+                // If successful, update the StorageModules interval state with the actual chunk type
+                let mut intervals = self
+                    .intervals
+                    .write()
+                    .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+                let chunk_interval = ii(chunk_offset, chunk_offset);
+                let _ = intervals.cut(chunk_interval);
+                let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+            }
+            Err(e) => {
+                // If write failed, reset the interval to Uninitialized
+                error!(
+                    "Write failed, resetting interval to Uninitialized for chunk_offset {}",
+                    chunk_offset
+                );
+
+                // Try to reset to Uninitialized, but don't propagate lock errors
+                match self.intervals.write() {
+                    Ok(mut intervals) => {
+                        let chunk_interval = ii(chunk_offset, chunk_offset);
+                        let _ = intervals.cut(chunk_interval);
+                        let _ = intervals.insert_merge_touching_if_values_equal(
+                            chunk_interval,
+                            ChunkType::Uninitialized,
+                        );
+                    }
+                    Err(write_err) => {
+                        // Log the failure but don't return early - we still need to propagate the original error
+                        error!(
+                    "CRITICAL: Failed to acquire write lock to reset interval to Uninitialized: {}. \
+                     The interval state may be inconsistent!",
+                    write_err
+                );
+                    }
+                }
+
+                // Always return the original write error
+                return Err(e);
+            }
         }
 
         let completion_time = Instant::now();
