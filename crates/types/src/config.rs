@@ -309,6 +309,10 @@ pub struct NodeConfig {
 
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
+
+    /// P2P handshake parameters
+    #[serde(default)]
+    pub p2p_handshake: P2PHandshakeConfig,
 }
 
 impl From<NodeConfig> for Config {
@@ -989,6 +993,7 @@ impl NodeConfig {
                 bind_port: 0,
             },
             reth_peer_info: RethPeerInfo::default(),
+            p2p_handshake: P2PHandshakeConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
@@ -1091,6 +1096,7 @@ impl NodeConfig {
                 )),
                 peer_id: Default::default(),
             },
+            p2p_handshake: P2PHandshakeConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
@@ -1138,6 +1144,33 @@ impl NodeConfig {
                 .parse()
                 .expect("valid SocketAddr expected"),
             execution: self.reth_peer_info,
+        }
+    }
+}
+
+/// P2P handshake configuration with sensible defaults
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P2PHandshakeConfig {
+    pub max_concurrent_handshakes: usize,
+    pub max_peers_per_response: usize,
+    pub max_retries: u32,
+    pub backoff_base_secs: u64,
+    pub backoff_cap_secs: u64,
+    pub blocklist_ttl_secs: u64,
+    pub server_peer_list_cap: usize,
+}
+
+impl Default for P2PHandshakeConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_handshakes: 32,
+            max_peers_per_response: 25,
+            max_retries: 8,
+            backoff_base_secs: 1,
+            backoff_cap_secs: 60,
+            blocklist_ttl_secs: 600,
+            server_peer_list_cap: 25,
         }
     }
 }

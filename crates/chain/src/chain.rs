@@ -41,8 +41,8 @@ use irys_domain::{
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
-    P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
-    SyncChainServiceMessage,
+    GossipDataHandler, P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal,
+    SyncChainServiceFacade, SyncChainServiceMessage,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -1049,10 +1049,10 @@ impl IrysNode {
         // resolved once all actors are converted to tokio services, and BlockPool is moved into
         // domain
         let (chain_sync_tx, chain_sync_rx) = mpsc::unbounded_channel();
-        let (p2p_service_handle, block_pool) = p2p_service.run(
+        let (p2p_service_handle, block_pool, gossip_data_handler) = p2p_service.run(
             mempool_facade,
             block_discovery_facade.clone(),
-            irys_api_client::IrysApiClient::new(),
+            IrysApiClient::new(),
             task_exec,
             peer_list_guard.clone(),
             irys_db.clone(),
@@ -1152,6 +1152,7 @@ impl IrysNode {
             block_index_guard.clone(),
             runtime_handle.clone(),
             Arc::clone(&block_pool),
+            gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
         );
 
@@ -1593,6 +1594,9 @@ impl IrysNode {
         block_index_guard: BlockIndexReadGuard,
         runtime_handle: tokio::runtime::Handle,
         block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+        gossip_data_handler: Arc<
+            GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl, IrysApiClient>,
+        >,
         (tx, rx): (
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
@@ -1606,6 +1610,7 @@ impl IrysNode {
             config,
             block_index_guard,
             block_pool,
+            gossip_data_handler,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);

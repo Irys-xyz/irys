@@ -884,6 +884,7 @@ impl BlockTreeServiceInner {
         if let Err(e) = self.service_senders.storage_modules.send(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
+                update_height: epoch_block.height,
             },
         ) {
             error!("Failed to send partition assignments update: {}", e);
