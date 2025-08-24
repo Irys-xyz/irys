@@ -1,10 +1,11 @@
 use crate::{ApiClient, IrysApiClient, Method};
 use eyre::OptionExt as _;
 pub use irys_api_server::routes::block::BlockParam;
-use irys_api_server::routes::price::PriceInfo;
+use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
-    Base64, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset, UnpackedChunk, H256,
+    Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset,
+    UnpackedChunk, H256,
 };
 use std::{
     net::SocketAddr,
@@ -52,6 +53,8 @@ pub trait ApiClientExt: ApiClient {
         data_root: DataRoot,
         offset: u32, // data root relative offset
     ) -> eyre::Result<ChunkFormat>;
+
+    async fn get_anchor(&self, peer: SocketAddr) -> eyre::Result<BlockHash>;
 }
 
 #[async_trait::async_trait]
@@ -178,5 +181,13 @@ impl ApiClientExt for IrysApiClient {
         )
         .await?
         .ok_or_eyre("Unable to fetch chunk")
+    }
+
+    async fn get_anchor(&self, peer: SocketAddr) -> eyre::Result<BlockHash> {
+        Ok(self
+            .make_request::<AnchorResponse, _>(peer, Method::GET, "/anchor", None::<&()>)
+            .await?
+            .ok_or_eyre("Unable to fetch anchor")?
+            .block_hash)
     }
 }

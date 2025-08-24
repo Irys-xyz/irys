@@ -19,5 +19,5 @@ pub async fn anchor_route(state: web::Data<ApiState>) -> HttpResponse {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AnchorResponse {
-    block_hash: BlockHash,
+    pub block_hash: BlockHash,
 }
