@@ -36,7 +36,7 @@ async fn send_block_to_block_tree(
 // This test creates a malicious block producer that includes a data transaction with insufficient perm_fee.
 // The assertion will fail (block will be discarded) because data transactions must have perm_fee >= expected amount.
 #[test_log::test(actix_web::test)]
-async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
+async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub malicious_tx: DataTransactionHeader,

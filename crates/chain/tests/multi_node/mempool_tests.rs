@@ -789,7 +789,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// mine a block on C, assert that all reorgd txs are present
 
 #[actix_web::test]
-async fn heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
+async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
