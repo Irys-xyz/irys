@@ -235,12 +235,22 @@ pub async fn get_tx_is_promoted(
         .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
         .unwrap();
 
-    if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
-        //read its ingressproof(s)
-        if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-            assert_eq!(proof.proof.data_root, tx_header.data_root);
-            return Ok(web::Json(true));
-        };
+    let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
+        err: "Unable to read result from oneshot".to_owned(),
+    })?;
+
+    let tx_header = oneshot_res
+        .first()
+        .and_then(|opt| opt.as_ref())
+        .ok_or_else(|| ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: "Unable to find tx".to_owned(),
+        })?;
+
+    // Read its ingress proof
+    if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+        assert_eq!(proof.proof.data_root, tx_header.data_root);
+        return Ok(web::Json(true));
     };
 
     Ok(web::Json(false))
