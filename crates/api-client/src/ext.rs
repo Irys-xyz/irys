@@ -105,7 +105,7 @@ impl ApiClientExt for IrysApiClient {
                 data_size: tx.header.data_size,
                 data_path: Base64(proof.proof.clone()),
                 bytes: Base64(data),
-                tx_offset: TxChunkOffset::from(idx as u32),
+                tx_offset: TxChunkOffset::from(std::convert::TryInto::<u32>::try_into(idx)?),
             };
             let now = Instant::now();
             let _response = self
@@ -136,7 +136,7 @@ impl ApiClientExt for IrysApiClient {
             {
                 return Ok(());
             }
-            sleep(Duration::from_secs(1)).await;
+            sleep(Duration::from_millis(200)).await;
         }
 
         Err(eyre::eyre!(

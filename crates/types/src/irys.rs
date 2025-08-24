@@ -210,14 +210,17 @@ impl IrysSigner {
         let proofs = resolve_proofs(root, None)?;
 
         // Error if the last chunk or proof is zero length.
-        let last_chunk = chunks.last().unwrap();
+        let last_chunk = chunks.last().expect("Unable to get last chunk");
         if last_chunk.max_byte_range == last_chunk.min_byte_range {
             return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
         Ok(DataTransaction {
             header: DataTransactionHeader {
-                data_size: chunks.last().unwrap().max_byte_range as u64,
+                data_size: chunks
+                    .last()
+                    .expect("Unable to get last chunk")
+                    .max_byte_range as u64,
                 data_root,
                 ..Default::default()
             },

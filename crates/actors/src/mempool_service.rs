@@ -8,7 +8,6 @@ pub mod pledge_provider;
 
 pub use chunks::*;
 pub use facade::*;
-use itertools::Itertools as _;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
