@@ -1,6 +1,6 @@
 use alloy_eips::BlockId;
 use alloy_primitives::U256;
-use base58::ToBase58 as _;
+
 use irys_types::Address;
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
@@ -61,9 +61,7 @@ where
             .inspect_err(|e| {
                 warn!(
                     "Error getting balance for {}@{:?} - {:?}",
-                    &address.0.to_base58(),
-                    &block_id,
-                    &e
+                    &address, &block_id, &e
                 )
             })
             .unwrap_or(irys_types::U256::zero())

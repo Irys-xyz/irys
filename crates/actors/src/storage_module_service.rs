@@ -32,6 +32,7 @@ use crate::{
 pub enum StorageModuleServiceMessage {
     PartitionAssignmentsUpdated {
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
+        update_height: u64,
     },
 }
 
@@ -78,13 +79,15 @@ impl StorageModuleServiceInner {
         match msg {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos,
-            } => self.handle_partition_assignments_update(storage_module_infos),
+                update_height,
+            } => self.handle_partition_assignments_update(storage_module_infos, update_height),
         }
     }
 
     fn handle_partition_assignments_update(
         &mut self,
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
+        update_height: u64,
     ) -> eyre::Result<()> {
         let span = Span::current();
         let _span = span.enter();
@@ -97,11 +100,15 @@ impl StorageModuleServiceInner {
 
         for sm_info in storage_module_infos.iter() {
             // Get the existing StorageModule
-            let existing = &current_modules[sm_info.id];
+            // TODO: this fix works and we don't know why :)
+            let existing = current_modules
+                .iter()
+                .find(|sm| sm.id == sm_info.id)
+                .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &current_modules, &storage_module_infos));
 
             // Did this storage module get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
-                existing.assign_partition(sm_info.partition_assignment.unwrap());
+                existing.assign_partition(sm_info.partition_assignment.unwrap(), update_height);
                 // Record this storage module as updated
                 updated_modules.push(existing.clone());
 
@@ -149,7 +156,7 @@ impl StorageModuleServiceInner {
                 {
                     // Update the storage modules partition assignment (and packing params toml)
                     // to match ledger/capacity reassignment
-                    existing.assign_partition(info_pa);
+                    existing.assign_partition(info_pa, update_height);
 
                     // Record this storage module as updated
                     updated_modules.push(existing.clone());

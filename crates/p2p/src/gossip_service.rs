@@ -8,7 +8,7 @@
 )]
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
-use crate::server_data_handler::GossipServerDataHandler;
+use crate::gossip_data_handler::GossipDataHandler;
 use crate::types::InternalGossipError;
 use crate::{
     cache::GossipCache,
@@ -26,7 +26,6 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
-use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
@@ -156,11 +155,14 @@ impl P2PService {
         listener: TcpListener,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadCache,
-        vdf_state: VdfStateReadonly,
         config: Config,
         service_senders: ServiceSenders,
         chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
-    ) -> GossipResult<(ServiceHandleWithShutdownSignal, Arc<BlockPool<B, M>>)>
+    ) -> GossipResult<(
+        ServiceHandleWithShutdownSignal,
+        Arc<BlockPool<B, M>>,
+        Arc<GossipDataHandler<M, B, A>>,
+    )>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
@@ -176,14 +178,13 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
-            vdf_state,
             config,
             service_senders,
         );
 
         let arc_pool = Arc::new(block_pool);
 
-        let server_data_handler = GossipServerDataHandler {
+        let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
             block_pool: Arc::clone(&arc_pool),
             api_client,
@@ -193,8 +194,8 @@ impl P2PService {
             sync_state: self.sync_state.clone(),
             span: Span::current(),
             execution_payload_cache: execution_payload_provider,
-        };
-        let server = GossipServer::new(server_data_handler, peer_list.clone());
+        });
+        let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 
         let server = server.run(listener)?;
         let server_handle = server.handle();
@@ -214,7 +215,7 @@ impl P2PService {
 
         debug!("Started gossip service");
 
-        Ok((gossip_service_handle, arc_pool))
+        Ok((gossip_service_handle, arc_pool, gossip_data_handler))
     }
 
     async fn broadcast_data(
