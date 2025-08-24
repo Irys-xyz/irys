@@ -1,6 +1,7 @@
+use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::mempool_service::MempoolFacade;
+use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
@@ -10,6 +11,7 @@ use irys_types::{
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -51,6 +53,9 @@ impl From<GossipError> for ChainSyncError {
             GossipError::CommitmentValidation(commit_err) => {
                 Self::Network(format!("Commitment validation error: {}", commit_err))
             }
+            GossipError::PeerNetwork(peer_network_err) => {
+                Self::Network(format!("Peer network error: {}", peer_network_err))
+            }
         }
     }
 }
@@ -79,13 +84,19 @@ pub enum SyncChainServiceMessage {
 
 /// Inner service containing the sync logic
 #[derive(Debug, Clone)]
-pub struct ChainSyncServiceInner<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> {
+pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> {
     sync_state: ChainSyncState,
-    api_client: T,
+    api_client: A,
     peer_list: PeerList,
-    config: irys_types::Config,
+    config: Config,
     block_index: BlockIndexReadGuard,
     block_pool: Arc<BlockPool<B, M>>,
+    /// This field signifies when the sync task is already spawned, but the sync has not started yet.
+    ///  The time gap between spawning the task and starting the sync can be significant. The node
+    ///  needs to fetch the tip of the block index from the network to figure out how
+    ///  much behind the network we are, if at all.
+    is_sync_task_spawned: Arc<AtomicBool>,
+    gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -129,6 +140,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         config: irys_types::Config,
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
+        gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -137,18 +149,20 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             config,
             block_index,
             block_pool,
+            gossip_data_handler,
         )
     }
 }
 
-impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<T, B, M> {
+impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<A, B, M> {
     pub fn new_with_client(
         sync_state: ChainSyncState,
-        api_client: T,
+        api_client: A,
         peer_list: PeerList,
         config: irys_types::Config,
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
+        gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Self {
         Self {
             sync_state,
@@ -157,11 +171,35 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             config,
             block_index,
             block_pool,
+            is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
+            gossip_data_handler,
         }
     }
 
     /// Perform a sync operation
-    async fn spawn_chain_sync_task(&self, response: Option<oneshot::Sender<ChainSyncResult<()>>>) {
+    async fn spawn_chain_sync_task(
+        &self,
+        response: Option<oneshot::Sender<ChainSyncResult<()>>>,
+        is_initial_sync: bool,
+    ) {
+        let is_already_syncing = !is_initial_sync && self.sync_state.is_syncing();
+        let is_task_spawned_but_has_not_started_syncing_yet =
+            self.is_sync_task_spawned.load(Ordering::Relaxed);
+
+        if is_already_syncing || is_task_spawned_but_has_not_started_syncing_yet {
+            debug!("Sync task: Sync already in progress, skipping the new sync request");
+            if let Some(response_sender) = response {
+                if let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
+                    "Sync already in progress".to_string(),
+                ))) {
+                    error!("Failed to send the sync response: {:?}", e);
+                }
+            }
+            return;
+        }
+
+        self.is_sync_task_spawned.store(true, Ordering::Relaxed);
+
         let start_sync_from_height = self.block_index.read().latest_height();
         // Clear any pending blocks from the cache
         self.block_pool.block_cache_guard().clear().await;
@@ -170,6 +208,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
         let api_client = self.api_client.clone();
+        let gossip_data_handler = self.gossip_data_handler.clone();
+        let is_sync_task_spawned = self.is_sync_task_spawned.clone();
 
         tokio::spawn(async move {
             let res = sync_chain(
@@ -180,8 +220,11 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     .try_into()
                     .expect("Expected to be able to convert u64 to usize"),
                 &config,
+                gossip_data_handler,
             )
             .await;
+
+            is_sync_task_spawned.store(false, Ordering::Relaxed);
 
             match &res {
                 Ok(()) => info!("Sync task completed successfully"),
@@ -209,11 +252,11 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         if let Some(orphaned_block) = maybe_orphaned_block {
             info!(
                 "Start processing orphaned ancestor block: {:?}",
-                orphaned_block.block_hash
+                orphaned_block.header.block_hash
             );
 
             self.block_pool
-                .process_block(orphaned_block, false)
+                .process_block(orphaned_block.header, orphaned_block.is_fast_tracking)
                 .await
                 .map_err(|e| ChainSyncError::Internal(format!("Block processing error: {:?}", e)))
         } else {
@@ -257,30 +300,23 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_hash: BlockHash,
     ) -> Result<(), ChainSyncError> {
         self.block_pool.mark_block_as_requested(block_hash).await;
-        match self
-            .peer_list
-            .request_block_from_the_network(
-                block_hash,
-                self.sync_state.is_syncing_from_a_trusted_peer(),
-            )
+        if let Err(err) = self
+            .gossip_data_handler
+            .pull_and_process_block(block_hash, self.sync_state.is_trusted_sync())
             .await
         {
-            Ok(()) => {
-                debug!(
-                    "Orphan service: Requested block {:?} from the network",
-                    block_hash
-                );
-                Ok(())
-            }
-            Err(error) => {
-                error!("Error while trying to fetch parent block {:?}: {:?}. Removing the block from the pool", block_hash, error);
-                self.block_pool.remove_requested_block(&block_hash).await;
-                self.block_pool.remove_block_from_cache(&block_hash).await;
-                Err(ChainSyncError::Internal(format!(
-                    "Network error: {:?}",
-                    error
-                )))
-            }
+            error!(
+                "Failed to pull and process block {:?}: {:?}",
+                block_hash, err
+            );
+            self.block_pool.remove_requested_block(&block_hash).await;
+            self.block_pool.remove_block_from_cache(&block_hash).await;
+            Err(ChainSyncError::Internal(format!(
+                "Network error: {:?}",
+                err
+            )))
+        } else {
+            Ok(())
         }
     }
 }
@@ -366,7 +402,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
                 self.inner
-                    .spawn_chain_sync_task(Some(response_sender))
+                    .spawn_chain_sync_task(Some(response_sender), true)
                     .await;
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
@@ -410,12 +446,6 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
     }
 
     async fn handle_periodic_sync_check(&self) {
-        // Skip if already syncing
-        if self.inner.sync_state.is_syncing() {
-            debug!("Periodic sync check: Already syncing, skipping");
-            return;
-        }
-
         debug!("Starting a periodic sync check routine");
         // Check if we're behind the network
         match is_local_index_is_behind_trusted_peers(
@@ -428,7 +458,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None).await;
+                self.inner.spawn_chain_sync_task(None, false).await;
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");
@@ -438,19 +468,20 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
                     e
                 );
-                self.inner.spawn_chain_sync_task(None).await;
+                self.inner.spawn_chain_sync_task(None, false).await;
             }
         }
     }
 }
 
 #[instrument(skip_all, err)]
-async fn sync_chain(
+async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     sync_state: ChainSyncState,
     api_client: impl ApiClient,
     peer_list: &PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
+    gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
 ) -> ChainSyncResult<()> {
     let node_mode = config.node_config.mode;
     let genesis_peer_discovery_timeout_millis =
@@ -505,6 +536,7 @@ async fn sync_chain(
             }
         };
     } else {
+        sync_state.set_is_syncing(true);
         peer_list.wait_for_active_peers().await;
     }
 
@@ -559,46 +591,127 @@ async fn sync_chain(
     if block_queue.is_empty() {
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
+        sync_state.finish_sync();
+        return Ok(());
+    } else {
+        sync_state.set_is_syncing(true);
     }
 
     while let Some(block) = block_queue.pop_front() {
         if sync_state.is_queue_full() {
             debug!("Sync task: Block queue is full, waiting for an empty slot");
-            sync_state.wait_for_an_empty_queue_slot().await;
-        }
 
-        let peer_list_clone = peer_list.clone();
-        let sync_state_clone = sync_state.clone();
-        let block_hash = block.block_hash;
+            // Retry logic for wait_for_an_empty_queue_slot
+            let retry_attempts = 3;
+            let mut wait_success = false;
 
-        tokio::spawn(async move {
-            debug!(
-                "Sync task: Requesting block {:?} (sync height is {}) from the network",
-                block_hash,
-                sync_state_clone.sync_target_height()
-            );
-            sync_state_clone.increment_sync_target_height();
-            match peer_list_clone
-                .request_block_from_the_network(block_hash, sync_state_clone.is_trusted_sync())
-                .await
-            {
-                Ok(()) => {
-                    info!(
-                        "Sync task: Successfully requested block {:?} (sync height is {}) from the network",
-                        block_hash,
-                        sync_state_clone.sync_target_height()
-                    );
-                }
-                Err(err) => {
-                    error!(
-                        "Sync task: Failed to request block {:?} (height {}) from the network: {}",
-                        block_hash,
-                        sync_state_clone.sync_target_height(),
-                        err
-                    );
+            for attempt in 1..=retry_attempts {
+                debug!("Sync task: Wait attempt {} for empty queue slot", attempt);
+
+                match sync_state.wait_for_an_empty_queue_slot().await {
+                    Ok(()) => {
+                        debug!(
+                            "Sync task: Queue slot became available on attempt {}",
+                            attempt
+                        );
+                        wait_success = true;
+                        break;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Sync task: Timeout on attempt {} waiting for queue slot",
+                            attempt
+                        );
+
+                        if attempt < retry_attempts {
+                            // Try to request the block at height = last synced + 1 to trigger processing
+                            let retry_height = sync_state.highest_processed_block() + 1;
+                            debug!("Sync task: Attempting to request block at height {} to trigger processing", retry_height);
+
+                            match get_block_index(
+                                peer_list,
+                                &api_client,
+                                retry_height,
+                                1, // Just get one block
+                                3, // 3 retries for the network call
+                                fetch_index_from_the_trusted_peer,
+                            )
+                            .await
+                            {
+                                Ok(retry_index) if !retry_index.is_empty() => {
+                                    let retry_block = &retry_index[0];
+                                    debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
+
+                                    // Try to reprocess last prevalidated block
+                                    match gossip_data_handler
+                                        .pull_and_process_block(
+                                            retry_block.block_hash,
+                                            sync_state.is_syncing_from_a_trusted_peer(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
+                                        }
+                                        Err(e) => {
+                                            warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    warn!("Sync task: Retry attempt returned empty index for height {}", retry_height);
+                                }
+                                Err(e) => {
+                                    warn!("Sync task: Failed to get retry block index for height {}: {}", retry_height, e);
+                                }
+                            }
+
+                            // Wait a bit before next retry
+                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                        }
+                    }
                 }
             }
-        }.in_current_span());
+
+            if !wait_success {
+                error!("Sync task: All wait attempts failed, exiting sync");
+                return Err(ChainSyncError::Internal(
+                    "Failed to get queue slot after timeout and retries".to_string(),
+                ));
+            }
+        }
+
+        let sync_state_clone = sync_state.clone();
+        let data_handler = gossip_data_handler.clone();
+        let block_hash = block.block_hash;
+
+        tokio::spawn(
+            async move {
+                debug!(
+                    "Sync task: Requesting block {:?} (sync height is {}) from the network",
+                    block_hash,
+                    sync_state_clone.sync_target_height()
+                );
+                sync_state_clone.increment_sync_target_height();
+                match data_handler
+                    .pull_and_process_block(
+                        block_hash,
+                        sync_state_clone.is_syncing_from_a_trusted_peer(),
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        debug!("Sync task: Successfully processed block {:?}", block_hash);
+                    }
+                    Err(e) => {
+                        error!("Sync task: Failed to process block {:?}: {}", block_hash, e);
+                        // Don't need to retry here, the code at the beginning of the loop will handle it
+                        // by requesting the block again if needed
+                    }
+                }
+            }
+            .in_current_span(),
+        );
 
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
@@ -875,14 +988,15 @@ mod tests {
     mod catch_up_task {
         use super::*;
         use crate::peer_network_service::PeerNetworkService;
+        use crate::tests::util::data_handler_stub;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, NodeConfig, PeerAddress, PeerListItem,
-            PeerNetworkSender, PeerScore,
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -902,17 +1016,26 @@ mod tests {
             let block_requests_clone = block_requests.clone();
             let fake_gossip_server = FakeGossipServer::new();
             let sync_state_clone = sync_state.clone();
-            fake_gossip_server.set_on_block_data_request(move |block_hash| {
-                let mut block_requests = block_requests.lock().unwrap();
-                let requests_len = block_requests.len();
-                block_requests.push(block_hash);
+            fake_gossip_server.set_on_pull_data_request(move |data_request| {
+                match data_request {
+                    GossipDataRequest::ExecutionPayload(_) => None,
+                    GossipDataRequest::Block(block_hash) => {
+                        info!("Fake server pull data request: {block_hash:?}");
+                        let mut block_requests = block_requests.lock().unwrap();
+                        let requests_len = block_requests.len();
+                        block_requests.push(block_hash);
 
-                // Simulating one false response so the block gets requested again
-                if requests_len == 0 {
-                    false
-                } else {
-                    sync_state_clone.mark_processed(start_from + requests_len);
-                    true
+                        // Simulating one false response so the block gets requested again
+                        if requests_len == 0 {
+                            None
+                        } else {
+                            sync_state_clone.mark_processed(start_from + requests_len);
+                            Some(GossipData::Block(Arc::new(
+                                IrysBlockHeader::new_mock_header(),
+                            )))
+                        }
+                    }
+                    GossipDataRequest::Chunk(_) => None,
                 }
             });
             let fake_gossip_address = fake_gossip_server.spawn();
@@ -936,7 +1059,7 @@ mod tests {
                 let calls_len = calls_ref.len();
                 calls_ref.push(query);
 
-                // Simulate process needing to make two calls
+                // Simulate a process needing to make two calls
                 if calls_len == 0 {
                     Ok(vec![BlockIndexItem {
                         block_hash: BlockHash::repeat_byte(1),
@@ -959,7 +1082,7 @@ mod tests {
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
             let peer_list_service = PeerNetworkService::new_with_custom_api_client(
-                db,
+                db.clone(),
                 &config,
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
@@ -985,6 +1108,15 @@ mod tests {
                 true,
             );
 
+            let data_handler = data_handler_stub(
+                &config,
+                &peer_list_guard,
+                db.clone(),
+                api_client_stub.clone(),
+                sync_state.clone(),
+            )
+            .await;
+
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
@@ -994,6 +1126,7 @@ mod tests {
                 &peer_list_guard,
                 10,
                 &config,
+                data_handler,
             )
             .await
             .expect("to finish catching up");
@@ -1066,7 +1199,7 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let peer_list_service = PeerNetworkService::new_with_custom_api_client(
-                db,
+                db.clone(),
                 &config,
                 api_client_stub.clone(),
                 reth_mock_addr.clone(),
@@ -1099,6 +1232,15 @@ mod tests {
                 true,
             );
 
+            let data_handler = data_handler_stub(
+                &config,
+                &peer_list,
+                db,
+                api_client_stub.clone(),
+                sync_state.clone(),
+            )
+            .await;
+
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
@@ -1108,6 +1250,7 @@ mod tests {
                 &peer_list,
                 start_from,
                 &config,
+                data_handler,
             )
             .await
             .expect("to finish catching up");

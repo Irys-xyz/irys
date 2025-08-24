@@ -2,8 +2,11 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use irys_actors::mempool_service::TxIngressError;
-use irys_actors::{async_trait, sha, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+use irys_actors::{
+    async_trait, mempool_service::TxIngressError, reth_ethereum_primitives,
+    shadow_tx_generator::PublishLedgerWithTxs, shadow_tx_generator::RollingHash, BlockProdStrategy,
+    BlockProducerInner, ProductionStrategy,
+};
 use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -12,8 +15,11 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, IrysBlockHeader, NodeConfig};
-use irys_types::{IrysTransactionCommon as _, H256};
+use irys_types::{
+    irys::IrysSigner, storage_pricing::Amount, Address, CommitmentTransaction,
+    DataTransactionHeader, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
+};
+use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
 use reth::{
     providers::{
@@ -21,7 +27,7 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -33,7 +39,7 @@ use crate::utils::{
 // EVM test constants
 const EVM_GAS_PRICE: u128 = 20_000_000_000; // 20 gwei
 const EVM_GAS_LIMIT: u64 = 21_000;
-const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::from_limbs([1, 0, 0, 0]);
+const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::ONE;
 
 // Test account balances
 const ZERO_BALANCE: U256 = U256::ZERO;
@@ -1066,37 +1072,46 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 // A new block will not be built on the invalid block.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
+    // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
 
-    #[async_trait::async_trait(?Send)]
+    #[async_trait::async_trait]
     impl BlockProdStrategy for EvilBlockProdStrategy {
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
         }
 
-        fn create_poa_data(
+        async fn create_evm_block(
             &self,
-            solution: &irys_types::block_production::SolutionContext,
-            ledger_id: Option<u32>,
-        ) -> eyre::Result<(irys_types::PoaData, H256)> {
-            // Create an invalid PoA chunk that doesn't match the actual solution
-            let invalid_chunk = vec![0xFF; 256 * 1024]; // Fill with invalid data
-            let poa_chunk = irys_types::Base64(invalid_chunk);
-            // hash is valid so that prevalidation succeeds
-            let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
+            prev_block_header: &IrysBlockHeader,
+            prev_evm_block: &reth_ethereum_primitives::Block,
+            commitment_txs_to_bill: &[CommitmentTransaction],
+            submit_txs: &[DataTransactionHeader],
+            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            timestamp_ms: u128,
+            expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
+        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
+            // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
+            let mut submit_txs = submit_txs.to_vec();
+            if submit_txs.len() >= 2 {
+                submit_txs.reverse();
+            }
 
-            let poa = irys_types::PoaData {
-                tx_path: solution.tx_path.clone().map(irys_types::Base64),
-                data_path: solution.data_path.clone().map(irys_types::Base64),
-                chunk: Some(poa_chunk),
-
-                ledger_id,
-                partition_chunk_offset: solution.chunk_offset,
-                partition_hash: solution.partition_hash,
-            };
-            Ok((poa, poa_chunk_hash))
+            self.prod
+                .create_evm_block(
+                    prev_block_header,
+                    prev_evm_block,
+                    commitment_txs_to_bill,
+                    &submit_txs,
+                    data_txs_with_proofs,
+                    reward_amount,
+                    timestamp_ms,
+                    expired_ledger_fees,
+                )
+                .await
         }
     }
 
@@ -1113,6 +1128,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     let node = IrysNodeTest::new_genesis(node.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
+
     // disable validation for this test
     node.node_ctx.set_validation_enabled(false);
 
@@ -1123,7 +1139,19 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         },
     };
 
-    // Produce block with invalid PoA
+    // Seed at least two Submit-ledger txs so reversing their order tampers the EVM payload
+    let data_tx1 = node
+        .post_data_tx(irys_types::H256::zero(), vec![1_u8; 64], &peer_signer)
+        .await;
+    node.wait_for_mempool(data_tx1.header.id, seconds_to_wait)
+        .await?;
+    let data_tx2 = node
+        .post_data_tx(irys_types::H256::zero(), vec![2_u8; 64], &peer_signer)
+        .await;
+    node.wait_for_mempool(data_tx2.header.id, seconds_to_wait)
+        .await?;
+
+    // Produce block with valid PoA/difficulty but invalid EVM payload (subit txs tampered to not match shadow tx order)
     let (evil_block, _eth_payload) = evil_strategy
         .fully_produce_new_block(solution_context(&node.node_ctx).await?)
         .await?

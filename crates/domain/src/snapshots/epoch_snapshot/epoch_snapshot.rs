@@ -1,6 +1,5 @@
 use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
-use base58::ToBase58 as _;
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
@@ -21,7 +20,7 @@ use std::path::PathBuf;
 use tracing::{debug, error, trace, warn};
 
 /// Temporarily track all of the ledger definitions inside the epoch service actor
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EpochSnapshot {
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Ledgers,
@@ -43,23 +42,8 @@ pub struct EpochSnapshot {
     pub previous_epoch_block: Option<IrysBlockHeader>,
     /// Partition hashes that expired with this snapshot
     pub expired_partition_hashes: Vec<PartitionHash>,
-}
-
-impl Clone for EpochSnapshot {
-    fn clone(&self) -> Self {
-        Self {
-            ledgers: self.ledgers.clone(),
-            partition_assignments: self.partition_assignments.clone(),
-            all_active_partitions: self.all_active_partitions.clone(),
-            unassigned_partitions: self.unassigned_partitions.clone(),
-            storage_submodules_config: self.storage_submodules_config.clone(),
-            config: self.config.clone(),
-            commitment_state: self.commitment_state.clone(),
-            epoch_block: self.epoch_block.clone(),
-            previous_epoch_block: self.previous_epoch_block.clone(),
-            expired_partition_hashes: self.expired_partition_hashes.clone(),
-        }
-    }
+    /// Epoch block height this snapshot was computed for
+    pub height: u64,
 }
 
 impl Default for EpochSnapshot {
@@ -77,6 +61,7 @@ impl Default for EpochSnapshot {
             epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
             expired_partition_hashes: Vec::new(),
+            height: IrysBlockHeader::default().height,
         }
     }
 }
@@ -113,6 +98,7 @@ impl EpochSnapshot {
             epoch_block: genesis_block.clone(),
             previous_epoch_block: None,
             expired_partition_hashes: Vec::new(),
+            height: genesis_block.height,
         };
 
         match new_self.perform_epoch_tasks(&None, &genesis_block, commitments) {
@@ -184,8 +170,8 @@ impl EpochSnapshot {
                 if !commitments.iter().any(|c| c.id == *txid) {
                     return Err(eyre::eyre!(
                         "Missing commitment transaction {} for block {}",
-                        txid.0.to_base58(),
-                        block_header.block_hash.0.to_base58()
+                        txid,
+                        block_header.block_hash
                     ));
                 }
             }
@@ -196,8 +182,8 @@ impl EpochSnapshot {
                 if !commitment_ledger.tx_ids.contains(&commitment.id) {
                     return Err(eyre::eyre!(
                         "Extra commitment transaction {} not referenced in block {} ledger",
-                        commitment.id.0.to_base58(),
-                        block_header.block_hash.0.to_base58()
+                        commitment.id,
+                        block_header.block_hash
                     ));
                 }
             }
@@ -206,7 +192,7 @@ impl EpochSnapshot {
             if !commitments.is_empty() {
                 return Err(eyre::eyre!(
                     "Block {} has no commitment ledger, but {} commitments were provided",
-                    block_header.block_hash.0.to_base58(),
+                    block_header.block_hash,
                     commitments.len()
                 ));
             }
@@ -235,6 +221,8 @@ impl EpochSnapshot {
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
 
+        self.height = new_epoch_block.height;
+
         // Skip previous block validation for genesis block (height 0)
         if new_epoch_block.height <= self.config.consensus.epoch.num_blocks_in_epoch {
             // Continue with validation logic for commitments
@@ -258,7 +246,7 @@ impl EpochSnapshot {
 
         debug!(
             height = new_epoch_block.height,
-            block_hash = %new_epoch_block.block_hash.0.to_base58(),
+            block_hash = %new_epoch_block.block_hash,
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
@@ -536,8 +524,8 @@ impl EpochSnapshot {
             let next_part_hash = H256(hash_sha256(&prev_partition_hash.0).unwrap());
             trace!(
                 "Adding partition with hash: {} (prev: {})",
-                next_part_hash.0.to_base58(),
-                prev_partition_hash.0.to_base58()
+                next_part_hash,
+                prev_partition_hash
             );
             self.all_active_partitions.push(next_part_hash);
             // All partition_hashes begin as unassigned capacity partitions
@@ -583,9 +571,7 @@ impl EpochSnapshot {
     ) {
         debug!(
             "Assigning partition {} to slot {} of ledger {:?}",
-            &partition_hash.0.to_base58(),
-            &slot_index,
-            &ledger
+            &partition_hash, &slot_index, &ledger
         );
         if let Some(mut assignment) = self
             .partition_assignments
@@ -898,7 +884,7 @@ impl EpochSnapshot {
 
         // Collect existing storage module packing info
         let mut sm_packing_info = self.collect_packing_info(paths);
-        debug!("{:#?}", sm_packing_info);
+        debug!("Packing info: {:#?}", &sm_packing_info);
 
         let mut module_infos = Vec::new();
 
@@ -932,11 +918,18 @@ impl EpochSnapshot {
             num_chunks,
         );
 
-        // STEP 4: Unassigned
-        for (original_idx, (path, _)) in sm_packing_info
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, params))| params.is_none())
+        // STEP 4: Unassigned & assignments from the future
+        for (original_idx, (path, _)) in
+            sm_packing_info
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, params))| {
+                    params.is_none()
+                    // if an assignment exists, and is from the future, we pass it through
+                        || params.is_some_and(|pa| {
+                            pa.last_updated_height.unwrap_or(self.height + 1) > self.height
+                        })
+                })
         {
             module_infos.push(StorageModuleInfo {
                 id: original_idx,
@@ -1010,6 +1003,7 @@ impl EpochSnapshot {
                 partition_hash: Some(pa.partition_hash),
                 ledger: pa.ledger_id,
                 slot: pa.slot_index,
+                last_updated_height: Some(self.height),
             });
         }
     }
@@ -1098,6 +1092,7 @@ mod tests {
             epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
             expired_partition_hashes: Vec::new(),
+            height: 0,
         };
 
         // Allocate four slots in the submit ledger so `slot_count()` returns 4.

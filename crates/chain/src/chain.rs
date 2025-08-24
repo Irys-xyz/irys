@@ -8,6 +8,7 @@ use irys_actors::block_discovery::{
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
 use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
+use irys_actors::pledge_provider::MempoolPledgeProvider;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacadeImpl,
     block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
@@ -40,8 +41,8 @@ use irys_domain::{
 };
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
-    P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
-    SyncChainServiceMessage,
+    GossipDataHandler, P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal,
+    SyncChainServiceFacade, SyncChainServiceMessage,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
@@ -110,7 +111,7 @@ pub struct IrysNodeCtx {
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
-    pub mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
+    pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub sync_service_facade: SyncChainServiceFacade,
 }
 
@@ -979,11 +980,10 @@ impl IrysNode {
             .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
 
         // Create the MempoolPledgeProvider
-        let mempool_pledge_provider =
-            Arc::new(irys_actors::mempool_service::MempoolPledgeProvider::new(
-                mempool_state,
-                block_tree_guard.clone(),
-            ));
+        let mempool_pledge_provider = Arc::new(MempoolPledgeProvider::new(
+            mempool_state,
+            block_tree_guard.clone(),
+        ));
 
         // spawn the chunk migration service
         Self::init_chunk_migration_service(
@@ -1049,17 +1049,16 @@ impl IrysNode {
         // resolved once all actors are converted to tokio services, and BlockPool is moved into
         // domain
         let (chain_sync_tx, chain_sync_rx) = mpsc::unbounded_channel();
-        let (p2p_service_handle, block_pool) = p2p_service.run(
+        let (p2p_service_handle, block_pool, gossip_data_handler) = p2p_service.run(
             mempool_facade,
             block_discovery_facade.clone(),
-            irys_api_client::IrysApiClient::new(),
+            IrysApiClient::new(),
             task_exec,
             peer_list_guard.clone(),
             irys_db.clone(),
             gossip_listener,
             block_status_provider.clone(),
             execution_payload_cache,
-            vdf_state_readonly.clone(),
             config.clone(),
             service_senders.clone(),
             chain_sync_tx.clone(),
@@ -1153,6 +1152,7 @@ impl IrysNode {
             block_index_guard.clone(),
             runtime_handle.clone(),
             Arc::clone(&block_pool),
+            gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
         );
 
@@ -1594,6 +1594,9 @@ impl IrysNode {
         block_index_guard: BlockIndexReadGuard,
         runtime_handle: tokio::runtime::Handle,
         block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+        gossip_data_handler: Arc<
+            GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl, IrysApiClient>,
+        >,
         (tx, rx): (
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
@@ -1607,6 +1610,7 @@ impl IrysNode {
             config,
             block_index_guard,
             block_pool,
+            gossip_data_handler,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);
@@ -1619,10 +1623,11 @@ fn read_latest_block_data(
     block_index: &BlockIndex,
     irys_db: &DatabaseProvider,
 ) -> (u64, Arc<IrysBlockHeader>) {
+    // Read latest from the block index; if no entries, panic
     let latest_block_index = block_index
         .get_latest_item()
         .cloned()
-        .expect("the block index must have at least one entry");
+        .expect("block index must have at least one entry");
     let latest_block_height = block_index.latest_height();
     let latest_block = Arc::new(
         database::block_header_by_hash(
@@ -1720,7 +1725,7 @@ async fn stake_and_pledge(
     block_tree_guard: BlockTreeReadGuard,
     storage_modules_guard: StorageModulesReadGuard,
     latest_block_hash: BlockHash,
-    mempool_pledge_provider: Arc<irys_actors::mempool_service::MempoolPledgeProvider>,
+    mempool_pledge_provider: Arc<MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain

@@ -5,7 +5,7 @@
 )]
 use crate::types::GossipResult;
 use core::time::Duration;
-use irys_types::{Address, BlockHash, ChunkPathHash, GossipCacheKey, IrysTransactionId};
+use irys_types::{Address, BlockHash, ChunkPathHash, GossipCacheKey, IrysTransactionId, H256};
 use moka::sync::Cache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -16,22 +16,30 @@ const GOSSIP_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Tracks which peers have seen what data to avoid sending duplicates
 #[derive(Debug)]
-pub(crate) struct GossipCache {
+pub struct GossipCache {
     /// Maps data identifiers to a set of peer addresses that have seen the data
     chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<Address>>>>,
     transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<Address>>>>,
     blocks: Cache<BlockHash, Arc<RwLock<HashSet<Address>>>>,
     payloads: Cache<B256, Arc<RwLock<HashSet<Address>>>>,
+    ingress_proofs: Cache<H256, Arc<RwLock<HashSet<Address>>>>,
+}
+
+impl Default for GossipCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GossipCache {
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             chunks: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             transactions: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             blocks: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
             payloads: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
+            ingress_proofs: Cache::builder().time_to_live(GOSSIP_CACHE_TTL).build(),
         }
     }
 
@@ -51,6 +59,13 @@ impl GossipCache {
         transaction_id: &IrysTransactionId,
     ) -> GossipResult<bool> {
         Ok(self.transactions.contains_key(transaction_id))
+    }
+
+    pub(crate) fn seen_ingress_proof_from_any_peer(
+        &self,
+        ingress_proof_hash: &H256,
+    ) -> GossipResult<bool> {
+        Ok(self.ingress_proofs.contains_key(ingress_proof_hash))
     }
 
     /// Record that a peer has seen some data
@@ -100,6 +115,14 @@ impl GossipCache {
                 });
                 peer_set.write().unwrap().insert(miner_address);
             }
+            GossipCacheKey::IngressProof(proof_hash) => {
+                let peer_set = self.ingress_proofs.get(&proof_hash).unwrap_or_else(|| {
+                    let new_set = Arc::new(RwLock::new(HashSet::new()));
+                    self.ingress_proofs.insert(proof_hash, new_set.clone());
+                    new_set
+                });
+                peer_set.write().unwrap().insert(miner_address);
+            }
         }
         Ok(())
     }
@@ -127,6 +150,11 @@ impl GossipCache {
             GossipCacheKey::ExecutionPayload(evm_block_hash) => self
                 .payloads
                 .get(evm_block_hash)
+                .map(|arc| arc.read().unwrap().clone())
+                .unwrap_or_default(),
+            GossipCacheKey::IngressProof(proof_hash) => self
+                .ingress_proofs
+                .get(proof_hash)
                 .map(|arc| arc.read().unwrap().clone())
                 .unwrap_or_default(),
         };

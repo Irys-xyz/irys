@@ -1,6 +1,6 @@
 use crate::block_pool::BlockPoolError;
-use irys_actors::mempool_service::TxIngressError;
-use irys_types::CommitmentValidationError;
+use irys_actors::mempool_service::{IngressProofError, TxIngressError};
+use irys_types::{CommitmentValidationError, PeerNetworkError};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -22,11 +22,28 @@ pub enum GossipError {
     TransactionIsAlreadyHandled,
     #[error("Commitment validation error: {0}")]
     CommitmentValidation(#[from] CommitmentValidationError),
+    #[error(transparent)]
+    PeerNetwork(PeerNetworkError),
 }
 
 impl From<InternalGossipError> for GossipError {
     fn from(value: InternalGossipError) -> Self {
         Self::Internal(value)
+    }
+}
+
+impl From<IngressProofError> for GossipError {
+    fn from(value: IngressProofError) -> Self {
+        match value {
+            IngressProofError::InvalidSignature => {
+                Self::InvalidData(InvalidDataError::IngressProofSignature)
+            }
+            IngressProofError::DatabaseError => Self::Internal(InternalGossipError::Database),
+            IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            IngressProofError::UnstakedAddress => {
+                Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
+            }
+        }
     }
 }
 
@@ -68,6 +85,12 @@ impl From<TxIngressError> for GossipError {
     }
 }
 
+impl From<PeerNetworkError> for GossipError {
+    fn from(value: PeerNetworkError) -> Self {
+        Self::PeerNetwork(value)
+    }
+}
+
 impl GossipError {
     pub fn unknown<T: ToString + ?Sized>(error: &T) -> Self {
         Self::Internal(InternalGossipError::Unknown(error.to_string()))
@@ -96,6 +119,8 @@ pub enum InvalidDataError {
     InvalidBlockSignature,
     #[error("Execution payload hash mismatch")]
     ExecutionPayloadHashMismatch,
+    #[error("Invalid ingress proof signature")]
+    IngressProofSignature,
 }
 
 #[derive(Debug, Error, Clone)]

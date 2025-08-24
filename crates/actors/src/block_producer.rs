@@ -16,7 +16,6 @@ use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
 };
 use alloy_signer_local::LocalSigner;
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
@@ -200,7 +199,7 @@ impl BlockProducerService {
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
-                let solution_hash = solution.solution_hash.0.to_base58();
+                let solution_hash = solution.solution_hash;
                 info!(
                     solution_hash = %solution_hash,
                     vdf_step = solution.vdf_step,
@@ -226,7 +225,7 @@ impl BlockProducerService {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
                 if let Some((irys_block_header, eth_built_payload)) = &result {
                     info!(
-                        block_hash = %irys_block_header.block_hash.0.to_base58(),
+                        block_hash = %irys_block_header.block_hash,
                         block_height = irys_block_header.height,
                         "Block production completed successfully"
                     );
@@ -270,7 +269,7 @@ impl BlockProducerService {
 
     /// Internal method to produce a block without the non-Send trait
     #[tracing::instrument(skip_all, fields(
-        solution_hash = %solution.solution_hash.0.to_base58(),
+        solution_hash = %solution.solution_hash,
         vdf_step = solution.vdf_step,
         mining_address = %solution.mining_address
     ))]
@@ -279,7 +278,7 @@ impl BlockProducerService {
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
-            partition_hash = %solution.partition_hash.0.to_base58(),
+            partition_hash = %solution.partition_hash,
             chunk_offset = solution.chunk_offset,
             "Starting block production for solution"
         );
@@ -578,8 +577,14 @@ pub trait BlockProdStrategy {
             })?
             .map_err(|e| eyre!("Failed to build payload: {}", e))?;
 
+        let evm_block_hash = built_payload.block().hash();
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap();
+        let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
+            panic!(
+                "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
+                evm_block_hash, e
+            )
+        });
         let new_payload_result = beacon_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
@@ -620,7 +625,7 @@ pub trait BlockProdStrategy {
         let evm_block_hash = eth_built_payload.hash();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
+            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash);
             return Ok(None);
         }
 
@@ -801,20 +806,18 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block))
+            .handle_block(Arc::clone(&block), false)
             .await
         {
             Ok(()) => Ok(()),
             e @ Err(BlockDiscoveryError::InternalError(_)) => {
                 error!(
                     "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block.block_hash.0.to_base58(),
-                    &block.height,
-                    e
+                    &block.block_hash, &block.height, e
                 );
                 Err(eyre!(
                     "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block.block_hash.0.to_base58(),
+                    &block.block_hash,
                     &block.height,
                     e
                 ))

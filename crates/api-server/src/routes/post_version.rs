@@ -70,7 +70,12 @@ pub async fn post_version(
     }
 
     // Fetch peers and handle potential errors
-    let peers = state.get_known_peers();
+    let mut peers = state.get_known_peers();
+    // Cap the number of peers returned using configured limit
+    peers = cap_peers(
+        peers,
+        state.config.node_config.p2p_handshake.server_peer_list_cap,
+    );
 
     let peer_address = version_request.address;
     let mining_addr = version_request.mining_address;
@@ -109,4 +114,39 @@ pub async fn post_version(
     Ok(HttpResponse::Ok()
         .content_type(ContentType::json())
         .json(response))
+}
+
+// Helper to cap peers for handshake responses
+fn cap_peers(mut peers: Vec<irys_types::PeerAddress>, cap: usize) -> Vec<irys_types::PeerAddress> {
+    if peers.len() > cap {
+        peers.truncate(cap);
+    }
+    peers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::PeerAddress;
+
+    #[test]
+    fn caps_peers_to_limit() {
+        // Create more peers than the cap
+        let mut peers = Vec::new();
+        for _ in 0..100 {
+            peers.push(PeerAddress::default());
+        }
+        let capped = cap_peers(peers.clone(), 25);
+        assert_eq!(capped.len(), 25, "should truncate to requested cap");
+
+        let capped_zero = cap_peers(peers.clone(), 0);
+        assert_eq!(capped_zero.len(), 0, "zero cap should yield empty vec");
+
+        let capped_large = cap_peers(peers.clone(), 200);
+        assert_eq!(
+            capped_large.len(),
+            peers.len(),
+            "cap above length keeps all"
+        );
+    }
 }

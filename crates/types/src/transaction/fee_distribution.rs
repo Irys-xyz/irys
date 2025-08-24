@@ -154,7 +154,7 @@ impl PublishFeeCharges {
         .unwrap_or(U256::from(0));
 
         // Number of ingress proofs required from config
-        let num_ingress_proofs = config.number_of_ingress_proofs;
+        let num_ingress_proofs = config.number_of_ingress_proofs_total;
 
         // Calculate total ingress rewards for all proofs
         let ingress_proof_reward =
@@ -364,7 +364,7 @@ mod tests {
         // Set ingress proof fee to 5%
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        config.number_of_ingress_proofs = 3;
+        config.number_of_ingress_proofs_total = 3;
 
         let term_fee = U256::from(1000);
         let perm_fee = U256::from(10000);
@@ -447,7 +447,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        config.number_of_ingress_proofs = 3;
+        config.number_of_ingress_proofs_total = 3;
 
         let term_fee = U256::from(1000);
         let perm_fee = U256::from(100); // Too small to cover ingress rewards (150)
@@ -467,7 +467,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        config.number_of_ingress_proofs = 3;
+        config.number_of_ingress_proofs_total = 3;
 
         let term_fee = U256::from(1000);
         // Exactly equal to ingress rewards (150), no base storage cost

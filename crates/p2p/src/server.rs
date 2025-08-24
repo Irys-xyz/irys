@@ -3,7 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::{
-    server_data_handler::GossipServerDataHandler,
+    gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
     BlockPoolError,
 };
@@ -18,10 +18,11 @@ use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
     Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
-    IrysBlockHeader, PeerListItem, UnpackedChunk,
+    IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
@@ -31,7 +32,7 @@ where
     B: BlockDiscoveryFacade,
     A: ApiClient,
 {
-    data_handler: GossipServerDataHandler<M, B, A>,
+    data_handler: Arc<GossipDataHandler<M, B, A>>,
     peer_list: PeerList,
 }
 
@@ -56,7 +57,7 @@ where
     A: ApiClient,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: GossipServerDataHandler<M, B, A>,
+        gossip_server_data_handler: Arc<GossipDataHandler<M, B, A>>,
         peer_list: PeerList,
     ) -> Self {
         Self {
@@ -158,7 +159,7 @@ where
             let block_hash_string = gossip_request.data.block_hash;
             if let Err(error) = server
                 .data_handler
-                .handle_block_header_request(gossip_request, peer.address.api, source_socket_addr)
+                .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -287,6 +288,42 @@ where
         HttpResponse::Ok().finish()
     }
 
+    async fn handle_ingress_proof(
+        server: Data<Self>,
+        proof_json: web::Json<GossipRequest<IngressProof>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let data_root = proof_json.0.data.data_root;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
+                node_id, data_root
+            );
+            return HttpResponse::Forbidden().finish();
+        }
+        let gossip_request = proof_json.0;
+        let source_miner_address = gossip_request.miner_address;
+
+        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
+            Ok(peer_address) => peer_address,
+            Err(error_response) => return error_response,
+        };
+
+        if let Err(error) = server
+            .data_handler
+            .handle_ingress_proof(gossip_request)
+            .await
+        {
+            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            error!("Failed to send ingress proof: {}", error);
+            return HttpResponse::InternalServerError().finish();
+        }
+
+        debug!("Gossip data handled");
+        HttpResponse::Ok().finish()
+    }
+
     #[expect(
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
@@ -318,7 +355,7 @@ where
         };
     }
 
-    async fn handle_get_data(
+    async fn handle_data_request(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
@@ -360,6 +397,37 @@ where
         }
     }
 
+    async fn handle_pull_data(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequest<GossipDataRequest>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled()
+            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
+        {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
+            return HttpResponse::Forbidden().finish();
+        }
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, data_request.miner_address)
+        {
+            return error_response;
+        };
+
+        match server
+            .data_handler
+            .handle_get_data_sync(data_request.0)
+            .await
+        {
+            Ok(maybe_data) => HttpResponse::Ok().json(maybe_data),
+            Err(error) => {
+                error!("Failed to handle get data request: {}", error);
+                HttpResponse::InternalServerError().finish()
+            }
+        }
+    }
+
     /// Start the gossip server
     ///
     /// # Errors
@@ -381,11 +449,13 @@ where
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
                         .route("/block", web::post().to(Self::handle_block))
+                        .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
                         .route(
                             "/execution_payload",
                             web::post().to(Self::handle_execution_payload),
                         )
-                        .route("/get_data", web::post().to(Self::handle_get_data))
+                        .route("/get_data", web::post().to(Self::handle_data_request))
+                        .route("/pull_data", web::post().to(Self::handle_pull_data))
                         .route("/health", web::get().to(Self::handle_health_check)),
                 )
         })
