@@ -782,6 +782,7 @@ impl IrysNode {
                         latest_block_height,
                         shadow_tx_store,
                     )
+                    .in_current_span()
                     .await
                     .expect("to be able to start the reth node");
                     let service_set = service_set.await.expect("Service Set must be awaited");

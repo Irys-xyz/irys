@@ -3,7 +3,9 @@ use eyre::OptionExt as _;
 pub use irys_api_server::routes::block::BlockParam;
 use irys_api_server::routes::price::PriceInfo;
 pub use irys_types::CombinedBlockHeader;
-use irys_types::{Base64, DataLedger, DataTransaction, TxChunkOffset, UnpackedChunk, H256};
+use irys_types::{
+    Base64, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset, UnpackedChunk, H256,
+};
 use std::{
     net::SocketAddr,
     time::{Duration, Instant},
@@ -42,6 +44,14 @@ pub trait ApiClientExt: ApiClient {
         ledger: DataLedger,
         data_size: u64,
     ) -> eyre::Result<PriceInfo>;
+
+    async fn get_chunk(
+        &self,
+        peer: SocketAddr,
+        ledger: DataLedger,
+        data_root: DataRoot,
+        offset: u32, // data root relative offset
+    ) -> eyre::Result<ChunkFormat>;
 }
 
 #[async_trait::async_trait]
@@ -85,10 +95,11 @@ impl ApiClientExt for IrysApiClient {
         &self,
         peer: SocketAddr,
         tx: &DataTransaction,
-        mut data: impl Iterator<Item = eyre::Result<Vec<u8>>> + Send,
+        data: impl Iterator<Item = eyre::Result<Vec<u8>>> + Send,
     ) -> eyre::Result<()> {
-        for (idx, proof) in tx.proofs.iter().enumerate() {
-            let data = data.next().unwrap()?;
+        for (idx, data) in data.enumerate() {
+            let data = data?;
+            let proof = &tx.proofs[idx];
             let unpacked_chunk = UnpackedChunk {
                 data_root: tx.header.data_root,
                 data_size: tx.header.data_size,
@@ -150,5 +161,22 @@ impl ApiClientExt for IrysApiClient {
             )
             .await?;
         response.ok_or_eyre("unable to get price info")
+    }
+
+    async fn get_chunk(
+        &self,
+        peer: SocketAddr,
+        ledger_id: DataLedger,
+        data_root: DataRoot,
+        offset: u32, // data root relative offset
+    ) -> eyre::Result<ChunkFormat> {
+        self.make_request(
+            peer,
+            Method::GET,
+            format!("/chunk/data_root/{}/{data_root}/{offset}", ledger_id as u32).as_str(),
+            None::<&()>,
+        )
+        .await?
+        .ok_or_eyre("Unable to fetch chunk")
     }
 }

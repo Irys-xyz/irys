@@ -973,11 +973,11 @@ impl NodeConfig {
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
             },
-            trusted_peers: vec![PeerAddress {
+            trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
-            }],
+            } */],
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,

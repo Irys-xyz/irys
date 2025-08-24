@@ -211,35 +211,38 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
 
-        tokio::spawn(async move {
-            let res = sync_chain(
-                sync_state.clone(),
-                api_client,
-                &peer_list,
-                start_sync_from_height
-                    .try_into()
-                    .expect("Expected to be able to convert u64 to usize"),
-                &config,
-                gossip_data_handler,
-            )
-            .await;
+        tokio::spawn(
+            async move {
+                let res = sync_chain(
+                    sync_state.clone(),
+                    api_client,
+                    &peer_list,
+                    start_sync_from_height
+                        .try_into()
+                        .expect("Expected to be able to convert u64 to usize"),
+                    &config,
+                    gossip_data_handler,
+                )
+                .await;
 
-            is_sync_task_spawned.store(false, Ordering::Relaxed);
+                is_sync_task_spawned.store(false, Ordering::Relaxed);
 
-            match &res {
-                Ok(()) => info!("Sync task completed successfully"),
-                Err(e) => {
-                    error!("Sync task failed: {}", e);
-                    sync_state.finish_sync();
+                match &res {
+                    Ok(()) => info!("Sync task completed successfully"),
+                    Err(e) => {
+                        error!("Sync task failed: {}", e);
+                        sync_state.finish_sync();
+                    }
+                }
+
+                if let Some(response_sender) = response {
+                    if let Err(e) = response_sender.send(res) {
+                        error!("Failed to send the sync response: {:?}", e);
+                    }
                 }
             }
-
-            if let Some(response_sender) = response {
-                if let Err(e) = response_sender.send(res) {
-                    error!("Failed to send the sync response: {:?}", e);
-                }
-            }
-        });
+            .in_current_span(),
+        );
     }
 
     /// Process orphaned ancestor block - moved from OrphanBlockProcessingService
@@ -344,7 +347,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     .await
                     .expect("Sync service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+            .in_current_span(),
         );
 
         TokioServiceHandle {

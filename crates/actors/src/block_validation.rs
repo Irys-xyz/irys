@@ -1534,7 +1534,7 @@ pub async fn data_txs_are_valid(
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                 // (they're waiting for proofs to arrive)
-                if tx.ingress_proofs.is_none() {
+                if tx.ingress_proofs.is_some() {
                     tracing::warn!(
                         "Transaction {} in Submit ledger should not have ingress proofs",
                         tx.id

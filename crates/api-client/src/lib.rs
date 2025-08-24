@@ -3,7 +3,7 @@ use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, DataTransactionHeader,
     IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
 };
-use reqwest::{Client, StatusCode};
+pub use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -67,7 +67,7 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
 /// Real implementation of the API client that makes actual HTTP requests
 #[derive(Clone, Debug)]
 pub struct IrysApiClient {
-    client: Client,
+    pub client: Client,
 }
 
 impl Default for IrysApiClient {

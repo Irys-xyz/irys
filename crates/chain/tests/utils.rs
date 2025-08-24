@@ -284,6 +284,7 @@ pub struct IrysNodeTest<T = ()> {
     pub node_ctx: T,
     pub cfg: NodeConfig,
     pub temp_dir: TempDir,
+    pub name: Option<String>,
 }
 
 impl IrysNodeTest<()> {
@@ -311,23 +312,38 @@ impl IrysNodeTest<()> {
             cfg: config,
             temp_dir,
             node_ctx: (),
+            name: None,
         }
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+        let span = self.get_span();
+        let _enter = span.enter();
+
         let node = IrysNode::new(self.cfg).unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
             cfg: node_ctx.config.node_config.clone(),
             node_ctx,
             temp_dir: self.temp_dir,
+            name: self.name,
         }
     }
 
+    fn get_span(&self) -> tracing::Span {
+        match &self.name {
+            Some(name) => debug_span!("NODE", name = %name),
+            None => tracing::Span::none(),
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+
     pub async fn start_with_name(self, log_name: &str) -> IrysNodeTest<IrysNodeCtx> {
-        let span = debug_span!("NODE", name = %log_name);
-        let _enter = span.enter();
-        self.start().await
+        self.with_name(log_name).start().await
     }
 
     pub async fn start_and_wait_for_packing(
@@ -1402,6 +1418,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             node_ctx: (),
             cfg,
             temp_dir: self.temp_dir,
+            name: self.name,
         }
     }
 
