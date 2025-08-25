@@ -8,6 +8,7 @@ pub mod pledge_provider;
 
 pub use chunks::*;
 pub use facade::*;
+use tracing::instrument::WithSubscriber;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
@@ -132,6 +133,8 @@ pub enum MempoolServiceMessage {
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
     InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
     GetState(oneshot::Sender<AtomicMempoolState>),
+    /// Remove the set of txids from any blocklists (recent_invalid_txs)
+    RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
 }
 
 impl Inner {
@@ -239,9 +242,22 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+                MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
+                    let response_value = self.remove_from_blacklists(tx_ids).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
             }
             Ok(())
         })
+    }
+
+    async fn remove_from_blacklists(&mut self, tx_ids: Vec<H256>) {
+        let mut state = self.mempool_state.write().await;
+        for tx_id in tx_ids {
+            state.recent_invalid_tx.pop(&tx_id);
+        }
     }
 
     #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
@@ -799,12 +815,15 @@ impl Inner {
                 debug!("valid block hash anchor for tx ");
                 return Ok(hdr.height);
             } else {
-                let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                warn!(
-                    "Invalid anchor value for tx - header height {} beyond expiry depth {}",
-                    &hdr.height, &anchor_expiry_depth
+                Self::mark_tx_as_invalid(
+                    mempool_state.write().await,
+                    tx_id,
+                    format!(
+                        "Invalid anchor value for tx - header height {} beyond expiry depth {}",
+                        &hdr.height, &anchor_expiry_depth
+                    ),
                 );
+
                 return Err(TxIngressError::InvalidAnchor);
             }
         }
@@ -816,16 +835,23 @@ impl Inner {
                     debug!("valid block hash anchor for tx");
                     Ok(hdr.height)
                 } else {
-                    let mut mempool_state_write_guard = mempool_state.write().await;
-                    mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                    warn!("Invalid block hash anchor value for tx - header height {} beyond expiry depth {}", &hdr.height, &anchor_expiry_depth);
+                    Self::mark_tx_as_invalid(
+                    mempool_state.write().await,
+                    tx_id,
+                    format!(
+                        "Invalid block hash anchor value for tx - header height {} beyond expiry depth {}", &hdr.height, &anchor_expiry_depth
+                    ),
+                );
                     Err(TxIngressError::InvalidAnchor)
                 }
             }
             _ => {
-                let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                warn!("Invalid anchor value for tx - Unknown anchor {}", &anchor);
+                Self::mark_tx_as_invalid(
+                    mempool_state.write().await,
+                    tx_id,
+                    format!("Invalid anchor value for tx - Unknown anchor {}", &anchor),
+                );
+
                 Err(TxIngressError::InvalidAnchor)
             }
         }
@@ -971,6 +997,18 @@ impl Inner {
             warn!("Tx {} signature is invalid", &tx.id());
             Err(TxIngressError::InvalidSignature)
         }
+    }
+
+    /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
+    pub fn mark_tx_as_invalid(
+        mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState>,
+        tx_id: IrysTransactionId,
+        err_reason: impl ToString,
+    ) {
+        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
+        // let mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState> = self.mempool_state.write().await;
+        state.recent_invalid_tx.put(tx_id, ());
+        state.recent_valid_tx.pop(&tx_id);
     }
 
     // Helper to get the canonical chain and latest height

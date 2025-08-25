@@ -25,6 +25,11 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     genesis_config
         .consensus
         .get_mut()
+        .mempool
+        .anchor_expiry_depth = block_migration_depth.try_into()?;
+    genesis_config
+        .consensus
+        .get_mut()
         .ema
         .price_adjustment_interval = PRICE_ADJUSTMENT_INTERVAL;
 

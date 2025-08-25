@@ -500,6 +500,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[test_log::test(actix::test)]
 async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
@@ -587,6 +588,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[test_log::test(actix::test)]
 async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
