@@ -260,7 +260,7 @@ fn collect_expired_partitions(
     target_ledger_type: DataLedger,
 ) -> eyre::Result<BTreeMap<SlotIndex, Vec<Address>>> {
     let partition_assignments = &epoch_snapshot.partition_assignments;
-    let expired_partition_info = &epoch_snapshot.expired_partition_infos;
+    let expired_partition_info = &epoch_snapshot.get_expiring_partition_info(block_height);
     let mut expired_ledger_slot_indexes = BTreeMap::new();
     if expired_partition_info.is_empty() {
         return Ok(expired_ledger_slot_indexes);
