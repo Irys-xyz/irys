@@ -9,12 +9,14 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// TODO: expand these enum variants to account for all the actual states
 pub enum BlockStatus {
     /// The block is not in the index or tree.
     NotProcessed,
     /// The block is still in the tree. It might or might not
     /// be in the block index.
     ProcessedButCanBeReorganized,
+
     /// The block is in the index, but the tree has already pruned it.
     Finalized,
 }
@@ -56,42 +58,37 @@ impl BlockStatusProvider {
             .is_some()
     }
 
-    fn height_is_in_the_tree(&self, block_height: u64) -> bool {
-        let binding = self.block_tree_read_guard.read();
-        binding.get_hashes_for_height(block_height).is_some()
-    }
-
     /// Returns the status of a block based on its height and hash.
     /// Possible statuses:
     /// - `NotProcessed`: The block is not in the index or tree.
     /// - `ProcessedButCanBeReorganized`: The block is still in the tree. It might or might not
     ///   be in the block index.
     /// - `Finalized`: The block is in the index, but the tree has already pruned it.
+    /// TODO: this needs to handle migrated block reorgs, it does not currently :)
+    /// NOTE: block height is UNTRUSTED here, we haven't validated it yet
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
-        let block_is_in_the_tree = self.is_block_in_the_tree(block_hash);
-        let height_is_in_the_tree = self.height_is_in_the_tree(block_height);
+        let block_is_anywhere_in_the_tree = self.is_block_in_the_tree(block_hash);
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
+        let hash_is_in_the_index = index_item.is_some_and(|idx| idx.block_hash == *block_hash);
         let height_is_in_the_index = index_item.is_some();
 
-        let height_is_in_the_tree_but_the_block_is_not_processed =
-            height_is_in_the_tree && !block_is_in_the_tree;
-
         if height_is_in_the_index {
-            if block_is_in_the_tree {
-                // Block has been processed, but all blocks in the tree are not considered finalized
-                BlockStatus::ProcessedButCanBeReorganized
-            } else if height_is_in_the_tree_but_the_block_is_not_processed {
-                // Block might be a fork after a network partition
-                BlockStatus::NotProcessed
+            if hash_is_in_the_index {
+                // Block is in the block index, it has been migrated
+                return BlockStatus::Finalized;
             } else {
-                // Block is in the index, but the tree has already pruned it
-                BlockStatus::Finalized
+                // TODO: this should be an explicit STOP, as we can't process a fork block that has a migrated height
+                return BlockStatus::Finalized;
             }
-        } else if block_is_in_the_tree {
+        }
+
+        if !height_is_in_the_index && block_is_anywhere_in_the_tree {
             // All blocks in the tree are a subject of reorganization
             BlockStatus::ProcessedButCanBeReorganized
-        } else {
+        } else
+        /* !height_is_in_the_index && !block_is_anywhere_in_the_tree */
+        {
             // No information about the block in the index or tree
             BlockStatus::NotProcessed
         }
@@ -125,7 +122,9 @@ impl BlockStatusProvider {
         }
     }
 
-    pub async fn wait_for_block_tree_to_catch_up(&self, block_height: u64) {
+    // waits for the block tree to be "able" to processed this block, based on height.
+    // this is to prevent overwhelming the block tree with blocks, such that it prunes blocks still undergoing validation.
+    pub async fn wait_for_block_tree_can_process_height(&self, block_height: u64) {
         const ATTEMPTS_PER_SECOND: u64 = 5;
         let mut attempts = 0;
 

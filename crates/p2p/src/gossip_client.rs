@@ -6,17 +6,27 @@ use crate::types::{GossipError, GossipResult};
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, GossipData, GossipDataRequest, GossipRequest, PeerAddress, PeerListItem,
+    Address, BlockHash, GossipData, GossipDataRequest, GossipRequest, IrysBlockHeader, PeerAddress,
+    PeerListItem, PeerNetworkError,
 };
+use rand::prelude::SliceRandom as _;
 use reqwest::Client;
 use reqwest::Response;
+use reth::primitives::Block;
+use reth::revm::primitives::B256;
 use serde::Serialize;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("Gossip client error: {0}")]
-pub struct GossipClientError(String);
+pub enum GossipClientError {
+    #[error("Get request to {0} failed with reason {1}")]
+    GetRequest(String, String),
+    #[error("Health check to {0} failed with status code {1}")]
+    HealthCheck(String, reqwest::StatusCode),
+    #[error("Failed to get json response payload from {0} with reason {1}")]
+    GetJsonResponsePayload(String, String),
+}
 
 #[derive(Debug, Clone)]
 pub struct GossipClient {
@@ -91,27 +101,49 @@ impl GossipClient {
         res
     }
 
+    /// Request specific data from the peer. Returns the data right away if the peer has it
+    /// and updates the peer's score based on the result.
+    async fn pull_data_and_update_the_score(
+        &self,
+        peer: &(Address, PeerListItem),
+        requested_data: GossipDataRequest,
+        peer_list: &PeerList,
+    ) -> GossipResult<Option<GossipData>> {
+        let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
+        let get_data_request = self.create_request(requested_data);
+
+        let res = self
+            .client
+            .post(&url)
+            .json(&get_data_request)
+            .send()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| GossipError::Network(error.to_string()));
+        Self::handle_score(peer_list, &res, &peer.0);
+        res
+    }
+
     pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
+        let peer_addr = peer.gossip.to_string();
 
         let response = self
             .internal_client()
             .get(&url)
             .send()
             .await
-            .map_err(|error| GossipClientError(error.to_string()))?;
+            .map_err(|error| GossipClientError::GetRequest(peer_addr.clone(), error.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(GossipClientError(format!(
-                "Health check failed with status: {}",
-                response.status()
-            )));
+            return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|error| GossipClientError(error.to_string()))
+        response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
+        })
     }
 
     /// Send data to a peer
@@ -237,6 +269,368 @@ impl GossipClient {
         GossipRequest {
             miner_address: self.mining_address,
             data,
+        }
+    }
+
+    pub async fn pull_block_from_network(
+        &self,
+        block_hash: BlockHash,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+        let data_request = GossipDataRequest::Block(block_hash);
+        self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
+            .await
+    }
+
+    pub async fn pull_payload_from_network(
+        &self,
+        evm_payload_hash: B256,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+    ) -> Result<(Address, Block), PeerNetworkError> {
+        let data_request = GossipDataRequest::ExecutionPayload(evm_payload_hash);
+        self.pull_data_from_network(
+            data_request,
+            use_trusted_peers_only,
+            peer_list,
+            Self::execution_payload,
+        )
+        .await
+    }
+
+    fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+        match gossip_data {
+            GossipData::Block(block) => Ok(block),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected IrysBlockHeader, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    fn execution_payload(gossip_data: GossipData) -> Result<Block, PeerNetworkError> {
+        match gossip_data {
+            GossipData::ExecutionPayload(block) => Ok(block),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected ExecutionPayload, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    pub async fn pull_data_from_network<T>(
+        &self,
+        data_request: GossipDataRequest,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+        map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
+    ) -> Result<(Address, T), PeerNetworkError> {
+        let mut peers = if use_trusted_peers_only {
+            peer_list.trusted_peers()
+        } else {
+            // Get the top 10 most active peers
+            peer_list.top_active_peers(Some(10), None)
+        };
+
+        // Shuffle peers to randomize the selection
+        peers.shuffle(&mut rand::thread_rng());
+        // Take random 5
+        peers.truncate(5);
+
+        if peers.is_empty() {
+            return Err(PeerNetworkError::NoPeersAvailable);
+        }
+
+        // Try up to 5 iterations over the peer list to get the block
+        let mut last_error = None;
+
+        for attempt in 1..=5 {
+            for peer in &peers {
+                let address = &peer.0;
+                debug!(
+                    "Attempting to fetch {:?} from peer {} (attempt {}/5)",
+                    data_request, address, attempt
+                );
+
+                match self
+                    .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
+                    .await
+                {
+                    Ok(Some(data)) => {
+                        info!(
+                            "Successfully requested {:?} from peer {}",
+                            data_request, address
+                        );
+                        match map_data(data) {
+                            Ok(data) => return Ok((*address, data)),
+                            Err(err) => {
+                                warn!("Failed to map data from peer {}: {}", address, err);
+                                continue;
+                            }
+                        };
+                    }
+                    Ok(None) => {
+                        // Peer doesn't have this block, try another peer
+                        debug!("Peer {} doesn't have {:?}", address, data_request);
+                        continue;
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                        warn!(
+                            "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
+                            data_request,
+                            address,
+                            attempt,
+                            last_error.as_ref().unwrap()
+                        );
+
+                        // Move on to the next peer
+                        continue;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err(PeerNetworkError::FailedToRequestData(format!(
+            "Failed to fetch {:?} after trying 5 peers: {:?}",
+            data_request, last_error
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::time::Duration;
+    use reqwest::StatusCode;
+    use std::io::prelude::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    // Test fixtures and utilities
+    struct TestFixture {
+        client: GossipClient,
+    }
+
+    impl TestFixture {
+        fn new() -> Self {
+            Self {
+                client: GossipClient::new(Duration::from_secs(1), Address::from([1_u8; 20])),
+            }
+        }
+
+        fn with_timeout(timeout: Duration) -> Self {
+            Self {
+                client: GossipClient::new(timeout, Address::from([1_u8; 20])),
+            }
+        }
+    }
+
+    fn get_free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .expect("Failed to bind to port")
+            .local_addr()
+            .expect("Failed to get local addr")
+            .port()
+    }
+
+    fn create_peer_address(host: &str, port: u16) -> PeerAddress {
+        PeerAddress {
+            gossip: format!("{}:{}", host, port).parse().expect("Valid address"),
+            api: format!("{}:{}", host, port).parse().expect("Valid address"),
+            execution: Default::default(),
+        }
+    }
+
+    // Mock HTTP server for testing
+    struct MockHttpServer {
+        port: u16,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockHttpServer {
+        fn new_with_response(status_code: u16, body: &str, content_type: &str) -> Self {
+            let port = get_free_port();
+            let body = body.to_string();
+            let content_type = content_type.to_string();
+
+            let handle = thread::spawn(move || {
+                let listener =
+                    TcpListener::bind(format!("127.0.0.1:{}", port)).expect("Failed to bind");
+
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buffer = [0; 1024];
+                    let _ = stream.read(&mut buffer);
+
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+                        status_code,
+                        Self::status_text(status_code),
+                        content_type,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+
+            std::thread::sleep(Duration::from_millis(50));
+
+            Self {
+                port,
+                handle: Some(handle),
+            }
+        }
+
+        fn status_text(code: u16) -> &'static str {
+            match code {
+                200 => "OK",
+                404 => "Not Found",
+                500 => "Internal Server Error",
+                _ => "Unknown",
+            }
+        }
+
+        fn port(&self) -> u16 {
+            self.port
+        }
+    }
+
+    impl Drop for MockHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    mod connection_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_connection_refused() {
+            let fixture = TestFixture::new();
+            let unreachable_port = get_free_port();
+            let peer = create_peer_address("127.0.0.1", unreachable_port);
+
+            let result = fixture.client.check_health(peer).await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::GetRequest(addr, reason) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert!(
+                        reason.to_lowercase().contains("connection refused"),
+                        "Expected connection refused error, got: {}",
+                        reason
+                    );
+                }
+                err => panic!("Expected GetRequest error, got: {:?}", err),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_request_timeout() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(1));
+            // Use a non-routable IP address
+            let peer = create_peer_address("192.0.2.1", 8080);
+
+            let result = fixture.client.check_health(peer).await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::GetRequest(addr, reason) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert!(!reason.is_empty(), "Expected timeout error message");
+                }
+                err => panic!("Expected GetRequest error for timeout, got: {:?}", err),
+            }
+        }
+    }
+
+    mod health_check_error_tests {
+        use super::*;
+
+        async fn test_health_check_error_status(status_code: u16, expected_status: StatusCode) {
+            let server = MockHttpServer::new_with_response(status_code, "", "text/plain");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+
+            let result = fixture.client.check_health(peer).await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::HealthCheck(addr, status) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert_eq!(status, expected_status);
+                }
+                err => panic!(
+                    "Expected HealthCheck error for status {}, got: {:?}",
+                    status_code, err
+                ),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_404_not_found() {
+            test_health_check_error_status(404, StatusCode::NOT_FOUND).await;
+        }
+
+        #[tokio::test]
+        async fn test_500_internal_server_error() {
+            test_health_check_error_status(500, StatusCode::INTERNAL_SERVER_ERROR).await;
+        }
+    }
+
+    // Response parsing tests
+    mod response_parsing_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_invalid_json_response() {
+            let server =
+                MockHttpServer::new_with_response(200, "invalid json {", "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+
+            let result = fixture.client.check_health(peer).await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                GossipClientError::GetJsonResponsePayload(addr, reason) => {
+                    assert_eq!(addr, peer.gossip.to_string());
+                    assert!(
+                        reason.contains("expected")
+                            || reason.contains("EOF")
+                            || reason.contains("invalid"),
+                        "Expected JSON parsing error, got: {}",
+                        reason
+                    );
+                }
+                err => panic!("Expected GetJsonResponsePayload error, got: {:?}", err),
+            }
+        }
+
+        // Additional test for malformed JSON
+        #[tokio::test]
+        async fn test_truncated_json_response() {
+            let server = MockHttpServer::new_with_response(
+                200,
+                r#"{"status": "healthy", "version"#,
+                "application/json",
+            );
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+
+            let result = fixture.client.check_health(peer).await;
+
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                GossipClientError::GetJsonResponsePayload(_, _)
+            ));
         }
     }
 }

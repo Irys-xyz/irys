@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use crate::utils::IrysNodeTest;
-use base58::ToBase58 as _;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};
@@ -215,13 +214,13 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     debug!(
         "\nPEER1\n    before: {} c_diff: {}\n    after:  {} c_diff: {}\nPEER2\n    before: {} c_diff: {}\n    after:  {} c_diff: {}",
-        peer1_block.block_hash.0.to_base58(),
+        peer1_block.block_hash,
         peer1_block.cumulative_diff,
-        peer1_block_after.block_hash.0.to_base58(),
+        peer1_block_after.block_hash,
         peer1_block_after.cumulative_diff,
-        peer2_block.block_hash.0.to_base58(),
+        peer2_block.block_hash,
         peer2_block.cumulative_diff,
-        peer2_block_after.block_hash.0.to_base58(),
+        peer2_block_after.block_hash,
         peer2_block_after.cumulative_diff,
     );
     debug!(
@@ -1218,7 +1217,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
 #[test_log::test(actix_web::test)]
-async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
+async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg

@@ -1,9 +1,9 @@
 use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tables::DataRootLRU, tx_header_by_txid,
+    block_header_by_hash, db::IrysDatabaseExt as _, db_cache::DataRootLRUEntry,
+    tables::DataRootLRU, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -54,11 +54,7 @@ impl Inner {
         &mut self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        debug!(
-            "received tx {:?} (data_root {:?})",
-            &tx.id.0.to_base58(),
-            &tx.data_root.0.to_base58()
-        );
+        debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
         // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
         tx.ingress_proofs = None;
         let mempool_state_read_guard = self.mempool_state.read().await;
@@ -142,27 +138,35 @@ impl Inner {
                 .mempool
                 .anchor_expiry_depth as u64;
             let new_expiry = anchor_height + anchor_expiry_depth;
-            debug!(
-                "Updating ingress proof for data root {} expiry from {} -> {}",
-                &tx.data_root, &old_expiry.last_height, &new_expiry
-            );
-
-            self.irys_db
-                .update(|write_tx| write_tx.put::<DataRootLRU>(tx.data_root, old_expiry))
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?
-                .map_err(|e| {
-                    error!(
-                        "Error updating ingress proof expiry for {} - {}",
-                        &tx.data_root, &e
-                    );
-                    TxIngressError::DatabaseError
-                })?;
+            if old_expiry.last_height == new_expiry {
+                debug!(
+                    "Updating ingress proof for data root {} expiry from {} -> {}",
+                    &tx.data_root, &old_expiry.last_height, &new_expiry
+                );
+            } else {
+                self.irys_db
+                    .update(|write_tx| {
+                        let updated_expiry = DataRootLRUEntry {
+                            last_height: new_expiry,
+                            ..old_expiry
+                        };
+                        write_tx.put::<DataRootLRU>(tx.data_root, updated_expiry)
+                    })
+                    .map_err(|e| {
+                        error!(
+                            "Error updating ingress proof expiry for {} - {}",
+                            &tx.data_root, &e
+                        );
+                        TxIngressError::DatabaseError
+                    })?
+                    .map_err(|e| {
+                        error!(
+                            "Error updating ingress proof expiry for {} - {}",
+                            &tx.data_root, &e
+                        );
+                        TxIngressError::DatabaseError
+                    })?;
+            }
         }
 
         // Check account balance
@@ -191,16 +195,13 @@ impl Inner {
             Ok(()) => {
                 info!(
                     "Successfully cached data_root {:?} for tx {:?}",
-                    tx.data_root,
-                    tx.id.0.to_base58()
+                    tx.data_root, tx.id
                 );
             }
             Err(db_error) => {
                 error!(
                     "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                    tx.data_root,
-                    tx.id.0.to_base58(),
-                    db_error
+                    tx.data_root, tx.id, db_error
                 );
             }
         };

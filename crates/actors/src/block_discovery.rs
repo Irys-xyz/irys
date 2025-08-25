@@ -476,6 +476,8 @@ impl BlockDiscoveryServiceInner {
                 "incoming block commitment txids, height {}\n{:#?}",
                 new_block_header.height, commitment_ledger
             );
+            // TODO: we can't get these from the database
+            // if we can, something has gone wrong!
             match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
                 .await
             {

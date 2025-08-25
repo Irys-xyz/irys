@@ -617,7 +617,7 @@ mod tests {
                 * config.immediate_tx_inclusion_reward_percent.amount)
                 / U256::from(10000);
             let total_ingress_reward =
-                ingress_reward_per_proof * U256::from(config.number_of_ingress_proofs);
+                ingress_reward_per_proof * U256::from(config.number_of_ingress_proofs_total);
             U256::from(1000000) + total_ingress_reward
         });
 

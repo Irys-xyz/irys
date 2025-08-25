@@ -10,7 +10,6 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use base58::ToBase58 as _;
 use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, SystemLedger};
@@ -120,6 +119,8 @@ pub enum PreValidationError {
     RewardMismatch { got: U256, expected: U256 },
     #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
     SolutionHashBelowDifficulty { expected: U256, got: U256 },
+    #[error("Invalid solution_hash link - expected {expected} got {got}")]
+    SolutionHashLinkInvalid { expected: H256, got: H256 },
     #[error("system time error: {0}")]
     SystemTimeError(String),
     #[error("block timestamp {current} is older than parent block {parent}")]
@@ -148,7 +149,7 @@ pub async fn prevalidate_block(
     parent_ema_snapshot: &EmaSnapshot,
 ) -> Result<(), PreValidationError> {
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "Prevalidating block",
     );
@@ -171,7 +172,7 @@ pub async fn prevalidate_block(
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "prev_output_is_valid",
     );
@@ -179,7 +180,7 @@ pub async fn prevalidate_block(
     // Check block height continuity
     height_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "height_is_valid",
     );
@@ -206,7 +207,7 @@ pub async fn prevalidate_block(
     )?;
 
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "difficulty_is_valid",
     );
@@ -214,7 +215,7 @@ pub async fn prevalidate_block(
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "previous_cumulative_difficulty_is_valid",
     );
@@ -222,7 +223,7 @@ pub async fn prevalidate_block(
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "cumulative_difficulty_is_valid",
     );
@@ -233,15 +234,23 @@ pub async fn prevalidate_block(
     // Check the solution_hash
     solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "solution_hash_is_valid",
+    );
+
+    // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
+    solution_hash_link_is_valid(&block, &poa_chunk)?;
+    debug!(
+        block_hash = ?block.block_hash,
+        ?block.height,
+        "solution_hash_link_is_valid",
     );
 
     // Check the previous solution hash references the parent correctly
     previous_solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "previous_solution_hash_is_valid",
     );
@@ -264,7 +273,7 @@ pub async fn prevalidate_block(
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
-        block_hash = ?block.block_hash.0.to_base58(),
+        block_hash = ?block.block_hash,
         ?block.height,
         "last_epoch_hash_is_valid",
     );
@@ -506,6 +515,28 @@ pub fn solution_hash_is_valid(
         Err(PreValidationError::SolutionHashBelowDifficulty {
             expected: previous_block.diff,
             got: solution_diff,
+        })
+    }
+}
+
+/// Validates the cryptographic link between solution_hash and its inputs:
+/// PoA chunk bytes, partition_chunk_offset (little-endian), and the VDF seed (vdf_limiter_info.output)
+pub fn solution_hash_link_is_valid(
+    block: &IrysBlockHeader,
+    poa_chunk: &[u8],
+) -> Result<(), PreValidationError> {
+    let expected = irys_types::compute_solution_hash(
+        poa_chunk,
+        block.poa.partition_chunk_offset,
+        &block.vdf_limiter_info.output,
+    );
+
+    if block.solution_hash == expected {
+        Ok(())
+    } else {
+        Err(PreValidationError::SolutionHashLinkInvalid {
+            expected,
+            got: block.solution_hash,
         })
     }
 }
@@ -1270,7 +1301,7 @@ pub fn calculate_perm_storage_total_fee(
             config.consensus.safe_minimum_number_of_years,
             config.consensus.decay_rate,
         )?
-        .replica_count(config.consensus.number_of_ingress_proofs)?;
+        .replica_count(config.consensus.number_of_ingress_proofs_total)?;
 
     // Calculate the base network fee (protocol cost) using the provided EMA snapshot
     let base_network_fee = cost_per_gb.base_network_fee(
@@ -1282,7 +1313,7 @@ pub fn calculate_perm_storage_total_fee(
     // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        config.consensus.number_of_ingress_proofs,
+        config.consensus.number_of_ingress_proofs_total,
         config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 
@@ -1503,7 +1534,7 @@ pub async fn data_txs_are_valid(
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                 // (they're waiting for proofs to arrive)
-                if tx.ingress_proofs.is_none() {
+                if tx.ingress_proofs.is_some() {
                     tracing::warn!(
                         "Transaction {} in Submit ledger should not have ingress proofs",
                         tx.id
