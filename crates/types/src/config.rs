@@ -9,6 +9,7 @@ use crate::{
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
+use eyre::ensure;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -34,6 +35,22 @@ impl Config {
             chain_id: self.consensus.chain_id,
             chunk_size: self.consensus.chunk_size,
         }
+    }
+
+    // validate configuration invariants
+    // TODO: expand this!
+    pub fn validate(&self) -> eyre::Result<()> {
+        // ensures the block tree is able to contain all unmigrated blocks
+        ensure!((self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth);
+
+        // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
+        // TODO: once anchor maturity is enforced, apply that value here
+        ensure!(
+            std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
+                <= (self.consensus.mempool.anchor_expiry_depth + 4)
+        );
+
+        Ok(())
     }
 }
 
