@@ -115,7 +115,14 @@ pub async fn calculate_expired_ledger_fees(
     }
 
     // Step 2: Find block ranges
-    let block_range = find_block_range(expired_slots, config, &block_index, ledger_type)?;
+    let block_range = match find_block_range(expired_slots, config, &block_index, ledger_type)? {
+        Some(br) => br,
+        None => {
+            // Check to see if there were no chunks uploaded to this ledger slot!
+            // If there wasn't, there aren't any fees to distribute
+            return Ok(BTreeMap::new());
+        }
+    };
 
     // Step 3: Process boundary blocks
     let same_block = block_range.min_block.item.block_hash == block_range.max_block.item.block_hash;
@@ -320,7 +327,7 @@ fn find_block_range(
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
     ledger_type: DataLedger,
-) -> eyre::Result<BlockRange> {
+) -> eyre::Result<Option<BlockRange>> {
     let mut blocks_with_expired_ledgers = BTreeMap::new();
     let block_index_read = block_index
         .read()
@@ -377,6 +384,12 @@ fn find_block_range(
         }
     }
 
+    // Double check to see if there were any chunks added to this partition requiring rewards
+    // (This should cause the min_height and max_height to be the same resulting in no fee distribution)
+    if min_height.is_none() && max_height.is_none() {
+        return Ok(None);
+    }
+
     // Extract min and max block data - these must exist if we have expired slots
     let (min_height, min_item, min_range) =
         min_height.expect("min_height must be populated after iterating expired slots");
@@ -404,13 +417,13 @@ fn find_block_range(
         .remove(&max_block.item.block_hash)
         .unwrap_or_else(|| Arc::new(vec![]));
 
-    Ok(BlockRange {
+    Ok(Some(BlockRange {
         min_block,
         max_block,
         min_block_miners,
         max_block_miners,
         middle_blocks: blocks_with_expired_ledgers,
-    })
+    }))
 }
 
 /// Helper to get the previous block's max chunk offset
