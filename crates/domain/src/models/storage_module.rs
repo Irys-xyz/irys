@@ -74,7 +74,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{CircularBuffer, StorageModulesReadGuard};
 
@@ -630,7 +630,14 @@ impl StorageModule {
 
             for (interval, chunk_type) in submodule_intervals {
                 let set_chunk_type = match chunk_type {
-                    ChunkType::Interrupted => ChunkType::Uninitialized,
+                    ChunkType::Interrupted => {
+                        warn!(
+                            "Chunk @ interval ({}, {}) was interrupted, resetting to Uninitialized",
+                            interval.start(),
+                            interval.end()
+                        );
+                        ChunkType::Uninitialized
+                    }
                     _ => chunk_type,
                 };
                 global_intervals
