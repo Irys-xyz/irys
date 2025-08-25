@@ -67,6 +67,7 @@ impl Inner {
                 info!("Promoted tx:\n{:?}", tx_header);
             }
         }
+        self.revalidate_all_txs().await.unwrap();
 
         Ok(())
     }
@@ -107,29 +108,54 @@ impl Inner {
     #[instrument(skip_all)]
     pub async fn revalidate_all_txs(&mut self) -> eyre::Result<()> {
         // re-process all valid txs
-        let (valid_submit_ledger_tx, valid_commitment_tx) = {
-            let mut state = self.mempool_state.write().await;
-            state.recent_valid_tx.clear();
-            (
-                std::mem::take(&mut state.valid_submit_ledger_tx),
-                std::mem::take(&mut state.valid_commitment_tx),
-            )
+        let tx_ids = {
+            let state = self.mempool_state.read().await;
+            state
+                .valid_submit_ledger_tx
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
         };
-        for (id, tx) in valid_submit_ledger_tx {
-            match self.handle_data_tx_ingress_message(tx).await {
-                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
-                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
+        for tx_id in tx_ids {
+            let tx = {
+                let state = self.mempool_state.read().await;
+                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone across lock points
+                state.valid_submit_ledger_tx.get(&tx_id).cloned()
+            };
+
+            // TODO: unwrap here? we should always be able to get the value if the key exists
+            if let Some(tx) = tx {
+                if let Err(e) = self.validate_data_tx(&tx).await {
+                    let mut state = self.mempool_state.write().await;
+                    state.valid_submit_ledger_tx.remove(&tx_id);
+                    Self::mark_tx_as_invalid(state, tx_id, e);
+                }
             }
         }
-        for (_address, txs) in valid_commitment_tx {
-            for tx in txs {
-                let id = tx.id;
-                match self.handle_ingress_commitment_tx_message(tx).await {
-                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
-                    Err(err) => debug!(
-                        "failed to resubmit commitment tx {} to mempool: {:?}",
-                        &id, &err
-                    ),
+
+        // re-process all valid txs
+        let addresses = {
+            let state = self.mempool_state.read().await;
+            state
+                .valid_commitment_tx
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        for address in addresses {
+            let txs = {
+                let state = self.mempool_state.read().await;
+                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone
+                state.valid_commitment_tx.get(&address).cloned()
+            };
+
+            // TODO: unwrap here? we should always be able to get the value if the key exists
+            if let Some(txs) = txs {
+                for tx in txs {
+                    if let Err(e) = self.validate_commitment_tx(&tx).await {
+                        self.remove_commitment_tx(&tx.id).await;
+                        Self::mark_tx_as_invalid(self.mempool_state.write().await, tx.id, e);
+                    }
                 }
             }
         }
