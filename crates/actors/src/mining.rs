@@ -181,6 +181,9 @@ impl PartitionMiningActor {
                 ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"))
                 }
+                ChunkType::Interrupted => {
+                    return Err(eyre::eyre!("Cannot mine interrupted chunks"))
+                }
             };
 
             // info!(

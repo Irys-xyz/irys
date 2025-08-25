@@ -74,7 +74,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{CircularBuffer, StorageModulesReadGuard};
 
@@ -197,7 +197,7 @@ pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Resul
 }
 
 /// Defines how chunk data is processed and stored
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ChunkType {
     /// Chunk containing matrix-packed entropy only
     Entropy,
@@ -205,6 +205,8 @@ pub enum ChunkType {
     Data,
     /// Chunk has not been initialized
     Uninitialized,
+    /// Chunk write was interrupted, should be reinitialized
+    Interrupted,
 }
 
 // we can't put this in `types` due to dependency cycles
@@ -373,7 +375,8 @@ impl StorageModule {
         }
 
         // Attempt to load a global set of intervals from the submodules
-        let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
+        let loaded_intervals =
+            Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id);
 
         Ok(Self {
             id: storage_module_info.id,
@@ -528,10 +531,9 @@ impl StorageModule {
 
             for (chunk_offset, (bytes, chunk_type)) in write_batch {
                 // self.intervals are updated by write_chunk_internal()
-                self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
+                self.write_chunk_internal(chunk_offset, bytes, chunk_type)?;
                 pending.remove(&chunk_offset); // Clean up written chunks
             }
-            drop(pending);
 
             // Save the updated intervals
             if self.write_intervals_to_submodules().is_err() {
@@ -617,8 +619,13 @@ impl StorageModule {
     /// * If unable to lock a submodule's intervals file mutex
     /// * If reading a submodule's intervals file fails
     /// * If interval insertion into the global map fails due to overlapping intervals
-    fn load_intervals_from_submodules(submodules: &SubmoduleMap) -> StorageIntervals {
+    fn load_intervals_from_submodules(
+        submodules: &SubmoduleMap,
+        module_id: usize,
+    ) -> StorageIntervals {
         let mut global_intervals = StorageIntervals::new();
+        let mut interrupted_count = 0;
+
         for (_, submodule) in submodules.iter() {
             let file = submodule
                 .intervals_file
@@ -628,11 +635,31 @@ impl StorageModule {
                 read_intervals_file(&file).expect("to read submodule intervals file");
 
             for (interval, chunk_type) in submodule_intervals {
+                let set_chunk_type = match chunk_type {
+                    ChunkType::Interrupted => {
+                        interrupted_count += 1;
+                        warn!(
+                            "Chunk @ interval ({}, {}) was interrupted, resetting to Uninitialized",
+                            interval.start(),
+                            interval.end()
+                        );
+                        ChunkType::Uninitialized
+                    }
+                    _ => chunk_type,
+                };
                 global_intervals
-                    .insert_merge_touching_if_values_equal(interval, chunk_type)
+                    .insert_merge_touching_if_values_equal(interval, set_chunk_type)
                     .expect("to insert interval into global intervals map");
             }
         }
+
+        if interrupted_count > 0 {
+            error!(
+                "Found {} interrupted writes in storage module {}",
+                interrupted_count, module_id
+            );
+        }
+
         global_intervals
     }
 
@@ -670,7 +697,7 @@ impl StorageModule {
                 let pending = self.pending_writes.read().unwrap();
                 let pending_chunk = pending
                     .get(&partition_chunk_offset)
-                    .map(|(bytes, chunk_type)| (bytes.clone(), chunk_type.clone()));
+                    .map(|(bytes, chunk_type)| (bytes.clone(), *chunk_type));
                 drop(pending);
 
                 // Use pending chunk if available, otherwise use storage based on chunk type
@@ -686,8 +713,7 @@ impl StorageModule {
                     // Case 3: No pending chunk, Data or Entropy interval_chunk_type - read from storage
                     (None, _) => {
                         let bytes = self.read_chunk_internal(partition_chunk_offset)?;
-                        chunk_map
-                            .insert(partition_chunk_offset, (bytes, interval_chunk_type.clone()));
+                        chunk_map.insert(partition_chunk_offset, (bytes, *interval_chunk_type));
                     }
                 }
             }
@@ -1081,6 +1107,16 @@ impl StorageModule {
         submodule.db.view(fetch_from_db)?
     }
 
+    pub(crate) fn cut_then_insert_interval_if_touching(
+        intervals: &mut StorageIntervals,
+        chunk_offset: PartitionChunkOffset,
+        chunk_type: ChunkType,
+    ) {
+        let chunk_interval = ii(chunk_offset, chunk_offset);
+        let _ = intervals.cut(chunk_interval);
+        let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+    }
+
     #[inline]
     pub fn get_submodule_for_offset(
         &self,
@@ -1095,9 +1131,11 @@ impl StorageModule {
     ///
     /// Process:
     /// 1. Locates correct submodule for chunk offset
-    /// 2. Calculates physical storage position
-    /// 3. Writes chunk data to disk
-    /// 4. Updates interval tracking with new chunk state
+    /// 2. Sets the chunk status to Interrupted before writing
+    /// 3. Writes the intervals file to persist the Interrupted status
+    /// 4. Calculates physical storage position
+    /// 5. Writes chunk data to disk
+    /// 6. Updates interval tracking with new chunk state
     ///
     /// Note: Chunk size must match size in StorageModule.config
     fn write_chunk_internal(
@@ -1107,38 +1145,103 @@ impl StorageModule {
         chunk_type: ChunkType,
     ) -> eyre::Result<()> {
         let chunk_size = self.config.consensus.chunk_size;
+
         // Get the correct submodule reference based on chunk_offset
-        let (interval, submodule) = self.get_submodule_for_offset(chunk_offset).unwrap();
+        let (interval, submodule) = self.get_submodule_for_offset(chunk_offset)?;
+
+        // Set the chunk status to Interrupted before writing
+        {
+            let mut intervals = self
+                .intervals
+                .write()
+                .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+
+            Self::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                chunk_offset,
+                ChunkType::Interrupted,
+            );
+        }
+
+        // Write the intervals file to persist the Interrupted status
+        self.write_intervals_to_submodules()
+            .map_err(|e| eyre::eyre!("Failed to write intervals file before chunk write: {}", e))?;
 
         let start_time = Instant::now();
 
         // Get the submodule relative offset of the chunk
         let submodule_offset = chunk_offset - interval.start();
-        {
-            // Lock to the submodules internal file handle & write the chunk
 
+        // Attempt to write the chunk data, handling errors by resetting to Uninitialized
+        let write_result = (|| -> eyre::Result<()> {
+            // Lock to the submodules internal file handle & write the chunk
             let mut file = submodule.file.lock().unwrap();
 
             file.seek(SeekFrom::Start(u64::from(submodule_offset) * chunk_size))?;
-            let result = file.write(bytes.as_slice());
-            match result {
-                // TODO: better logging
-                Ok(_bytes_written) => {
-                    //info!("write_chunk_internal() -> bytes_written: {}", bytes_written)
-                }
-                Err(err) => info!("{:?}", err),
+            let bytes_written = file.write(bytes.as_slice()).map_err(|e| {
+                error!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e);
+                eyre::eyre!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e)
+            })?;
+            // Ensure all bytes were written
+            if bytes_written != bytes.len() {
+                return Err(eyre::eyre!(
+                    "Incomplete write: expected {} bytes, wrote {} bytes @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}",
+                    bytes.len(),
+                    bytes_written
+                ));
             }
-            drop(file);
+
+            // Ensure data is flushed to disk prior to drop
+            file.sync_all()
+                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+
+            Ok(())
+        })();
+
+        // Update the interval based on whether the write succeeded or failed
+        match write_result {
+            Ok(()) => {
+                // If successful, update the StorageModules interval state with the actual chunk type
+                let mut intervals = self
+                    .intervals
+                    .write()
+                    .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+                Self::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    chunk_offset,
+                    chunk_type,
+                );
+            }
+            Err(e) => {
+                // If write failed, reset the interval to Uninitialized
+                error!(
+                    "Write failed, resetting interval to Uninitialized for chunk_offset {}",
+                    chunk_offset
+                );
+
+                // Try to reset to Uninitialized, but don't propagate lock errors
+                match self.intervals.write() {
+                    Ok(mut intervals) => {
+                        Self::cut_then_insert_interval_if_touching(
+                            &mut intervals,
+                            chunk_offset,
+                            ChunkType::Uninitialized,
+                        );
+                    }
+                    Err(write_err) => {
+                        // Log the failure but don't return early - we still need to propagate the original error
+                        error!(
+                    "CRITICAL: Failed to acquire write lock to reset interval to Uninitialized: {}. \
+                     The interval state may be inconsistent!",
+                    write_err
+                );
+                    }
+                }
+
+                // Always return the original write error
+                return Err(e);
+            }
         }
-
-        // If successful, update the StorageModules interval state
-        let mut intervals = self.intervals.write().unwrap();
-
-        let chunk_interval = ii(chunk_offset, chunk_offset);
-        let _ = intervals.cut(chunk_interval);
-        let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
-
-        drop(intervals);
 
         let completion_time = Instant::now();
 
@@ -1151,7 +1254,7 @@ impl StorageModule {
 
         self.recent_chunk_times
             .write()
-            .unwrap()
+            .map_err(|e| eyre::eyre!("Failed to acquire write lock on recent_chunk_times: {}", e))?
             .push(chunk_time_record);
 
         Ok(())
@@ -1655,7 +1758,10 @@ mod tests {
         );
 
         // Load up the intervals from file
-        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
+        let intervals = StorageModule::load_intervals_from_submodules(
+            &storage_module.submodules,
+            storage_module.id,
+        );
 
         {
             let file_intervals = intervals.into_iter().collect::<Vec<_>>();
@@ -1674,7 +1780,10 @@ mod tests {
         assert_eq!(unpacked, [partition_chunk_offset_ii!(0, 19)]);
 
         // Check intervals file is also reinitialized
-        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
+        let intervals = StorageModule::load_intervals_from_submodules(
+            &storage_module.submodules,
+            storage_module.id,
+        );
 
         {
             let file_intervals = intervals.into_iter().collect::<Vec<_>>();
@@ -1958,6 +2067,230 @@ mod tests {
 
         assert!(tx_path.is_none());
         assert!(ret_path.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_interruption_flow() -> eyre::Result<()> {
+        // This test verifies the interruption flow by checking the interval
+        // files that are written during the write_chunk_internal process
+
+        let tmp_dir = setup_tracing_and_temp_dir(Some("write_interruption_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ii!(0, 10), "test-submodule".into())],
+        }];
+
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 11,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base_path,
+            ..NodeConfig::testing()
+        };
+        let config = Config::new(node_config);
+
+        let storage_module = StorageModule::new(&infos[0], &config)?;
+
+        // Verify initial state is uninitialized
+        let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
+        assert_eq!(uninitialized, [partition_chunk_offset_ii!(0, 10)]);
+
+        // Write a successful chunk to verify normal flow
+        let test_chunk = vec![0x42; 32];
+        storage_module.write_chunk_internal(
+            PartitionChunkOffset::from(5),
+            test_chunk,
+            ChunkType::Data,
+        )?;
+
+        // After successful write, chunk should be marked as Data
+        let data = storage_module.get_intervals(ChunkType::Data);
+        assert_eq!(data, [partition_chunk_offset_ii!(5, 5)]);
+
+        // Verify no Interrupted chunks remain after successful write
+        let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
+        assert_eq!(interrupted, vec![]);
+
+        // Now test that if we manually set a chunk to Interrupted and write intervals,
+        // it persists until a new StorageModule loads it
+        {
+            let mut intervals = storage_module.intervals.write().unwrap();
+            let _ = intervals.cut(partition_chunk_offset_ii!(7, 7));
+            let _ = intervals.insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(7, 7),
+                ChunkType::Interrupted,
+            );
+        }
+
+        // Write the intervals to disk
+        storage_module.write_intervals_to_submodules()?;
+
+        // Verify the Interrupted chunk is in memory
+        let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
+        assert_eq!(interrupted, [partition_chunk_offset_ii!(7, 7)]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_successful_write_updates_from_interrupted_to_actual_type() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("successful_write_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ii!(0, 10), "test-submodule".into())],
+        }];
+
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 11,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base_path,
+            ..NodeConfig::testing()
+        };
+        let config = Config::new(node_config);
+
+        let storage_module = StorageModule::new(&infos[0], &config)?;
+
+        // Create test chunks
+        let data_chunk = vec![0xDA; 32];
+        let entropy_chunk = vec![0xEE; 32];
+
+        // Write a data chunk successfully
+        storage_module.write_chunk_internal(
+            PartitionChunkOffset::from(3),
+            data_chunk,
+            ChunkType::Data,
+        )?;
+
+        // Write an entropy chunk successfully
+        storage_module.write_chunk_internal(
+            PartitionChunkOffset::from(7),
+            entropy_chunk,
+            ChunkType::Entropy,
+        )?;
+
+        // Verify the chunks are marked with their correct types
+        let data_intervals = storage_module.get_intervals(ChunkType::Data);
+        assert_eq!(data_intervals, [partition_chunk_offset_ii!(3, 3)]);
+
+        let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
+        assert_eq!(entropy_intervals, [partition_chunk_offset_ii!(7, 7)]);
+
+        // Verify no Interrupted chunks remain
+        let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
+        assert_eq!(interrupted, vec![]);
+
+        // Verify uninitialized chunks are correctly updated
+        let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
+        assert_eq!(
+            uninitialized,
+            [
+                partition_chunk_offset_ii!(0, 2),
+                partition_chunk_offset_ii!(4, 6),
+                partition_chunk_offset_ii!(8, 10),
+            ]
+        );
+
+        // Verify we can read the chunks back
+        let chunks = storage_module.read_chunks(partition_chunk_offset_ii!(3, 7))?;
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks.get(&PartitionChunkOffset::from(3)).unwrap().1,
+            ChunkType::Data
+        );
+        assert_eq!(
+            chunks.get(&PartitionChunkOffset::from(7)).unwrap().1,
+            ChunkType::Entropy
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_interrupted_chunks_reset_on_load() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("interrupted_load_test"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ii!(0, 10), "test-submodule".into())],
+        }];
+
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 11,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base_path,
+            ..NodeConfig::testing()
+        };
+        let config = Config::new(node_config.clone());
+
+        {
+            let storage_module = StorageModule::new(&infos[0], &config)?;
+
+            // Manually set some intervals to Interrupted (simulating a crash during write)
+            {
+                let mut intervals = storage_module.intervals.write().unwrap();
+                StorageModule::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(3),
+                    ChunkType::Interrupted,
+                );
+                StorageModule::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(7),
+                    ChunkType::Interrupted,
+                );
+                StorageModule::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(8),
+                    ChunkType::Interrupted,
+                );
+            }
+
+            // Write the intervals to disk
+            storage_module.write_intervals_to_submodules()?;
+
+            // Verify Interrupted chunks are set
+            let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
+            assert_eq!(
+                interrupted,
+                [
+                    partition_chunk_offset_ii!(3, 3),
+                    partition_chunk_offset_ii!(7, 8),
+                ]
+            );
+        }
+
+        // Create a new StorageModule instance (simulating restart)
+        let storage_module = StorageModule::new(&infos[0], &Config::new(node_config))?;
+
+        // Verify that Interrupted chunks are reset to Uninitialized on load
+        let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
+        assert_eq!(
+            interrupted,
+            vec![],
+            "Interrupted chunks should be reset on load"
+        );
+
+        // Verify all chunks are now Uninitialized
+        let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
+        assert_eq!(uninitialized, [partition_chunk_offset_ii!(0, 10)]);
 
         Ok(())
     }
