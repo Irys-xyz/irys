@@ -90,6 +90,7 @@ type SubmoduleMap =
 /// Tracks storage state of chunk ranges across all submodules
 type StorageIntervals = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, ChunkType>;
 
+
 #[derive(Debug, Clone)]
 pub struct ChunkTimeRecord {
     pub chunk_offset: PartitionChunkOffset,
@@ -197,7 +198,7 @@ pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Resul
 }
 
 /// Defines how chunk data is processed and stored
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ChunkType {
     /// Chunk containing matrix-packed entropy only
     Entropy,
@@ -421,7 +422,7 @@ impl StorageModule {
     /// Reinit intervals setting them as Uninitialized, and erase db
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let storage_interval = {
-            let mut intervals = self.intervals.write().unwrap();
+            let mut intervals= self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
             let end = intervals.last_key_value().unwrap().0.end();
             let storage_interval = ii(start, end);
@@ -530,7 +531,7 @@ impl StorageModule {
 
             for (chunk_offset, (bytes, chunk_type)) in write_batch {
                 // self.intervals are updated by write_chunk_internal()
-                self.write_chunk_internal(chunk_offset, bytes, chunk_type.clone())?;
+                self.write_chunk_internal(chunk_offset, bytes, chunk_type)?;
                 pending.remove(&chunk_offset); // Clean up written chunks
             }
 
@@ -675,7 +676,7 @@ impl StorageModule {
                 let pending = self.pending_writes.read().unwrap();
                 let pending_chunk = pending
                     .get(&partition_chunk_offset)
-                    .map(|(bytes, chunk_type)| (bytes.clone(), chunk_type.clone()));
+                    .map(|(bytes, chunk_type)| (bytes.clone(), *chunk_type));
                 drop(pending);
 
                 // Use pending chunk if available, otherwise use storage based on chunk type
@@ -692,7 +693,7 @@ impl StorageModule {
                     (None, _) => {
                         let bytes = self.read_chunk_internal(partition_chunk_offset)?;
                         chunk_map
-                            .insert(partition_chunk_offset, (bytes, interval_chunk_type.clone()));
+                            .insert(partition_chunk_offset, (bytes, *interval_chunk_type));
                     }
                 }
             }
@@ -1086,6 +1087,16 @@ impl StorageModule {
         submodule.db.view(fetch_from_db)?
     }
 
+    fn cut_then_insert_interval_if_touching(
+        intervals: &mut StorageIntervals,
+        chunk_offset: PartitionChunkOffset,
+        chunk_type: ChunkType,
+    ) {
+        let chunk_interval = ii(chunk_offset, chunk_offset);
+        let _ = intervals.cut(chunk_interval);
+        let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+    }
+
     #[inline]
     pub fn get_submodule_for_offset(
         &self,
@@ -1120,15 +1131,12 @@ impl StorageModule {
 
         // Set the chunk status to Interrupted before writing
         {
-            let mut intervals = self
+            let mut intervals= self
                 .intervals
                 .write()
                 .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
 
-            let chunk_interval = ii(chunk_offset, chunk_offset);
-            let _ = intervals.cut(chunk_interval);
-            let _ = intervals
-                .insert_merge_touching_if_values_equal(chunk_interval, ChunkType::Interrupted);
+            Self::cut_then_insert_interval_if_touching(&mut intervals, chunk_offset, ChunkType::Interrupted);
         }
 
         // Write the intervals file to persist the Interrupted status
