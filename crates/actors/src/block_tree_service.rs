@@ -884,7 +884,7 @@ impl BlockTreeServiceInner {
             System::set_current(self.system.clone());
             let mining_broadcaster_addr = BroadcastMiningService::from_registry();
             mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-                expired_partition_hashes.clone(),
+                expired_partition_hashes,
             )));
         }
 
