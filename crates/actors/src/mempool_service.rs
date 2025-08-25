@@ -922,6 +922,15 @@ impl Inner {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")
                 });
         }
+
+        self.wipe_blacklists().await;
+    }
+
+    // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
+    // right now this only wipes `recent_invalid_tx`
+    pub async fn wipe_blacklists(&mut self) {
+        let mut write = self.mempool_state.write().await;
+        write.recent_invalid_tx.clear();
     }
 
     /// Helper that opens a read-only database transaction from the Irys mempool state.

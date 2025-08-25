@@ -1,10 +1,10 @@
 use irys_actors::block_validation::{
-    poa_is_valid, previous_solution_hash_is_valid, PreValidationError,
+    poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid, PreValidationError,
 };
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
-    partition::PartitionAssignment, Address, Base64, BlockIndexItem, ConsensusConfig, DataLedger,
-    IrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    compute_solution_hash, partition::PartitionAssignment, Address, Base64, BlockIndexItem,
+    ConsensusConfig, DataLedger, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -114,4 +114,45 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         res,
         Err(PreValidationError::MerkleProofInvalid(_))
     ));
+}
+
+#[test_log::test(test)]
+fn solution_hash_link_valid_ok() {
+    let mut block = IrysBlockHeader::new_mock_header();
+    // choose deterministic inputs
+    block.poa.partition_chunk_offset = 7;
+    block.vdf_limiter_info.output = H256::from([1_u8; 32]);
+
+    let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
+
+    // compute expected solution_hash = sha256(poa_chunk || offset_le || seed)
+    block.solution_hash = compute_solution_hash(
+        &poa_chunk,
+        block.poa.partition_chunk_offset,
+        &block.vdf_limiter_info.output,
+    );
+
+    assert!(solution_hash_link_is_valid(&block, &poa_chunk).is_ok());
+}
+
+#[test_log::test(test)]
+fn solution_hash_link_invalid_when_inputs_tampered() {
+    let mut block = IrysBlockHeader::new_mock_header();
+    block.poa.partition_chunk_offset = 7;
+    block.vdf_limiter_info.output = H256::from([1_u8; 32]);
+
+    let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
+
+    // set correct solution hash first
+    block.solution_hash = compute_solution_hash(
+        &poa_chunk,
+        block.poa.partition_chunk_offset,
+        &block.vdf_limiter_info.output,
+    );
+
+    // now tamper the inputs (e.g., change poa_chunk by one byte) to trigger mismatch
+    let mut tampered_chunk = poa_chunk;
+    tampered_chunk[0] ^= 0x01;
+
+    assert!(solution_hash_link_is_valid(&block, &tampered_chunk).is_err());
 }

@@ -141,7 +141,11 @@ pub struct ConsensusConfig {
 
     /// Minimum number of replicas required for data to be considered permanently stored
     /// Higher values increase data durability but require more network resources
-    pub number_of_ingress_proofs: u64,
+    pub number_of_ingress_proofs_total: u64,
+
+    /// Minimum number of proofs from miners assigned to store the associated data
+    /// required for data to be promoted
+    pub number_of_ingress_proofs_from_assignees: u64,
 
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
@@ -314,6 +318,10 @@ pub struct NodeConfig {
 
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
+
+    /// P2P handshake parameters
+    #[serde(default)]
+    pub p2p_handshake: P2PHandshakeConfig,
 }
 
 impl From<NodeConfig> for Config {
@@ -657,7 +665,8 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs: 10,
+            number_of_ingress_proofs_total: 1,
+            number_of_ingress_proofs_from_assignees: 0,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
                 timestamp_millis: 0,
@@ -776,7 +785,8 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs: 10,
+            number_of_ingress_proofs_total: 1,
+            number_of_ingress_proofs_from_assignees: 0,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
                 timestamp_millis: 0,
@@ -970,11 +980,11 @@ impl NodeConfig {
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
             },
-            trusted_peers: vec![PeerAddress {
+            trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
-            }],
+            } */],
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -996,6 +1006,7 @@ impl NodeConfig {
                 bind_port: 0,
             },
             reth_peer_info: RethPeerInfo::default(),
+            p2p_handshake: P2PHandshakeConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
@@ -1098,6 +1109,7 @@ impl NodeConfig {
                 )),
                 peer_id: Default::default(),
             },
+            p2p_handshake: P2PHandshakeConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
@@ -1145,6 +1157,33 @@ impl NodeConfig {
                 .parse()
                 .expect("valid SocketAddr expected"),
             execution: self.reth_peer_info,
+        }
+    }
+}
+
+/// P2P handshake configuration with sensible defaults
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P2PHandshakeConfig {
+    pub max_concurrent_handshakes: usize,
+    pub max_peers_per_response: usize,
+    pub max_retries: u32,
+    pub backoff_base_secs: u64,
+    pub backoff_cap_secs: u64,
+    pub blocklist_ttl_secs: u64,
+    pub server_peer_list_cap: usize,
+}
+
+impl Default for P2PHandshakeConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_handshakes: 32,
+            max_peers_per_response: 25,
+            max_retries: 8,
+            backoff_base_secs: 1,
+            backoff_cap_secs: 60,
+            blocklist_ttl_secs: 600,
+            server_peer_list_cap: 25,
         }
     }
 }
@@ -1356,7 +1395,8 @@ mod tests {
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
-        number_of_ingress_proofs = 10
+        number_of_ingress_proofs_total = 1
+        number_of_ingress_proofs_from_assignees = 0
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
         pledge_base_value = 950.0
@@ -1529,13 +1569,18 @@ mod tests {
         let mut expected_config = NodeConfig::testing();
         expected_config.consensus = ConsensusOptions::Testing;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
-        expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
+        expected_config.trusted_peers = vec![ PeerAddress {
+            api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo {
             peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
             peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
-        };
-        let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        }
+        }];
         // for debugging purposes
-        println!("{}", expected_toml_data);
+
+        // let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        // println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a NodeConfig
         let config = toml::from_str::<NodeConfig>(toml_data)

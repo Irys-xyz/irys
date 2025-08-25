@@ -462,11 +462,13 @@ where
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
                 block_header.block_hash
             );
-        } else {
-            self.blocks_cache
-                .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
-                .await;
+            return Err(BlockPoolError::AlreadyProcessed(block_header.block_hash));
         }
+
+        self.blocks_cache
+            .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+            .await;
+
         debug!(
             "Block pool: Processing block {:?} (height {})",
             block_header.block_hash, block_header.height,
@@ -548,8 +550,10 @@ where
             current_block_hash
         );
 
+        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
+
         self.block_status_provider
-            .wait_for_block_tree_to_catch_up(block_header.height)
+            .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
         if let Err(block_discovery_error) = self

@@ -1,6 +1,7 @@
 use crate::peer_network_service::{GetPeerListGuard, PeerNetworkService};
 use crate::{
-    BlockStatusProvider, P2PService, ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
+    BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
+    ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
 use actix::{Actor, Addr, Context, Handler};
 use actix_web::dev::Server;
@@ -16,7 +17,9 @@ use irys_actors::{
     ChunkIngressError, IngressProofError, MempoolFacade,
 };
 use irys_api_client::ApiClient;
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
+use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
@@ -24,9 +27,10 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
-    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk, VersionRequest, H256,
+    GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
+    IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -34,9 +38,10 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, warn};
+use tracing::{debug, warn, Span};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
@@ -161,7 +166,14 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
+    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessage>>,
+    pub block_status_provider: BlockStatusProvider,
+}
+
+impl BlockDiscoveryStub {
+    pub(crate) fn get_blocks(&self) -> Vec<Arc<IrysBlockHeader>> {
+        self.blocks.read().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -171,6 +183,8 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
         block: Arc<IrysBlockHeader>,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
+        self.block_status_provider
+            .add_block_to_index_and_tree_for_testing(&block);
         self.blocks
             .write()
             .expect("to unlock blocks")
@@ -178,12 +192,14 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 
         let sender = self.internal_message_bus.clone();
 
-        // Pretend that we've validated the block and we're ready to gossip it
-        tokio::runtime::Handle::current().spawn(async move {
-            sender
-                .send(GossipBroadcastMessage::from(block))
-                .expect("to send block");
-        });
+        if let Some(sender) = sender {
+            // Pretend that we've validated the block and we're ready to gossip it
+            tokio::runtime::Handle::current().spawn(async move {
+                sender
+                    .send(GossipBroadcastMessage::from(block))
+                    .expect("to send block");
+            });
+        }
 
         Ok(())
     }
@@ -380,9 +396,11 @@ impl GossipServiceTestFixture {
         let mempool_txs = Arc::clone(&mempool_stub.txs);
         let mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
-            internal_message_bus: service_senders.gossip_broadcast.clone(),
+            internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
+            block_status_provider: block_status_provider_mock.clone(),
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
@@ -482,9 +500,11 @@ impl GossipServiceTestFixture {
 
         self.mempool_stub = mempool_stub.clone();
 
+        let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node_config).await;
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
-            internal_message_bus: self.service_senders.gossip_broadcast.clone(),
+            internal_message_bus: Some(self.service_senders.gossip_broadcast.clone()),
+            block_status_provider: block_status_provider_mock.clone(),
         };
 
         let peer_list = self
@@ -498,7 +518,7 @@ impl GossipServiceTestFixture {
         let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
 
         gossip_service.sync_state.finish_sync();
-        let (service_handle, _block_pool) = gossip_service
+        let (service_handle, _block_pool, _data_handler) = gossip_service
             .run(
                 mempool_stub,
                 block_discovery_stub,
@@ -624,12 +644,14 @@ pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
 
 struct FakeGossipDataHandler {
     on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+    on_pull_data_request: Box<dyn Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync>,
 }
 
 impl FakeGossipDataHandler {
     fn new() -> Self {
         Self {
             on_block_data_request: Box::new(|_| false),
+            on_pull_data_request: Box::new(|_| None),
         }
     }
 
@@ -637,11 +659,22 @@ impl FakeGossipDataHandler {
         (self.on_block_data_request)(block_hash)
     }
 
+    fn call_on_pull_data_request(&self, data_request: GossipDataRequest) -> Option<GossipData> {
+        (self.on_pull_data_request)(data_request)
+    }
+
     fn set_on_block_data_request(
         &mut self,
         on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
     ) {
         self.on_block_data_request = on_block_data_request;
+    }
+
+    fn set_on_pull_data_request(
+        &mut self,
+        on_pull_data_request: Box<dyn Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync>,
+    ) {
+        self.on_pull_data_request = on_pull_data_request;
     }
 }
 
@@ -679,6 +712,16 @@ impl FakeGossipServer {
             .set_on_block_data_request(Box::new(on_block_data_request));
     }
 
+    pub(crate) fn set_on_pull_data_request(
+        &self,
+        on_pull_data_request: impl Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync + 'static,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .set_on_pull_data_request(Box::new(on_pull_data_request));
+    }
+
     /// Runs the fake server, returns the address on which the server has started, as well
     /// as the server handle
     pub(crate) fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
@@ -689,6 +732,7 @@ impl FakeGossipServer {
                 .app_data(web::Data::new(handler))
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
+                .service(web::resource("/gossip/pull_data").route(web::post().to(handle_pull_data)))
                 .default_service(web::to(|| async {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
@@ -744,7 +788,86 @@ async fn handle_get_data(
             warn!("Failed to acquire read lock on handler: {}", e);
             HttpResponse::InternalServerError()
                 .content_type("application/json")
-                .json("Failed to process request")
+                .json("Failed to process a request")
         }
     }
+}
+
+async fn handle_pull_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    warn!("Fake server got pull data request: {:?}", data_request.data);
+
+    match handler.read() {
+        Ok(handler) => {
+            let data_request = data_request.data.clone();
+            let response = handler.call_on_pull_data_request(data_request);
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .json(response)
+        }
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process a request")
+        }
+    }
+}
+
+pub(crate) async fn data_handler_stub<T: ApiClient>(
+    config: &Config,
+    peer_list_guard: &PeerList,
+    db: DatabaseProvider,
+    api_client_stub: T,
+    sync_state: ChainSyncState,
+) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
+    let genesis_block = IrysBlockHeader::new_mock_header();
+    let block_index = BlockIndex::new(&config.node_config)
+        .await
+        .expect("expected to create a block index");
+    let block_index_read_guard_stub = BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+    let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+    let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+
+    let (service_senders, _service_receivers) = ServiceSenders::new();
+    let gossip_tx = service_senders.gossip_broadcast.clone();
+    let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
+    let mempool_stub = MempoolStub::new(gossip_tx);
+    let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
+    let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+    let block_discovery_stub = BlockDiscoveryStub {
+        blocks: Arc::new(RwLock::new(Vec::new())),
+        internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
+        block_status_provider: block_status_provider_mock,
+    };
+    let execution_payload_cache =
+        ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider.clone());
+    let block_pool_stub = Arc::new(BlockPool::new(
+        db.clone(),
+        block_discovery_stub,
+        mempool_stub.clone(),
+        sync_tx,
+        sync_state.clone(),
+        // Index guard, tree guard
+        BlockStatusProvider::new(block_index_read_guard_stub, block_tree_read_guard_stub),
+        // Reth service as a second argument
+        execution_payload_cache.clone(),
+        config.clone(),
+        service_senders,
+    ));
+
+    Arc::new(GossipDataHandler {
+        mempool: mempool_stub,
+        block_pool: block_pool_stub,
+        cache: Arc::new(GossipCache::new()),
+        api_client: api_client_stub.clone(),
+        gossip_client: GossipClient::new(Duration::from_millis(100000), Address::repeat_byte(2)),
+        peer_list: peer_list_guard.clone(),
+        sync_state: sync_state.clone(),
+        span: Span::current(),
+        execution_payload_cache,
+    })
 }

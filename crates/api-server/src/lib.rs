@@ -5,6 +5,7 @@ use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
+    middleware,
     web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
@@ -23,6 +24,8 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
+
+use crate::routes::anchor;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -48,6 +51,7 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
+        .wrap(middleware::Logger::default())
         .route("/", web::get().to(index::info_route))
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
@@ -102,6 +106,7 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(tx::get_tx_local_start_offset),
         )
         .route("/version", web::post().to(post_version::post_version))
+        .route("/anchor", web::get().to(anchor::anchor_route))
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
@@ -217,7 +222,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 
 //     // Create 2.5 chunks worth of data *  fill the data with random bytes
 //     let data_size = (MAX_CHUNK_SIZE as f64 * 2.5).round() as usize;
-//     let mut data_bytes = vec![0u8; data_size];
+//     let mut data_bytes = vec![0_u8; data_size];
 //     rand::thread_rng().fill(&mut data_bytes[..]);
 
 //     // Create a new Irys API instance & a signed transaction

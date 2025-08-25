@@ -1217,7 +1217,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
 #[test_log::test(actix_web::test)]
-async fn heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
+async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
     // Adjust num_blocks_in_epoch to control how many blocks are mined for the reorg
