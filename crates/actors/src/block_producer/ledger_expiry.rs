@@ -86,7 +86,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 /// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
 #[tracing::instrument(skip_all, fields(block_height, ledger_type = ?ledger_type))]
 pub async fn calculate_expired_ledger_fees(
-    epoch_snapshot: &EpochSnapshot,
+    parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     ledger_type: DataLedger,
     config: &Config,
@@ -95,7 +95,8 @@ pub async fn calculate_expired_ledger_fees(
     db: DatabaseProvider,
 ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
     // Step 1: Collect expired partitions
-    let expired_slots = collect_expired_partitions(epoch_snapshot, block_height, ledger_type)?;
+    let expired_slots =
+        collect_expired_partitions(parent_epoch_snapshot, block_height, ledger_type)?;
 
     tracing::info!(
         "Ledger expiry check at block {}: found {} expired slots for {:?} ledger",
@@ -255,12 +256,12 @@ async fn get_block_by_hash(
 /// Collects all expired partitions for the specified ledger type and their miners
 #[tracing::instrument(skip_all, fields(block_height, target_ledger_type))]
 fn collect_expired_partitions(
-    epoch_snapshot: &EpochSnapshot,
+    parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     target_ledger_type: DataLedger,
 ) -> eyre::Result<BTreeMap<SlotIndex, Vec<Address>>> {
-    let partition_assignments = &epoch_snapshot.partition_assignments;
-    let expired_partition_info = &epoch_snapshot.get_expiring_partition_info(block_height);
+    let partition_assignments = &parent_epoch_snapshot.partition_assignments;
+    let expired_partition_info = &parent_epoch_snapshot.get_expiring_partition_info(block_height);
     let mut expired_ledger_slot_indexes = BTreeMap::new();
     if expired_partition_info.is_empty() {
         return Ok(expired_ledger_slot_indexes);
