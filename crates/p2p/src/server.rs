@@ -25,6 +25,10 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// Default deduplication window in milliseconds for data requests
+/// Prevents rapid duplicate requests within this time window
+const DEFAULT_DUPLICATE_REQUEST_MILLISECONDS: u128 = 10_000; // 10 seconds
+
 #[derive(Debug)]
 pub(crate) struct GossipServer<M, B, A>
 where
@@ -386,7 +390,11 @@ where
 
         match server
             .data_handler
-            .handle_get_data(&peer, data_request.0)
+            .handle_get_data(
+                &peer,
+                data_request.0,
+                DEFAULT_DUPLICATE_REQUEST_MILLISECONDS,
+            )
             .await
         {
             Ok(has_data) => HttpResponse::Ok().json(has_data),

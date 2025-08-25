@@ -869,5 +869,6 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         sync_state: sync_state.clone(),
         span: Span::current(),
         execution_payload_cache,
+        data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
     })
 }

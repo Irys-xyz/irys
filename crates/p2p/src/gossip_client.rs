@@ -229,8 +229,8 @@ impl GossipClient {
     ) {
         match &result {
             Ok(_) => {
-                // Successful send, increase score
-                peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online);
+                // Successful send, increase score for data request
+                peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
             }
             Err(_) => {
                 // Failed to send, decrease score
@@ -261,6 +261,50 @@ impl GossipClient {
                 .await
             {
                 error!("Error sending data to peer: {}", e);
+            }
+        });
+    }
+
+    /// Sends data to a peer without updating their score
+    pub fn send_data_without_score_update(
+        &self,
+        peer: (&Address, &PeerListItem),
+        data: Arc<GossipData>,
+    ) {
+        let client = self.clone();
+        let peer = peer.1.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = client.send_data(&peer, &data).await {
+                error!("Error sending data to peer: {}", e);
+            }
+        });
+    }
+
+    /// Sends data to a peer and updates their score specifically for data requests
+    pub fn send_data_and_update_score_for_request(
+        &self,
+        peer: (&Address, &PeerListItem),
+        data: Arc<GossipData>,
+        peer_list: &PeerList,
+    ) {
+        let client = self.clone();
+        let peer_list = peer_list.clone();
+        let peer_miner_address = *peer.0;
+        let peer = peer.1.clone();
+
+        tokio::spawn(async move {
+            let result = client.send_data(&peer, &data).await;
+            match &result {
+                Ok(_) => {
+                    // Use DataRequest reason for score increase
+                    peer_list
+                        .increase_peer_score(&peer_miner_address, ScoreIncreaseReason::DataRequest);
+                }
+                Err(_) => {
+                    peer_list
+                        .decrease_peer_score(&peer_miner_address, ScoreDecreaseReason::Offline);
+                }
             }
         });
     }
