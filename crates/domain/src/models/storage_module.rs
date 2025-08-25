@@ -375,7 +375,7 @@ impl StorageModule {
         }
 
         // Attempt to load a global set of intervals from the submodules
-        let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map);
+        let loaded_intervals = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id);
 
         Ok(Self {
             id: storage_module_info.id,
@@ -618,8 +618,10 @@ impl StorageModule {
     /// * If unable to lock a submodule's intervals file mutex
     /// * If reading a submodule's intervals file fails
     /// * If interval insertion into the global map fails due to overlapping intervals
-    fn load_intervals_from_submodules(submodules: &SubmoduleMap) -> StorageIntervals {
+    fn load_intervals_from_submodules(submodules: &SubmoduleMap, module_id: usize) -> StorageIntervals {
         let mut global_intervals = StorageIntervals::new();
+        let mut interrupted_count = 0;
+        
         for (_, submodule) in submodules.iter() {
             let file = submodule
                 .intervals_file
@@ -631,6 +633,7 @@ impl StorageModule {
             for (interval, chunk_type) in submodule_intervals {
                 let set_chunk_type = match chunk_type {
                     ChunkType::Interrupted => {
+                        interrupted_count += 1;
                         warn!(
                             "Chunk @ interval ({}, {}) was interrupted, resetting to Uninitialized",
                             interval.start(),
@@ -645,6 +648,14 @@ impl StorageModule {
                     .expect("to insert interval into global intervals map");
             }
         }
+        
+        if interrupted_count > 0 {
+            error!(
+                "Found {} interrupted writes in storage module {}",
+                interrupted_count, module_id
+            );
+        }
+        
         global_intervals
     }
 
@@ -1743,7 +1754,7 @@ mod tests {
         );
 
         // Load up the intervals from file
-        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
+        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules, storage_module.id);
 
         {
             let file_intervals = intervals.into_iter().collect::<Vec<_>>();
@@ -1762,7 +1773,7 @@ mod tests {
         assert_eq!(unpacked, [partition_chunk_offset_ii!(0, 19)]);
 
         // Check intervals file is also reinitialized
-        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules);
+        let intervals = StorageModule::load_intervals_from_submodules(&storage_module.submodules, storage_module.id);
 
         {
             let file_intervals = intervals.into_iter().collect::<Vec<_>>();
