@@ -1,6 +1,7 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
+    rate_limiting::DataRequestTracker,
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
@@ -38,6 +39,7 @@ where
     /// Tracing span
     pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,
+    pub data_request_tracker: DataRequestTracker,
 }
 
 impl<M, B, A> Clone for GossipDataHandler<M, B, A>
@@ -57,6 +59,7 @@ where
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
+            data_request_tracker: DataRequestTracker::new(),
         }
     }
 }
@@ -550,7 +553,23 @@ where
         &self,
         peer_info: &PeerListItem,
         request: GossipRequest<GossipDataRequest>,
+        duplicate_request_milliseconds: u128,
     ) -> GossipResult<bool> {
+        // Check rate limiting and score cap
+        let (should_update_score, should_serve) = self
+            .data_request_tracker
+            .check_request(&request.miner_address, duplicate_request_milliseconds)
+            .await;
+
+        // If rate limited, don't serve data
+        if !should_serve {
+            debug!(
+                "Node {}: Rate limiting peer {:?} for data request",
+                self.gossip_client.mining_address, request.miner_address
+            );
+            return Ok(false);
+        }
+
         match request.data {
             GossipDataRequest::Block(block_hash) => {
                 let block_result = self.block_pool.get_block_data(&block_hash).await;
@@ -560,11 +579,18 @@ where
                 match maybe_block {
                     Some(block) => {
                         let data = Arc::new(GossipData::Block(block));
-                        self.gossip_client.send_data_and_update_the_score_detached(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &self.peer_list,
-                        );
+                        if should_update_score {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
                         Ok(true)
                     }
                     None => Ok(false),
@@ -583,11 +609,18 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipData::ExecutionPayload(evm_block));
-                        self.gossip_client.send_data_and_update_the_score_detached(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &self.peer_list,
-                        );
+                        if should_update_score {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
                         Ok(true)
                     }
                     None => Ok(false),

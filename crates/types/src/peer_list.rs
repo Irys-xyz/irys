@@ -30,6 +30,11 @@ impl PeerScore {
         self.0 = (self.0 + 1).min(Self::MAX);
     }
 
+    /// Limited increase for data requests (prevents farming)
+    pub fn increase_limited(&mut self, amount: u16) {
+        self.0 = (self.0 + amount).min(Self::MAX);
+    }
+
     pub fn decrease_offline(&mut self) {
         self.0 = self.0.saturating_sub(3);
     }

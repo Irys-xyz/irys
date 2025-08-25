@@ -6,6 +6,7 @@ mod gossip_client;
 mod gossip_data_handler;
 mod gossip_service;
 mod peer_network_service;
+mod rate_limiting;
 mod server;
 #[cfg(test)]
 mod tests;
