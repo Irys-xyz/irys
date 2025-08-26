@@ -10,7 +10,6 @@ use crate::{
     BlockMigrationMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
@@ -327,8 +326,7 @@ impl BlockTreeServiceInner {
 
         info!(
             "Migrating to block_index - hash: {} height: {}",
-            &block_header.block_hash.0.to_base58(),
-            &block_header.height
+            &block_header.block_hash, &block_header.height
         );
 
         // HACK
@@ -594,13 +592,13 @@ impl BlockTreeServiceInner {
         );
 
         if validation_result == ValidationResult::Invalid {
-            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            error!(block_hash = %block_hash,"invalid block");
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            error!(block_hash = %block_hash,"invalid block");
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());
@@ -872,20 +870,28 @@ impl BlockTreeServiceInner {
                 epoch_block.block_hash
             )
         });
-        let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
 
-        // Let the mining actors know about expired partitions
-        System::set_current(self.system.clone());
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-            expired_partition_hashes.clone(),
-        )));
+        // Check for partitions expired at this epoch boundary
+        if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
+            let expired_partition_hashes: Vec<_> = expired_partition_infos
+                .iter()
+                .map(|i| i.partition_hash)
+                .collect();
+
+            // Let the mining actors know about expired partitions
+            System::set_current(self.system.clone());
+            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+            mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+                expired_partition_hashes,
+            )));
+        }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
         if let Err(e) = self.service_senders.storage_modules.send(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
+                update_height: epoch_block.height,
             },
         ) {
             error!("Failed to send partition assignments update: {}", e);

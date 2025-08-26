@@ -107,7 +107,7 @@ const TARGET_100MBPS_256KIB: usize = 100;
 // const TARGET_100MBPS_32B: usize = 20; // 20KB/s equivalent
 
 #[test]
-fn run_256kib_tests() {
+fn slow_run_256kib_tests() {
     println!("=== 256KiB Chunk Test Suite ===");
 
     run_steady_test(CHUNK_256KIB, TARGET_50MBPS_256KIB);

@@ -81,7 +81,7 @@ impl H256 {
     #[doc = r" Returns a new zero-initialized fixed hash."]
     #[inline]
     pub const fn zero() -> H256 {
-        H256::repeat_byte(0u8)
+        H256::repeat_byte(0_u8)
     }
     #[doc = r" Returns the size of this hash in bytes."]
     #[inline]
@@ -159,7 +159,7 @@ impl H256 {
     #[doc = r" Returns `true` if no bits are set."]
     #[inline]
     pub fn is_zero(&self) -> bool {
-        self.as_bytes().iter().all(|&byte| byte == 0u8)
+        self.as_bytes().iter().all(|&byte| byte == 0_u8)
     }
 }
 impl fixed_hash::core_::fmt::Debug for H256 {

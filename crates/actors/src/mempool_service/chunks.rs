@@ -18,9 +18,10 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display, num::NonZeroUsize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
+    #[instrument(skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -29,7 +30,7 @@ impl Inner {
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
 
-        info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
+        info!("Processing chunk");
 
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
@@ -131,7 +132,7 @@ impl Inner {
                 return Ok(());
             }
         };
-
+        debug!("Got data root and data size");
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
         if data_size != chunk.data_size {

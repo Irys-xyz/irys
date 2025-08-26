@@ -9,7 +9,10 @@ use irys_actors::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     mempool_service::{MempoolServiceMessage, TxIngressError},
 };
-use irys_database::{database, db::IrysDatabaseExt as _};
+use irys_database::reth_db::transaction::DbTx as _;
+use irys_database::{
+    database, db::IrysDatabaseExt as _, reth_db::Database as _, tables::IngressProofs,
+};
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
     IrysTransactionResponse, H256,
@@ -214,7 +217,41 @@ pub async fn get_tx_is_promoted(
 ) -> Result<Json<bool>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx_is_promoted by tx_id: {}", tx_id);
-    let tx_header = get_storage_transaction(&state, tx_id)?;
 
-    Ok(web::Json(tx_header.ingress_proofs.is_some()))
+    // create db read transaction
+    let ro_tx = state
+        .db
+        .as_ref()
+        .tx()
+        .map_err(|e| {
+            tracing::error!("Failed to create mdbx transaction: {}", e);
+        })
+        .unwrap();
+
+    // Retrieve the transaction header from mempool or database
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    state
+        .mempool_service
+        .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
+        .unwrap();
+
+    let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
+        err: "Unable to read result from oneshot".to_owned(),
+    })?;
+
+    let tx_header = oneshot_res
+        .first()
+        .and_then(|opt| opt.as_ref())
+        .ok_or_else(|| ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: "Unable to find tx".to_owned(),
+        })?;
+
+    // Read its ingress proof
+    if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
+        assert_eq!(proof.proof.data_root, tx_header.data_root);
+        return Ok(web::Json(true));
+    };
+
+    Ok(web::Json(false))
 }

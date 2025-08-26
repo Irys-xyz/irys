@@ -26,7 +26,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
                 ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
                 ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs_total)?;
 
         cost_per_gb.base_network_fee(
             U256::from(data_size_bytes),
@@ -38,7 +38,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         TERM_FEE, // Current placeholder value
-        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus
@@ -89,7 +89,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
                 ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
                 ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs_total)?;
 
         cost_per_gb.base_network_fee(
             // the original data_size_bytes is too small to fill up a whole chunk
@@ -102,7 +102,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         TERM_FEE, // Current placeholder value
-        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus
@@ -176,7 +176,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
                 ctx.node_ctx.config.consensus.safe_minimum_number_of_years,
                 ctx.node_ctx.config.consensus.decay_rate,
             )?
-            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs_total)?;
 
         cost_per_gb.base_network_fee(
             // round to the chunk size boundary
@@ -189,7 +189,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         TERM_FEE, // Current placeholder value
-        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus
