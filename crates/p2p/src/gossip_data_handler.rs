@@ -556,13 +556,12 @@ where
         duplicate_request_milliseconds: u128,
     ) -> GossipResult<bool> {
         // Check rate limiting and score cap
-        let (should_update_score, should_serve) = self
+        let check_result = self
             .data_request_tracker
-            .check_request(&request.miner_address, duplicate_request_milliseconds)
-            .await;
+            .check_request(&request.miner_address, duplicate_request_milliseconds);
 
         // If rate limited, don't serve data
-        if !should_serve {
+        if !check_result.should_serve() {
             debug!(
                 "Node {}: Rate limiting peer {:?} for data request",
                 self.gossip_client.mining_address, request.miner_address
@@ -579,7 +578,7 @@ where
                 match maybe_block {
                     Some(block) => {
                         let data = Arc::new(GossipData::Block(block));
-                        if should_update_score {
+                        if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
                                 data,
@@ -609,7 +608,7 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipData::ExecutionPayload(evm_block));
-                        if should_update_score {
+                        if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
                                 data,

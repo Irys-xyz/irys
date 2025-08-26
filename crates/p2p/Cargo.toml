@@ -29,6 +29,7 @@ lru.workspace = true
 async-trait = "0.1"
 reth.workspace = true
 moka.workspace = true
+dashmap = "6.1.0"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true

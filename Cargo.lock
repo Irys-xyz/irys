@@ -5064,6 +5064,7 @@ dependencies = [
  "actix-rt",
  "actix-web",
  "async-trait",
+ "dashmap 6.1.0",
  "eyre",
  "irys-actors",
  "irys-api-client",
