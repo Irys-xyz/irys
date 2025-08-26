@@ -5,6 +5,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
+// Constants for rate limiting configuration
+const WINDOW_DURATION_MS: u64 = 3_600_000; // 1 hour in milliseconds
+const MAX_SCORE_PER_HOUR: u32 = 5; // Max score points per hour
+const MAX_REQUESTS_PER_HOUR: u32 = 100; // Max requests per hour
+const CLEANUP_INTERVAL_SECS: u64 = 300; // Cleanup every 5 minutes
+const ENTRY_EXPIRY_MS: u64 = 7_200_000; // 2 hours in milliseconds
+
+
 /// Record of data requests from a peer
 #[derive(Debug, Clone)]
 pub struct DataRequestRecord {
@@ -42,7 +50,7 @@ impl DataRequestRecord {
     /// Check if the tracking window has expired (1 hour)
     pub fn is_window_expired(&self) -> bool {
         let now = Self::now_as_secs();
-        now - self.window_start > 3_600_000 // 1 hour in milliseconds
+        now - self.window_start > WINDOW_DURATION_MS
     }
 
     /// Check if enough time has passed since last request (deduplication window)
@@ -90,9 +98,9 @@ impl DataRequestTracker {
     pub fn new() -> Self {
         Self {
             request_history: Arc::new(RwLock::new(HashMap::new())),
-            max_score_per_hour: 5,      // Max 5 score points per hour
-            max_requests_per_hour: 100, // Max 100 requests per hour
-            cleanup_interval: Duration::from_secs(300), // Cleanup every 5 minutes
+            max_score_per_hour: MAX_SCORE_PER_HOUR,
+            max_requests_per_hour: MAX_REQUESTS_PER_HOUR,
+            cleanup_interval: Duration::from_secs(CLEANUP_INTERVAL_SECS),
             last_cleanup: Arc::new(RwLock::new(Instant::now())),
         }
     }
@@ -196,8 +204,7 @@ impl DataRequestTracker {
         let before = history.len();
         history.retain(|addr, record| {
             let age = now - record.window_start;
-            if age > 7_200_000 {
-                // 2 hours in milliseconds
+            if age > ENTRY_EXPIRY_MS {
                 trace!("Removing expired tracking record for peer {:?}", addr);
                 false
             } else {
@@ -238,6 +245,9 @@ mod tests {
     use super::*;
     use irys_types::Address;
 
+const TEST_DEDUP_WINDOW_MS: u128 = 10_000; // Test deduplication window
+const TEST_SLEEP_MS: u64 = 11_000; // Test sleep duration
+                                   //
     #[tokio::test]
     async fn test_data_request_tracker_score_limiting() {
         let tracker = DataRequestTracker::new();
@@ -246,9 +256,9 @@ mod tests {
         // First 5 requests should allow score updates
         for i in 1..=5 {
             // Wait a bit to avoid deduplication window
-            tokio::time::sleep(Duration::from_millis(11_000)).await;
+            tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
             let (should_update, should_serve) =
-                tracker.check_request(&peer_addr, 10_000_u128).await;
+                tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS).await;
             assert!(should_serve, "Should serve data for request {}", i);
             if i == 1 {
                 // First request always updates score
@@ -259,8 +269,8 @@ mod tests {
         }
 
         // 6th request should not update score but still serve
-        tokio::time::sleep(Duration::from_millis(11_000)).await;
-        let (should_update, should_serve) = tracker.check_request(&peer_addr, 10_000_u128).await;
+        tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
+        let (should_update, should_serve) = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS).await;
         assert!(!should_update, "Should not update score after cap");
         assert!(should_serve, "Should still serve data after score cap");
 
@@ -276,25 +286,25 @@ mod tests {
         let peer_addr = Address::from([2_u8; 20]);
 
         // First request
-        let (should_update1, should_serve1) = tracker.check_request(&peer_addr, 10_000_u128).await;
+        let (should_update1, should_serve1) = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS).await;
         assert!(should_update1);
         assert!(should_serve1);
 
         // Immediate second request should be deduplicated
-        let (should_update2, should_serve2) = tracker.check_request(&peer_addr, 10_000_u128).await;
+        let (should_update2, should_serve2) = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS).await;
         assert!(!should_update2, "Should not update score for duplicate");
         assert!(should_serve2, "Should still serve data for duplicate");
 
         // After deduplication window, should allow score update
-        tokio::time::sleep(Duration::from_millis(11_000)).await;
-        let (should_update3, should_serve3) = tracker.check_request(&peer_addr, 10_000_u128).await;
+        tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
+        let (should_update3, should_serve3) = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS).await;
         assert!(should_update3, "Should update score after dedup window");
         assert!(should_serve3);
     }
 
     #[test]
     fn test_data_request_record_expiry() {
-        let mut record = DataRequestRecord::new(10_00_u128);
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW_MS);
 
         // Fresh record should not be expired
         assert!(!record.is_window_expired());
@@ -304,7 +314,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64)
-            .saturating_sub(3_700_000); // Over 1 hour ago
+            .saturating_sub(WINDOW_DURATION_MS + 100_000); // Over 1 hour ago
 
         assert!(record.is_window_expired());
 
