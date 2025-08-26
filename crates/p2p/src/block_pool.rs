@@ -444,6 +444,7 @@ where
         Ok(())
     }
 
+    #[instrument(skip_all, target="BlockPool")]
     pub(crate) async fn process_block(
         &self,
         block_header: Arc<IrysBlockHeader>,
