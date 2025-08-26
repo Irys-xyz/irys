@@ -4,7 +4,8 @@ use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerFilterMode
+    Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
+    PeerNetworkSender,
 };
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};

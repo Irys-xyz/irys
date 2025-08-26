@@ -792,7 +792,7 @@ where
                     peer_service_addr,
                     is_trusted_peer,
                     peer_filter_mode,
-                    peer_list
+                    peer_list,
                 )
                 .await;
             };
