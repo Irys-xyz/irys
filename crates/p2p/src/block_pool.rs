@@ -543,12 +543,12 @@ where
         }
 
         if skip_validation_for_fast_track {
-            // Preemptively handle reth payload for trusted sync path
-            if let Err(err) = Self::force_handle_execution_payload(
+            // Preemptively handle reth payload for the trusted sync path
+            if let Err(err) = Self::pull_and_seal_execution_payload(
                 &self.execution_payload_provider,
                 &self.sync_service_sender,
                 block_header.evm_block_hash,
-                true,
+                skip_validation_for_fast_track,
             )
             .await
             {
@@ -594,7 +594,7 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
+            self.pull_and_seal_execution_payload_in_background(block_header.evm_block_hash, skip_validation_for_fast_track);
         }
 
         debug!(
@@ -627,7 +627,7 @@ where
         Ok(())
     }
 
-    pub(crate) async fn force_handle_execution_payload(
+    pub(crate) async fn pull_and_seal_execution_payload(
         execution_payload_provider: &ExecutionPayloadCache,
         sync_service_sender: &mpsc::UnboundedSender<SyncChainServiceMessage>,
         evm_block_hash: EvmBlockHash,
@@ -678,7 +678,7 @@ where
     /// Requests the execution payload for the given EVM block hash if it is not already stored
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
-    pub(crate) fn handle_execution_payload_for_prevalidated_block(
+    pub(crate) fn pull_and_seal_execution_payload_in_background(
         &self,
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
@@ -691,7 +691,7 @@ where
         let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
         let chain_sync_sender = self.sync_service_sender.clone();
         tokio::spawn(async move {
-            match Self::force_handle_execution_payload(
+            match Self::pull_and_seal_execution_payload(
                 &execution_payload_provider,
                 &chain_sync_sender,
                 evm_block_hash,

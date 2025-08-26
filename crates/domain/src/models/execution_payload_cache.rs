@@ -92,7 +92,7 @@ impl RethBlockProvider {
             let payloads = payloads.read().expect("can always read");
             payloads.get(&evm_block_hash).cloned()
         } else {
-            panic!("Tried to get payload from mock provider, but it is not a mock provider");
+            panic!("Tried to get payload from the mock provider, but it is not a mock provider");
         }
     }
 }

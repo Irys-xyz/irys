@@ -440,10 +440,6 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
             match sync_rx.recv().await {
                 None => {}
                 Some(message) => match message {
-                    SyncChainServiceMessage::InitialSync(_) => {}
-                    SyncChainServiceMessage::PeriodicSyncCheck => {}
-                    SyncChainServiceMessage::BlockProcessedByThePool { .. } => {}
-                    SyncChainServiceMessage::RequestBlockFromTheNetwork { .. } => {}
                     SyncChainServiceMessage::PullPayloadFromTheNetwork {
                         evm_block_hash,
                         use_trusted_peers_only: _,
@@ -463,7 +459,8 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
                             );
                             break;
                         }
-                    }
+                    },
+                    _ => {}
                 },
             }
         }
