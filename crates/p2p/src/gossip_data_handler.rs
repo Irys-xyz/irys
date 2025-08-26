@@ -507,21 +507,19 @@ where
                 .await
             {
                 Ok((source_address, execution_payload)) => {
-                    let result = self
+                    if let Err(e) = self
                         .handle_execution_payload(GossipRequest {
                             miner_address: source_address,
                             data: execution_payload,
                         })
-                        .await;
-                    match result {
-                        Ok(()) => return Ok(()),
-                        Err(e) => {
-                            last_err = Some(e);
-                            if attempt < 3 {
-                                continue;
-                            }
+                        .await
+                    {
+                        last_err = Some(e);
+                        if attempt < 3 {
+                            continue;
                         }
                     }
+                    return Ok(());
                 }
                 Err(e) => {
                     last_err = Some(GossipError::from(e));
