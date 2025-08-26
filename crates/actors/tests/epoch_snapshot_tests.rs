@@ -580,10 +580,16 @@ async fn partition_expiration_and_repacking_test() {
         }
 
         // Simulate the partition expiry broadcast the service would normally do
-        let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
+        let expired_partition_hashes: Vec<_> = epoch_snapshot
+            .expired_partition_infos
+            .as_ref()
+            .map_or(Vec::new(), |infos| {
+                infos.iter().map(|info| info.partition_hash).collect()
+            });
+
         let mining_broadcaster_addr = BroadcastMiningService::from_registry();
         mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-            expired_partition_hashes.clone(),
+            expired_partition_hashes,
         )));
 
         previous_epoch_block = Some(new_epoch_block.clone());

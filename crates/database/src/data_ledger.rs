@@ -1,4 +1,4 @@
-use irys_types::{ConsensusConfig, DataLedger, H256};
+use irys_types::{partition::PartitionHash, ConsensusConfig, DataLedger, H256};
 use serde::Serialize;
 use std::ops::{Index, IndexMut};
 /// Manages the global ledger state within the epoch service, tracking:
@@ -18,6 +18,13 @@ pub struct LedgerSlot {
     pub is_expired: bool,
     /// Block height of most recently added transaction data (chunks)
     pub last_height: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExpiringPartitionInfo {
+    pub partition_hash: PartitionHash,
+    pub ledger_id: DataLedger,
+    pub slot_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -71,9 +78,8 @@ impl TermLedger {
         &self.slots
     }
 
-    /// Returns indices of newly expired slots
-    pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<usize> {
-        let mut expired_indices = Vec::new();
+    pub fn get_expired_slot_indexes(&self, epoch_height: u64) -> Vec<usize> {
+        let mut expired_slot_indexes = Vec::new();
 
         tracing::debug!(
             "expire_old_slots: epoch_height={}, epoch_length={}, num_blocks_in_epoch={}, min_height_needed={}",
@@ -90,39 +96,46 @@ impl TermLedger {
                 epoch_height,
                 self.epoch_length * self.num_blocks_in_epoch
             );
-            return expired_indices;
+            return expired_slot_indexes;
         }
 
         let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
         tracing::error!("Calculated expiry_height={}", expiry_height);
 
         // Collect indices of slots to expire
-        for (idx, slot) in self.slots.iter().enumerate() {
+        for (slot_index, slot) in self.slots.iter().enumerate() {
             tracing::debug!(
                 "Checking slot {}: last_height={}, is_expired={}, partitions={:?}",
-                idx,
+                slot_index,
                 slot.last_height,
                 slot.is_expired,
                 slot.partitions
             );
 
-            if idx == self.slots.len() - 1 {
+            if slot_index == self.slots.len() - 1 {
                 // Never expire the last slot in a ledger
-                tracing::warn!("Skipping slot {} (last slot)", idx);
+                tracing::warn!("Skipping slot {} (last slot)", slot_index);
                 continue;
             }
             if slot.last_height <= expiry_height && !slot.is_expired {
-                tracing::info!("Slot {} is expired! Adding to expired_indices", idx);
-                expired_indices.push(idx);
+                tracing::info!("Slot {} is expired! Adding to expired_indices", slot_index);
+                expired_slot_indexes.push(slot_index);
             }
         }
 
+        expired_slot_indexes
+    }
+
+    /// Returns indices of newly expired slots
+    pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<usize> {
+        let expired_slot_indexes = self.get_expired_slot_indexes(epoch_height);
+
         // Mark collected slots as expired
-        for &idx in &expired_indices {
+        for &idx in &expired_slot_indexes {
             self.slots[idx].is_expired = true;
         }
 
-        expired_indices
+        expired_slot_indexes
     }
 }
 
@@ -269,18 +282,46 @@ impl Ledgers {
     }
 
     /// Get all of the partition hashes that have expired out of term ledgers
-    pub fn get_expired_partition_hashes(&mut self, epoch_height: u64) -> Vec<H256> {
-        let mut expired_hashes: Vec<H256> = Vec::new();
+    pub fn expire_term_partitions(&mut self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
+        let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
 
         // Collect expired partition hashes from term ledgers
         for term_ledger in &mut self.term {
+            let ledger_id = DataLedger::try_from(term_ledger.ledger_id).unwrap();
             for expired_index in term_ledger.expire_old_slots(epoch_height) {
-                // Add each partition hash from expired slots
-                expired_hashes.extend(term_ledger.slots[expired_index].partitions.iter().copied());
+                for partition_hash in term_ledger.slots[expired_index].partitions.iter() {
+                    // Add ExpiringPartitionInfo for each expired partition_hash
+                    expired_partitions.push(ExpiringPartitionInfo {
+                        partition_hash: *partition_hash,
+                        ledger_id,
+                        slot_index: expired_index,
+                    });
+                }
             }
         }
 
-        expired_hashes
+        expired_partitions
+    }
+
+    pub fn get_expiring_term_partitions(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
+        let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
+
+        // Collect expired partition hashes from term ledgers
+        for term_ledger in &self.term {
+            let ledger_id = DataLedger::try_from(term_ledger.ledger_id).unwrap();
+            for expiring_slot_index in term_ledger.get_expired_slot_indexes(epoch_height) {
+                for partition_hash in term_ledger.slots[expiring_slot_index].partitions.iter() {
+                    // Add ExpiringPartitionInfo for each expired partition_hash
+                    expired_partitions.push(ExpiringPartitionInfo {
+                        partition_hash: *partition_hash,
+                        ledger_id,
+                        slot_index: expiring_slot_index,
+                    });
+                }
+            }
+        }
+
+        expired_partitions
     }
 
     // Private helper methods for term ledger lookups

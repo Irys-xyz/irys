@@ -916,7 +916,7 @@ pub trait BlockProdStrategy {
         let system_transaction_ledger;
         let aggregated_miner_fees;
         if is_epoch_block {
-            let epoch_snapshot = self
+            let parent_epoch_snapshot = self
                 .inner()
                 .block_tree_guard
                 .read()
@@ -926,7 +926,7 @@ pub trait BlockProdStrategy {
             tracing::error!("about to calculate fees");
             // Calculate fees for expired ledgers
             aggregated_miner_fees = self
-                .calculate_expired_ledger_fees(&epoch_snapshot, block_height)
+                .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
                 .await?;
 
             // todo - if tx is of publish ledger and did not get promoted then we refund the perm fee
@@ -1061,11 +1061,11 @@ pub trait BlockProdStrategy {
     /// Currently processes Submit ledger as that's the only expiring ledger type.
     async fn calculate_expired_ledger_fees(
         &self,
-        epoch_snapshot: &EpochSnapshot,
+        parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
     ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
         ledger_expiry::calculate_expired_ledger_fees(
-            epoch_snapshot,
+            parent_epoch_snapshot,
             block_height,
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
