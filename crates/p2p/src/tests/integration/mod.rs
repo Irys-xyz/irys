@@ -437,31 +437,26 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     let mut sync_rx = fixture2._sync_rx.take().expect("expect to have a sync rx");
     tokio::spawn(async move {
         loop {
-            match sync_rx.recv().await {
-                None => {}
-                Some(message) => match message {
-                    SyncChainServiceMessage::PullPayloadFromTheNetwork {
-                        evm_block_hash,
-                        use_trusted_peers_only: _,
-                        response,
-                    } => {
-                        debug!("Sync request received for block hash: {:?}", evm_block_hash);
-                        if evm_block_hash == sealed_block.hash() {
-                            execution_payload_provider2
-                                .add_payload_to_cache(sealed_block.clone())
-                                .await;
-                            response.send(Ok(())).expect("to deliver response");
-                            break;
-                        } else {
-                            debug!(
-                                "Received sync request for unknown block hash: {:?}",
-                                evm_block_hash
-                            );
-                            break;
-                        }
-                    }
-                    _ => {}
-                },
+            if let Some(SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                evm_block_hash,
+                use_trusted_peers_only: _,
+                response,
+            }) = sync_rx.recv().await
+            {
+                debug!("Sync request received for block hash: {:?}", evm_block_hash);
+                if evm_block_hash == sealed_block.hash() {
+                    execution_payload_provider2
+                        .add_payload_to_cache(sealed_block.clone())
+                        .await;
+                    response.send(Ok(())).expect("to deliver response");
+                    break;
+                } else {
+                    debug!(
+                        "Received sync request for unknown block hash: {:?}",
+                        evm_block_hash
+                    );
+                    break;
+                }
             }
         }
     });
