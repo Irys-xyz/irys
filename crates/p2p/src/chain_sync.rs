@@ -80,6 +80,10 @@ pub enum SyncChainServiceMessage {
         block_hash: BlockHash,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
     },
+    PullRethPayload {
+        evm_block_hash: irys_types::H256,
+        response: oneshot::Sender<ChainSyncResult<()>>,
+    },
 }
 
 /// Inner service containing the sync logic
