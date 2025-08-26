@@ -15,8 +15,8 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, GossipCacheKey,
-    GossipData, IrysBlockHeader, PeerNetworkError,
+    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
+    PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -544,9 +544,13 @@ where
 
         if skip_validation_for_fast_track {
             // Preemptively handle reth payload for trusted sync path
-            if let Err(err) = self
-                .force_handle_execution_payload(block_header.evm_block_hash, true)
-                .await
+            if let Err(err) = Self::force_handle_execution_payload(
+                &self.execution_payload_provider,
+                &self.sync_service_sender,
+                block_header.evm_block_hash,
+                true,
+            )
+            .await
             {
                 error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, err);
                 self.blocks_cache
@@ -590,12 +594,7 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            if let Err(err) = self
-                .force_handle_execution_payload(block_header.evm_block_hash, true)
-                .await
-            {
-                error!("Unexpected error while fetching reth payload: {:?}: {:?}. Payload will be attempted to be downloaded once more before shadow tx validation", block_header.block_hash, err);
-            }
+            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
         }
 
         debug!(
@@ -629,24 +628,23 @@ where
     }
 
     pub(crate) async fn force_handle_execution_payload(
-        &self,
+        execution_payload_provider: &ExecutionPayloadCache,
+        sync_service_sender: &mpsc::UnboundedSender<SyncChainServiceMessage>,
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
         let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
 
-        if !self
-            .execution_payload_provider
+        if !execution_payload_provider
             .is_payload_in_cache(&evm_block_hash)
             .await
         {
             if let Err(send_err) =
-                self.sync_service_sender
-                    .send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
-                        evm_block_hash,
-                        use_trusted_peers_only,
-                        response: response_sender,
-                    })
+                sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                    evm_block_hash,
+                    use_trusted_peers_only,
+                    response: response_sender,
+                })
             {
                 let err_text = format!(
                     "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
@@ -674,7 +672,7 @@ where
     /// Requests the execution payload for the given EVM block hash if it is not already stored
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
-    pub(crate) fn _handle_execution_payload_for_prevalidated_block(
+    pub(crate) fn handle_execution_payload_for_prevalidated_block(
         &self,
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
@@ -685,25 +683,35 @@ where
         );
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
+        let chain_sync_sender = self.sync_service_sender.clone();
         tokio::spawn(async move {
-            if let Some(sealed_block) = execution_payload_provider
-                .wait_for_sealed_block(&evm_block_hash, use_trusted_peers_only)
-                .await
+            match Self::force_handle_execution_payload(
+                &execution_payload_provider,
+                &chain_sync_sender,
+                evm_block_hash,
+                use_trusted_peers_only,
+            )
+            .await
             {
-                let evm_block = sealed_block.into_block();
-                if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
-                    GossipCacheKey::ExecutionPayload(evm_block_hash),
-                    GossipData::ExecutionPayload(evm_block),
-                )) {
-                    error!(
-                        "Failed to broadcast execution payload for block {:?}: {:?}",
-                        evm_block_hash, err
-                    );
-                } else {
-                    debug!(
-                        "Execution payload for block {:?} has been broadcasted",
-                        evm_block_hash
-                    );
+                Ok(()) => {
+                    let gossip_payload = execution_payload_provider
+                        .get_locally_stored_sealed_block(&evm_block_hash)
+                        .await
+                        .map(GossipBroadcastMessage::from);
+
+                    if let Some(payload) = gossip_payload {
+                        if let Err(err) = gossip_broadcast_sender.send(payload) {
+                            error!("Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
+                        } else {
+                            debug!(
+                                "Block pool: Broadcasted execution payload for EVM block hash {:?}",
+                                evm_block_hash
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Block pool: Failed to handle execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
                 }
             }
         });
