@@ -19,7 +19,6 @@ use irys_types::{
     PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
-use reth::rpc::server_types::eth::simulate::execute_transactions;
 use std::net::SocketAddr;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};

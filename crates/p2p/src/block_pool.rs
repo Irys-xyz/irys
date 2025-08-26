@@ -633,12 +633,17 @@ where
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
+        debug!(
+            "Block pool: Forcing handling of execution payload for EVM block hash: {:?}",
+            evm_block_hash
+        );
         let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
 
         if !execution_payload_provider
             .is_payload_in_cache(&evm_block_hash)
             .await
         {
+            debug!("BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network", evm_block_hash);
             if let Err(send_err) =
                 sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
                     evm_block_hash,
@@ -665,6 +670,7 @@ where
                 GossipError::Internal(InternalGossipError::Unknown(err_text))
             })?
         } else {
+            debug!("BlockPool: Payload for EVM block hash {:?} is already in cache, no need to request", evm_block_hash);
             Ok(())
         }
     }

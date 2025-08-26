@@ -457,7 +457,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 use_trusted_peers_only,
             } => {
                 debug!(
-                    "Force pulling execution payload for evm block hash {:?}",
+                    "SyncChainService: Received a request to force pull an execution payload for evm block hash {:?}",
                     evm_block_hash
                 );
                 let inner = self.inner.clone();
