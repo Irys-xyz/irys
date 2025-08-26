@@ -459,7 +459,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
                             );
                             break;
                         }
-                    },
+                    }
                     _ => {}
                 },
             }

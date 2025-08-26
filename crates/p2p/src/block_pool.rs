@@ -594,7 +594,10 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            self.pull_and_seal_execution_payload_in_background(block_header.evm_block_hash, skip_validation_for_fast_track);
+            self.pull_and_seal_execution_payload_in_background(
+                block_header.evm_block_hash,
+                skip_validation_for_fast_track,
+            );
         }
 
         debug!(
