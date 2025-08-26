@@ -226,11 +226,7 @@ impl ExecutionPayloadCache {
     }
 
     pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
-        self.cache
-            .read()
-            .await
-            .payloads
-            .contains(evm_block_hash)
+        self.cache.read().await.payloads.contains(evm_block_hash)
     }
 
     #[instrument(skip(self))]

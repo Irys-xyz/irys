@@ -469,10 +469,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                             use_trusted_peers_only,
                         )
                         .await;
-                    if let Some(sender) = response {
-                        if let Err(e) = sender.send(result) {
-                            tracing::error!("Failed to send response: {:?}", e);
-                        }
+                    if let Err(e) = response.send(result) {
+                        tracing::error!("Failed to send response: {:?}", e);
                     }
                 });
             }

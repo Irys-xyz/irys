@@ -1,6 +1,7 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
-use crate::GossipResult;
+use crate::types::InternalGossipError;
+use crate::{GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -547,7 +548,7 @@ where
                 .force_handle_execution_payload(block_header.evm_block_hash, true)
                 .await
             {
-                error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
+                error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, err);
                 self.blocks_cache
                     .remove_block(&block_header.block_hash)
                     .await;
@@ -634,8 +635,11 @@ where
     ) -> GossipResult<()> {
         let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
 
-        if !self.execution_payload_provider.is_payload_in_cache(&evm_block_hash) {
-
+        if !self
+            .execution_payload_provider
+            .is_payload_in_cache(&evm_block_hash)
+            .await
+        {
             if let Err(send_err) =
                 self.sync_service_sender
                     .send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
@@ -644,19 +648,23 @@ where
                         response: response_sender,
                     })
             {
-                error!(
-                "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
-                send_err
-            );
-                return Err(send_err.into());
+                let err_text = format!(
+                    "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
+                    send_err
+                );
+                error!(err_text);
+                return Err(GossipError::Internal(InternalGossipError::Unknown(
+                    err_text,
+                )));
             }
 
             response_receiver.await.map_err(|recv_err| {
-                error!(
-                "BlockPool: Failed to receive response from PullPayloadFromTheNetwork: {:?}",
-                recv_err
-            );
-                return Err(recv_err.into());
+                let err_text = format!(
+                    "BlockPool: Failed to receive response from PullPayloadFromTheNetwork: {:?}",
+                    recv_err
+                );
+                error!(err_text);
+                GossipError::Internal(InternalGossipError::Unknown(err_text))
             })?
         } else {
             Ok(())
@@ -666,7 +674,7 @@ where
     /// Requests the execution payload for the given EVM block hash if it is not already stored
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
-    pub(crate) fn handle_execution_payload_for_prevalidated_block(
+    pub(crate) fn _handle_execution_payload_for_prevalidated_block(
         &self,
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
