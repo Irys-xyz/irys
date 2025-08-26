@@ -198,19 +198,27 @@ impl GossipClient {
             || async {
                 let res = client.get(&url).send().await.map_err(|error| {
                     warn!("Network error during health check to {}: {}", url, error);
-                    backoff::Error::transient(GossipClientError::GetRequest(url.clone(), error.to_string()))
+                    backoff::Error::transient(GossipClientError::GetRequest(
+                        url.clone(),
+                        error.to_string(),
+                    ))
                 })?;
 
-                Self::classify_http(res, |e| GossipClientError::GetRequest(url.clone(), e.to_string()))?
-                    .json::<bool>()
-                    .await
-                    .map_err(|error| {
-                        warn!(
-                            "JSON parsing error during health check to {}: {}",
-                            url, error
-                        );
-                        backoff::Error::permanent(GossipClientError::GetJsonResponsePayload(url.clone(), error.to_string()))
-                    })
+                Self::classify_http(res, |e| {
+                    GossipClientError::GetRequest(url.clone(), e.to_string())
+                })?
+                .json::<bool>()
+                .await
+                .map_err(|error| {
+                    warn!(
+                        "JSON parsing error during health check to {}: {}",
+                        url, error
+                    );
+                    backoff::Error::permanent(GossipClientError::GetJsonResponsePayload(
+                        url.clone(),
+                        error.to_string(),
+                    ))
+                })
             },
             |err, dur| {
                 warn!(?dur, %err, "retrying health check after {:?}", dur);
@@ -498,7 +506,6 @@ impl GossipClient {
 mod tests {
     use super::*;
     use core::time::Duration;
-    use reqwest::StatusCode;
     use std::io::prelude::*;
     use std::net::TcpListener;
     use std::thread;
@@ -613,7 +620,11 @@ mod tests {
 
             assert!(result.is_err());
             assert!(
-                result.unwrap_err().to_string().to_lowercase().contains("failed"),
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .to_lowercase()
+                    .contains("failed"),
                 "Expected connection error"
             );
         }
@@ -627,10 +638,7 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            assert!(
-                result.is_err(),
-                "Expected timeout error"
-            );
+            assert!(result.is_err(), "Expected timeout error");
         }
     }
 
@@ -645,11 +653,7 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            assert!(
-                result.is_err(),
-                "Expected error for status {}",
-                status_code
-            );
+            assert!(result.is_err(), "Expected error for status {}", status_code);
         }
 
         #[tokio::test]
@@ -677,10 +681,7 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            assert!(
-                result.is_err(),
-                "Expected JSON parsing error"
-            );
+            assert!(result.is_err(), "Expected JSON parsing error");
         }
 
         // Additional test for malformed JSON
@@ -697,10 +698,7 @@ mod tests {
             let result = fixture.client.check_health(peer).await;
 
             assert!(result.is_err());
-            assert!(
-                result.is_err(),
-                "Expected JSON parsing error"
-            );
+            assert!(result.is_err(), "Expected JSON parsing error");
         }
     }
 }
