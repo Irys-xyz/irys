@@ -104,6 +104,11 @@ pub struct DataTransactionHeader {
     #[serde(default, with = "optional_string_u64")]
     pub bundle_format: Option<u64>,
 
+    /// inclusive, 0-indexed byte offset of where the data starts, optional for txs that have no leading metadata segment
+    /// a value of 0 is equivalent to `None` - both mean there is no metadata segment and the data starts immediately
+    #[serde(default, with = "optional_string_u64")]
+    pub data_start: Option<u64>,
+
     /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
     #[serde(default)]
     pub perm_fee: Option<U256>,
@@ -208,6 +213,7 @@ impl DataTransactionHeader {
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
             ingress_proofs: None,
+            data_start: None,
         }
     }
 }
@@ -962,6 +968,7 @@ mod tests {
             version: 0,
             ingress_proofs: None,
             signature: Signature::test_signature().into(),
+            data_start: None,
         }
     }
 
