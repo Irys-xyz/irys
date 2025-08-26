@@ -9,7 +9,11 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, Memp
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
-use irys_types::{BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, IrysTransactionResponse, PeerListItem, UnpackedChunk, H256};
+use irys_types::{
+    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
+    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+};
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::sync::Arc;

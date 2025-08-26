@@ -225,6 +225,14 @@ impl ExecutionPayloadCache {
         receiver.await.ok()
     }
 
+    pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
+        self.cache
+            .read()
+            .await
+            .payloads
+            .contains(evm_block_hash)
+    }
+
     #[instrument(skip(self))]
     pub async fn request_payload_from_the_network(
         &self,

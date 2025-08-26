@@ -1,5 +1,6 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
+use crate::GossipResult;
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -13,8 +14,8 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
-    IrysBlockHeader, PeerNetworkError,
+    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, GossipCacheKey,
+    GossipData, IrysBlockHeader, PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -542,7 +543,16 @@ where
 
         if skip_validation_for_fast_track {
             // Preemptively handle reth payload for trusted sync path
-            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
+            if let Err(err) = self
+                .force_handle_execution_payload(block_header.evm_block_hash, true)
+                .await
+            {
+                error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
+                self.blocks_cache
+                    .remove_block(&block_header.block_hash)
+                    .await;
+                return Err(BlockPoolError::BlockError(format!("{:?}", err)));
+            }
         }
 
         info!(
@@ -579,10 +589,12 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            self.handle_execution_payload_for_prevalidated_block(
-                block_header.evm_block_hash,
-                false,
-            );
+            if let Err(err) = self
+                .force_handle_execution_payload(block_header.evm_block_hash, true)
+                .await
+            {
+                error!("Unexpected error while fetching reth payload: {:?}: {:?}. Payload will be attempted to be downloaded once more before shadow tx validation", block_header.block_hash, err);
+            }
         }
 
         debug!(
@@ -613,6 +625,42 @@ where
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn force_handle_execution_payload(
+        &self,
+        evm_block_hash: EvmBlockHash,
+        use_trusted_peers_only: bool,
+    ) -> GossipResult<()> {
+        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+
+        if !self.execution_payload_provider.is_payload_in_cache(&evm_block_hash) {
+
+            if let Err(send_err) =
+                self.sync_service_sender
+                    .send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                        evm_block_hash,
+                        use_trusted_peers_only,
+                        response: response_sender,
+                    })
+            {
+                error!(
+                "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
+                send_err
+            );
+                return Err(send_err.into());
+            }
+
+            response_receiver.await.map_err(|recv_err| {
+                error!(
+                "BlockPool: Failed to receive response from PullPayloadFromTheNetwork: {:?}",
+                recv_err
+            );
+                return Err(recv_err.into());
+            })?
+        } else {
+            Ok(())
+        }
     }
 
     /// Requests the execution payload for the given EVM block hash if it is not already stored
