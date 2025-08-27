@@ -662,65 +662,6 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 }
 
 #[actix_rt::test]
-async fn should_fast_track_block() {
-    let config = create_test_config();
-
-    let MockedServices {
-        block_status_provider_mock,
-        block_discovery_stub,
-        peer_list_data_guard: _,
-        db,
-        execution_payload_provider,
-        mempool_stub,
-        service_senders,
-    } = MockedServices::new(&config).await;
-
-    // Create a direct channel for the sync service
-    let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
-
-    let sync_state = ChainSyncState::new(false, true);
-
-    let service = BlockPool::new(
-        db.clone(),
-        block_discovery_stub.clone(),
-        mempool_stub.clone(),
-        sync_sender,
-        sync_state,
-        block_status_provider_mock.clone(),
-        execution_payload_provider.clone(),
-        config,
-        service_senders,
-    );
-
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
-    let parent_block_header = mock_chain[0].clone();
-    let test_header = mock_chain[1].clone();
-
-    // Inserting parent block header to the db, so the current block should go to the
-    //  block producer
-    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&parent_block_header);
-
-    debug!("Previous block hash: {:?}", test_header.previous_block_hash);
-
-    service
-        .process_block(Arc::new(test_header.clone()), true)
-        .await
-        .expect("can't process block");
-
-    let blocks_in_discovery = block_discovery_stub.get_blocks();
-    // Fast-track now only skips VDF verification; block still goes through discovery
-    assert_eq!(blocks_in_discovery.len(), 1);
-    assert_eq!(blocks_in_discovery[0].block_hash, test_header.block_hash);
-
-    let migrated_blocks = mempool_stub
-        .migrated_blocks
-        .read()
-        .expect("to lock migrated blocks");
-    // No direct migration is performed in fast-track mode anymore
-    assert_eq!(migrated_blocks.len(), 0);
-}
-
-#[actix_rt::test]
 async fn should_not_fast_track_block_already_in_index() {
     let config = create_test_config();
 

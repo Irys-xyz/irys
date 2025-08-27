@@ -1,12 +1,12 @@
 use crate::gossip_data_handler::GossipDataHandler;
-use crate::{BlockPool, GossipError};
+use crate::{BlockPool, GossipError, GossipResult};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, NodeMode, TokioServiceHandle,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
@@ -79,6 +79,13 @@ pub enum SyncChainServiceMessage {
     RequestBlockFromTheNetwork {
         block_hash: BlockHash,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
+    },
+    /// Forcefully pulls payload from the network and adds it to payload cache -
+    /// doesn't perform any validation except hash check.
+    PullPayloadFromTheNetwork {
+        evm_block_hash: EvmBlockHash,
+        use_trusted_peers_only: bool,
+        response: oneshot::Sender<GossipResult<()>>,
     },
 }
 
@@ -441,6 +448,29 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                         if let Err(e) = sender.send(result) {
                             tracing::error!("Failed to send response: {:?}", e);
                         }
+                    }
+                });
+            }
+            SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                evm_block_hash,
+                response,
+                use_trusted_peers_only,
+            } => {
+                debug!(
+                    "SyncChainService: Received a request to force pull an execution payload for evm block hash {:?}",
+                    evm_block_hash
+                );
+                let inner = self.inner.clone();
+                tokio::spawn(async move {
+                    let result = inner
+                        .gossip_data_handler
+                        .pull_and_add_execution_payload_to_cache(
+                            evm_block_hash,
+                            use_trusted_peers_only,
+                        )
+                        .await;
+                    if let Err(e) = response.send(result) {
+                        tracing::error!("Failed to send response: {:?}", e);
                     }
                 });
             }

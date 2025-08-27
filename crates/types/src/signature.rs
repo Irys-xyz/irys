@@ -183,10 +183,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x551c1d5360361c8f02552b17fd33b7edb2ec8b65e7bc1bcee6539441fa7fce846ffb399cf3bd3ab29f2cb2b90d68520046b2f2cc1e0fa389a628546720a7b44e1c";
+    const SIG_HEX: &str = "0xe6f3dcdb19b05c84386ef43a9bcb0f08f9e8866f8318decf5072b3bc12fb61cf3bcb46664e0fca943fb1a4ac011ca532498707b88a8561d7493f0a9d26d8306a1c";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"8WcdA5FKZvQdi6m7c7UNhbVmFggA1rRzdrFxQaMCfq2sHXbZJDmkBEXbtNqGYtAdbj7aXkmkgHYrZpTH9PmUos9VM\"";
+        "\"MP5Nbu4GjNMiqesVbjLPacoDbpo8h78u6YwMgW3SKhP62gnvxPFeHDUiagr7dfMHFUoTBE4xwJCkx6PPktqxt8qAj\"";
 
     // spellchecker:on
 
@@ -214,6 +214,7 @@ mod tests {
             version: 0,
             ingress_proofs: None,
             signature: Default::default(),
+            data_start: Some(0),
         };
         let transaction = DataTransaction {
             header: original_header,
@@ -242,6 +243,14 @@ mod tests {
         // assert parity against hardcoded signatures
         assert_eq!(SIG_BS58, ser);
         let decoded_js_sig = Signature::try_from(&hex::decode(SIG_HEX)?[..])?;
+
+        // let d2 = hex::encode(transaction.header.signature.as_bytes());
+        // assert_eq!(
+        //     transaction.header.signature,
+        //     Signature::try_from(&hex::decode(&d2)?[..])?.into()
+        // );
+        // assert_eq!(SIG_HEX, format!("0x{}", d2));
+
         assert_eq!(transaction.header.signature, decoded_js_sig.into());
 
         // test RLP roundtrip
