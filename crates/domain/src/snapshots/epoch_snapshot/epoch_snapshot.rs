@@ -951,6 +951,19 @@ impl EpochSnapshot {
         ledgers.get_expiring_term_partitions(epoch_height)
     }
 
+    pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {
+        let slots = self.ledgers[ledger_id].get_slots();
+
+        // Try to find the first unexpired slot
+        for i in 0..slots.len() {
+            if !slots[i].is_expired {
+                return i;
+            }
+        }
+        // This should only be the case with the published/permanent ledger data
+        0
+    }
+
     /// Loops though all the paths in the storage_submodules.toml and attempts to read the existing
     /// packing params from that path, building a list of (PathBuf, Option<PackingParams>) whose
     /// indexes map to the index of the path in the .toml

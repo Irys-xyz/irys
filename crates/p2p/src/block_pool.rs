@@ -327,13 +327,27 @@ where
             .get_epoch_snapshot(&block_header.previous_block_hash)
             .ok_or_else(|| {
                 BlockPoolError::OtherInternal(format!(
-                    "Parent epoch snapshot not found for block {:?}",
+                    "Parent epoch snapshot isn't found for block {:?}",
                     block_header.previous_block_hash
                 ))
             })?;
 
-        // Get block index from block status provider
+        // Get block index from the block status provider
         let block_index = self.block_status_provider.block_index_read_guard().inner();
+
+        Self::pull_and_seal_execution_payload(
+            &self.execution_payload_provider,
+            &self.sync_service_sender,
+            block_header.evm_block_hash,
+            false,
+        )
+        .await
+        .map_err(|error| {
+            BlockPoolError::OtherInternal(format!(
+                "Encountered a problem while trying to fix payload {:?}: {error:?}",
+                block_header.evm_block_hash
+            ))
+        })?;
 
         match shadow_transactions_are_valid(
             &self.config,
@@ -400,6 +414,11 @@ where
         &self,
         reth_service: Option<Addr<RethServiceActor>>,
     ) -> Result<(), BlockPoolError> {
+        if reth_service.is_none() {
+            error!("Reth service is not available, skipping payload repair");
+            return Ok(());
+        }
+
         let Some(latest_block_in_index) = self.block_status_provider.latest_block_in_index() else {
             debug!("No payloads to repair");
             return Ok(());

@@ -1,6 +1,8 @@
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
+use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::reth_service::RethServiceActor;
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -105,6 +107,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     ///  much behind the network we are, if at all.
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+    reth_service_actor: Option<Addr<RethServiceActor>>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -149,6 +152,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
+        reth_service_actor: Option<Addr<RethServiceActor>>,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -158,6 +162,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             block_index,
             block_pool,
             gossip_data_handler,
+            reth_service_actor,
         )
     }
 }
@@ -171,6 +176,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+        reth_service_actor: Option<Addr<RethServiceActor>>,
     ) -> Self {
         Self {
             sync_state,
@@ -181,6 +187,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             block_pool,
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
+            reth_service_actor,
         }
     }
 
@@ -218,9 +225,21 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let api_client = self.api_client.clone();
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
+        let block_pool = self.block_pool.clone();
+        let reth_service_addr = self.reth_service_actor.clone();
 
         tokio::spawn(
             async move {
+                if let Err(err) = block_pool
+                    .repair_missing_payloads_if_any(reth_service_addr)
+                    .await
+                {
+                    error!(
+                        "Sync task: Failed to repair missing payloads before starting sync: {:?}",
+                        err
+                    );
+                }
+
                 let res = sync_chain(
                     sync_state.clone(),
                     api_client,
