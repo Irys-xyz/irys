@@ -48,17 +48,40 @@ impl Inner {
         found_txs
     }
 
-    pub async fn validate_data_tx(
+    pub async fn handle_data_tx_ingress_message(
         &mut self,
-        tx: &DataTransactionHeader,
-        // anchor_height
-    ) -> Result<u64, TxIngressError> {
+        mut tx: DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
+        // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
+        tx.ingress_proofs = None;
+
         // Validate the transaction signature
         // check the result and error handle
-        self.validate_signature(tx).await?;
+        self.validate_signature(&tx).await?;
+
+        {
+            let mempool_state_read_guard = self.mempool_state.read().await;
+
+            // Early out if we already know about this transaction in
+            // the mempool or the index
+            if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
+                || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
+                || self
+                    .irys_db
+                    .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
+                    .map_err(|_| TxIngressError::DatabaseError)?
+                    .is_some()
+            {
+                warn!("duplicate tx: {:?}", TxIngressError::Skipped);
+                return Err(TxIngressError::Skipped);
+            }
+
+            drop(mempool_state_read_guard);
+        };
 
         // Validate anchor
-        let anchor_height = self.validate_anchor(tx).await?;
+        let anchor_height = self.validate_anchor(&tx).await?;
 
         // Validate ledger type and protocol fees
         let ledger = DataLedger::try_from(tx.ledger_id)
@@ -106,49 +129,7 @@ impl Inner {
             } // TODO: support other term ledgers here
         }
 
-        // // Check account balance
-
-        // if self.reth_node_adapter.rpc.get_balance_irys(tx.signer, None) < tx.total_cost() {
-        //     error!(
-        //         "{:?}: unfunded balance from irys_database::get_account_balance({:?})",
-        //         TxIngressError::Unfunded,
-        //         tx.signer
-        //     );
-        //     return Err(TxIngressError::Unfunded);
-        // }
-
-        Ok(anchor_height)
-    }
-
-    pub async fn handle_data_tx_ingress_message(
-        &mut self,
-        mut tx: DataTransactionHeader,
-    ) -> Result<(), TxIngressError> {
-        debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
-        // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
-        tx.ingress_proofs = None;
-
-        {
-            let mempool_state_read_guard = self.mempool_state.read().await;
-
-            // Early out if we already know about this transaction in
-            // the mempool or the index
-            if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
-                || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
-                || self
-                    .irys_db
-                    .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
-                    .map_err(|_| TxIngressError::DatabaseError)?
-                    .is_some()
-            {
-                warn!("duplicate tx: {:?}", TxIngressError::Skipped);
-                return Err(TxIngressError::Skipped);
-            }
-
-            drop(mempool_state_read_guard);
-        };
-
-        let anchor_height = self.validate_data_tx(&tx).await?;
+        // we don't check account balance here - we check it when we build & validate blocks
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 

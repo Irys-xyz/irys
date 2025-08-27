@@ -4,7 +4,10 @@ use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, SystemLedger};
-use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
+use irys_types::{
+    CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
+    H256,
+};
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -67,7 +70,7 @@ impl Inner {
                 info!("Promoted tx:\n{:?}", tx_header);
             }
         }
-        self.revalidate_all_txs().await;
+        self.expire_anchors().await;
 
         Ok(())
     }
@@ -103,7 +106,6 @@ impl Inner {
 
     /// Re-process all currently valid mempool txs
     /// all this does is take all valid submit & commitment txs, and passes them back through ingress
-
     #[instrument(skip_all)]
     pub async fn reprocess_all_txs(&mut self) -> eyre::Result<()> {
         // re-process all valid txs
@@ -137,11 +139,43 @@ impl Inner {
         Ok(())
     }
 
+    /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
+    /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
+    /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
+    pub async fn validate_anchor_for_expiry(
+        &mut self,
+        current_height: u64,
+        tx: &impl IrysTransactionCommon,
+    ) -> Result<(), TxIngressError> {
+        let anchor_height = self.get_anchor_height(tx.id(), tx.anchor()).await?;
+
+        let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
+            + self.config.consensus.block_migration_depth;
+
+        let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
+
+        if anchor_height < resolved_expiry_depth {
+            Err(TxIngressError::InvalidAnchor)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Re-process all currently valid mempool txs
     /// This takes every valid data & system tx, and revalidates them using their corresponding validation function. The primary check done here is to ensure that their anchor values are still correct.
     /// (when a reorg happens, the anchor a tx used to make it into valid txs could now be pending)
     #[instrument(skip_all)]
-    pub async fn revalidate_all_txs(&mut self) {
+    pub async fn expire_anchors(&mut self) {
+        let current_height = match self.get_latest_block_height() {
+            Ok(height) => height,
+            Err(e) => {
+                error!(
+                    "Error getting latest block height from the block tree for anchor expiry: {:?}",
+                    &e
+                );
+                return;
+            }
+        };
         // re-process all valid data txs
         let tx_ids = {
             let state = self.mempool_state.read().await;
@@ -160,7 +194,7 @@ impl Inner {
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
-                if let Err(e) = self.validate_data_tx(&tx).await {
+                if let Err(e) = self.validate_anchor_for_expiry(current_height, &tx).await {
                     let mut state = self.mempool_state.write().await;
                     state.valid_submit_ledger_tx.remove(&tx_id);
                     Self::mark_tx_as_invalid(state, tx_id, e);
@@ -187,7 +221,7 @@ impl Inner {
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
-                    if let Err(e) = self.validate_commitment_tx(&tx).await {
+                    if let Err(e) = self.validate_anchor_for_expiry(current_height, &tx).await {
                         self.remove_commitment_tx(&tx.id).await;
                         Self::mark_tx_as_invalid(self.mempool_state.write().await, tx.id, e);
                     }

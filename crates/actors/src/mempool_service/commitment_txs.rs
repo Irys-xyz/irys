@@ -8,44 +8,16 @@ use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
 
 impl Inner {
-    pub async fn validate_commitment_tx(
+    #[instrument(skip_all)]
+    pub async fn handle_ingress_commitment_tx_message(
         &mut self,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        let _anchor_height = self.validate_anchor(commitment_tx).await?;
-
-        // Validate fee
-        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
-            drop(mempool_state_guard);
-            tracing::warn!(
-                "Commitment tx {} failed fee validation: {}",
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::CommitmentValidationError(e));
-        }
-
-        // Validate value based on commitment type
-        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
-            drop(mempool_state_guard);
-            tracing::warn!(
-                "Commitment tx {} failed value validation: {}",
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::CommitmentValidationError(e));
-        }
+        debug!("received commitment tx {:?}", &commitment_tx.id);
 
         // Validate tx signature
-        if let Err(e) = self.validate_signature(commitment_tx).await {
+        // we MUST do this before using the ID for ANYTHING
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
             tracing::error!(
                 "Signature validation for commitment_tx {:?} failed with error: {:?}",
                 &commitment_tx,
@@ -53,16 +25,6 @@ impl Inner {
             );
             return Err(TxIngressError::InvalidSignature);
         }
-
-        Ok(())
-    }
-
-    #[instrument(skip_all)]
-    pub async fn handle_ingress_commitment_tx_message(
-        &mut self,
-        commitment_tx: CommitmentTransaction,
-    ) -> Result<(), TxIngressError> {
-        debug!("received commitment tx {:?}", &commitment_tx.id);
 
         let mempool_state_guard = self.mempool_state.read().await;
 
@@ -102,7 +64,37 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        self.validate_commitment_tx(&commitment_tx).await?;
+        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
+
+        // Validate fee
+        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
+            drop(mempool_state_guard);
+            tracing::warn!(
+                "Commitment tx {} failed fee validation: {}",
+                commitment_tx.id,
+                e
+            );
+            return Err(TxIngressError::CommitmentValidationError(e));
+        }
+
+        // Validate value based on commitment type
+        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
+            drop(mempool_state_guard);
+            tracing::warn!(
+                "Commitment tx {} failed value validation: {}",
+                commitment_tx.id,
+                e
+            );
+            return Err(TxIngressError::CommitmentValidationError(e));
+        }
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
