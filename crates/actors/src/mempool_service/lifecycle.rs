@@ -70,7 +70,7 @@ impl Inner {
                 info!("Promoted tx:\n{:?}", tx_header);
             }
         }
-        self.expire_anchors().await;
+        self.prune_pending_txs().await;
 
         Ok(())
     }
@@ -142,29 +142,33 @@ impl Inner {
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
-    pub async fn validate_anchor_for_expiry(
+    /// swallows errors from get_anchor_height (but does log them)
+    pub async fn should_prune_tx(
         &mut self,
         current_height: u64,
         tx: &impl IrysTransactionCommon,
-    ) -> Result<(), TxIngressError> {
-        let anchor_height = self.get_anchor_height(tx.id(), tx.anchor()).await?;
+    ) -> bool {
+        let anchor_height = match self.get_anchor_height(tx.id(), tx.anchor()).await {
+            Ok(h) => h,
+            Err(e) => {
+                // we can't tell due to an error
+                error!("Error checking if we should prune tx {} - {}", &tx.id(), e);
+                return false;
+            }
+        };
 
         let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
             + self.config.consensus.block_migration_depth;
 
         let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
 
-        if anchor_height < resolved_expiry_depth {
-            Err(TxIngressError::InvalidAnchor)
-        } else {
-            Ok(())
-        }
+        anchor_height < resolved_expiry_depth
     }
 
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
     /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
     #[instrument(skip_all)]
-    pub async fn expire_anchors(&mut self) {
+    pub async fn prune_pending_txs(&mut self) {
         let current_height = match self.get_latest_block_height() {
             Ok(height) => height,
             Err(e) => {
@@ -193,10 +197,10 @@ impl Inner {
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
-                if let Err(e) = self.validate_anchor_for_expiry(current_height, &tx).await {
+                if self.should_prune_tx(current_height, &tx).await {
                     let mut state = self.mempool_state.write().await;
                     state.valid_submit_ledger_tx.remove(&tx_id);
-                    Self::mark_tx_as_invalid(state, tx_id, e);
+                    Self::mark_tx_as_invalid(state, tx_id, TxIngressError::InvalidAnchor);
                 }
             }
         }
@@ -220,9 +224,13 @@ impl Inner {
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
-                    if let Err(e) = self.validate_anchor_for_expiry(current_height, &tx).await {
+                    if self.should_prune_tx(current_height, &tx).await {
                         self.remove_commitment_tx(&tx.id).await;
-                        Self::mark_tx_as_invalid(self.mempool_state.write().await, tx.id, e);
+                        Self::mark_tx_as_invalid(
+                            self.mempool_state.write().await,
+                            tx.id,
+                            TxIngressError::InvalidAnchor,
+                        );
                     }
                 }
             }
