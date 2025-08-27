@@ -884,38 +884,22 @@ impl Inner {
 
         let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
 
-        // maximum anchor height we'll accept
-        // this is BMD blocks behind current height
-        let max_anchor_height =
-            latest_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
+        // is this anchor too old?
 
-        // is our anchor old enough to be well confirmed?
-        let old_enough = anchor_height <= max_anchor_height;
+        let min_anchor_height =
+            latest_height.saturating_sub(self.config.consensus.mempool.anchor_expiry_depth as u64);
 
-        // is our anchor just generally too old?
-        let too_old = anchor_height
-            < latest_height
-                .saturating_sub(self.config.consensus.mempool.anchor_expiry_depth as u64);
+        let too_old = anchor_height < min_anchor_height;
 
-        if old_enough && !too_old {
+        if !too_old {
             debug!("valid block hash anchor for tx ");
             return Ok(anchor_height);
-        } else if !old_enough {
-            warn!(
-                "Invalid anchor value for tx {} - anchor {} is not well confirmed (height >= {}",
-                &tx_id, &anchor_height, &max_anchor_height
-            );
-
-            // explicitly don't add to the blacklist
-            // this is so we can accept it in the future once it matures
-            return Err(TxIngressError::InvalidAnchor);
         } else {
             Self::mark_tx_as_invalid(
                 self.mempool_state.write().await,
                 tx_id,
                 format!(
-                    "Invalid anchor value for tx {} - anchor {} is not well confirmed (height >= {})",
-                    &tx_id, &anchor_height, &max_anchor_height
+                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height}"
                 ),
             );
 
