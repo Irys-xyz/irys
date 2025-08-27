@@ -498,11 +498,10 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 debug!("Periodic sync check: We're up to date with the network");
             }
             Err(e) => {
-                warn!(
-                    "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
+                error!(
+                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
                     e
                 );
-                self.inner.spawn_chain_sync_task(None, false).await;
             }
         }
     }
