@@ -1010,7 +1010,7 @@ async fn is_local_index_is_behind_trusted_peers(
     }
 
     if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
-        Ok(block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
+        Ok((block_index.read().latest_height() + (migration_depth * 2)) < highest_trusted_peer_height)
     } else {
         Err(ChainSyncError::Network(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),
