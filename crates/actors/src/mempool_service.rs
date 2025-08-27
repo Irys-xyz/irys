@@ -8,7 +8,6 @@ pub mod pledge_provider;
 
 pub use chunks::*;
 pub use facade::*;
-use tracing::instrument::WithSubscriber;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
@@ -262,9 +261,11 @@ impl Inner {
 
     #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
-        &self,
+        &mut self,
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
+        self.revalidate_all_txs().await;
+
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
@@ -279,6 +280,8 @@ impl Inner {
             .max_commitment_txs_per_block
             .try_into()
             .expect("max_commitment_txs_per_block to fit into usize");
+
+        // TODO: we should remove the old_check from validate_anchor and instead only enforce minimum anchor age here
 
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
@@ -788,73 +791,110 @@ impl Inner {
         &mut self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
-        let mempool_state = &self.mempool_state;
         let tx_id = tx.id();
         let anchor = tx.anchor();
 
-        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
-
         let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = self
-            .config
-            .node_config
-            .consensus_config()
-            .mempool
-            .anchor_expiry_depth as u64;
 
-        // check tree / mempool for block header
-        if let Some(hdr) = self
-            .mempool_state
-            .read()
-            .await
-            .prevalidated_blocks
-            .get(&anchor)
-            .cloned()
-        {
-            if hdr.height + anchor_expiry_depth >= latest_height {
-                debug!("valid block hash anchor for tx ");
-                return Ok(hdr.height);
+        // the block we're anchored to must be >= `block_migration_depth` blocks away
+        let anchor_height: Option<u64> = {
+            if let Some(hdr) = self
+                .mempool_state
+                .read()
+                .await
+                .prevalidated_blocks
+                .get(&anchor)
+            {
+                Some(hdr.height)
+            } else if let Some(hdr) = self.block_tree_read_guard.read().get_block(&anchor) {
+                Some(hdr.height)
+            } else if let Some(hdr) = {
+                let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
+                irys_database::block_header_by_hash(&read_tx, &anchor, false)
+                    .map_err(|_| TxIngressError::DatabaseError)?
+            } {
+                Some(hdr.height)
             } else {
-                Self::mark_tx_as_invalid(
-                    mempool_state.write().await,
-                    tx_id,
-                    format!(
-                        "Invalid anchor value for tx - header height {} beyond expiry depth {}",
-                        &hdr.height, &anchor_expiry_depth
-                    ),
-                );
+                // makes this not Send, what
+                // Self::mark_tx_as_invalid(mempool_state.write().await, tx_id, "Unknown anchor");
+                None
+            }
+        };
 
+
+        let anchor_height = match anchor_height {
+            Some(height) => height,
+            None => {
+                // we do this here because rust throws a fit if we try to do it in the `else` case
+                // it somehow makes this function's Future not Send
+                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
                 return Err(TxIngressError::InvalidAnchor);
             }
+        };
+
+        // maximum anchor height we'll accept
+        // this is BMD blocks behind current height
+        let max_anchor_height =
+            latest_height.saturating_sub(self.config.consensus.block_migration_depth.into()) ; 
+        
+        // minimum anchor we'll accept
+        // this is height- AED, plus the BMD
+        let min_anchor_height = latest_height.saturating_sub(
+            self.config
+                .consensus
+                .mempool
+                .anchor_expiry_depth
+                .saturating_sub(
+                    self.config
+                        .consensus
+                        .block_migration_depth
+                        .try_into()
+                        .map_err(|_| {
+                            TxIngressError::Other("invalid anchor_expiry_depth".to_string())
+                        })?,
+                )
+                .into(),
+        );
+
+        // is our anchor older than current - migration depth? (so it won't get expired before block migration)
+        // TODO: only enforce this in get_best_mempool_txs
+        let old_enough = anchor_height <= max_anchor_height;
+        // is our anchor newer than current - (anchor expiry depth - migration depth)? (so it won't get rejected)
+        let new_enough = anchor_height >= min_anchor_height;
+
+        debug!("TX {} min: {} =< anchor_height: {} <= max: {}, current height: {}, expiry depth: {}, migration depth: {}",
+        tx_id, min_anchor_height, anchor_height, max_anchor_height,  latest_height, self.config
+                .consensus
+                .mempool
+                .anchor_expiry_depth, 
+                self.config
+                .consensus.block_migration_depth
+    );
+
+        if old_enough && new_enough {
+            debug!("valid block hash anchor for tx ");
+            return Ok(anchor_height);
+        } else if new_enough {
+            warn!(
+                "Invalid anchor value for tx - header height {} beyond mature depth {}",
+                &anchor_height, &max_anchor_height
+            );
+            // explicitly don't add to the blacklist
+            // this is so we can accept it in the future
+            return Err(TxIngressError::InvalidAnchor);
+        } else {
+            Self::mark_tx_as_invalid(
+                self.mempool_state.write().await,
+                tx_id,
+                format!(
+                    "Invalid anchor value for tx - header height {} beyond expiry depth {}",
+                    &anchor_height, &min_anchor_height
+                ),
+            );
+
+            return Err(TxIngressError::InvalidAnchor);
         }
 
-        // check index for block header
-        match irys_database::block_header_by_hash(&read_tx, &anchor, false) {
-            Ok(Some(hdr)) => {
-                if hdr.height + anchor_expiry_depth >= latest_height {
-                    debug!("valid block hash anchor for tx");
-                    Ok(hdr.height)
-                } else {
-                    Self::mark_tx_as_invalid(
-                    mempool_state.write().await,
-                    tx_id,
-                    format!(
-                        "Invalid block hash anchor value for tx - header height {} beyond expiry depth {}", &hdr.height, &anchor_expiry_depth
-                    ),
-                );
-                    Err(TxIngressError::InvalidAnchor)
-                }
-            }
-            _ => {
-                Self::mark_tx_as_invalid(
-                    mempool_state.write().await,
-                    tx_id,
-                    format!("Invalid anchor value for tx - Unknown anchor {}", &anchor),
-                );
-
-                Err(TxIngressError::InvalidAnchor)
-            }
-        }
     }
 
     /// ingest a block into the mempool

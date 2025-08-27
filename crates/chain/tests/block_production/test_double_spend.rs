@@ -52,15 +52,15 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     )
     .await?;
 
-    let block2 = node.get_block_by_height(2).await?;
+    let anchor = node.get_anchor().await?;
     // check the shape of the mempool equates to empty
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
     // create commitment tx that will be allowed into mempool, but not included in a block as this node is already staked
-    let stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
+    let stake_for_mempool = node.post_stake_commitment(Some(anchor)).await?;
 
     // create commitment tx that will remain in the mempool
-    let pledge_for_mempool = node.post_pledge_commitment(block2.block_hash).await;
+    let pledge_for_mempool = node.post_pledge_commitment(Some(anchor)).await?;
     node.wait_for_mempool_commitment_txs(
         vec![stake_for_mempool.id, pledge_for_mempool.id],
         seconds_to_wait,
@@ -150,17 +150,17 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
         .await?;
 
     // retrieve block 8 for use as a unique, recent and previously unused anchor
-    let block8 = node.get_block_by_height(8).await?;
+    let _block8 = node.get_block_by_height(8).await?;
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
 
     // re post existing stake commitment, that also uses the same anchor as the previous stake tx
     // this should be rejected by the mempool and not ingress the mempool
-    let _duplicate_stake_for_mempool = node.post_stake_commitment(block2.block_hash).await;
+    let _duplicate_stake_for_mempool = node.post_stake_commitment(Some(anchor)).await?;
 
     // re post existing stake commitment tx that will be skipped by mempool ingress as this node is already staked
     // use a recent anchor, or we will hit an invalid anchor error due to anchor timeout
-    let _new_anchor_stake_for_mempool = node.post_stake_commitment(block8.block_hash).await;
+    let _new_anchor_stake_for_mempool = node.post_stake_commitment(None).await?;
     // ensure mempool does not accept either of the above two txs
     // i.e. mempool should have rejected both stakes as the node has been staked since epoch
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)

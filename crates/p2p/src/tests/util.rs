@@ -162,7 +162,7 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {
+    async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {
         Ok(())
     }
 }
@@ -617,7 +617,7 @@ pub(crate) fn generate_test_tx() -> DataTransaction {
     let data_bytes = message.as_bytes().to_vec();
     // post a tx, mine a block
     let tx = account1
-        .create_transaction(data_bytes, None)
+        .create_transaction(data_bytes, H256::zero())
         .expect("Failed to create transaction");
     account1
         .sign_transaction(tx)

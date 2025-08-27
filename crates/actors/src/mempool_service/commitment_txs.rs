@@ -12,6 +12,8 @@ impl Inner {
         &mut self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
+        let _anchor_height = self.validate_anchor(commitment_tx).await?;
+
         // Validate fee
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
             let mut mempool_state_guard = self.mempool_state.write().await;
@@ -52,7 +54,6 @@ impl Inner {
             return Err(TxIngressError::InvalidSignature);
         }
 
-        let _anchor_height = self.validate_anchor(commitment_tx).await?;
         Ok(())
     }
 

@@ -69,10 +69,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.mine_block().await?;
     assert_eq!(node.get_canonical_chain_height().await, 1_u64);
 
-    let block = node
+    let _block = node
         .get_block_by_height(node.get_canonical_chain_height().await)
         .await?;
-    let anchor = Some(block.block_hash);
 
     // create and sign a data tx
     let message = "Hirys, world!";
@@ -87,7 +86,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let tx = account1
         .create_publish_transaction(
             data_bytes.clone(),
-            anchor,
+            node.get_anchor().await?,
             price_info.perm_fee,
             price_info.term_fee,
         )

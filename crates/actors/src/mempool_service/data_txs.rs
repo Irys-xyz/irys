@@ -6,10 +6,9 @@ use irys_database::{
     tables::DataRootLRU, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage,
     IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
@@ -163,18 +162,19 @@ impl Inner {
                 .mempool
                 .anchor_expiry_depth as u64;
             let new_expiry = anchor_height + anchor_expiry_depth;
-            if old_expiry.last_height == new_expiry {
+
+            if old_expiry.last_height < new_expiry {
                 debug!(
                     "Updating ingress proof for data root {} expiry from {} -> {}",
                     &tx.data_root, &old_expiry.last_height, &new_expiry
                 );
-            } else {
                 self.irys_db
                     .update(|write_tx| {
                         let updated_expiry = DataRootLRUEntry {
                             last_height: new_expiry,
                             ..old_expiry
                         };
+
                         write_tx.put::<DataRootLRU>(tx.data_root, updated_expiry)
                     })
                     .map_err(|e| {

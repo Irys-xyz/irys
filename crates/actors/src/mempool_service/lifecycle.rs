@@ -67,7 +67,7 @@ impl Inner {
                 info!("Promoted tx:\n{:?}", tx_header);
             }
         }
-        self.revalidate_all_txs().await.unwrap();
+        self.revalidate_all_txs().await;
 
         Ok(())
     }
@@ -95,7 +95,7 @@ impl Inner {
 
         self.handle_confirmed_commitment_tx_reorg(&event).await?;
 
-        self.revalidate_all_txs().await?;
+        self.reprocess_all_txs().await?;
 
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
@@ -103,11 +103,46 @@ impl Inner {
 
     /// Re-process all currently valid mempool txs
     /// all this does is take all valid submit & commitment txs, and passes them back through ingress
-    /// right now, all this is used for is to validate the anchor state of a tx
+
+    #[instrument(skip_all)]
+    pub async fn reprocess_all_txs(&mut self) -> eyre::Result<()> {
+        // re-process all valid txs
+        let (valid_submit_ledger_tx, valid_commitment_tx) = {
+            let mut state = self.mempool_state.write().await;
+            state.recent_valid_tx.clear();
+            (
+                std::mem::take(&mut state.valid_submit_ledger_tx),
+                std::mem::take(&mut state.valid_commitment_tx),
+            )
+        };
+        for (id, tx) in valid_submit_ledger_tx {
+            match self.handle_data_tx_ingress_message(tx).await {
+                Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
+                Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
+            }
+        }
+        for (_address, txs) in valid_commitment_tx {
+            for tx in txs {
+                let id = tx.id;
+                match self.handle_ingress_commitment_tx_message(tx).await {
+                    Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
+                    Err(err) => debug!(
+                        "failed to resubmit commitment tx {} to mempool: {:?}",
+                        &id, &err
+                    ),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Re-process all currently valid mempool txs
+    /// This takes every valid data & system tx, and revalidates them using their corresponding validation function. The primary check done here is to ensure that their anchor values are still correct.
     /// (when a reorg happens, the anchor a tx used to make it into valid txs could now be pending)
     #[instrument(skip_all)]
-    pub async fn revalidate_all_txs(&mut self) -> eyre::Result<()> {
-        // re-process all valid txs
+    pub async fn revalidate_all_txs(&mut self) {
+        // re-process all valid data txs
         let tx_ids = {
             let state = self.mempool_state.read().await;
             state
@@ -133,7 +168,7 @@ impl Inner {
             }
         }
 
-        // re-process all valid txs
+        // re-process all valid commitment txs
         let addresses = {
             let state = self.mempool_state.read().await;
             state
@@ -159,8 +194,6 @@ impl Inner {
                 }
             }
         }
-
-        Ok(())
     }
 
     fn get_confirmed_range(
@@ -555,7 +588,8 @@ impl Inner {
             let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
             data_tx_headers
                 .into_iter()
-                .for_each(|maybe_header| match maybe_header {
+                .enumerate()
+                .for_each(|(idx, maybe_header)| match maybe_header {
                     Some(ref header) => {
                         if let Err(err) = insert_tx_header(&mut_tx, header) {
                             error!(
@@ -565,7 +599,10 @@ impl Inner {
                         }
                     }
                     None => {
-                        error!("Could not find transaction header in mempool");
+                        error!(
+                            "Could not find transaction {} header in mempool",
+                            &submit_tx_ids[idx]
+                        );
                     }
                 });
             mut_tx.commit().expect("expect to commit to database");
