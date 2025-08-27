@@ -8,8 +8,7 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage,
-    IrysTransactionId, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;

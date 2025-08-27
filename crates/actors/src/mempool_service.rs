@@ -821,7 +821,6 @@ impl Inner {
             }
         };
 
-
         let anchor_height = match anchor_height {
             Some(height) => height,
             None => {
@@ -835,8 +834,8 @@ impl Inner {
         // maximum anchor height we'll accept
         // this is BMD blocks behind current height
         let max_anchor_height =
-            latest_height.saturating_sub(self.config.consensus.block_migration_depth.into()) ; 
-        
+            latest_height.saturating_sub(self.config.consensus.block_migration_depth.into());
+
         // minimum anchor we'll accept
         // this is height- AED, plus the BMD
         let min_anchor_height = latest_height.saturating_sub(
@@ -863,13 +862,8 @@ impl Inner {
         let new_enough = anchor_height >= min_anchor_height;
 
         debug!("TX {} min: {} =< anchor_height: {} <= max: {}, current height: {}, expiry depth: {}, migration depth: {}",
-        tx_id, min_anchor_height, anchor_height, max_anchor_height,  latest_height, self.config
-                .consensus
-                .mempool
-                .anchor_expiry_depth, 
-                self.config
-                .consensus.block_migration_depth
-    );
+        tx_id, min_anchor_height, anchor_height, max_anchor_height,  latest_height, self.config.consensus.mempool.anchor_expiry_depth, self.config.consensus.block_migration_depth
+        );
 
         if old_enough && new_enough {
             debug!("valid block hash anchor for tx ");
@@ -894,7 +888,6 @@ impl Inner {
 
             return Err(TxIngressError::InvalidAnchor);
         }
-
     }
 
     /// ingest a block into the mempool
