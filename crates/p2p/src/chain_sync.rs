@@ -1,12 +1,12 @@
 use crate::gossip_data_handler::GossipDataHandler;
-use crate::{BlockPool, GossipError};
+use crate::{BlockPool, GossipError, GossipResult};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, NodeMode, TokioServiceHandle,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
@@ -62,6 +62,7 @@ impl From<GossipError> for ChainSyncError {
 
 const BLOCK_BATCH_SIZE: usize = 10;
 const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
+const RETRY_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 30; // Timeout for retry block pull/process
 
 /// Messages that can be sent to the SyncService
 #[derive(Debug)]
@@ -79,6 +80,13 @@ pub enum SyncChainServiceMessage {
     RequestBlockFromTheNetwork {
         block_hash: BlockHash,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
+    },
+    /// Forcefully pulls payload from the network and adds it to payload cache -
+    /// doesn't perform any validation except hash check.
+    PullPayloadFromTheNetwork {
+        evm_block_hash: EvmBlockHash,
+        use_trusted_peers_only: bool,
+        response: oneshot::Sender<GossipResult<()>>,
     },
 }
 
@@ -444,6 +452,29 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     }
                 });
             }
+            SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                evm_block_hash,
+                response,
+                use_trusted_peers_only,
+            } => {
+                debug!(
+                    "SyncChainService: Received a request to force pull an execution payload for evm block hash {:?}",
+                    evm_block_hash
+                );
+                let inner = self.inner.clone();
+                tokio::spawn(async move {
+                    let result = inner
+                        .gossip_data_handler
+                        .pull_and_add_execution_payload_to_cache(
+                            evm_block_hash,
+                            use_trusted_peers_only,
+                        )
+                        .await;
+                    if let Err(e) = response.send(result) {
+                        tracing::error!("Failed to send response: {:?}", e);
+                    }
+                });
+            }
         }
         Ok(())
     }
@@ -467,11 +498,10 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 debug!("Periodic sync check: We're up to date with the network");
             }
             Err(e) => {
-                warn!(
-                    "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
+                error!(
+                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
                     e
                 );
-                self.inner.spawn_chain_sync_task(None, false).await;
             }
         }
     }
@@ -643,21 +673,26 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                             {
                                 Ok(retry_index) if !retry_index.is_empty() => {
                                     let retry_block = &retry_index[0];
-                                    debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
+                                    debug!("Sync task: Got to retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
 
-                                    // Try to reprocess last prevalidated block
-                                    match gossip_data_handler
-                                        .pull_and_process_block(
+                                    // Try to reprocess the last prevalidated block
+                                    match timeout(
+                                        Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                                        gossip_data_handler.pull_and_process_block(
                                             retry_block.block_hash,
                                             sync_state.is_syncing_from_a_trusted_peer(),
-                                        )
-                                        .await
+                                        ),
+                                    )
+                                    .await
                                     {
-                                        Ok(()) => {
+                                        Ok(Ok(())) => {
                                             debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
+                                        }
+                                        Err(_) => {
+                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", RETRY_BLOCK_REQUEST_TIMEOUT_SECS, retry_block.block_hash);
                                         }
                                     }
                                 }
@@ -974,7 +1009,8 @@ async fn is_local_index_is_behind_trusted_peers(
     }
 
     if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
-        Ok(block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
+        Ok((block_index.read().latest_height() + (migration_depth * 2))
+            < highest_trusted_peer_height)
     } else {
         Err(ChainSyncError::Network(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),

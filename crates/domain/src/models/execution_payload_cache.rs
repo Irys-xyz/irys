@@ -92,7 +92,7 @@ impl RethBlockProvider {
             let payloads = payloads.read().expect("can always read");
             payloads.get(&evm_block_hash).cloned()
         } else {
-            panic!("Tried to get payload from mock provider, but it is not a mock provider");
+            panic!("Tried to get payload from the mock provider, but it is not a mock provider");
         }
     }
 }
@@ -223,6 +223,10 @@ impl ExecutionPayloadCache {
         self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
             .await;
         receiver.await.ok()
+    }
+
+    pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
+        self.cache.read().await.payloads.contains(evm_block_hash)
     }
 
     #[instrument(skip(self))]

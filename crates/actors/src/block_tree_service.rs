@@ -870,14 +870,21 @@ impl BlockTreeServiceInner {
                 epoch_block.block_hash
             )
         });
-        let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
 
-        // Let the mining actors know about expired partitions
-        System::set_current(self.system.clone());
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-            expired_partition_hashes.clone(),
-        )));
+        // Check for partitions expired at this epoch boundary
+        if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
+            let expired_partition_hashes: Vec<_> = expired_partition_infos
+                .iter()
+                .map(|i| i.partition_hash)
+                .collect();
+
+            // Let the mining actors know about expired partitions
+            System::set_current(self.system.clone());
+            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+            mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+                expired_partition_hashes,
+            )));
+        }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();

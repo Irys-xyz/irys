@@ -86,7 +86,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 /// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
 #[tracing::instrument(skip_all, fields(block_height, ledger_type = ?ledger_type))]
 pub async fn calculate_expired_ledger_fees(
-    epoch_snapshot: &EpochSnapshot,
+    parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     ledger_type: DataLedger,
     config: &Config,
@@ -95,7 +95,8 @@ pub async fn calculate_expired_ledger_fees(
     db: DatabaseProvider,
 ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
     // Step 1: Collect expired partitions
-    let expired_slots = collect_expired_partitions(epoch_snapshot, block_height, ledger_type)?;
+    let expired_slots =
+        collect_expired_partitions(parent_epoch_snapshot, block_height, ledger_type)?;
 
     tracing::info!(
         "Ledger expiry check at block {}: found {} expired slots for {:?} ledger",
@@ -114,7 +115,14 @@ pub async fn calculate_expired_ledger_fees(
     }
 
     // Step 2: Find block ranges
-    let block_range = find_block_range(expired_slots, config, &block_index, ledger_type)?;
+    let block_range = match find_block_range(expired_slots, config, &block_index, ledger_type)? {
+        Some(br) => br,
+        None => {
+            // Check to see if there were no chunks uploaded to this ledger slot!
+            // If there wasn't, there aren't any fees to distribute
+            return Ok(BTreeMap::new());
+        }
+    };
 
     // Step 3: Process boundary blocks
     let same_block = block_range.min_block.item.block_hash == block_range.max_block.item.block_hash;
@@ -255,15 +263,14 @@ async fn get_block_by_hash(
 /// Collects all expired partitions for the specified ledger type and their miners
 #[tracing::instrument(skip_all, fields(block_height, target_ledger_type))]
 fn collect_expired_partitions(
-    epoch_snapshot: &EpochSnapshot,
+    parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     target_ledger_type: DataLedger,
 ) -> eyre::Result<BTreeMap<SlotIndex, Vec<Address>>> {
-    let mut ledgers = epoch_snapshot.ledgers.clone();
-    let partition_assignments = &epoch_snapshot.partition_assignments;
-    let expired_partition_hashes = ledgers.get_expired_partition_hashes(block_height);
+    let partition_assignments = &parent_epoch_snapshot.partition_assignments;
+    let expired_partition_info = &parent_epoch_snapshot.get_expiring_partition_info(block_height);
     let mut expired_ledger_slot_indexes = BTreeMap::new();
-    if expired_partition_hashes.is_empty() {
+    if expired_partition_info.is_empty() {
         return Ok(expired_ledger_slot_indexes);
     }
 
@@ -271,24 +278,16 @@ fn collect_expired_partitions(
         "collect_expired_partitions: block_height={}, target_ledger={:?}, found {} expired partition hashes",
         block_height,
         target_ledger_type,
-        expired_partition_hashes.len()
+        expired_partition_info.len()
     );
 
-    for expired_partition_hash in expired_partition_hashes {
+    for expired_partition in expired_partition_info {
         let partition = partition_assignments
-            .get_assignment(expired_partition_hash)
+            .get_assignment(expired_partition.partition_hash)
             .ok_or_eyre("could not get expired partition")?;
 
-        let ledger_id = partition
-            .ledger_id
-            .map(DataLedger::try_from)
-            .ok_or_eyre("ledger id must be present")??;
-
-        let slot_index = SlotIndex::new(
-            partition
-                .slot_index
-                .ok_or_eyre("slot index must be present")? as u64,
-        );
+        let ledger_id = expired_partition.ledger_id;
+        let slot_index = SlotIndex::new(expired_partition.slot_index as u64);
 
         // Only process partitions for the target ledger type
         if ledger_id == target_ledger_type {
@@ -328,7 +327,7 @@ fn find_block_range(
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
     ledger_type: DataLedger,
-) -> eyre::Result<BlockRange> {
+) -> eyre::Result<Option<BlockRange>> {
     let mut blocks_with_expired_ledgers = BTreeMap::new();
     let block_index_read = block_index
         .read()
@@ -385,6 +384,12 @@ fn find_block_range(
         }
     }
 
+    // Double check to see if there were any chunks added to this partition requiring rewards
+    // (This should cause the min_height and max_height to be the same resulting in no fee distribution)
+    if min_height.is_none() && max_height.is_none() {
+        return Ok(None);
+    }
+
     // Extract min and max block data - these must exist if we have expired slots
     let (min_height, min_item, min_range) =
         min_height.expect("min_height must be populated after iterating expired slots");
@@ -412,13 +417,13 @@ fn find_block_range(
         .remove(&max_block.item.block_hash)
         .unwrap_or_else(|| Arc::new(vec![]));
 
-    Ok(BlockRange {
+    Ok(Some(BlockRange {
         min_block,
         max_block,
         min_block_miners,
         max_block_miners,
         middle_blocks: blocks_with_expired_ledgers,
-    })
+    }))
 }
 
 /// Helper to get the previous block's max chunk offset
