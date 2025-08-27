@@ -9,18 +9,25 @@ use irys_database::{
     tables::{CachedChunks, IngressProofs},
     walk_all,
 };
+use irys_testing_utils::initialize_tracing;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
 use reth_db::Database as _;
 use std::time::Duration;
 use tracing::info;
 
-#[test_log::test(actix_web::test)]
+#[actix_web::test]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().block_migration_depth = 2;
     config.cache.cache_clean_lag = 5;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = 5;
+    config.consensus.get_mut().epoch.submit_ledger_epoch_length = 3;
 
     let main_address = config.miner_address();
     let account1 = IrysSigner::random_signer(&config.consensus_config());
@@ -163,9 +170,27 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     // confirm that we have one entry in CachedChunks mdbx table
     node.wait_for_chunk_cache_count(1, 10).await?;
 
-    // mine enough blocks to cause block and chunk migration
-    node.mine_blocks(node.node_ctx.config.node_config.cache.cache_clean_lag as usize)
-        .await?;
+    // post a data tx to cause the submit ledger to grow (and fill a partition)
+    let chunks = vec![
+        [10; 32], [20; 32], [30; 32], [40; 32], [50; 32], [60; 32], [70; 32], [80; 32], [90; 32],
+    ];
+    let mut data: Vec<u8> = Vec::new();
+    for chunk in chunks {
+        data.extend_from_slice(&chunk);
+    }
+    let price_info = node
+        .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx = account1
+        .create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)
+        .unwrap();
+    let tx = account1.sign_transaction(tx).unwrap();
+    node.post_data_tx_raw(&tx.header).await;
+
+    // mine enough blocks to cause the submit ledger to expire a partition
+    node.mine_blocks(10).await?;
 
     // confirm that we no longer see an entry in CachedChunks mdbx table
     node.wait_for_chunk_cache_count(0, 10).await?;

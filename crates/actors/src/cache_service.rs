@@ -6,12 +6,14 @@ use irys_database::{
         CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
     },
 };
-use irys_types::{Config, DatabaseProvider, TokioServiceHandle, GIGABYTE};
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
+use irys_types::{Config, DataLedger, DatabaseProvider, TokioServiceHandle, GIGABYTE};
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
+use std::sync::Arc;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -21,6 +23,10 @@ use tracing::{debug, info, warn};
 #[derive(Debug)]
 pub enum CacheServiceAction {
     OnBlockMigrated(u64, Option<oneshot::Sender<eyre::Result<()>>>),
+    OnEpochProcessed(
+        Arc<EpochSnapshot>,
+        Option<oneshot::Sender<eyre::Result<()>>>,
+    ),
 }
 
 pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
@@ -28,6 +34,8 @@ pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
 #[derive(Debug)]
 pub struct ChunkCacheService {
     pub config: Config,
+    pub block_index_guard: BlockIndexReadGuard,
+    pub block_tree_guard: BlockTreeReadGuard,
     pub db: DatabaseProvider,
     pub msg_rx: UnboundedReceiver<CacheServiceAction>,
     pub shutdown: Shutdown,
@@ -35,6 +43,8 @@ pub struct ChunkCacheService {
 
 impl ChunkCacheService {
     pub fn spawn_service(
+        block_index_guard: BlockIndexReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
         db: DatabaseProvider,
         rx: UnboundedReceiver<CacheServiceAction>,
         config: Config,
@@ -47,6 +57,8 @@ impl ChunkCacheService {
         let handle = runtime_handle.spawn(async move {
             let cache_service = Self {
                 shutdown: shutdown_rx,
+                block_index_guard,
+                block_tree_guard,
                 db,
                 config,
                 msg_rx: rx,
@@ -109,13 +121,68 @@ impl ChunkCacheService {
                     warn!(?error, "RX failure for OnBlockMigrated");
                 }
             }
+            CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
+                let res = self.on_epoch_processed(epoch_snapshot);
+                if let Some(sender) = sender {
+                    if let Err(e) = sender.send(res) {
+                        warn!(?e, "Unable to send response for OnEpochProcessed")
+                    }
+                }
+            }
         }
+    }
+
+    fn on_epoch_processed(&self, epoch_snapshot: Arc<EpochSnapshot>) -> eyre::Result<()> {
+        // Find the block height of the first block to add data to the active submit ledger slots
+        let ledger_id = DataLedger::Submit;
+        let first_unexpired_slot_index: u64 = epoch_snapshot
+            .get_first_unexpired_slot_index(ledger_id)
+            .try_into()
+            .unwrap();
+        let chunk_offset =
+            first_unexpired_slot_index * self.config.consensus.num_chunks_in_partition;
+
+        // Check to see if the first overlapping block in our first active submit ledger slot is in the block index
+        let mut prune_height: Option<u64> = None;
+        if let Some(latest) = self.block_index_guard.read().get_latest_item() {
+            let submit_ledger_max_chunk_offset = latest.ledgers[ledger_id].max_chunk_offset;
+            if submit_ledger_max_chunk_offset > chunk_offset {
+                // If the chunk_offset is in the block index look up the block_bounds
+                let block_bounds = self
+                    .block_index_guard
+                    .read()
+                    .get_block_bounds(ledger_id, chunk_offset)
+                    .expect("Should be able to get block bounds as max_chunk_offset was checked");
+                prune_height = Some((block_bounds.height - 1).try_into().unwrap());
+            }
+        }
+
+        // If it wasn't in the index, we'll have to check the canonical
+        if prune_height.is_none() {
+            let (canonical, _) = self.block_tree_guard.read().get_canonical_chain();
+
+            let found_block = canonical.iter().rev().find_map(|block_entry| {
+                let block_hash = block_entry.block_hash;
+                let block_tree = self.block_tree_guard.read();
+                let block = block_tree.get_block(&block_hash)?;
+                let ledger_max_offset = block.data_ledgers[ledger_id].max_chunk_offset;
+                if ledger_max_offset <= chunk_offset {
+                    Some((block_entry.height, ledger_max_offset))
+                } else {
+                    None
+                }
+            });
+            let (block_height, _ledger_max_offset) = found_block.unwrap();
+            prune_height = Some(block_height - 1);
+        }
+
+        // Prune the data root cache at the start of the submit ledger
+        self.prune_data_root_cache(prune_height.unwrap())
     }
 
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
         let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
-        self.prune_data_root_cache(prune_height)?;
         self.prune_pd_cache(prune_height)?;
         let (
             (chunk_cache_count, chunk_cache_size),

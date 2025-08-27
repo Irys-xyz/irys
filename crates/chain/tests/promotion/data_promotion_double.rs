@@ -1,5 +1,5 @@
+use crate::utils::post_chunk;
 use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
-use crate::utils::{mine_blocks, post_chunk};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -376,10 +376,8 @@ async fn slow_heavy_double_root_data_promotion_test() {
 
     // println!("\n{:?}", unpacked_chunk);
 
-    mine_blocks(&node.node_ctx, 5).await.unwrap();
-    // ensure the ingress proof is gone
-    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
-    assert_eq!(ingress_proofs.len(), 0);
+    // Because it takes multiple ingress proofs to promote a tx, we keep ingress
+    // proofs around until their data_roots expire out of the Submit ledger
 
     node.node_ctx.stop().await;
 }

@@ -878,14 +878,6 @@ impl IrysNode {
         node_config.reth_peer_info = reth_peering;
         let config = Config::new(node_config);
 
-        let chunk_cache_handle = ChunkCacheService::spawn_service(
-            irys_db.clone(),
-            receivers.chunk_cache,
-            config.clone(),
-            runtime_handle.clone(),
-        );
-        debug!("Chunk cache initialized");
-
         let block_index_guard = block_index_service_actor
             .send(GetBlockIndexGuardMessage)
             .await?;
@@ -897,11 +889,6 @@ impl IrysNode {
         // start the epoch service
         let replay_data =
             EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
-        // let (genesis_block, commitments, epoch_block_data) = (
-        //     &replay_data.genesis_block_header,
-        //     &replay_data.genesis_commitments,
-        //     &replay_data.epoch_blocks,
-        // );
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
@@ -933,6 +920,16 @@ impl IrysNode {
         let block_tree_guard = oneshot_rx
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
+
+        let chunk_cache_handle = ChunkCacheService::spawn_service(
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            irys_db.clone(),
+            receivers.chunk_cache,
+            config.clone(),
+            runtime_handle.clone(),
+        );
+        debug!("Chunk cache initialized");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
