@@ -259,13 +259,40 @@ impl Inner {
         }
     }
 
+    pub async fn validate_anchor_for_inclusion(
+        &self,
+        min_anchor_height: u64,
+        max_anchor_height: u64,
+        tx: &impl IrysTransactionCommon,
+    ) -> bool {
+        let tx_id = tx.id();
+        let anchor = tx.anchor();
+        let anchor_height = match self.get_anchor_height(tx_id, anchor).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("Unable to get anchor height for {tx_id} {anchor} - {e}");
+                return false;
+            }
+        };
+        // these have to be inclusive so we handle txs near height 0 correctly
+        let old_enough = anchor_height >= min_anchor_height;
+        let new_enough = anchor_height <= max_anchor_height;
+        if old_enough && new_enough {
+            true
+        } else if !old_enough {
+            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
+            false
+        } else {
+            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+            false
+        }
+    }
+
     #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
         &mut self,
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
-        self.expire_anchors().await;
-
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
@@ -280,6 +307,17 @@ impl Inner {
             .max_commitment_txs_per_block
             .try_into()
             .expect("max_commitment_txs_per_block to fit into usize");
+
+        let current_height = self.get_latest_block_height()?;
+        let min_anchor_height = current_height.saturating_sub(
+            (self.config.consensus.mempool.anchor_expiry_depth as u64)
+                .saturating_sub(self.config.consensus.block_migration_depth as u64),
+        );
+
+        let max_anchor_height =
+            current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
+
+        debug!("Anchor bounds for inclusion @ {current_height}: >= {min_anchor_height}, <= {max_anchor_height}");
 
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
@@ -412,6 +450,13 @@ impl Inner {
 
             // Check funding before simulation
             if !check_funding(tx) {
+                continue;
+            }
+
+            if !self
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
+                .await
+            {
                 continue;
             }
 
@@ -572,6 +617,13 @@ impl Inner {
                 irys_types::DataLedger::Submit => {
                     // todo: add to list of invalid txs because we don't support Submit txs
                 }
+            }
+
+            if !self
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
+                .await
+            {
+                continue;
             }
 
             trace!(
@@ -783,7 +835,7 @@ impl Inner {
 
     // Resolves an anchor (block hash) to it's height
     pub async fn get_anchor_height(
-        &mut self,
+        &self,
         tx_id: IrysTransactionId,
         anchor: H256,
     ) -> Result<u64, TxIngressError> {
@@ -840,9 +892,23 @@ impl Inner {
         // is our anchor old enough to be well confirmed?
         let old_enough = anchor_height <= max_anchor_height;
 
-        if old_enough {
+        // is our anchor just generally too old?
+        let too_old = anchor_height
+            < latest_height
+                .saturating_sub(self.config.consensus.mempool.anchor_expiry_depth as u64);
+
+        if old_enough && !too_old {
             debug!("valid block hash anchor for tx ");
             return Ok(anchor_height);
+        } else if !old_enough {
+            warn!(
+                "Invalid anchor value for tx {} - anchor {} is not well confirmed (height >= {}",
+                &tx_id, &anchor_height, &max_anchor_height
+            );
+
+            // explicitly don't add to the blacklist
+            // this is so we can accept it in the future once it matures
+            return Err(TxIngressError::InvalidAnchor);
         } else {
             Self::mark_tx_as_invalid(
                 self.mempool_state.write().await,
