@@ -1,4 +1,5 @@
 use super::util::{create_test_chunks, generate_test_tx, GossipServiceTestFixture};
+use crate::SyncChainServiceMessage;
 use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
@@ -431,6 +432,34 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .execution_payload_provider
         .add_payload_to_cache(sealed_block.clone())
         .await;
+
+    let execution_payload_provider2 = fixture2.execution_payload_provider.clone();
+    let mut sync_rx = fixture2._sync_rx.take().expect("expect to have a sync rx");
+    tokio::spawn(async move {
+        loop {
+            if let Some(SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                evm_block_hash,
+                use_trusted_peers_only: _,
+                response,
+            }) = sync_rx.recv().await
+            {
+                debug!("Sync request received for block hash: {:?}", evm_block_hash);
+                if evm_block_hash == sealed_block.hash() {
+                    execution_payload_provider2
+                        .add_payload_to_cache(sealed_block.clone())
+                        .await;
+                    response.send(Ok(())).expect("to deliver response");
+                    break;
+                } else {
+                    debug!(
+                        "Received sync request for unknown block hash: {:?}",
+                        evm_block_hash
+                    );
+                    break;
+                }
+            }
+        }
+    });
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;

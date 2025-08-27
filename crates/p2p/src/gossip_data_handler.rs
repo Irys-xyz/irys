@@ -10,9 +10,9 @@ use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{
-    BlockHash, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, GossipData,
-    GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, IrysTransactionResponse,
-    PeerListItem, UnpackedChunk, H256,
+    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
+    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -492,6 +492,44 @@ where
             .await
             .map_err(GossipError::BlockPool)?;
         Ok(())
+    }
+
+    pub async fn pull_and_add_execution_payload_to_cache(
+        &self,
+        evm_block_hash: EvmBlockHash,
+        use_trusted_peers_only: bool,
+    ) -> GossipResult<()> {
+        let mut last_err = None;
+        for attempt in 1..=3 {
+            match self
+                .gossip_client
+                .pull_payload_from_network(evm_block_hash, use_trusted_peers_only, &self.peer_list)
+                .await
+            {
+                Ok((source_address, execution_payload)) => {
+                    if let Err(e) = self
+                        .handle_execution_payload(GossipRequest {
+                            miner_address: source_address,
+                            data: execution_payload,
+                        })
+                        .await
+                    {
+                        last_err = Some(e);
+                        if attempt < 3 {
+                            continue;
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = Some(GossipError::from(e));
+                    if attempt < 3 {
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("Error must be set after 3 attempts"))
     }
 
     pub(crate) async fn handle_execution_payload(
