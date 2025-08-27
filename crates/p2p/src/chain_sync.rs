@@ -62,6 +62,7 @@ impl From<GossipError> for ChainSyncError {
 
 const BLOCK_BATCH_SIZE: usize = 10;
 const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
+const RETRY_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 30; // Timeout for retry block pull/process
 
 /// Messages that can be sent to the SyncService
 #[derive(Debug)]
@@ -673,21 +674,26 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                             {
                                 Ok(retry_index) if !retry_index.is_empty() => {
                                     let retry_block = &retry_index[0];
-                                    debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
+                                    debug!("Sync task: Got to retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
 
-                                    // Try to reprocess last prevalidated block
-                                    match gossip_data_handler
-                                        .pull_and_process_block(
+                                    // Try to reprocess the last prevalidated block
+                                    match timeout(
+                                        Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                                        gossip_data_handler.pull_and_process_block(
                                             retry_block.block_hash,
                                             sync_state.is_syncing_from_a_trusted_peer(),
-                                        )
-                                        .await
+                                        ),
+                                    )
+                                    .await
                                     {
-                                        Ok(()) => {
+                                        Ok(Ok(())) => {
                                             debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
+                                        }
+                                        Err(_) => {
+                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", RETRY_BLOCK_REQUEST_TIMEOUT_SECS, retry_block.block_hash);
                                         }
                                     }
                                 }
