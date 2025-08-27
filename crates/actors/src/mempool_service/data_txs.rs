@@ -56,10 +56,6 @@ impl Inner {
         // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
         tx.ingress_proofs = None;
 
-        // Validate the transaction signature
-        // check the result and error handle
-        self.validate_signature(&tx).await?;
-
         {
             let mempool_state_read_guard = self.mempool_state.read().await;
 
@@ -79,6 +75,10 @@ impl Inner {
 
             drop(mempool_state_read_guard);
         };
+
+        // Validate the transaction signature
+        // check the result and error handle
+        self.validate_signature(&tx).await?;
 
         // Validate anchor
         let anchor_height = self.validate_anchor(&tx).await?;

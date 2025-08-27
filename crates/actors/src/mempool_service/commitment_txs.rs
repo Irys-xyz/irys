@@ -15,17 +15,6 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
-        // Validate tx signature
-        // we MUST do this before using the ID for ANYTHING
-        if let Err(e) = self.validate_signature(&commitment_tx).await {
-            tracing::error!(
-                "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                &commitment_tx,
-                e
-            );
-            return Err(TxIngressError::InvalidSignature);
-        }
-
         let mempool_state_guard = self.mempool_state.read().await;
 
         // Early out if we already know about this transaction (invalid)
@@ -62,6 +51,17 @@ impl Inner {
             .is_some()
         {
             return Err(TxIngressError::Skipped);
+        }
+
+        // Validate tx signature
+        // we MUST do this before using the ID
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
+            tracing::error!(
+                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                &commitment_tx,
+                e
+            );
+            return Err(TxIngressError::InvalidSignature);
         }
 
         let _anchor_height = self.validate_anchor(&commitment_tx).await?;
