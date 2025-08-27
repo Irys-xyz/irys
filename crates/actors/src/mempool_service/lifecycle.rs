@@ -161,9 +161,8 @@ impl Inner {
         }
     }
 
-    /// Re-process all currently valid mempool txs
-    /// This takes every valid data & system tx, and revalidates them using their corresponding validation function. The primary check done here is to ensure that their anchor values are still correct.
-    /// (when a reorg happens, the anchor a tx used to make it into valid txs could now be pending)
+    /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
+    /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
     #[instrument(skip_all)]
     pub async fn expire_anchors(&mut self) {
         let current_height = match self.get_latest_block_height() {
