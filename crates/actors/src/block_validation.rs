@@ -164,18 +164,32 @@ pub enum PreValidationError {
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
-    InvalidLedgerId { tx_id: H256, expected: u32, actual: u32 },
+    InvalidLedgerId {
+        tx_id: H256,
+        expected: u32,
+        actual: u32,
+    },
     #[error("Failed to calculate fees: {0}")]
     FeeCalculationFailed(String),
     #[error("Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}")]
-    InsufficientPermFee { tx_id: H256, expected: U256, actual: U256 },
+    InsufficientPermFee {
+        tx_id: H256,
+        expected: U256,
+        actual: U256,
+    },
     #[error("Transaction {tx_id} has insufficient term_fee. Expected at least: {expected}, Actual: {actual}")]
-    InsufficientTermFee { tx_id: H256, expected: U256, actual: U256 },
+    InsufficientTermFee {
+        tx_id: H256,
+        expected: U256,
+        actual: U256,
+    },
     #[error("Transaction {tx_id} has invalid term fee structure: {reason}")]
     InvalidTermFeeStructure { tx_id: H256, reason: String },
     #[error("Transaction {tx_id} has invalid perm fee structure: {reason}")]
     InvalidPermFeeStructure { tx_id: H256, reason: String },
-    #[error("Publish ledger proof count ({proof_count}) does not match transaction count ({tx_count})")]
+    #[error(
+        "Publish ledger proof count ({proof_count}) does not match transaction count ({tx_count})"
+    )]
     PublishLedgerProofCountMismatch { proof_count: usize, tx_count: usize },
     #[error("Ingress proof count mismatch. Expected: {expected}, Actual: {actual}")]
     IngressProofCountMismatch { expected: usize, actual: usize },
@@ -1399,8 +1413,8 @@ pub async fn data_txs_are_valid(
     let block_ema = block_tree_guard
         .read()
         .get_ema_snapshot(&block.block_hash)
-        .ok_or_else(|| PreValidationError::BlockEmaSnapshotNotFound { 
-            block_hash: block.block_hash 
+        .ok_or_else(|| PreValidationError::BlockEmaSnapshotNotFound {
+            block_hash: block.block_hash,
         })?;
 
     // Extract data transactions from both ledgers
@@ -1495,9 +1509,7 @@ pub async fn data_txs_are_valid(
                         );
                     }
                     (DataLedger::Publish, DataLedger::Publish) => {
-                        return Err(PreValidationError::PublishTxAlreadyIncluded {
-                            tx_id: tx.id,
-                        });
+                        return Err(PreValidationError::PublishTxAlreadyIncluded { tx_id: tx.id });
                     }
                     (DataLedger::Submit, _) => {
                         // Submit tx should not have any past inclusion
@@ -1575,11 +1587,9 @@ pub async fn data_txs_are_valid(
         })?;
 
         PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
-            |e| {
-                PreValidationError::InvalidPermFeeStructure {
-                    tx_id: tx.id,
-                    reason: e.to_string(),
-                }
+            |e| PreValidationError::InvalidPermFeeStructure {
+                tx_id: tx.id,
+                reason: e.to_string(),
             },
         )?;
 
@@ -1591,9 +1601,7 @@ pub async fn data_txs_are_valid(
                 // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                 // (they're waiting for proofs to arrive)
                 if tx.ingress_proofs.is_some() {
-                    return Err(PreValidationError::SubmitTxHasIngressProofs {
-                        tx_id: tx.id,
-                    });
+                    return Err(PreValidationError::SubmitTxHasIngressProofs { tx_id: tx.id });
                 }
             }
         }
@@ -1628,9 +1636,7 @@ pub async fn data_txs_are_valid(
 
             // Validate ingress proofs are present
             let Some(tx_proof) = tx.ingress_proofs.as_ref() else {
-                return Err(PreValidationError::PublishTxMissingIngressProofs {
-                    tx_id: tx.id,
-                });
+                return Err(PreValidationError::PublishTxMissingIngressProofs { tx_id: tx.id });
             };
 
             // Validate ingress proof signature and data_root match
@@ -1645,9 +1651,7 @@ pub async fn data_txs_are_valid(
             // TODO: use `verify_ingress_proof` to verify all ingress proof chunks and data
             // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
             if tx_proof.proof != proof.proof || tx_proof.signature != proof.signature {
-                return Err(PreValidationError::IngressProofMismatch {
-                    tx_id: tx.id,
-                });
+                return Err(PreValidationError::IngressProofMismatch { tx_id: tx.id });
             }
         }
     }
