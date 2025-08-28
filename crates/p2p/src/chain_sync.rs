@@ -56,6 +56,9 @@ impl From<GossipError> for ChainSyncError {
             GossipError::PeerNetwork(peer_network_err) => {
                 Self::Network(format!("Peer network error: {}", peer_network_err))
             }
+            GossipError::RateLimited => {
+                Self::Network("Rate limited".to_string())
+            }
         }
     }
 }

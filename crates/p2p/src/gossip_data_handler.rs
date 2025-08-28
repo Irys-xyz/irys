@@ -566,7 +566,7 @@ where
                 "Node {}: Rate limiting peer {:?} for data request",
                 self.gossip_client.mining_address, request.miner_address
             );
-            return Ok(false);
+            return Err(GossipError::RateLimited);
         }
 
         match request.data {

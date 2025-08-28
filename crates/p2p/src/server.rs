@@ -398,6 +398,10 @@ where
             .await
         {
             Ok(has_data) => HttpResponse::Ok().json(has_data),
+            Err(GossipError::RateLimited) => {
+                debug!("Rate limited data request from peer");
+                HttpResponse::TooManyRequests().finish()
+            }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
                 HttpResponse::InternalServerError().finish()
