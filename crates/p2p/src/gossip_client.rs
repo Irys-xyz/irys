@@ -72,7 +72,7 @@ impl GossipClient {
 
         let res = self.send_data(peer, data).await;
         Self::handle_score(peer_list, &res, peer_miner_address);
-        res
+        res.map(|_| ())
     }
 
     /// Request a specific data to be gossiped. Returns true if the peer has the data,
@@ -201,6 +201,8 @@ impl GossipClient {
         T: Serialize + ?Sized,
         for<'de> R: Deserialize<'de>,
     {
+        debug!("Sending data to {}", url);
+
         let req = self.create_request(data);
         let response =
             self.client
@@ -223,8 +225,18 @@ impl GossipClient {
                     GossipError::Network(format!("Failed to read response from {}: {}", url, e))
                 })?;
 
-                if !empty_response_allowed && text.trim().is_empty() {
-                    return Err(GossipError::Network(format!("Empty response from {}", url)));
+                if text.trim().is_empty() {
+                    return if empty_response_allowed {
+                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
+                        Ok(serde_json::from_str("null").map_err(|e| {
+                            GossipError::Network(format!(
+                                "Failed to parse an empty JSON response from {}: {}",
+                                url, e
+                            ))
+                        })?)
+                    } else {
+                        Err(GossipError::Network(format!("Empty response from {}", url)))
+                    };
                 }
 
                 let body = serde_json::from_str(&text).map_err(|e| {
