@@ -10,11 +10,10 @@ use irys_types::{
     PeerListItem, PeerNetworkError,
 };
 use rand::prelude::SliceRandom as _;
-use reqwest::Client;
-use reqwest::Response;
+use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -85,18 +84,8 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
-        let get_data_request = self.create_request(requested_data);
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&get_data_request)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()));
+        let res = self.send_data_internal(url, &requested_data).await;
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
@@ -110,18 +99,8 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> GossipResult<Option<GossipData>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
-        let get_data_request = self.create_request(requested_data);
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&get_data_request)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()));
+        let res = self.send_data_internal(url, &requested_data).await;
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
@@ -159,46 +138,44 @@ impl GossipClient {
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
                 )
-                .await?;
+                .await
             }
             GossipData::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
                 )
-                .await?;
+                .await
             }
             GossipData::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/commitment_tx", peer.address.gossip),
                     commitment_tx,
                 )
-                .await?;
+                .await
             }
             GossipData::Block(irys_block_header) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
                 )
-                .await?;
+                .await
             }
             GossipData::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/execution_payload", peer.address.gossip),
                     &execution_payload,
                 )
-                .await?;
+                .await
             }
             GossipData::IngressProof(ingress_proof) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/ingress_proof", peer.address.gossip),
                     &ingress_proof,
                 )
-                .await?;
+                .await
             }
-        };
-
-        Ok(())
+        }
     }
 
     fn check_if_peer_is_online(peer: &PeerListItem) -> GossipResult<()> {
@@ -208,18 +185,55 @@ impl GossipClient {
         Ok(())
     }
 
-    async fn send_data_internal<T: Serialize + ?Sized>(
-        &self,
-        url: String,
-        data: &T,
-    ) -> Result<Response, GossipError> {
+    async fn send_data_internal<T, R>(&self, url: String, data: &T) -> GossipResult<R>
+    where
+        T: Serialize + ?Sized,
+        for<'de> R: Deserialize<'de>,
+    {
         let req = self.create_request(data);
-        self.client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))
+        let response =
+            self.client
+                .post(&url)
+                .json(&req)
+                .send()
+                .await
+                .map_err(|response_error| {
+                    GossipError::Network(format!(
+                        "Failed to send data to {}: {}",
+                        url, response_error
+                    ))
+                })?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let text = response.text().await.map_err(|e| {
+                    GossipError::Network(format!("Failed to read response from {}: {}", url, e))
+                })?;
+                if text.trim().is_empty() {
+                    return Err(GossipError::Network(format!("Empty response from {}", url)));
+                }
+                let body = serde_json::from_str(&text).map_err(|e| {
+                    GossipError::Network(format!(
+                        "Failed to parse JSON: {} - Response: {}",
+                        e, text
+                    ))
+                })?;
+                Ok(body)
+            }
+            StatusCode::NOT_FOUND => Err(GossipError::Network(format!(
+                "Got a not found from {}",
+                url
+            ))),
+            _ => {
+                let error_text = response.text().await.unwrap_or_default();
+                Err(GossipError::Network(format!(
+                    "API request failed with status: {} - {}",
+                    status, error_text
+                )))
+            }
+        }
     }
 
     fn handle_score<T>(
