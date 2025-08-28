@@ -1957,7 +1957,7 @@ async fn test_evm_gossip() -> eyre::Result<()> {
         .rpc
         .get_balance(recipient1.address(), None)?;
 
-    let recipient1_balance3 = peer1_reth_context
+    let recipient1_balance3 = peer2_reth_context
         .rpc
         .get_balance(recipient1.address(), None)?;
 
