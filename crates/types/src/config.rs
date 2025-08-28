@@ -260,7 +260,10 @@ pub struct RethChainSpec {
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
-    pub mode: NodeMode,
+    pub node_mode: NodeMode,
+
+    /// The synchronization mode for the node
+    pub sync_mode: SyncMode,
 
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
@@ -336,10 +339,22 @@ pub enum NodeMode {
     Genesis,
 
     /// Join an existing network by connecting to trusted peers
-    PeerSync,
+    Peer,
+}
 
-    /// Trusted peer mode, where the node only connects to trusted peers
-    TrustedPeerSync,
+/// # Node Synchronization Mode
+///
+/// Defines the method the node uses to synchronize with the network.
+/// Trusted mode allows for faster sync by relying on trusted peers,
+/// while Full mode ensures complete validation of all blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum SyncMode {
+    /// Fast sync mode, downloads index from the trusted peers and skips
+    /// heavy parts of the block validation
+    Trusted,
+    /// Full sync mode, fully validates all blocks
+    Full,
 }
 
 /// # Consensus Configuration Source
@@ -953,7 +968,8 @@ impl NodeConfig {
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
         Self {
-            mode: NodeMode::Genesis,
+            node_mode: NodeMode::Genesis,
+            sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
@@ -1049,7 +1065,8 @@ impl NodeConfig {
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
         Self {
-            mode: NodeMode::PeerSync,
+            node_mode: NodeMode::Peer,
+            sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
@@ -1597,7 +1614,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert_eq!(config.mode, NodeMode::PeerSync);
+        assert_eq!(config.node_mode, NodeMode::Peer);
 
         // Check consensus config fields
         let consensus = config.consensus_config();

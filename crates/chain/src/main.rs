@@ -24,7 +24,7 @@ async fn main() -> eyre::Result<()> {
     let config = load_config()?;
 
     // start the node
-    info!("starting the node, mode: {:?}", &config.mode);
+    info!("starting the node, mode: {:?}", &config.node_mode);
     let handle = IrysNode::new(config)?.start().await?;
     handle.start_mining().await?;
     let reth_thread_handle = handle.reth_thread_handle.clone();

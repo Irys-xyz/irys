@@ -355,7 +355,7 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block(genesis_block.clone()).await
             }
-            NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
+            NodeMode::Peer => {
                 // Fetch genesis data from trusted peer when joining network
                 self.fetch_genesis_from_trusted_peer().await
             }
@@ -520,7 +520,7 @@ impl IrysNode {
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
-        let node_mode = &config.node_config.mode;
+        let node_mode = &config.node_config.node_mode;
         // Start with base genesis and update fields
         let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
 
