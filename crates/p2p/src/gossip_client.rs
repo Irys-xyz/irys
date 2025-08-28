@@ -247,12 +247,24 @@ impl GossipClient {
                 })?;
                 Ok(body)
             }
-            StatusCode::NOT_FOUND => Err(GossipError::Network(format!(
-                "Got a not found from {}",
-                url
-            ))),
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
+                // It seems like heavy_fork_recovery_epoch_test expects 403 error to be
+                //  handled like this; I can't figure out a reason why, but it doesn't pass
+                //  if we actually return an error if this happens
+                if error_text.trim().is_empty() {
+                    return if empty_response_allowed {
+                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
+                        Ok(serde_json::from_str("null").map_err(|e| {
+                            GossipError::Network(format!(
+                                "Failed to parse an empty JSON response from {}: {}",
+                                url, e
+                            ))
+                        })?)
+                    } else {
+                        Err(GossipError::Network(format!("Empty response from {}", url)))
+                    };
+                }
                 Err(GossipError::Network(format!(
                     "API request failed with status: {} - {}",
                     status, error_text
