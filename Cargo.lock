@@ -4897,6 +4897,7 @@ dependencies = [
  "alloy-genesis",
  "alloy-network",
  "alloy-provider",
+ "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
  "alloy-signer-local",
  "alloy-sol-macro",

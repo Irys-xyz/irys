@@ -1793,6 +1793,191 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     Ok(())
 }
 
+#[actix_web::test]
+async fn test_evm_gossip() -> eyre::Result<()> {
+    // Turn on tracing even before the nodes start
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+
+    // Configure a test network with accelerated epochs (2 blocks per epoch)
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().num_chunks_in_partition = 10;
+    genesis_config
+        .consensus
+        .get_mut()
+        .num_chunks_in_recall_range = 2;
+    genesis_config.consensus.get_mut().num_partitions_per_slot = 1;
+    genesis_config.storage.num_writes_before_sync = 1;
+    genesis_config
+        .consensus
+        .get_mut()
+        .entropy_packing_iterations = 1_000;
+    genesis_config.consensus.get_mut().block_migration_depth = 1;
+
+    // Create signers for the test accounts
+    let peer1_signer = genesis_config.new_random_signer();
+    let peer2_signer = genesis_config.new_random_signer();
+    let rich_account = IrysSigner::random_signer(&genesis_config.consensus_config());
+    let recipient1 = IrysSigner::random_signer(&genesis_config.consensus_config());
+    let recipient2 = IrysSigner::random_signer(&genesis_config.consensus_config());
+
+    let chain_id = genesis_config.consensus_config().chain_id;
+
+    // Fund genesis accounts for EVM transactions
+    genesis_config.consensus.extend_genesis_accounts(vec![(
+        rich_account.address(),
+        GenesisAccount {
+            balance: U256::from(1000000000000000000_u128), // 1 IRYS
+            ..Default::default()
+        },
+    )]);
+
+    // Fund the peer signers for network participation
+    genesis_config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
+
+    // Start the genesis node and wait for packing
+    let genesis = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Setup Reth context for EVM transactions
+    let genesis_reth_context = genesis.node_ctx.reth_node_adapter.clone();
+
+    // Initialize peer configs with their keypair/signer
+    let peer1_config = genesis.testing_peer_with_signer(&peer1_signer);
+    let peer2_config = genesis.testing_peer_with_signer(&peer2_signer);
+
+    // Start the peers
+    let peer1 = IrysNodeTest::new(peer1_config.clone())
+        .start_with_name("PEER1")
+        .await;
+
+    let peer2 = IrysNodeTest::new(peer2_config.clone())
+        .start_with_name("PEER2")
+        .await;
+
+    // Setup Reth contexts for peers
+    let peer1_reth_context = peer1.node_ctx.reth_node_adapter.clone();
+    let peer2_reth_context = peer2.node_ctx.reth_node_adapter.clone();
+
+    // ensure recipients have 0 balance
+    let recipient1_init_balance = genesis_reth_context
+        .rpc
+        .get_balance(recipient1.address(), None)?;
+    let recipient2_init_balance = genesis_reth_context
+        .rpc
+        .get_balance(recipient2.address(), None)?;
+    assert_eq!(recipient1_init_balance, U256::from(0));
+    assert_eq!(recipient2_init_balance, U256::from(0));
+
+    // need to stake & pledge peers before they can mine
+    let post_wait_stake_commitment =
+        async |peer: &IrysNodeTest<IrysNodeCtx>,
+               genesis: &IrysNodeTest<IrysNodeCtx>|
+               -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
+            let stake_tx = peer.post_stake_commitment(H256::zero()).await;
+            genesis
+                .wait_for_mempool(stake_tx.id, seconds_to_wait)
+                .await?;
+            let pledge_tx = peer.post_pledge_commitment(H256::zero()).await;
+            genesis
+                .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+                .await?;
+            Ok((stake_tx, pledge_tx))
+        };
+
+    post_wait_stake_commitment(&peer1, &genesis).await?;
+    post_wait_stake_commitment(&peer2, &genesis).await?;
+
+    // Mine a block to get the commitments included
+    genesis.mine_block().await.unwrap();
+
+    // Mine another block to perform epoch tasks, and assign partition_hash's to the peers
+    genesis.mine_block().await.unwrap();
+
+    // Wait for peers to sync and start packing
+    let _block_hash = peer1.wait_until_height(2, seconds_to_wait).await?;
+    let _block_hash = peer2.wait_until_height(2, seconds_to_wait).await?;
+    peer1.wait_for_packing(seconds_to_wait).await;
+    peer2.wait_for_packing(seconds_to_wait).await;
+
+    // Create EVM transactions that will be used in the fork scenario
+    let rich_signer: LocalSigner<SigningKey> = rich_account.clone().into();
+
+    // Shared transaction that should be gossiped to all peers
+    let shared_evm_tx_req = TransactionRequest {
+        to: Some(TxKind::Call(recipient1.address())),
+        max_fee_per_gas: Some(20e9 as u128),
+        max_priority_fee_per_gas: Some(20e9 as u128),
+        gas: Some(21000),
+        value: Some(U256::from(123)),
+        nonce: Some(0),
+        chain_id: Some(chain_id),
+        ..Default::default()
+    };
+    let shared_tx_env = TransactionTestContext::sign_tx(rich_signer, shared_evm_tx_req).await;
+    let shared_signed_tx: Bytes = shared_tx_env.encoded_2718().into();
+
+    // Inject the shared EVM transaction to genesis node (should gossip to peers)
+    genesis_reth_context
+        .rpc
+        .inject_tx(shared_signed_tx)
+        .await
+        .expect("shared tx should be accepted");
+
+    peer1
+        .wait_for_evm_tx(shared_tx_env.hash(), seconds_to_wait)
+        .await?;
+    peer2
+        .wait_for_evm_tx(shared_tx_env.hash(), seconds_to_wait)
+        .await?;
+
+    let block = peer2.mine_block().await?;
+
+    let evm_block_hash = block.evm_block_hash;
+
+    genesis.wait_for_block(&block.block_hash, 20).await?;
+    peer1.wait_for_block(&block.block_hash, 20).await?;
+
+    // note: there is a delay between when the node says it has processed a block, and when all services (reth included) have actually processed it - so we wait
+
+    peer2.wait_for_evm_block(evm_block_hash, 20).await?;
+
+    peer1.wait_for_evm_block(evm_block_hash, 20).await?;
+
+    let recipient1_balance = peer1_reth_context.rpc.get_balance(
+        recipient1.address(),
+        Some(BlockId::Hash(evm_block_hash.into())),
+    )?;
+
+    let recipient1_balance2 = peer1_reth_context
+        .rpc
+        .get_balance(recipient1.address(), None)?;
+
+    let recipient1_balance3 = peer1_reth_context
+        .rpc
+        .get_balance(recipient1.address(), None)?;
+
+    // assert reth "head" state is the state we expect on both peers
+    assert_eq!(recipient1_balance, recipient1_balance2);
+    assert_eq!(recipient1_balance, recipient1_balance3);
+
+    assert_eq!(recipient1_balance, U256::from(123));
+
+    let evm_block = peer1.get_evm_block_by_hash(evm_block_hash)?;
+    let evm_block2 = peer1.get_evm_block_by_hash2(evm_block_hash).await?;
+    assert_eq!(evm_block, evm_block2.into());
+
+    assert_eq!(evm_block.body.transactions.len(), 2);
+
+    tokio::join!(genesis.stop(), peer1.stop(), peer2.stop());
+
+    Ok(())
+}
+
 #[test_log::test(actix_web::test)]
 /// send (staked) invalid pledge commitment txs where tx id has been tampered with
 /// try with and without pending anchor

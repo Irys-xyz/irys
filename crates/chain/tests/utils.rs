@@ -996,6 +996,100 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    pub fn get_evm_block_by_hash(
+        &self,
+        hash: alloy_core::primitives::B256,
+    ) -> eyre::Result<reth::primitives::Block> {
+        use reth::providers::BlockReader as _;
+
+        self.node_ctx
+            .reth_handle
+            .provider
+            .block_by_hash(hash)?
+            .ok_or_eyre("Got None")
+    }
+
+    // kept for future work so we can query EVM info from nodes remotely (via HTTP)
+    pub async fn get_evm_block_by_hash2(
+        &self,
+        hash: alloy_core::primitives::B256,
+    ) -> eyre::Result<alloy_rpc_types_eth::Block> {
+        let client = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc_client()
+            .ok_or_eyre("Unable to get RPC client")?;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::block_by_hash(
+            &client, hash, true,
+        )
+        .await?
+        .ok_or_eyre("Got None")
+    }
+
+    pub async fn wait_for_evm_block(
+        &self,
+        hash: alloy_core::primitives::BlockHash,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<reth::primitives::Block> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        for retry in 0..max_retries {
+            if let Ok(block) = self.get_evm_block_by_hash(hash) {
+                info!(
+                    "block found in {:?} reth after {} retries",
+                    &self.name, &retry
+                );
+                return Ok(block);
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate block in {:?} reth after {} retries",
+            &self.name,
+            max_retries
+        ))
+    }
+
+    pub async fn wait_for_evm_tx(
+        &self,
+        hash: &alloy_core::primitives::B256,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+
+        // wait until the tx shows up
+        let rpc = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc_client()
+            .ok_or_eyre("Unable to get RPC client")?;
+
+        for retry in 0..max_retries {
+            if let Some(tx) = reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::transaction_by_hash(
+                &rpc, *hash,
+            )
+            .await? {
+                info!(
+                    "tx {} found in {:?} reth after {} retries",
+                    &hash, &self.name, &retry
+                );
+                return Ok(tx);
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate tx {} in {:?} reth after {} retries",
+            &hash,
+            &self.name,
+            max_retries
+        ))
+    }
+
     /// wait for tx to appear in the mempool or be found in the database
     pub async fn wait_for_mempool(
         &self,
