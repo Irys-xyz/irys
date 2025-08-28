@@ -572,7 +572,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
     debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", sync_mode, start_sync_from_height, sync_state.is_trusted_sync());
 
-    let fetch_index_from_the_trusted_peer = !is_trusted_mode;
     if is_a_genesis_node {
         warn!("Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", genesis_peer_discovery_timeout_millis);
         match timeout(
@@ -581,7 +580,9 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         )
         .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                info!("Genesis node has active peers");
+            }
             Err(elapsed) => {
                 warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
                 sync_state.finish_sync();
@@ -613,7 +614,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         sync_state.sync_target_height(),
         BLOCK_BATCH_SIZE,
         5,
-        fetch_index_from_the_trusted_peer,
+        is_trusted_mode,
     )
     .await
     {
@@ -623,6 +624,11 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         }
         Err(err) => {
             error!("Sync task: Failed to fetch block index: {}", err);
+            if is_a_genesis_node {
+                warn!("Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers");
+                sync_state.finish_sync();
+                return Ok(());
+            }
             return Err(err);
         }
     };
@@ -682,7 +688,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                                 retry_height,
                                 1, // Just get one block
                                 3, // 3 retries for the network call
-                                fetch_index_from_the_trusted_peer,
+                                is_trusted_mode,
                             )
                             .await
                             {
@@ -784,7 +790,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                 target,
                 BLOCK_BATCH_SIZE,
                 5,
-                fetch_index_from_the_trusted_peer,
+                is_trusted_mode,
             )
             .await?;
 
@@ -898,8 +904,10 @@ async fn get_block_index(
         start, limit
     );
     let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
+        debug!("Fetching block index from trusted peers");
         peer_list.trusted_peers()
     } else {
+        debug!("Fetching block index from top active peers");
         peer_list.top_active_peers(Some(5), None)
     };
 

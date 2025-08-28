@@ -1505,7 +1505,8 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-        mode = "Genesis"
+        node_mode = "Genesis"
+        sync_mode = "Full"
         base_directory = "~/.tmp/.irys"
         consensus = "Testing"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
