@@ -223,10 +223,8 @@ impl GossipClient {
                     GossipError::Network(format!("Failed to read response from {}: {}", url, e))
                 })?;
 
-                if !empty_response_allowed {
-                    if text.trim().is_empty() {
-                        return Err(GossipError::Network(format!("Empty response from {}", url)));
-                    }
+                if !empty_response_allowed && text.trim().is_empty() {
+                    return Err(GossipError::Network(format!("Empty response from {}", url)));
                 }
 
                 let body = serde_json::from_str(&text).map_err(|e| {
