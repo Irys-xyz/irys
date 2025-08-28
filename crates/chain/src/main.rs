@@ -43,7 +43,7 @@ fn init_tracing() -> eyre::Result<()> {
     let subscriber = Registry::default();
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
-        .try_from_env()?;
+        .from_env()?;
 
     let output_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)
