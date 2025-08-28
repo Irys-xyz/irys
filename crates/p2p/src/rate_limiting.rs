@@ -6,11 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, trace};
 
 // Constants for rate limiting configuration
-const WINDOW_DURATION_MS: u128 = 3_600_000; // 1 hour in milliseconds
-const MAX_SCORE_PER_HOUR: u32 = 5; // Max score points per hour
-const MAX_REQUESTS_PER_HOUR: u32 = 100; // Max requests per hour
-const CLEANUP_INTERVAL_SECS: u64 = 300; // Cleanup every 5 minutes
-const ENTRY_EXPIRY_MS: u128 = 7_200_000; // 2 hours in milliseconds
+const WINDOW_DURATION_MS: u128 = 60_000; // 1 minute in milliseconds
+const MAX_SCORE_PER_MINUTE: u32 = 5; // Max score points per minute
+const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per minute
+const CLEANUP_INTERVAL_SECS: u64 = 60; // Cleanup every minute
+const ENTRY_EXPIRY_MS: u128 = 120_000; // 2 minutes in milliseconds
 
 /// Get current time as milliseconds since Unix epoch
 fn now_as_millis() -> u128 {
@@ -108,10 +108,10 @@ impl DataRequestRecord {
 pub struct DataRequestTracker {
     /// Per-peer request history
     request_history: Arc<DashMap<Address, DataRequestRecord>>,
-    /// Maximum score points a peer can gain per hour from data requests
-    max_score_per_hour: u32,
-    /// Maximum requests per hour before blocking
-    max_requests_per_hour: u32,
+    /// Maximum score points a peer can gain per minute from data requests
+    max_score_per_minute: u32,
+    /// Maximum requests per minute before blocking
+    max_requests_per_minute: u32,
     /// Interval for cleaning up old entries
     cleanup_interval: Duration,
     /// Last cleanup timestamp (Unix timestamp in milliseconds, truncated from u128)
@@ -124,8 +124,8 @@ impl DataRequestTracker {
 
         Self {
             request_history: Arc::new(DashMap::new()),
-            max_score_per_hour: MAX_SCORE_PER_HOUR,
-            max_requests_per_hour: MAX_REQUESTS_PER_HOUR,
+            max_score_per_minute: MAX_SCORE_PER_MINUTE,
+            max_requests_per_minute: MAX_REQUESTS_PER_MINUTE,
             cleanup_interval: Duration::from_secs(CLEANUP_INTERVAL_SECS),
             last_cleanup: Arc::new(AtomicU64::new(now as u64)),
         }
@@ -183,26 +183,26 @@ impl DataRequestTracker {
         entry.update_request();
 
         // Check if peer exceeded request limit
-        if entry.request_count > self.max_requests_per_hour {
+        if entry.request_count > self.max_requests_per_minute {
             debug!(
                 "Peer {:?} exceeded request limit ({}/{})",
-                peer_address, entry.request_count, self.max_requests_per_hour
+                peer_address, entry.request_count, self.max_requests_per_minute
             );
             return RequestCheckResult::BlockRequest; // Don't serve data or update score
         }
 
         // Check if we can give more score
-        let should_update_score = if entry.score_given < self.max_score_per_hour {
+        let should_update_score = if entry.score_given < self.max_score_per_minute {
             entry.score_given += 1;
             debug!(
                 "Peer {:?} score update allowed ({}/{})",
-                peer_address, entry.score_given, self.max_score_per_hour
+                peer_address, entry.score_given, self.max_score_per_minute
             );
             true
         } else {
             debug!(
-                "Peer {:?} reached score cap for this hour ({}/{})",
-                peer_address, entry.score_given, self.max_score_per_hour
+                "Peer {:?} reached score cap for this minute ({}/{})",
+                peer_address, entry.score_given, self.max_score_per_minute
             );
             false
         };
@@ -372,7 +372,7 @@ mod tests {
         assert!(!record.is_window_expired());
 
         // Simulate old record
-        record.window_start = now_as_millis().saturating_sub(WINDOW_DURATION_MS + 100_000); // Over 1 hour ago
+        record.window_start = now_as_millis().saturating_sub(WINDOW_DURATION_MS + 10_000); // Over 1 minute ago
 
         assert!(record.is_window_expired());
 
