@@ -435,6 +435,11 @@ where
             blocks_with_missing_payloads.push(block);
         }
 
+        if blocks_with_missing_payloads.is_empty() {
+            debug!("No missing payloads found");
+            return Ok(());
+        }
+
         // The last block in the list is the oldest block with a missing payload
         while let Some(block) = blocks_with_missing_payloads.pop() {
             debug!(

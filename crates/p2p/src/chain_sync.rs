@@ -1050,6 +1050,8 @@ async fn is_local_index_is_behind_trusted_peers(
             if index_tip > peer_height {
                 highest_trusted_peer_height = Some(index_tip);
             }
+        } else {
+            highest_trusted_peer_height = Some(index_tip);
         }
     }
 
