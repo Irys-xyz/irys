@@ -1,4 +1,5 @@
-mode = "PeerSync"
+node_mode = "Peer"
+sync_mode = "Full"
 base_directory = ""
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
 trusted_peers = []
