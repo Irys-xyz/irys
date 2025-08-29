@@ -96,7 +96,6 @@ pub(crate) struct CachedBlock {
 struct BlockCacheInner {
     pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, HashSet<BlockHash>>,
     pub(crate) blocks: LruCache<BlockHash, CachedBlock>,
-    pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
 }
 
@@ -127,12 +126,8 @@ impl BlockCacheGuard {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
-    async fn block_hash_to_parent_hash_contains(&self, block_hash: &BlockHash) -> bool {
-        self.inner
-            .write()
-            .await
-            .block_hash_to_parent_hash
-            .contains(block_hash)
+    async fn contains_block(&self, block_hash: &BlockHash) -> bool {
+        self.inner.write().await.blocks.contains(block_hash)
     }
 
     async fn orphaned_blocks_for_parent(
@@ -167,7 +162,6 @@ impl BlockCacheGuard {
     pub(crate) async fn clear(&self) {
         let mut guard = self.inner.write().await;
         guard.orphaned_blocks_by_parent.clear();
-        guard.block_hash_to_parent_hash.clear();
         guard.requested_blocks.clear();
         guard.blocks.clear();
     }
@@ -190,18 +184,12 @@ impl BlockCacheInner {
             orphaned_blocks_by_parent: LruCache::new(
                 NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
-            block_hash_to_parent_hash: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
-            ),
             blocks: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
             requested_blocks: HashSet::new(),
         }
     }
 
     fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
-        self.block_hash_to_parent_hash
-            .put(block_header.block_hash, block_header.previous_block_hash);
-
         if let Some(set) = self
             .orphaned_blocks_by_parent
             .get_mut(&block_header.previous_block_hash)
@@ -239,16 +227,20 @@ impl BlockCacheInner {
     }
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.pop(block_hash) {
+        if let Some(removed_block) = self.blocks.pop(block_hash) {
             let mut set_is_empty = false;
-            if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&parent_hash) {
+            if let Some(set) = self
+                .orphaned_blocks_by_parent
+                .get_mut(&removed_block.header.previous_block_hash)
+            {
                 set.remove(block_hash);
                 if set.is_empty() {
                     set_is_empty = true;
                 }
             }
             if set_is_empty {
-                self.orphaned_blocks_by_parent.pop(&parent_hash);
+                self.orphaned_blocks_by_parent
+                    .pop(&removed_block.header.block_hash);
             }
         }
     }
@@ -516,10 +508,7 @@ where
                 current_block_hash
             );
 
-            let is_already_in_cache = self
-                .blocks_cache
-                .block_hash_to_parent_hash_contains(&prev_block_hash)
-                .await;
+            let is_already_in_cache = self.blocks_cache.contains_block(&prev_block_hash).await;
 
             if is_already_in_cache {
                 debug!(
@@ -825,10 +814,8 @@ where
     }
 
     /// Check if parent hash exists in block cache - for orphan block processing
-    pub(crate) async fn is_parent_hash_in_cache(&self, parent_hash: &BlockHash) -> bool {
-        self.blocks_cache
-            .block_hash_to_parent_hash_contains(parent_hash)
-            .await
+    pub(crate) async fn contains_block(&self, block_hash: &BlockHash) -> bool {
+        self.blocks_cache.contains_block(block_hash).await
     }
 
     /// Mark the block as requested - for orphan block processing
@@ -903,15 +890,6 @@ mod tests {
             .expect("parent entry should exist");
         assert!(set.contains(&child1.block_hash));
 
-        // mapping child1 -> parent exists
-        assert_eq!(
-            cache
-                .block_hash_to_parent_hash
-                .get(&child1.block_hash)
-                .copied(),
-            Some(parent)
-        );
-
         // child1 present in blocks cache with correct flags
         let cached = cache
             .blocks
@@ -938,27 +916,11 @@ mod tests {
         assert!(set.contains(&child1.block_hash));
         assert!(set.contains(&child2.block_hash));
 
-        // block hash to parent hash mappings exist for both
-        assert_eq!(
-            cache
-                .block_hash_to_parent_hash
-                .get(&child1.block_hash)
-                .copied(),
-            Some(parent)
-        );
-        assert_eq!(
-            cache
-                .block_hash_to_parent_hash
-                .get(&child2.block_hash)
-                .copied(),
-            Some(parent)
-        );
-
         // Only the first added sibling is stored in blocks cache (current implementation behavior)
         assert!(cache.blocks.get(&child1.block_hash).is_some());
         assert!(cache.blocks.get(&child2.block_hash).is_none());
 
-        // Verify fast tracking flag for first
+        // Verify the fast tracking flag for first
         assert!(
             cache
                 .blocks
@@ -986,27 +948,11 @@ mod tests {
             .expect("parent entry should remain");
         assert!(!set.contains(&child1.block_hash));
         assert!(set.contains(&child2.block_hash));
-        // mapping for child1 removed, child2 retained
-        assert!(cache
-            .block_hash_to_parent_hash
-            .get(&child1.block_hash)
-            .is_none());
-        assert_eq!(
-            cache
-                .block_hash_to_parent_hash
-                .get(&child2.block_hash)
-                .copied(),
-            Some(parent)
-        );
 
         // Remove second child
         cache.remove_block(&child2.block_hash);
         // parent entry should now be gone
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
-        assert!(cache
-            .block_hash_to_parent_hash
-            .get(&child2.block_hash)
-            .is_none());
     }
 
     #[test]
@@ -1041,7 +987,6 @@ mod tests {
         cache.remove_block(&bogus);
         // Ensure internal maps remain empty
         assert!(cache.orphaned_blocks_by_parent.iter().next().is_none());
-        assert!(cache.block_hash_to_parent_hash.iter().next().is_none());
         assert!(cache.blocks.iter().next().is_none());
     }
 
@@ -1057,10 +1002,5 @@ mod tests {
         cache.remove_block(&child.block_hash);
         // Parent entry should be removed entirely
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
-        // Mapping should be gone
-        assert!(cache
-            .block_hash_to_parent_hash
-            .get(&child.block_hash)
-            .is_none());
     }
 }

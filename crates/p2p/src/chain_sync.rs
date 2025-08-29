@@ -329,10 +329,8 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         &self,
         parent_block_hash: BlockHash,
     ) -> Result<(), ChainSyncError> {
-        let parent_is_already_in_the_pool = self
-            .block_pool
-            .is_parent_hash_in_cache(&parent_block_hash)
-            .await;
+        let parent_is_already_in_the_pool =
+            self.block_pool.contains_block(&parent_block_hash).await;
 
         // If the parent is also in the cache, it's likely that processing has already started
         if !parent_is_already_in_the_pool {
