@@ -43,8 +43,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List, H256,
-    U256,
+    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
+    SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -293,15 +293,16 @@ impl IrysNodeTest<()> {
         Self::new_genesis(config)
     }
 
-    /// Start a new test node in peer-sync mode
+    /// Start a new test node in peer-sync mode with full block validation
     pub fn new(mut config: NodeConfig) -> Self {
-        config.mode = NodeMode::PeerSync;
+        config.node_mode = NodeMode::Peer;
+        config.sync_mode = SyncMode::Full;
         Self::new_inner(config)
     }
 
     /// Start a new test node in genesis mode
     pub fn new_genesis(mut config: NodeConfig) -> Self {
-        config.mode = NodeMode::Genesis;
+        config.node_mode = NodeMode::Genesis;
         Self::new_inner(config)
     }
 
@@ -372,7 +373,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let node_config = &self.node_ctx.config.node_config;
 
-        if node_config.mode == NodeMode::PeerSync {
+        if node_config.node_mode == NodeMode::Peer {
             panic!("Can only create a peer from a genesis config");
         }
 
@@ -387,7 +388,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config.gossip.public_port = 0;
 
         // Make sure to mark this config as a peer
-        peer_config.mode = NodeMode::PeerSync;
+        peer_config.node_mode = NodeMode::Peer;
+        peer_config.sync_mode = SyncMode::Full;
 
         // Add the genesis node details as a trusted peer
         peer_config.trusted_peers = vec![

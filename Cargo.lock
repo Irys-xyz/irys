@@ -4958,6 +4958,7 @@ dependencies = [
  "irys-chain",
  "irys-config",
  "irys-database",
+ "irys-domain",
  "irys-reth-node-bridge",
  "irys-types",
  "reth-node-core",

@@ -3,7 +3,7 @@ use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, DataTransaction,
-    IrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode,
+    IrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode, SyncMode,
 };
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -106,7 +106,8 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let mut ctx_peer1_node = ctx_genesis_node.testing_peer();
     // Setting up mode to full validation sync to check that the reset seed is applied correctly
     //  and all blocks are validated successfully
-    ctx_peer1_node.mode = NodeMode::PeerSync;
+    ctx_peer1_node.node_mode = NodeMode::Peer;
+    ctx_peer1_node.sync_mode = SyncMode::Full;
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
         .await;
