@@ -7,6 +7,9 @@ use irys_reth_node_bridge::genesis::init_state;
 use irys_types::{Config, NodeConfig};
 use reth_node_core::version::default_client_version;
 use std::{path::PathBuf, sync::Arc};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt as _;
+use tracing::info;
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -24,6 +27,8 @@ pub enum Commands {
     DumpState {},
     #[command(name = "init-state")]
     InitState { state_path: PathBuf },
+    #[command(name = "rollback-blocks")]
+    RollbackBlocks { count: u64 },
 }
 
 #[tokio::main]
@@ -60,8 +65,33 @@ async fn main() -> eyre::Result<()> {
         Commands::InitState { state_path } => {
             let (chain_spec, _) =
                 IrysChainSpecBuilder::from_config(&Config::new(node_config.clone())).build();
-
             init_state(node_config, chain_spec.into(), state_path).await
+        }
+        Commands::RollbackBlocks { count } => {
+            let block_index = irys_domain::BlockIndex::new(&node_config).await?;
+            let items = &block_index.items[0..block_index
+                .items
+                .len()
+                .saturating_sub(count.try_into().unwrap())];
+
+            info!("Old len: {}, new {} ", block_index.items.len(), items.len());
+
+            std::fs::copy(
+                block_index.block_index_file.clone(),
+                node_config.block_index_dir().join("index.dat.bak"),
+            )?;
+
+            let mut f = OpenOptions::new()
+                .truncate(true)
+                .write(true)
+                .open(block_index.block_index_file)
+                .await?;
+            // TODO: update this so it a.) removes other data from the DB, and 2.) removes entries more efficiently (we know the size of each entry ahead of time)
+            for item in items.iter() {
+                f.write_all(&item.to_bytes()).await?
+            }
+            f.sync_all().await?;
+            Ok(())
         }
     }
 }
