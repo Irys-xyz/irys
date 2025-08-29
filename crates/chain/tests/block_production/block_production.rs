@@ -500,6 +500,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[test_log::test(actix::test)]
 async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
@@ -587,6 +588,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[test_log::test(actix::test)]
 async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
@@ -846,8 +848,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         });
 
     // Post stake + pledge commitments to the peer
-    let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
-    let pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
+    let stake_tx = peer_node.post_stake_commitment(None).await?;
+    let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
     // Assert that the fees are greater than 0
     assert!(

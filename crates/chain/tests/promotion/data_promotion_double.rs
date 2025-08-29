@@ -13,7 +13,7 @@ use std::time::Duration;
 use tracing::debug;
 
 #[test_log::test(actix_web::test)]
-async fn slow_heavy_double_root_data_promotion_test() {
+async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
     config.consensus.get_mut().chunk_size = chunk_size;
@@ -24,6 +24,8 @@ async fn slow_heavy_double_root_data_promotion_test() {
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     // Testnet / single node config
     config.consensus.get_mut().block_migration_depth = 1;
+    let anchor_expiry_depth = 10;
+    config.consensus.get_mut().mempool.anchor_expiry_depth = anchor_expiry_depth;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
@@ -81,7 +83,12 @@ async fn slow_heavy_double_root_data_promotion_test() {
             .expect("Failed to get price");
 
         let tx = s
-            .create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)
+            .create_publish_transaction(
+                data,
+                node.get_anchor().await?,
+                price_info.perm_fee,
+                price_info.term_fee,
+            )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
         println!("tx[{}] {}", i, tx.header.id);
@@ -108,6 +115,7 @@ async fn slow_heavy_double_root_data_promotion_test() {
     }
 
     // Wait for all the transactions to be confirmed
+    // this mines blocks
     let result = node.wait_for_migrated_txs(unconfirmed_tx, 20).await;
     // Verify all transactions are confirmed
     assert!(result.is_ok());
@@ -149,6 +157,7 @@ async fn slow_heavy_double_root_data_promotion_test() {
     // ------------------------------
     // Wait for the transactions to be promoted
     let unconfirmed_promotions = vec![txs[0].header.id];
+    // this mines blocks
     let result = node
         .wait_for_ingress_proofs(unconfirmed_promotions, 20)
         .await;
@@ -245,7 +254,7 @@ async fn slow_heavy_double_root_data_promotion_test() {
         let tx = s
             .create_publish_transaction(
                 data,
-                Some(block1.block_hash),
+                block1.block_hash,
                 price_info.perm_fee,
                 price_info.term_fee,
             )
@@ -378,6 +387,9 @@ async fn slow_heavy_double_root_data_promotion_test() {
 
     // Because it takes multiple ingress proofs to promote a tx, we keep ingress
     // proofs around until their data_roots expire out of the Submit ledger
+    // (there was code to check if proofs expired here)
 
-    node.node_ctx.stop().await;
+    node.stop().await;
+
+    Ok(())
 }

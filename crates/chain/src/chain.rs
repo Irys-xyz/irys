@@ -229,7 +229,7 @@ async fn start_reth_node(
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
-    let random_ports = config.node_config.reth.use_random_ports;
+    let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = match irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
@@ -612,7 +612,7 @@ impl IrysNode {
 
         // Log startup information
         info!(
-            "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}",
+            "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}:{}",
             &node_mode,
             &ctx.config.node_config.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
@@ -620,7 +620,9 @@ impl IrysNode {
             &node_config.http.bind_port,
             &node_config.gossip.bind_ip,
             &node_config.gossip.bind_port,
-            &node_config.reth_peer_info.peering_tcp_addr
+            &node_config.reth.network.bind_ip,
+            &node_config.reth.network.bind_port,
+
         );
 
         // This is going to resolve instantly for a genesis node with 0 blocks,
@@ -875,7 +877,14 @@ impl IrysNode {
         // overwrite config as we now have reth peering information
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
         let mut node_config = config.node_config.clone();
-        node_config.reth_peer_info = reth_peering;
+        node_config.reth.network.peer_id = reth_peering.peer_id;
+        node_config.reth.network.bind_ip = reth_peering.peering_tcp_addr.ip().to_string();
+        node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
+
+        if node_config.reth.network.public_port == 0 {
+            node_config.reth.network.public_port = reth_peering.peering_tcp_addr.port();
+        }
+
         let config = Config::new(node_config);
 
         let block_index_guard = block_index_service_actor

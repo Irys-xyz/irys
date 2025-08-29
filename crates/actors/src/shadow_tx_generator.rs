@@ -606,7 +606,7 @@ mod tests {
         perm_fee: Option<U256>,
     ) -> DataTransactionHeader {
         let data = vec![0_u8; 1024];
-        let anchor = Some(H256::from([9_u8; 32]));
+        let anchor = H256::from([9_u8; 32]);
 
         // Always create with perm_fee for publish ledger (ledger_id = 0)
         // The tests simulate the actual usage where submit txs have been promoted to publish

@@ -412,7 +412,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config
     }
 
-    pub async fn testing_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+    pub async fn testing_peer_with_assignments(
+        &self,
+        peer_signer: &IrysSigner,
+    ) -> eyre::Result<Self> {
         // Create a new peer config using the provided signer
         let peer_config = self.testing_peer_with_signer(peer_signer);
 
@@ -424,24 +427,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         config: NodeConfig,
         name: &'static str,
-    ) -> Self {
+    ) -> eyre::Result<Self> {
         let seconds_to_wait = 20;
         let peer_address = config.miner_address();
 
         // Start the peer node
         let peer_node = IrysNodeTest::new(config).start_with_name(name).await;
 
-        // Get the latest block hash to use as anchor
-        let current_height = self.get_canonical_chain_height().await;
-        let latest_block = self
-            .get_block_by_height(current_height)
-            .await
-            .expect("to get latest block");
-        let anchor = latest_block.block_hash;
-
         // Post stake + pledge commitments to establish validator status
-        let stake_tx = peer_node.post_stake_commitment(anchor).await;
-        let pledge_tx = peer_node.post_pledge_commitment(anchor).await;
+        let stake_tx = peer_node.post_stake_commitment(None).await?;
+        let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
         // Wait for commitment transactions to show up in this node's mempool
         self.wait_for_mempool(stake_tx.id, seconds_to_wait)
@@ -511,7 +506,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Peer should have at least one partition assignment"
         );
 
-        peer_node
+        Ok(peer_node)
     }
 
     /// get block height in block index
@@ -998,6 +993,100 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
+    pub fn get_evm_block_by_hash(
+        &self,
+        hash: alloy_core::primitives::B256,
+    ) -> eyre::Result<reth::primitives::Block> {
+        use reth::providers::BlockReader as _;
+
+        self.node_ctx
+            .reth_handle
+            .provider
+            .block_by_hash(hash)?
+            .ok_or_eyre("Got None")
+    }
+
+    // kept for future work so we can query EVM info from nodes remotely (via HTTP)
+    pub async fn get_evm_block_by_hash2(
+        &self,
+        hash: alloy_core::primitives::B256,
+    ) -> eyre::Result<alloy_rpc_types_eth::Block> {
+        let client = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc_client()
+            .ok_or_eyre("Unable to get RPC client")?;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::block_by_hash(
+            &client, hash, true,
+        )
+        .await?
+        .ok_or_eyre("Got None")
+    }
+
+    pub async fn wait_for_evm_block(
+        &self,
+        hash: alloy_core::primitives::BlockHash,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<reth::primitives::Block> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        for retry in 0..max_retries {
+            if let Ok(block) = self.get_evm_block_by_hash(hash) {
+                info!(
+                    "block found in {:?} reth after {} retries",
+                    &self.name, &retry
+                );
+                return Ok(block);
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate block in {:?} reth after {} retries",
+            &self.name,
+            max_retries
+        ))
+    }
+
+    pub async fn wait_for_evm_tx(
+        &self,
+        hash: &alloy_core::primitives::B256,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+
+        // wait until the tx shows up
+        let rpc = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc_client()
+            .ok_or_eyre("Unable to get RPC client")?;
+
+        for retry in 0..max_retries {
+            if let Some(tx) = reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::transaction_by_hash(
+                &rpc, *hash,
+            )
+            .await? {
+                info!(
+                    "tx {} found in {:?} reth after {} retries",
+                    &hash, &self.name, &retry
+                );
+                return Ok(tx);
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate tx {} in {:?} reth after {} retries",
+            &hash,
+            &self.name,
+            max_retries
+        ))
+    }
+
     /// wait for tx to appear in the mempool or be found in the database
     pub async fn wait_for_mempool(
         &self,
@@ -1199,7 +1288,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account
             .create_publish_transaction(
                 data,
-                None, // anchor
+                self.get_anchor().await.map_err(AddTxError::CreateTx)?, // anchor
                 price_info.perm_fee,
                 price_info.term_fee,
             )
@@ -1245,7 +1334,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account
             .create_publish_transaction(
                 data,
-                None, // anchor
+                self.get_anchor().await.map_err(AddTxError::CreateTx)?, // anchor
                 price_info.perm_fee,
                 price_info.term_fee,
             )
@@ -1566,12 +1655,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("Failed to get price");
 
         let tx = signer
-            .create_publish_transaction(
-                data,
-                Some(anchor),
-                price_info.perm_fee,
-                price_info.term_fee,
-            )
+            .create_publish_transaction(data, anchor, price_info.perm_fee, price_info.term_fee)
             .expect("Expect to create a storage transaction from the data");
         let tx = signer
             .sign_transaction(tx)
@@ -1778,9 +1862,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
+    pub async fn post_pledge_commitment(
+        &self,
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let signer = self.cfg.signer();
+        let anchor = match anchor {
+            Some(anchor) => anchor,
+            None => self.get_anchor().await?,
+        };
         let pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
@@ -1788,16 +1879,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             signer.address(),
         )
         .await;
+
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
         let api_uri = self.node_ctx.config.node_config.api_uri();
         self.post_commitment_tx_request(&api_uri, &pledge_tx)
-            .await
-            .expect("posted commitment tx");
+            .await?;
 
-        pledge_tx
+        Ok(pledge_tx)
     }
 
     pub async fn post_pledge_commitment_with_signer(
@@ -1827,14 +1918,25 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_pledge_commitment_without_gossip(
         &self,
-        anchor: H256,
-    ) -> CommitmentTransaction {
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         self.with_gossip_disabled(self.post_pledge_commitment(anchor))
             .await
     }
 
-    pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
+    pub async fn get_anchor(&self) -> eyre::Result<H256> {
+        self.get_api_client().get_anchor(self.get_peer_addr()).await
+    }
+
+    pub async fn post_stake_commitment(
+        &self,
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
+        let anchor = match anchor {
+            Some(anchor) => anchor,
+            None => self.get_anchor().await?,
+        };
         let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
@@ -1846,13 +1948,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("posted commitment tx");
 
-        stake_tx
+        Ok(stake_tx)
     }
 
     pub async fn post_stake_commitment_without_gossip(
         &self,
-        anchor: H256,
-    ) -> CommitmentTransaction {
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         self.with_gossip_disabled(self.post_stake_commitment(anchor))
             .await
     }
@@ -2398,6 +2500,7 @@ where
     assert_eq!(status, StatusCode::OK);
 }
 
+#[deprecated]
 pub async fn post_commitment_tx<T, B>(app: &T, tx: &CommitmentTransaction)
 where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,

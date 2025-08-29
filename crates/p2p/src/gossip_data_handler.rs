@@ -437,6 +437,15 @@ where
             debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
         }
 
+        // remove them from the mempool's blacklist
+        self.mempool
+            .remove_from_blacklist(missing_tx_ids.clone())
+            .await
+            .map_err(|error| {
+                error!("Failed to remove txs from mempool blacklist");
+                GossipError::unknown(&error)
+            })?;
+
         // Fetch missing transactions from the source peer
         let missing_txs = self
             .api_client

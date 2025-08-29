@@ -148,7 +148,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let tx = account1
         .create_publish_transaction(
             data_bytes.clone(),
-            None,
+            node.get_anchor().await?,
             price_info.perm_fee,
             price_info.term_fee,
         )

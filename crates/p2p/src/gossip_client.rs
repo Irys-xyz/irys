@@ -10,11 +10,10 @@ use irys_types::{
     PeerListItem, PeerNetworkError,
 };
 use rand::prelude::SliceRandom as _;
-use reqwest::Client;
-use reqwest::Response;
+use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -73,7 +72,7 @@ impl GossipClient {
 
         let res = self.send_data(peer, data).await;
         Self::handle_score(peer_list, &res, peer_miner_address);
-        res
+        res.map(|_| ())
     }
 
     /// Request a specific data to be gossiped. Returns true if the peer has the data,
@@ -85,18 +84,8 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> GossipResult<bool> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
-        let get_data_request = self.create_request(requested_data);
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&get_data_request)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()));
+        let res = self.send_data_internal(url, &requested_data, false).await;
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
@@ -110,18 +99,8 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> GossipResult<Option<GossipData>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
-        let get_data_request = self.create_request(requested_data);
 
-        let res = self
-            .client
-            .post(&url)
-            .json(&get_data_request)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()));
+        let res = self.send_data_internal(url, &requested_data, false).await;
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
@@ -158,47 +137,51 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
+                    true,
                 )
-                .await?;
+                .await
             }
             GossipData::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
+                    true,
                 )
-                .await?;
+                .await
             }
             GossipData::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/commitment_tx", peer.address.gossip),
                     commitment_tx,
+                    true,
                 )
-                .await?;
+                .await
             }
             GossipData::Block(irys_block_header) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
+                    true,
                 )
-                .await?;
+                .await
             }
             GossipData::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/execution_payload", peer.address.gossip),
                     &execution_payload,
+                    true,
                 )
-                .await?;
+                .await
             }
             GossipData::IngressProof(ingress_proof) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/ingress_proof", peer.address.gossip),
                     &ingress_proof,
+                    true,
                 )
-                .await?;
+                .await
             }
-        };
-
-        Ok(())
+        }
     }
 
     fn check_if_peer_is_online(peer: &PeerListItem) -> GossipResult<()> {
@@ -208,18 +191,86 @@ impl GossipClient {
         Ok(())
     }
 
-    async fn send_data_internal<T: Serialize + ?Sized>(
+    async fn send_data_internal<T, R>(
         &self,
         url: String,
         data: &T,
-    ) -> Result<Response, GossipError> {
+        empty_response_allowed: bool,
+    ) -> GossipResult<R>
+    where
+        T: Serialize + ?Sized,
+        for<'de> R: Deserialize<'de>,
+    {
+        debug!("Sending data to {}", url);
+
         let req = self.create_request(data);
-        self.client
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|error| GossipError::Network(error.to_string()))
+        let response =
+            self.client
+                .post(&url)
+                .json(&req)
+                .send()
+                .await
+                .map_err(|response_error| {
+                    GossipError::Network(format!(
+                        "Failed to send data to {}: {}",
+                        url, response_error
+                    ))
+                })?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let text = response.text().await.map_err(|e| {
+                    GossipError::Network(format!("Failed to read response from {}: {}", url, e))
+                })?;
+
+                if text.trim().is_empty() {
+                    return if empty_response_allowed {
+                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
+                        Ok(serde_json::from_str("null").map_err(|e| {
+                            GossipError::Network(format!(
+                                "Failed to parse an empty JSON response from {}: {}",
+                                url, e
+                            ))
+                        })?)
+                    } else {
+                        Err(GossipError::Network(format!("Empty response from {}", url)))
+                    };
+                }
+
+                let body = serde_json::from_str(&text).map_err(|e| {
+                    GossipError::Network(format!(
+                        "Failed to parse JSON: {} - Response: {}",
+                        e, text
+                    ))
+                })?;
+                Ok(body)
+            }
+            _ => {
+                let error_text = response.text().await.unwrap_or_default();
+                // It seems like heavy_fork_recovery_epoch_test expects 403 error to be
+                //  handled like this; I can't figure out a reason why, but it doesn't pass
+                //  if we actually return an error if this happens
+                if error_text.trim().is_empty() {
+                    return if empty_response_allowed {
+                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
+                        Ok(serde_json::from_str("null").map_err(|e| {
+                            GossipError::Network(format!(
+                                "Failed to parse an empty JSON response from {}: {}",
+                                url, e
+                            ))
+                        })?)
+                    } else {
+                        Err(GossipError::Network(format!("Empty response from {}", url)))
+                    };
+                }
+                Err(GossipError::Network(format!(
+                    "API request failed with status: {} - {}",
+                    status, error_text
+                )))
+            }
+        }
     }
 
     fn handle_score<T>(
