@@ -194,11 +194,10 @@ impl ExecutionPayloadCache {
     }
 
     /// Checks if the execution payload is stored in the EVM node.
-    pub async fn is_stored_in_reth(
-        &self,
-        evm_block_hash: &B256,
-    ) -> bool {
-        self.reth_payload_provider.evm_block(*evm_block_hash).is_some()
+    pub async fn is_stored_in_reth(&self, evm_block_hash: &B256) -> bool {
+        self.reth_payload_provider
+            .evm_block(*evm_block_hash)
+            .is_some()
     }
 
     /// Waits for the execution payload to arrive over gossip. This method will first check the local
