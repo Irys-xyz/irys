@@ -94,7 +94,8 @@ pub(crate) struct CachedBlock {
 
 #[derive(Clone, Debug)]
 struct BlockCacheInner {
-    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, CachedBlock>,
+    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, HashSet<BlockHash>>,
+    pub(crate) blocks: LruCache<BlockHash, CachedBlock>,
     pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
 }
@@ -126,15 +127,6 @@ impl BlockCacheGuard {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
-    async fn block_hash_to_parent_hash(&self, block_hash: &BlockHash) -> Option<BlockHash> {
-        self.inner
-            .write()
-            .await
-            .block_hash_to_parent_hash
-            .get(block_hash)
-            .copied()
-    }
-
     async fn block_hash_to_parent_hash_contains(&self, block_hash: &BlockHash) -> bool {
         self.inner
             .write()
@@ -143,18 +135,10 @@ impl BlockCacheGuard {
             .contains(block_hash)
     }
 
-    async fn orphaned_blocks_by_parent_contains(&self, block_hash: &BlockHash) -> bool {
-        self.inner
-            .write()
-            .await
-            .orphaned_blocks_by_parent
-            .contains(block_hash)
-    }
-
-    async fn orphaned_blocks_by_parent_cloned(
+    async fn orphaned_blocks_for_parent(
         &self,
         block_hash: &BlockHash,
-    ) -> Option<CachedBlock> {
+    ) -> Option<HashSet<BlockHash>> {
         self.inner
             .write()
             .await
@@ -185,6 +169,7 @@ impl BlockCacheGuard {
         guard.orphaned_blocks_by_parent.clear();
         guard.block_hash_to_parent_hash.clear();
         guard.requested_blocks.clear();
+        guard.blocks.clear();
     }
 
     async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
@@ -208,6 +193,7 @@ impl BlockCacheInner {
             block_hash_to_parent_hash: LruCache::new(
                 NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
+            blocks: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
             requested_blocks: HashSet::new(),
         }
     }
@@ -215,8 +201,22 @@ impl BlockCacheInner {
     fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
         self.block_hash_to_parent_hash
             .put(block_header.block_hash, block_header.previous_block_hash);
-        self.orphaned_blocks_by_parent.put(
-            block_header.previous_block_hash,
+
+        if let Some(set) = self
+            .orphaned_blocks_by_parent
+            .get_mut(&block_header.previous_block_hash)
+        {
+            set.insert(block_header.block_hash);
+            return;
+        } else {
+            let mut set = HashSet::new();
+            set.insert(block_header.block_hash);
+            self.orphaned_blocks_by_parent
+                .put(block_header.previous_block_hash, set);
+        }
+
+        self.blocks.put(
+            block_header.block_hash,
             CachedBlock {
                 header: block_header,
                 is_processing: true,
@@ -226,37 +226,35 @@ impl BlockCacheInner {
     }
 
     fn block_is_processing(&mut self, block_hash: &BlockHash) -> bool {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return header.is_processing;
-            }
-        }
-
-        false
+        self.blocks
+            .get(block_hash)
+            .map(|block| block.is_processing)
+            .unwrap_or(false)
     }
 
     fn change_block_processing_status(&mut self, block_hash: BlockHash, is_processing: bool) {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get_mut(parent_hash) {
-                header.is_processing = is_processing;
-            }
-        }
+        self.blocks
+            .get_mut(&block_hash)
+            .map(|block| block.is_processing = is_processing);
     }
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
         if let Some(parent_hash) = self.block_hash_to_parent_hash.pop(block_hash) {
-            self.orphaned_blocks_by_parent.pop(&parent_hash);
+            let mut set_is_empty = false;
+            if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&parent_hash) {
+                set.remove(block_hash);
+                if set.is_empty() {
+                    set_is_empty = true;
+                }
+            }
+            if set_is_empty {
+                self.orphaned_blocks_by_parent.pop(&parent_hash);
+            }
         }
     }
 
     fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<CachedBlock> {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return Some(header.clone());
-            }
-        }
-
-        None
+        self.blocks.get(block_hash).cloned()
     }
 }
 
@@ -755,19 +753,11 @@ where
         block_hash: &BlockHash,
         block_height: u64,
     ) -> bool {
-        if let Some(parent_hash) = self
-            .blocks_cache
-            .block_hash_to_parent_hash(block_hash)
-            .await
-        {
-            self.blocks_cache
-                .orphaned_blocks_by_parent_contains(&parent_hash)
-                .await
-        } else {
-            self.block_status_provider
+        self.blocks_cache.is_block_processing(block_hash).await
+            || self
+                .block_status_provider
                 .block_status(block_height, block_hash)
                 .is_processed()
-        }
     }
 
     /// Internal method for the p2p services to get direct access to the cache
@@ -812,13 +802,26 @@ where
     }
 
     /// Get orphaned block by parent hash - for orphan block processing
-    pub(crate) async fn get_orphaned_block_by_parent(
+    pub(crate) async fn get_orphaned_blocks_by_parent(
         &self,
         parent_hash: &BlockHash,
-    ) -> Option<CachedBlock> {
-        self.blocks_cache
-            .orphaned_blocks_by_parent_cloned(parent_hash)
-            .await
+    ) -> Option<Vec<CachedBlock>> {
+        let orphaned_hashes = self
+            .blocks_cache
+            .orphaned_blocks_for_parent(parent_hash)
+            .await;
+
+        if let Some(hashes) = orphaned_hashes {
+            let mut orphaned_blocks = Vec::new();
+            for hash in hashes {
+                if let Some(block) = self.blocks_cache.get_block_header_cloned(&hash).await {
+                    orphaned_blocks.push(block);
+                }
+            }
+            Some(orphaned_blocks)
+        } else {
+            None
+        }
     }
 
     /// Check if parent hash exists in block cache - for orphan block processing
@@ -868,5 +871,196 @@ fn check_block_status(
                 );
             Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // Helper to create a simple header with specified block & parent hashes and height
+    fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<IrysBlockHeader> {
+        let mut header = IrysBlockHeader::default();
+        header.block_hash = BlockHash::repeat_byte(block_byte);
+        header.previous_block_hash = BlockHash::repeat_byte(parent_byte);
+        header.height = height;
+        Arc::new(header)
+    }
+
+    #[test]
+    fn add_single_block() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xAA);
+        let child1 = make_header(0x01, 0xAA, 10);
+
+        cache.add_block(child1.clone(), false);
+
+        // parent -> set contains child1
+        let set = cache
+            .orphaned_blocks_by_parent
+            .get(&parent)
+            .expect("parent entry should exist");
+        assert!(set.contains(&child1.block_hash));
+
+        // mapping child1 -> parent exists
+        assert_eq!(
+            cache
+                .block_hash_to_parent_hash
+                .get(&child1.block_hash)
+                .copied(),
+            Some(parent)
+        );
+
+        // child1 present in blocks cache with correct flags
+        let cached = cache
+            .blocks
+            .get(&child1.block_hash)
+            .expect("child1 should be stored in blocks cache");
+        assert!(cached.is_processing);
+        assert!(!cached.is_fast_tracking);
+    }
+
+    #[test]
+    fn add_multiple_sibling_blocks_only_first_cached() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xBB);
+        let child1 = make_header(0x02, 0xBB, 11);
+        let child2 = make_header(0x03, 0xBB, 12);
+
+        cache.add_block(child1.clone(), true); // fast track first
+        cache.add_block(child2.clone(), false); // second sibling
+
+        let set = cache
+            .orphaned_blocks_by_parent
+            .get(&parent)
+            .expect("parent entry should exist");
+        assert!(set.contains(&child1.block_hash));
+        assert!(set.contains(&child2.block_hash));
+
+        // block hash to parent hash mappings exist for both
+        assert_eq!(
+            cache
+                .block_hash_to_parent_hash
+                .get(&child1.block_hash)
+                .copied(),
+            Some(parent)
+        );
+        assert_eq!(
+            cache
+                .block_hash_to_parent_hash
+                .get(&child2.block_hash)
+                .copied(),
+            Some(parent)
+        );
+
+        // Only the first added sibling is stored in blocks cache (current implementation behavior)
+        assert!(cache.blocks.get(&child1.block_hash).is_some());
+        assert!(cache.blocks.get(&child2.block_hash).is_none());
+
+        // Verify fast tracking flag for first
+        assert!(
+            cache
+                .blocks
+                .get(&child1.block_hash)
+                .expect("exists")
+                .is_fast_tracking
+        );
+    }
+
+    #[test]
+    fn remove_blocks_updates_mappings() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xCC);
+        let child1 = make_header(0x10, 0xCC, 20);
+        let child2 = make_header(0x11, 0xCC, 21);
+        cache.add_block(child1.clone(), false);
+        cache.add_block(child2.clone(), false);
+
+        // Remove first child
+        cache.remove_block(&child1.block_hash);
+        // parent entry still exists because child2 remains
+        let set = cache
+            .orphaned_blocks_by_parent
+            .get(&parent)
+            .expect("parent entry should remain");
+        assert!(!set.contains(&child1.block_hash));
+        assert!(set.contains(&child2.block_hash));
+        // mapping for child1 removed, child2 retained
+        assert!(cache
+            .block_hash_to_parent_hash
+            .get(&child1.block_hash)
+            .is_none());
+        assert_eq!(
+            cache
+                .block_hash_to_parent_hash
+                .get(&child2.block_hash)
+                .copied(),
+            Some(parent)
+        );
+
+        // Remove second child
+        cache.remove_block(&child2.block_hash);
+        // parent entry should now be gone
+        assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
+        assert!(cache
+            .block_hash_to_parent_hash
+            .get(&child2.block_hash)
+            .is_none());
+    }
+
+    #[test]
+    fn change_processing_status() {
+        let mut cache = BlockCacheInner::new();
+        let block = make_header(0x20, 0xDD, 30);
+        cache.add_block(block.clone(), false);
+
+        assert!(
+            cache
+                .blocks
+                .get(&block.block_hash)
+                .expect("cached")
+                .is_processing
+        );
+
+        cache.change_block_processing_status(block.block_hash, false);
+        assert!(
+            !cache
+                .blocks
+                .get(&block.block_hash)
+                .expect("cached")
+                .is_processing
+        );
+    }
+
+    #[test]
+    fn remove_nonexistent_block_is_noop() {
+        let mut cache = BlockCacheInner::new();
+        // Attempt to remove block that was never added
+        let bogus = BlockHash::repeat_byte(0xEE);
+        cache.remove_block(&bogus);
+        // Ensure internal maps remain empty
+        assert!(cache.orphaned_blocks_by_parent.iter().next().is_none());
+        assert!(cache.block_hash_to_parent_hash.iter().next().is_none());
+        assert!(cache.blocks.iter().next().is_none());
+    }
+
+    #[test]
+    fn remove_single_orphan_removes_parent_entry() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xAB);
+        let child = make_header(0xCD, 0xAB, 42);
+        cache.add_block(child.clone(), false);
+        // Sanity: parent entry exists
+        assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
+        // Remove only child
+        cache.remove_block(&child.block_hash);
+        // Parent entry should be removed entirely
+        assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
+        // Mapping should be gone
+        assert!(cache
+            .block_hash_to_parent_hash
+            .get(&child.block_hash)
+            .is_none());
     }
 }
