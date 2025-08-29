@@ -41,7 +41,7 @@ impl IrysSigner {
     pub fn create_transaction_from_iter(
         &self,
         data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
-        anchor: Option<H256>, //TODO!: more parameters as they are implemented
+        anchor: H256,     //TODO!: more parameters as they are implemented
         store_data: bool, // whether we should store the data from the iterator in the tx's `data` field
     ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize, store_data)?;
@@ -51,14 +51,6 @@ impl IrysSigner {
         transaction.header.perm_fee = Some(U256::from(1));
         transaction.header.term_fee = U256::from(1);
 
-        // Fetch and set last_tx if not provided (primarily for testing).
-        #[expect(clippy::manual_unwrap_or_default, reason = "TODO")]
-        let anchor = if let Some(anchor) = anchor {
-            anchor
-        } else {
-            // TODO: Retrieve an acceptable block_hash anchor
-            H256::default()
-        };
         transaction.header.anchor = anchor;
 
         Ok(transaction)
@@ -66,11 +58,7 @@ impl IrysSigner {
 
     /// Creates a transaction from a data buffer - which it stores in .data -  with an optional anchor.
     /// The txid will not be set until the transaction is signed with [sign_transaction]
-    pub fn create_transaction(
-        &self,
-        data: Vec<u8>,
-        anchor: Option<H256>,
-    ) -> Result<DataTransaction> {
+    pub fn create_transaction(&self, data: Vec<u8>, anchor: H256) -> Result<DataTransaction> {
         self.create_transaction_from_iter(vec_to_chunk_iter(data), anchor, true)
     }
 
@@ -79,7 +67,7 @@ impl IrysSigner {
     pub fn create_transaction_discard_data(
         &self,
         data: Vec<u8>,
-        anchor: Option<H256>,
+        anchor: H256,
     ) -> Result<DataTransaction> {
         self.create_transaction_from_iter(vec_to_chunk_iter(data), anchor, false)
     }
@@ -87,7 +75,7 @@ impl IrysSigner {
     pub fn create_transaction_with_fees(
         &self,
         data: Vec<u8>,
-        anchor: Option<H256>,
+        anchor: H256,
         ledger: DataLedger,
         term_fee: U256,
         perm_fee: Option<U256>,
@@ -99,10 +87,6 @@ impl IrysSigner {
         transaction.header.term_fee = term_fee;
         transaction.header.perm_fee = perm_fee;
 
-        // Fetch and set anchor if not provided
-        let anchor = anchor.unwrap_or_default();
-        transaction.header.anchor = anchor;
-
         Ok(transaction)
     }
 
@@ -110,7 +94,7 @@ impl IrysSigner {
     pub fn create_publish_transaction(
         &self,
         data: Vec<u8>,
-        anchor: Option<H256>,
+        anchor: H256,
         perm_price: U256,
         term_price: U256,
     ) -> Result<DataTransaction> {
@@ -243,7 +227,7 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use crate::{hash_sha256, validate_chunk};
+    use crate::{hash_sha256, validate_chunk, H256};
     use rand::Rng as _;
     use reth_primitives::transaction::recover_signer;
 
@@ -261,7 +245,9 @@ mod tests {
         let irys = IrysSigner::random_signer(&config);
 
         // Create a transaction from the random bytes
-        let mut tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
+        let mut tx = irys
+            .create_transaction(data_bytes.clone(), H256::zero())
+            .unwrap();
 
         // Sign the transaction
         tx = irys.sign_transaction(tx).unwrap();

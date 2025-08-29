@@ -884,6 +884,16 @@ impl BlockTreeServiceInner {
             mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
                 expired_partition_hashes,
             )));
+
+            // Let the cache service know some term ledger slots expired
+            if let Err(e) = self.service_senders.chunk_cache.send(
+                crate::cache_service::CacheServiceAction::OnEpochProcessed(
+                    epoch_snapshot.clone(),
+                    None,
+                ),
+            ) {
+                error!("Failed to send EpochProcessed event to CacheService: {}", e);
+            }
         }
 
         // Let the node know about any newly assigned partition hashes to local storage modules

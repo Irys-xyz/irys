@@ -355,6 +355,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_status_provider_mock.block_index(),
         block_pool.clone(),
         data_handler,
+        None,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -570,6 +571,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_status_provider_mock.block_index(),
         block_pool.clone(),
         data_handler,
+        None,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(

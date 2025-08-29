@@ -65,6 +65,7 @@ alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 reth-tracing.workspace = true
 alloy-contract.workspace = true
+alloy-rpc-types-eth.workspace = true
 reth-cli-util = { workspace = true, features = ["jemalloc"] }
 
 [dev-dependencies]

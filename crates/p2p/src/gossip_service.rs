@@ -194,6 +194,7 @@ impl P2PService {
             sync_state: self.sync_state.clone(),
             span: Span::current(),
             execution_payload_cache: execution_payload_provider,
+            data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
         });
         let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 

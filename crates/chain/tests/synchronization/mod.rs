@@ -75,7 +75,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let tx = account1
         .create_publish_transaction(
             data_bytes.clone(),
-            None,
+            node.get_anchor().await?,
             price_info.perm_fee,
             price_info.term_fee,
         )

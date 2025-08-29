@@ -26,7 +26,6 @@ use reth_db::{
     ClientVersion, DatabaseEnv, DatabaseError,
 };
 use reth_node_metrics::recorder::install_prometheus_recorder;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
@@ -136,19 +135,11 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
 ) -> eyre::Result<Option<CachedDataRoot>> {
     let key = tx_header.data_root;
 
-    // Calculate the duration since UNIX_EPOCH
-    let now = SystemTime::now();
-    let duration_since_epoch = now
-        .duration_since(UNIX_EPOCH)
-        .expect("should be able to compute duration since UNIX_EPOCH");
-    let timestamp = duration_since_epoch.as_millis();
-
     // Access the current cached entry from the database
     let result = tx.get::<CachedDataRoots>(key)?;
 
     // Create or update the CachedDataRoot
     let mut cached_data_root = result.unwrap_or_else(|| CachedDataRoot {
-        timestamp,
         data_size: tx_header.data_size,
         txid_set: vec![tx_header.id],
     });
@@ -157,7 +148,6 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     if !cached_data_root.txid_set.contains(&tx_header.id) {
         cached_data_root.txid_set.push(tx_header.id);
     }
-    cached_data_root.timestamp = timestamp;
 
     // Update the database with the modified or new entry
     tx.put::<CachedDataRoots>(key, cached_data_root.clone())?;

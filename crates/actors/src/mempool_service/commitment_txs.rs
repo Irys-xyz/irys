@@ -15,8 +15,7 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
-        let mempool_state = &self.mempool_state.clone();
-        let mempool_state_guard = mempool_state.read().await;
+        let mempool_state_guard = self.mempool_state.read().await;
 
         // Early out if we already know about this transaction (invalid)
         if mempool_state_guard
@@ -44,9 +43,32 @@ impl Inner {
         }
         drop(mempool_state_guard);
 
+        // Early out if we already know about this transaction in index / database
+        if self
+            .irys_db
+            .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, &commitment_tx.id))
+            .map_err(|_| TxIngressError::DatabaseError)?
+            .is_some()
+        {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Validate tx signature
+        // we MUST do this before using the ID
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
+            tracing::error!(
+                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                &commitment_tx,
+                e
+            );
+            return Err(TxIngressError::InvalidSignature);
+        }
+
+        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
+
         // Validate fee
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
-            let mut mempool_state_guard = mempool_state.write().await;
+            let mut mempool_state_guard = self.mempool_state.write().await;
             mempool_state_guard
                 .recent_invalid_tx
                 .put(commitment_tx.id, ());
@@ -61,7 +83,7 @@ impl Inner {
 
         // Validate value based on commitment type
         if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
-            let mut mempool_state_guard = mempool_state.write().await;
+            let mut mempool_state_guard = self.mempool_state.write().await;
             mempool_state_guard
                 .recent_invalid_tx
                 .put(commitment_tx.id, ());
@@ -74,28 +96,6 @@ impl Inner {
             return Err(TxIngressError::CommitmentValidationError(e));
         }
 
-        // Early out if we already know about this transaction in index / database
-        if self
-            .irys_db
-            .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, &commitment_tx.id))
-            .map_err(|_| TxIngressError::DatabaseError)?
-            .is_some()
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        // Validate tx signature
-        if let Err(e) = self.validate_signature(&commitment_tx).await {
-            tracing::error!(
-                "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                &commitment_tx,
-                e
-            );
-            return Err(TxIngressError::InvalidSignature);
-        }
-
-        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
-
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
         trace!(
@@ -104,7 +104,7 @@ impl Inner {
             &commitment_status
         );
         if commitment_status == CommitmentSnapshotStatus::Accepted {
-            let mut mempool_state_guard = mempool_state.write().await;
+            let mut mempool_state_guard = self.mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
             trace!(
                 "pushing commitment {} to valid_commitment_tx",
@@ -162,7 +162,7 @@ impl Inner {
             // Level 1: Keyed by signer address (allows tracking multiple addresses)
             // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
 
-            let mut mempool_state_guard = mempool_state.write().await;
+            let mut mempool_state_guard = self.mempool_state.write().await;
             if let Some(pledges_cache) = mempool_state_guard
                 .pending_pledges
                 .get_mut(&commitment_tx.signer)

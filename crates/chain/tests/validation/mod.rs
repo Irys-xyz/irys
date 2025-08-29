@@ -652,7 +652,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         .await;
 
     // Post a valid stake commitment to be included in the epoch
-    let pledge_tx = genesis_node.post_pledge_commitment(H256::zero()).await;
+    let pledge_tx = genesis_node.post_pledge_commitment(None).await?;
     genesis_node
         .wait_for_mempool(pledge_tx.id, seconds_to_wait)
         .await?;

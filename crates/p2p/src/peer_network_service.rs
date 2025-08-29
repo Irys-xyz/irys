@@ -207,7 +207,16 @@ where
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
-                execution: config.node_config.reth_peer_info,
+                execution: RethPeerInfo {
+                    peering_tcp_addr: format!(
+                        "{}:{}",
+                        &config.node_config.reth.network.public_ip,
+                        &config.node_config.reth.network.public_port
+                    )
+                    .parse()
+                    .expect("valid SocketAddr expected"),
+                    peer_id: config.node_config.reth.network.peer_id,
+                },
             },
             reth_service_addr: reth_actor,
             config: config.clone(),

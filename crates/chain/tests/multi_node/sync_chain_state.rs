@@ -9,7 +9,7 @@ use irys_chain::{
 use irys_database::block_header_by_hash;
 use irys_types::{
     irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
-    NodeMode, PeerAddress, H256,
+    NodeMode, PeerAddress, SyncMode, H256,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
@@ -37,16 +37,13 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    tracing::info!(
-        "peer info: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info
-    );
+    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.node_config.reth);
 
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info,
-        &peer1.node_ctx.config.node_config.reth_peer_info,
-        &peer2.node_ctx.config.node_config.reth_peer_info
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -117,9 +114,9 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 
     info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info,
-        &peer1.node_ctx.config.node_config.reth_peer_info,
-        &peer2.node_ctx.config.node_config.reth_peer_info
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -179,7 +176,18 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let max_seconds = 20;
 
     // setup trusted peers connection data and configs for genesis and nodes
-    let testing_config_genesis = NodeConfig::testing();
+    let mut testing_config_genesis = NodeConfig::testing();
+    testing_config_genesis
+        .consensus
+        .get_mut()
+        .mempool
+        .anchor_expiry_depth = 20;
+
+    testing_config_genesis
+        .consensus
+        .get_mut()
+        .block_migration_depth = 4;
+
     let account1 = testing_config_genesis.signer();
 
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
@@ -220,7 +228,8 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await;
 
     let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
-    ctx_peer2_node.mode = NodeMode::TrustedPeerSync;
+    ctx_peer2_node.node_mode = NodeMode::Peer;
+    ctx_peer2_node.sync_mode = SyncMode::Trusted;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
         .await;

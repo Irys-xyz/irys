@@ -490,7 +490,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
 
     let local_sealed_block = fixture2
         .execution_payload_provider
-        .get_locally_stored_sealed_block(&block.evm_block_hash)
+        .get_sealed_block_from_cache(&block.evm_block_hash)
         .await
         .expect("to get execution payload stored on peer 1 from peer 2");
     assert_eq!(local_sealed_block, evm_block.seal_slow());

@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::*;
-use irys_types::{NodeConfig, H256};
+use irys_types::NodeConfig;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -43,12 +43,12 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
         .await;
 
     // Post stake + pledge commitments to peer1
-    let peer1_stake_tx = peer1_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
-    let peer1_pledge_tx = peer1_node.post_pledge_commitment(H256::zero()).await;
+    let peer1_stake_tx = peer1_node.post_stake_commitment(None).await?; // zero() is the genesis block hash
+    let peer1_pledge_tx = peer1_node.post_pledge_commitment(None).await?;
 
     // Post stake + pledge commitments to peer2
-    let peer2_stake_tx = peer2_node.post_stake_commitment(H256::zero()).await;
-    let peer2_pledge_tx = peer2_node.post_pledge_commitment(H256::zero()).await;
+    let peer2_stake_tx = peer2_node.post_stake_commitment(None).await?;
+    let peer2_pledge_tx = peer2_node.post_pledge_commitment(None).await?;
 
     // Wait for all commitment tx to show up in the genesis_node's mempool
     genesis_node
@@ -68,7 +68,7 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     genesis_node.mine_block().await.unwrap();
 
     // Mine another block to perform epoch tasks, and assign partition_hash's to the peers
-    let epoch_block = genesis_node.mine_block().await.unwrap();
+    let _ = genesis_node.mine_block().await.unwrap();
 
     // Get the genesis nodes view of the peers assignments
     let peer1_assignments = genesis_node.get_partition_assignments(peer1_signer.address());
@@ -88,13 +88,13 @@ async fn heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
 
     // Now it's time to create different epoch timelines for each peers fork
     let pledge1 = peer1_node
-        .post_pledge_commitment_without_gossip(epoch_block.block_hash)
-        .await;
+        .post_pledge_commitment_without_gossip(Some(peer1_node.get_anchor().await?))
+        .await?;
     let fork1_3 = peer1_node.mine_block_without_gossip().await?;
 
     let pledge2 = peer2_node
-        .post_pledge_commitment_without_gossip(epoch_block.block_hash)
-        .await;
+        .post_pledge_commitment_without_gossip(Some(peer2_node.get_anchor().await?))
+        .await?;
     let fork2_3 = peer2_node.mine_block_without_gossip().await?;
 
     // Make sure the blocks on each for have different hashes

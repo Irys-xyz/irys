@@ -4,7 +4,10 @@ use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, SystemLedger};
-use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
+use irys_types::{
+    CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
+    H256,
+};
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -67,6 +70,7 @@ impl Inner {
                 info!("Promoted tx:\n{:?}", tx_header);
             }
         }
+        self.prune_pending_txs().await;
 
         Ok(())
     }
@@ -94,7 +98,7 @@ impl Inner {
 
         self.handle_confirmed_commitment_tx_reorg(&event).await?;
 
-        self.revalidate_all_txs().await?;
+        self.reprocess_all_txs().await?;
 
         tracing::info!("Reorg handled, new tip: {:?}", &new_tip);
         Ok(())
@@ -102,10 +106,8 @@ impl Inner {
 
     /// Re-process all currently valid mempool txs
     /// all this does is take all valid submit & commitment txs, and passes them back through ingress
-    /// right now, all this is used for is to validate the anchor state of a tx
-    /// (when a reorg happens, the anchor a tx used to make it into valid txs could now be pending)
     #[instrument(skip_all)]
-    pub async fn revalidate_all_txs(&mut self) -> eyre::Result<()> {
+    pub async fn reprocess_all_txs(&mut self) -> eyre::Result<()> {
         // re-process all valid txs
         let (valid_submit_ledger_tx, valid_commitment_tx) = {
             let mut state = self.mempool_state.write().await;
@@ -135,6 +137,104 @@ impl Inner {
         }
 
         Ok(())
+    }
+
+    /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
+    /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
+    /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
+    /// swallows errors from get_anchor_height (but does log them)
+    pub async fn should_prune_tx(
+        &mut self,
+        current_height: u64,
+        tx: &impl IrysTransactionCommon,
+    ) -> bool {
+        let anchor_height = match self.get_anchor_height(tx.id(), tx.anchor()).await {
+            Ok(h) => h,
+            Err(e) => {
+                // we can't tell due to an error
+                error!("Error checking if we should prune tx {} - {}", &tx.id(), e);
+                return false;
+            }
+        };
+
+        let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
+            + self.config.consensus.block_migration_depth;
+
+        let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
+
+        anchor_height < resolved_expiry_depth
+    }
+
+    /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
+    /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
+    #[instrument(skip_all)]
+    pub async fn prune_pending_txs(&mut self) {
+        let current_height = match self.get_latest_block_height() {
+            Ok(height) => height,
+            Err(e) => {
+                error!(
+                    "Error getting latest block height from the block tree for anchor expiry: {:?}",
+                    &e
+                );
+                return;
+            }
+        };
+        // re-process all valid data txs
+        let tx_ids = {
+            let state = self.mempool_state.read().await;
+            state
+                .valid_submit_ledger_tx
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        for tx_id in tx_ids {
+            let tx = {
+                let state = self.mempool_state.read().await;
+                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone across lock points
+                state.valid_submit_ledger_tx.get(&tx_id).cloned()
+            };
+
+            // TODO: unwrap here? we should always be able to get the value if the key exists
+            if let Some(tx) = tx {
+                if self.should_prune_tx(current_height, &tx).await {
+                    let mut state = self.mempool_state.write().await;
+                    state.valid_submit_ledger_tx.remove(&tx_id);
+                    Self::mark_tx_as_invalid(state, tx_id, TxIngressError::InvalidAnchor);
+                }
+            }
+        }
+
+        // re-process all valid commitment txs
+        let addresses = {
+            let state = self.mempool_state.read().await;
+            state
+                .valid_commitment_tx
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        for address in addresses {
+            let txs = {
+                let state = self.mempool_state.read().await;
+                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone
+                state.valid_commitment_tx.get(&address).cloned()
+            };
+
+            // TODO: unwrap here? we should always be able to get the value if the key exists
+            if let Some(txs) = txs {
+                for tx in txs {
+                    if self.should_prune_tx(current_height, &tx).await {
+                        self.remove_commitment_tx(&tx.id).await;
+                        Self::mark_tx_as_invalid(
+                            self.mempool_state.write().await,
+                            tx.id,
+                            TxIngressError::InvalidAnchor,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn get_confirmed_range(
@@ -529,7 +629,8 @@ impl Inner {
             let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
             data_tx_headers
                 .into_iter()
-                .for_each(|maybe_header| match maybe_header {
+                .enumerate()
+                .for_each(|(idx, maybe_header)| match maybe_header {
                     Some(ref header) => {
                         if let Err(err) = insert_tx_header(&mut_tx, header) {
                             error!(
@@ -539,7 +640,10 @@ impl Inner {
                         }
                     }
                     None => {
-                        error!("Could not find transaction header in mempool");
+                        error!(
+                            "Could not find transaction {} header in mempool",
+                            &submit_tx_ids[idx]
+                        );
                     }
                 });
             mut_tx.commit().expect("expect to commit to database");

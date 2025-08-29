@@ -6,11 +6,9 @@ use irys_database::{
     tables::DataRootLRU, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
 use std::collections::HashMap;
@@ -57,22 +55,26 @@ impl Inner {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
         // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
         tx.ingress_proofs = None;
-        let mempool_state_read_guard = self.mempool_state.read().await;
 
-        // Early out if we already know about this transaction in
-        // the mempool or the index
-        if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
-            || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
-            || self
-                .irys_db
-                .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
-                .map_err(|_| TxIngressError::DatabaseError)?
-                .is_some()
         {
-            warn!("duplicate tx: {:?}", TxIngressError::Skipped);
-            return Err(TxIngressError::Skipped);
-        }
-        drop(mempool_state_read_guard);
+            let mempool_state_read_guard = self.mempool_state.read().await;
+
+            // Early out if we already know about this transaction in
+            // the mempool or the index
+            if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
+                || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
+                || self
+                    .irys_db
+                    .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
+                    .map_err(|_| TxIngressError::DatabaseError)?
+                    .is_some()
+            {
+                warn!("duplicate tx: {:?}", TxIngressError::Skipped);
+                return Err(TxIngressError::Skipped);
+            }
+
+            drop(mempool_state_read_guard);
+        };
 
         // Validate the transaction signature
         // check the result and error handle
@@ -127,6 +129,8 @@ impl Inner {
             } // TODO: support other term ledgers here
         }
 
+        // we don't check account balance here - we check it when we build & validate blocks
+
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         // Update any associated ingress proofs
@@ -138,18 +142,19 @@ impl Inner {
                 .mempool
                 .anchor_expiry_depth as u64;
             let new_expiry = anchor_height + anchor_expiry_depth;
-            if old_expiry.last_height == new_expiry {
+
+            if old_expiry.last_height < new_expiry {
                 debug!(
                     "Updating ingress proof for data root {} expiry from {} -> {}",
                     &tx.data_root, &old_expiry.last_height, &new_expiry
                 );
-            } else {
                 self.irys_db
                     .update(|write_tx| {
                         let updated_expiry = DataRootLRUEntry {
                             last_height: new_expiry,
                             ..old_expiry
                         };
+
                         write_tx.put::<DataRootLRU>(tx.data_root, updated_expiry)
                     })
                     .map_err(|e| {
@@ -167,17 +172,6 @@ impl Inner {
                         TxIngressError::DatabaseError
                     })?;
             }
-        }
-
-        // Check account balance
-
-        if self.reth_node_adapter.rpc.get_balance_irys(tx.signer, None) < tx.total_cost() {
-            error!(
-                "{:?}: unfunded balance from irys_database::get_account_balance({:?})",
-                TxIngressError::Unfunded,
-                tx.signer
-            );
-            return Err(TxIngressError::Unfunded);
         }
 
         let mut mempool_state_write_guard = self.mempool_state.write().await;

@@ -24,6 +24,8 @@ pub enum GossipError {
     CommitmentValidation(#[from] CommitmentValidationError),
     #[error(transparent)]
     PeerNetwork(PeerNetworkError),
+    #[error("Rate limited: too many requests")]
+    RateLimited,
 }
 
 impl From<InternalGossipError> for GossipError {

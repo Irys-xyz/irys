@@ -1,12 +1,15 @@
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
+use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::reth_service::RethServiceActor;
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, TokioServiceHandle,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, SyncMode,
+    TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
@@ -56,12 +59,14 @@ impl From<GossipError> for ChainSyncError {
             GossipError::PeerNetwork(peer_network_err) => {
                 Self::Network(format!("Peer network error: {}", peer_network_err))
             }
+            GossipError::RateLimited => Self::Network("Rate limited".to_string()),
         }
     }
 }
 
 const BLOCK_BATCH_SIZE: usize = 10;
 const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
+const RETRY_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 30; // Timeout for retry block pull/process
 
 /// Messages that can be sent to the SyncService
 #[derive(Debug)]
@@ -104,6 +109,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     ///  much behind the network we are, if at all.
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+    reth_service_actor: Option<Addr<RethServiceActor>>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -148,6 +154,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
+        reth_service_actor: Option<Addr<RethServiceActor>>,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -157,6 +164,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             block_index,
             block_pool,
             gossip_data_handler,
+            reth_service_actor,
         )
     }
 }
@@ -170,6 +178,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+        reth_service_actor: Option<Addr<RethServiceActor>>,
     ) -> Self {
         Self {
             sync_state,
@@ -180,6 +189,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             block_pool,
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
+            reth_service_actor,
         }
     }
 
@@ -217,9 +227,21 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let api_client = self.api_client.clone();
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
+        let block_pool = self.block_pool.clone();
+        let reth_service_addr = self.reth_service_actor.clone();
 
         tokio::spawn(
             async move {
+                if let Err(err) = block_pool
+                    .repair_missing_payloads_if_any(reth_service_addr)
+                    .await
+                {
+                    error!(
+                        "Sync task: Failed to repair missing payloads before starting sync: {:?}",
+                        err
+                    );
+                }
+
                 let res = sync_chain(
                     sync_state.clone(),
                     api_client,
@@ -497,11 +519,10 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 debug!("Periodic sync check: We're up to date with the network");
             }
             Err(e) => {
-                warn!(
-                    "Periodic sync check: Failed to check if behind network: {}, trusted peers are likely offline, trying to run a sync without them",
+                error!(
+                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
                     e
                 );
-                self.inner.spawn_chain_sync_task(None, false).await;
             }
         }
     }
@@ -516,7 +537,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     config: &irys_types::Config,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
 ) -> ChainSyncResult<()> {
-    let node_mode = config.node_config.mode;
+    let sync_mode = config.node_config.sync_mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -531,29 +552,27 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     if start_sync_from_height == 0 {
         start_sync_from_height = 1;
     }
-    let is_trusted_mode = matches!(node_mode, NodeMode::TrustedPeerSync);
+    let is_trusted_mode = matches!(sync_mode, SyncMode::Trusted);
 
     sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(is_trusted_mode);
 
-    let is_in_genesis_mode = matches!(node_mode, NodeMode::Genesis);
-
-    if matches!(node_mode, NodeMode::TrustedPeerSync) {
-        sync_state.set_trusted_sync(true);
-    } else {
-        sync_state.set_trusted_sync(false);
-    }
-
-    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", node_mode, start_sync_from_height, sync_state.is_trusted_sync());
-
-    if is_in_genesis_mode && sync_state.sync_target_height() <= 1 {
+    let is_a_genesis_node = matches!(config.node_config.node_mode, NodeMode::Genesis);
+    if is_a_genesis_node && sync_state.sync_target_height() <= 1 {
         debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
         sync_state.finish_sync();
         return Ok(());
     }
 
-    let fetch_index_from_the_trusted_peer = !is_in_genesis_mode;
-    if is_in_genesis_mode {
+    if matches!(sync_mode, SyncMode::Trusted) {
+        sync_state.set_trusted_sync(true);
+    } else {
+        sync_state.set_trusted_sync(false);
+    }
+
+    debug!("Sync task: Starting a chain sync task, waiting for active peers. Mode: {:?}, starting from height: {}, trusted mode: {}", sync_mode, start_sync_from_height, sync_state.is_trusted_sync());
+
+    if is_a_genesis_node {
         warn!("Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task", genesis_peer_discovery_timeout_millis);
         match timeout(
             Duration::from_millis(genesis_peer_discovery_timeout_millis),
@@ -561,7 +580,9 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         )
         .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                info!("Genesis node has active peers");
+            }
             Err(elapsed) => {
                 warn!("Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task", elapsed);
                 sync_state.finish_sync();
@@ -593,7 +614,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         sync_state.sync_target_height(),
         BLOCK_BATCH_SIZE,
         5,
-        fetch_index_from_the_trusted_peer,
+        is_trusted_mode,
     )
     .await
     {
@@ -603,8 +624,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         }
         Err(err) => {
             error!("Sync task: Failed to fetch block index: {}", err);
-            if is_in_genesis_mode {
-                warn!("Sync task: No peers available, skipping the sync task");
+            if is_a_genesis_node {
+                warn!("Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers");
                 sync_state.finish_sync();
                 return Ok(());
             }
@@ -667,27 +688,32 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                                 retry_height,
                                 1, // Just get one block
                                 3, // 3 retries for the network call
-                                fetch_index_from_the_trusted_peer,
+                                is_trusted_mode,
                             )
                             .await
                             {
                                 Ok(retry_index) if !retry_index.is_empty() => {
                                     let retry_block = &retry_index[0];
-                                    debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
+                                    debug!("Sync task: Got to retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
 
-                                    // Try to reprocess last prevalidated block
-                                    match gossip_data_handler
-                                        .pull_and_process_block(
+                                    // Try to reprocess the last prevalidated block
+                                    match timeout(
+                                        Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                                        gossip_data_handler.pull_and_process_block(
                                             retry_block.block_hash,
                                             sync_state.is_syncing_from_a_trusted_peer(),
-                                        )
-                                        .await
+                                        ),
+                                    )
+                                    .await
                                     {
-                                        Ok(()) => {
+                                        Ok(Ok(())) => {
                                             debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
                                         }
-                                        Err(e) => {
+                                        Ok(Err(e)) => {
                                             warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
+                                        }
+                                        Err(_) => {
+                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", RETRY_BLOCK_REQUEST_TIMEOUT_SECS, retry_block.block_hash);
                                         }
                                     }
                                 }
@@ -764,7 +790,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                 target,
                 BLOCK_BATCH_SIZE,
                 5,
-                fetch_index_from_the_trusted_peer,
+                is_trusted_mode,
             )
             .await?;
 
@@ -878,8 +904,10 @@ async fn get_block_index(
         start, limit
     );
     let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
+        debug!("Fetching block index from trusted peers");
         peer_list.trusted_peers()
     } else {
+        debug!("Fetching block index from top active peers");
         peer_list.top_active_peers(Some(5), None)
     };
 
@@ -1004,7 +1032,8 @@ async fn is_local_index_is_behind_trusted_peers(
     }
 
     if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
-        Ok(block_index.read().latest_height() + migration_depth < highest_trusted_peer_height)
+        Ok((block_index.read().latest_height() + (migration_depth * 2))
+            < highest_trusted_peer_height)
     } else {
         Err(ChainSyncError::Network(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),
@@ -1079,7 +1108,7 @@ mod tests {
             };
 
             let mut node_config = NodeConfig::testing();
-            node_config.mode = NodeMode::PeerSync;
+            node_config.sync_mode = SyncMode::Full;
             node_config.trusted_peers = vec![fake_peer_address];
             node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
@@ -1214,7 +1243,7 @@ mod tests {
             ));
 
             let mut node_config = NodeConfig::testing();
-            node_config.mode = NodeMode::Genesis;
+            node_config.node_mode = NodeMode::Genesis;
             node_config.trusted_peers = vec![];
             node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
