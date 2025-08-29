@@ -460,7 +460,7 @@ where
 
         // The last block in the list is the oldest block with a missing payload
         while let Some(block) = blocks_with_missing_payloads.pop() {
-            debug!("Repairing missing payload for block {:?}", block.block_hash);
+            debug!("Repairing a missing payload for block {:?}", block.block_hash);
             self.validate_and_submit_reth_payload(&block, reth_service.clone())
                 .await?;
         }
