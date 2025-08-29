@@ -37,16 +37,13 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    tracing::info!(
-        "peer info: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info
-    );
+    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.node_config.reth);
 
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info,
-        &peer1.node_ctx.config.node_config.reth_peer_info,
-        &peer2.node_ctx.config.node_config.reth_peer_info
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -117,9 +114,9 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 
     info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info,
-        &peer1.node_ctx.config.node_config.reth_peer_info,
-        &peer2.node_ctx.config.node_config.reth_peer_info
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();

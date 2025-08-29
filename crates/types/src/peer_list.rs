@@ -102,8 +102,9 @@ impl Default for PeerListItem {
 #[rtype(result = "eyre::Result<()>")]
 #[serde(deny_unknown_fields)]
 pub struct RethPeerInfo {
-    // Reth's peering port: https://reth.rs/run/ports.html#peering-ports
+    // Reth's PUBLICLY ACCESSIBLE peering port: https://reth.rs/run/ports.html#peering-ports
     pub peering_tcp_addr: SocketAddr,
+    #[serde(default)]
     pub peer_id: reth_transaction_pool::PeerId,
 }
 
