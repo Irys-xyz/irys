@@ -23,7 +23,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     //
     // TEST CASE 1: create a submit tx for later migration to block index,
-    //              testing it cannot be resumbitted back into mempool after migration
+    //              testing it cannot be resubmitted back into mempool after migration
     //
 
     // create and submit a data transaction

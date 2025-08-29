@@ -161,7 +161,7 @@ impl IrysDatabaseExt for DatabaseEnv {
 impl DatabaseMetrics for RethDbWrapper {}
 
 pub trait IrysDupCursorExt<T: DupSort> {
-    /// Count the number of dupilicates.
+    /// Count the number of duplicates.
     fn dup_count(&mut self, key: T::Key) -> Result<Option<u32>, DatabaseError>;
 }
 
