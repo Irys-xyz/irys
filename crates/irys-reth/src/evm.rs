@@ -38,7 +38,7 @@ use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus, EvmStorageSlot};
 use revm::{DatabaseCommit as _, MainBuilder as _, MainContext as _};
-use tracing::trace;
+use tracing::{trace, warn};
 
 // External crate imports - Other
 
@@ -1369,6 +1369,9 @@ where
                 }
 
                 // ensure status changing logic as part of `commit_account_change` is sane
+                if state_acc.status != account.status {
+                    warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
+                }
                 // assert_eq!(
                 //     state_acc.status, account.status,
                 //     "Invalid account status flags: from commit {:?}, from prev: {:?}",
