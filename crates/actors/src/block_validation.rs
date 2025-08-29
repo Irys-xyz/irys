@@ -415,7 +415,8 @@ pub fn timestamp_is_valid(
     parent: u128,
     allowed_drift: u128,
 ) -> Result<(), PreValidationError> {
-    if current < parent {
+    // note: we have to make sure we don't overlap the parent's timestamp (even though it's very unlikely)
+    if current <= parent {
         return Err(PreValidationError::TimestampOlderThanParent { current, parent });
     }
 
