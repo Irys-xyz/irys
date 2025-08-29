@@ -190,19 +190,8 @@ impl BlockCacheInner {
     }
 
     fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
-        if let Some(set) = self
-            .orphaned_blocks_by_parent
-            .get_mut(&block_header.previous_block_hash)
-        {
-            set.insert(block_header.block_hash);
-            return;
-        } else {
-            let mut set = HashSet::new();
-            set.insert(block_header.block_hash);
-            self.orphaned_blocks_by_parent
-                .put(block_header.previous_block_hash, set);
-        }
-
+        let block_hash = block_header.block_hash;
+        let previous_block_hash = block_header.previous_block_hash;
         self.blocks.put(
             block_header.block_hash,
             CachedBlock {
@@ -211,6 +200,15 @@ impl BlockCacheInner {
                 is_fast_tracking: fast_track,
             },
         );
+
+        if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&previous_block_hash) {
+            set.insert(block_hash);
+            return;
+        } else {
+            let mut set = HashSet::new();
+            set.insert(block_hash);
+            self.orphaned_blocks_by_parent.put(previous_block_hash, set);
+        }
     }
 
     fn is_block_processing(&mut self, block_hash: &BlockHash) -> bool {
@@ -228,19 +226,16 @@ impl BlockCacheInner {
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
         if let Some(removed_block) = self.blocks.pop(block_hash) {
+            let parent_hash = removed_block.header.previous_block_hash;
             let mut set_is_empty = false;
-            if let Some(set) = self
-                .orphaned_blocks_by_parent
-                .get_mut(&removed_block.header.previous_block_hash)
-            {
+            if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&parent_hash) {
                 set.remove(block_hash);
                 if set.is_empty() {
                     set_is_empty = true;
                 }
             }
             if set_is_empty {
-                self.orphaned_blocks_by_parent
-                    .pop(&removed_block.header.block_hash);
+                self.orphaned_blocks_by_parent.pop(&parent_hash);
             }
         }
     }
@@ -919,7 +914,7 @@ mod tests {
 
         // Only the first added sibling is stored in blocks cache (current implementation behavior)
         assert!(cache.blocks.get(&child1.block_hash).is_some());
-        assert!(cache.blocks.get(&child2.block_hash).is_none());
+        assert!(cache.blocks.get(&child2.block_hash).is_some());
 
         // Verify the fast tracking flag for first
         assert!(
@@ -950,7 +945,7 @@ mod tests {
         assert!(!set.contains(&child1.block_hash));
         assert!(set.contains(&child2.block_hash));
 
-        // Remove second child
+        // Remove the second child
         cache.remove_block(&child2.block_hash);
         // parent entry should now be gone
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
