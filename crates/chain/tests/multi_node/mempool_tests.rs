@@ -1794,7 +1794,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 }
 
 #[actix_web::test]
-async fn test_evm_gossip() -> eyre::Result<()> {
+async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -1878,11 +1878,11 @@ async fn test_evm_gossip() -> eyre::Result<()> {
         async |peer: &IrysNodeTest<IrysNodeCtx>,
                genesis: &IrysNodeTest<IrysNodeCtx>|
                -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
-            let stake_tx = peer.post_stake_commitment(H256::zero()).await;
+            let stake_tx = peer.post_stake_commitment(None).await?;
             genesis
                 .wait_for_mempool(stake_tx.id, seconds_to_wait)
                 .await?;
-            let pledge_tx = peer.post_pledge_commitment(H256::zero()).await;
+            let pledge_tx = peer.post_pledge_commitment(None).await?;
             genesis
                 .wait_for_mempool(pledge_tx.id, seconds_to_wait)
                 .await?;
