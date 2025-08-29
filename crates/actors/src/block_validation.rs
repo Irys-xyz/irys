@@ -1972,7 +1972,7 @@ mod tests {
                 data.extend_from_slice(chunk);
             }
             let tx = signer
-                .create_transaction(data, None)
+                .create_transaction(data, H256::zero())
                 .expect("Expected to create a transaction");
             let tx = signer
                 .sign_transaction(tx)
@@ -2007,7 +2007,7 @@ mod tests {
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
         let tx = signer
-            .create_transaction(data.clone(), None)
+            .create_transaction(data.clone(), H256::zero())
             .expect("Expected to create a transaction");
         let tx = signer
             .sign_transaction(tx)
@@ -2258,7 +2258,7 @@ mod tests {
                 data.extend_from_slice(chunk);
             }
             let tx = signer
-                .create_transaction(data, None)
+                .create_transaction(data, H256::zero())
                 .expect("Expected to create a transaction");
             let tx = signer
                 .sign_transaction(tx)

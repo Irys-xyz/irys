@@ -25,6 +25,11 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     genesis_config
         .consensus
         .get_mut()
+        .mempool
+        .anchor_expiry_depth = 40;
+    genesis_config
+        .consensus
+        .get_mut()
         .ema
         .price_adjustment_interval = PRICE_ADJUSTMENT_INTERVAL;
 
@@ -42,7 +47,7 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
 
     let node_2 = node_1
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
-        .await;
+        .await?;
 
     node_1.gossip_disable();
     node_2.gossip_disable();

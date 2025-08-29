@@ -97,9 +97,11 @@ pub async fn run_node(
         RethRpcModule::Eth,
         RethRpcModule::Debug,
     ])));
-    reth_config.rpc.http_addr = node_config.reth_peer_info.peering_tcp_addr.ip();
-    reth_config.network.discovery.addr = node_config.reth_peer_info.peering_tcp_addr.ip();
-    reth_config.network.discovery.port = node_config.reth_peer_info.peering_tcp_addr.port();
+
+    reth_config.rpc.http_addr = node_config.reth.network.bind_ip.parse()?;
+    reth_config.network.port = node_config.reth.network.bind_port;
+    reth_config.network.addr = node_config.reth.network.bind_ip.parse()?;
+
     reth_config.datadir.datadir = node_config.reth_data_dir().into();
     reth_config.rpc.http_corsdomain = Some("*".to_string());
     reth_config.engine.persistence_threshold = 0;

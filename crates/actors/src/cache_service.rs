@@ -18,7 +18,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument as _};
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -65,6 +65,7 @@ impl ChunkCacheService {
             };
             cache_service
                 .start()
+                .in_current_span()
                 .await
                 .expect("Chunk cache service encountered an irrecoverable error")
         });
@@ -181,6 +182,7 @@ impl ChunkCacheService {
     }
 
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
+        debug!("Pruning cache for height {}", &migration_height);
         let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         self.prune_pd_cache(prune_height)?;
@@ -215,6 +217,10 @@ impl ChunkCacheService {
         while let Some((data_root, DataRootLRUEntry { last_height, .. })) =
             walker.next().transpose()?
         {
+            debug!(
+                "Processing data root {} last height: {}, prune height: {}",
+                &data_root, &last_height, &prune_height
+            );
             if last_height < prune_height {
                 debug!(
                     ?data_root,

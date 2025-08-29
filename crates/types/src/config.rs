@@ -9,6 +9,7 @@ use crate::{
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
+use eyre::ensure;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -34,6 +35,22 @@ impl Config {
             chain_id: self.consensus.chain_id,
             chunk_size: self.consensus.chunk_size,
         }
+    }
+
+    // validate configuration invariants
+    // TODO: expand this!
+    pub fn validate(&self) -> eyre::Result<()> {
+        // ensures the block tree is able to contain all unmigrated blocks
+        ensure!((self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth);
+
+        // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
+        // TODO: once anchor maturity is enforced, apply that value here
+        ensure!(
+            std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
+                <= (self.consensus.mempool.anchor_expiry_depth + 4)
+        );
+
+        Ok(())
     }
 }
 
@@ -293,6 +310,9 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
+    /// Reth node configuration
+    pub reth: RethConfig,
+
     /// StorageModule configuration
     pub storage: StorageSyncConfig,
 
@@ -307,12 +327,6 @@ pub struct NodeConfig {
 
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
-
-    /// Reth node configuration
-    pub reth: RethConfig,
-
-    /// Reth settings
-    pub reth_peer_info: RethPeerInfo,
 
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
@@ -580,13 +594,33 @@ pub struct GossipConfig {
     pub bind_port: u16,
 }
 
-/// # Reth Configuration
+/// # Reth Node Configuration
 ///
 /// Settings that are passed to the reth node
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RethConfig {
+    pub network: RethNetworkConfig,
+}
+
+/// # Reth network Configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RethNetworkConfig {
+    #[serde(default)]
     pub use_random_ports: bool,
+    /// The IP address that's going to be announced to other peers
+    pub public_ip: String,
+    /// The port to accept connections from other peers
+    pub public_port: u16,
+    /// The IP address that Reth binds to
+    pub bind_ip: String,
+    /// The port number the Reth listens on
+    pub bind_port: u16,
+    // peer ID
+    // WARNING: this gets overridden partway through the startup sequence with the correct value
+    #[serde(default)]
+    pub peer_id: reth_transaction_pool::PeerId,
 }
 
 /// # Data Packing Configuration
@@ -690,7 +724,7 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 10,
+                anchor_expiry_depth: 20,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
                 max_pledges_per_item: 100,
@@ -819,7 +853,7 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 10,
+                anchor_expiry_depth: 20,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
                 max_pledges_per_item: 100,
@@ -1001,7 +1035,14 @@ impl NodeConfig {
                 bind_port: 0,
             },
             reth: RethConfig {
-                use_random_ports: true,
+                network: RethNetworkConfig {
+                    use_random_ports: true,
+                    public_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    public_port: 0,
+                    bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    bind_port: 0,
+                    peer_id: Default::default(),
+                },
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -1014,9 +1055,7 @@ impl NodeConfig {
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
                 bind_port: 0,
             },
-            reth_peer_info: RethPeerInfo::default(),
             p2p_handshake: P2PHandshakeConfig::default(),
-
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
         }
@@ -1099,7 +1138,14 @@ impl NodeConfig {
                 bind_port: 8081,
             },
             reth: RethConfig {
-                use_random_ports: false,
+                network: RethNetworkConfig {
+                    use_random_ports: false,
+                    public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    public_port: 9009,
+                    bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    bind_port: 9009,
+                    peer_id: Default::default(),
+                },
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -1112,13 +1158,7 @@ impl NodeConfig {
                 bind_ip: "0.0.0.0".parse().expect("valid IP address"),
                 bind_port: 8080,
             },
-            reth_peer_info: crate::RethPeerInfo {
-                peering_tcp_addr: std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                    std::net::Ipv4Addr::new(127, 0, 0, 1),
-                    9009,
-                )),
-                peer_id: Default::default(),
-            },
+
             p2p_handshake: P2PHandshakeConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
@@ -1166,7 +1206,15 @@ impl NodeConfig {
             gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
                 .parse()
                 .expect("valid SocketAddr expected"),
-            execution: self.reth_peer_info,
+            execution: RethPeerInfo {
+                peering_tcp_addr: format!(
+                    "{}:{}",
+                    &self.reth.network.public_ip, &self.reth.network.public_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                peer_id: self.reth.network.peer_id,
+            },
         }
     }
 }
@@ -1448,7 +1496,7 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         max_commitment_txs_per_block = 100
-        anchor_expiry_depth = 10
+        anchor_expiry_depth = 20
         max_pending_pledge_items = 100
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
@@ -1557,24 +1605,26 @@ mod tests {
         public_ip = "127.0.0.1"
         public_port = 0
 
-        [reth]
+        [reth.network]
         use_random_ports = true
-
-        [reth_peer_info]
-        peering_tcp_addr = "0.0.0.0:0"
-        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        bind_ip = "0.0.0.0"
+        bind_port = 0
+        public_ip = "0.0.0.0"
+        public_port = 0
+        
         "#;
+
         // Create the expected config
         let mut expected_config = NodeConfig::testing();
         expected_config.consensus = ConsensusOptions::Testing;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
-        expected_config.trusted_peers = vec![ PeerAddress {
+        expected_config.trusted_peers = vec![PeerAddress {
             api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             execution: RethPeerInfo {
-            peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
-            peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
-        }
+                peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
+                peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
+            },
         }];
         // for debugging purposes
 

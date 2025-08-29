@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{NodeConfig, H256};
+use irys_types::NodeConfig;
 
 #[test_log::test(actix_web::test)]
 async fn slow_heavy_peer_mining_test() -> eyre::Result<()> {
@@ -30,8 +30,8 @@ async fn slow_heavy_peer_mining_test() -> eyre::Result<()> {
         .await;
 
     // Post stake + pledge commitments to the peer
-    let stake_tx = peer_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
-    let pledge_tx = peer_node.post_pledge_commitment(H256::zero()).await;
+    let stake_tx = peer_node.post_stake_commitment(None).await?; // zero() is the genesis block hash
+    let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
     // Wait for commitment tx to show up in the genesis_node's mempool
     genesis_node

@@ -37,16 +37,13 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    tracing::info!(
-        "peer info: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info
-    );
+    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.node_config.reth);
 
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info,
-        &peer1.node_ctx.config.node_config.reth_peer_info,
-        &peer2.node_ctx.config.node_config.reth_peer_info
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -117,9 +114,9 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 
     info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node_config.reth_peer_info,
-        &peer1.node_ctx.config.node_config.reth_peer_info,
-        &peer2.node_ctx.config.node_config.reth_peer_info
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -179,7 +176,18 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let max_seconds = 20;
 
     // setup trusted peers connection data and configs for genesis and nodes
-    let testing_config_genesis = NodeConfig::testing();
+    let mut testing_config_genesis = NodeConfig::testing();
+    testing_config_genesis
+        .consensus
+        .get_mut()
+        .mempool
+        .anchor_expiry_depth = 20;
+
+    testing_config_genesis
+        .consensus
+        .get_mut()
+        .block_migration_depth = 4;
+
     let account1 = testing_config_genesis.signer();
 
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
