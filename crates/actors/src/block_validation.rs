@@ -137,7 +137,7 @@ pub enum PreValidationError {
     HeightInvalid { expected: u64, got: u64 },
     #[error("Invalid last_epoch_hash - expected {expected} got {got}")]
     LastEpochHashMismatch { expected: BlockHash, got: BlockHash },
-    #[error("Transaction {tx_id} in Publish ledger must have prior Submit ledger inclusion")]
+    #[error("Transaction {tx_id} in Publish ledger must have a prior Submit ledger inclusion")]
     PublishTxMissingPriorSubmit { tx_id: H256 },
     #[error("Transaction {tx_id} already included in previous Publish ledger")]
     PublishTxAlreadyIncluded { tx_id: H256 },
