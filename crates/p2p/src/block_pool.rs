@@ -221,9 +221,9 @@ impl BlockCacheInner {
     }
 
     fn change_block_processing_status(&mut self, block_hash: BlockHash, is_processing: bool) {
-        self.blocks
-            .get_mut(&block_hash)
-            .map(|block| block.is_processing = is_processing);
+        if let Some(block) = self.blocks.get_mut(&block_hash) {
+            block.is_processing = is_processing
+        }
     }
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
@@ -866,12 +866,13 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    // Helper to create a simple header with specified block & parent hashes and height
     fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<IrysBlockHeader> {
-        let mut header = IrysBlockHeader::default();
-        header.block_hash = BlockHash::repeat_byte(block_byte);
-        header.previous_block_hash = BlockHash::repeat_byte(parent_byte);
-        header.height = height;
+        let header = IrysBlockHeader {
+            height,
+            block_hash: BlockHash::repeat_byte(block_byte),
+            previous_block_hash: BlockHash::repeat_byte(parent_byte),
+            ..IrysBlockHeader::default()
+        };
         Arc::new(header)
     }
 
