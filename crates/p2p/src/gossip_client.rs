@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// Response time threshold for fast responses (deserving extra reward)
+const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// Response time threshold for normal responses (standard reward)
+const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
     #[error("Get request to {0} failed with reason {1}")]
@@ -83,10 +89,12 @@ impl GossipClient {
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
     ) -> GossipResult<bool> {
+        let start_time = std::time::Instant::now();
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
 
         let res = self.send_data_internal(url, &requested_data, false).await;
-        Self::handle_score(peer_list, &res, &peer.0);
+        let response_time = start_time.elapsed();
+        Self::handle_data_provision_score(peer_list, &res, &peer.0, response_time);
         res
     }
 
@@ -98,10 +106,12 @@ impl GossipClient {
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
     ) -> GossipResult<Option<GossipData>> {
+        let start_time = std::time::Instant::now();
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
 
         let res = self.send_data_internal(url, &requested_data, false).await;
-        Self::handle_score(peer_list, &res, &peer.0);
+        let response_time = start_time.elapsed();
+        Self::handle_data_provision_score(peer_list, &res, &peer.0, response_time);
         res
     }
 
@@ -286,6 +296,38 @@ impl GossipClient {
             Err(_) => {
                 // Failed to send, decrease score
                 peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
+            }
+        }
+    }
+
+    /// Handle scoring for data provision requests based on response time and success
+    fn handle_data_provision_score<T>(
+        peer_list: &PeerList,
+        result: &GossipResult<T>,
+        peer_miner_address: &Address,
+        response_time: Duration,
+    ) {
+        match result {
+            Ok(_) => {
+                // Successful response - reward based on speed
+                if response_time <= FAST_RESPONSE_THRESHOLD {
+                    // Fast response deserves extra reward
+                    peer_list.increase_peer_score(
+                        peer_miner_address,
+                        ScoreIncreaseReason::TimelyResponse,
+                    );
+                } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
+                    // Normal response gets standard reward
+                    peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online);
+                } else {
+                    // Slow but successful response gets minimal penalty
+                    peer_list
+                        .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::SlowResponse);
+                }
+            }
+            Err(_) => {
+                // Failed to respond - severe penalty
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::NoResponse);
             }
         }
     }

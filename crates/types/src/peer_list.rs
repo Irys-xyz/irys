@@ -26,21 +26,30 @@ impl PeerScore {
         Self(score.clamp(Self::MIN, Self::MAX))
     }
 
-    pub fn increase(&mut self) {
-        self.0 = (self.0 + 1).min(Self::MAX);
-    }
-
-    /// Limited increase for data requests (prevents farming)
-    pub fn increase_limited(&mut self, amount: u16) {
+    /// Base method to increase score by a given amount
+    pub fn increase_by(&mut self, amount: u16) {
         self.0 = (self.0 + amount).min(Self::MAX);
     }
 
+    /// Base method to decrease score by a given amount
+    pub fn decrease_by(&mut self, amount: u16) {
+        self.0 = self.0.saturating_sub(amount);
+    }
+
+    pub fn increase(&mut self) {
+        self.increase_by(1);
+    }
+
+    pub fn decrease(&mut self) {
+        self.decrease_by(1);
+    }
+
     pub fn decrease_offline(&mut self) {
-        self.0 = self.0.saturating_sub(3);
+        self.decrease_by(3);
     }
 
     pub fn decrease_bogus_data(&mut self) {
-        self.0 = self.0.saturating_sub(5);
+        self.decrease_by(5);
     }
 
     pub fn is_active(&self) -> bool {
