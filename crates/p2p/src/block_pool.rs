@@ -203,7 +203,6 @@ impl BlockCacheInner {
 
         if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&previous_block_hash) {
             set.insert(block_hash);
-            return;
         } else {
             let mut set = HashSet::new();
             set.insert(block_hash);
