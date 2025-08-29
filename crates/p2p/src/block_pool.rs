@@ -167,7 +167,7 @@ impl BlockCacheGuard {
     }
 
     async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
-        self.inner.write().await.block_is_processing(block_hash)
+        self.inner.write().await.is_block_processing(block_hash)
     }
 
     async fn change_block_processing_status(&self, block_hash: BlockHash, is_processing: bool) {
@@ -213,7 +213,7 @@ impl BlockCacheInner {
         );
     }
 
-    fn block_is_processing(&mut self, block_hash: &BlockHash) -> bool {
+    fn is_block_processing(&mut self, block_hash: &BlockHash) -> bool {
         self.blocks
             .get(block_hash)
             .map(|block| block.is_processing)
