@@ -734,6 +734,7 @@ impl Inner {
                 .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
 
             let mut publish_txids: Vec<H256> = Vec::new();
+
             // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
             for data_root in ingress_proofs.keys() {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
@@ -766,12 +767,16 @@ impl Inner {
 
             for tx_header in &tx_headers {
                 let is_promoted = tx_header.promoted_height.is_some();
-                warn!(
-                    "Publish candidate {} is already promoted? {}",
-                    &tx_header.id, &is_promoted
-                );
-                // If it's not promoted, validate the proofs
-                if !is_promoted {
+
+                if is_promoted {
+                    // If it's promoted skip it
+                    warn!(
+                        "Publish candidate {} is already promoted? {}",
+                        &tx_header.id, &is_promoted
+                    );
+                } else {
+                    // If it's not promoted, validate the proofs
+
                     // Get the proofs for this tx
                     let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
 
