@@ -867,15 +867,17 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 /// - If `use_trusted_peers_only` is true, query all trusted peers.
 /// - Otherwise, query the top `top_n` active peers (default 10 if None).
 ///
-/// For each selected peer, it requests `/info` and collects the `block_hash`.
-/// Returns a map of `block_hash -> Vec<(miner_address, PeerListItem)>`; multiple peers may report
-/// the same hash, in which case all their miner addresses are grouped together.
+/// For each selected peer, it requests `/info` and collects the `block_hash` and the peer's
+/// reported `block_index_height`.
+/// Returns a map of `block_hash -> (reported_height, Vec<(miner_address, PeerListItem)>)`.
+/// If multiple peers report the same hash, the max height observed is retained and all reporting
+/// peers are grouped together.
 async fn pull_highest_blocks(
     peer_list: &PeerList,
     api_client: &impl ApiClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
-) -> ChainSyncResult<HashMap<BlockHash, Vec<(Address, PeerListItem)>>> {
+) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
     let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Collecting highest blocks from trusted peers");
@@ -890,16 +892,24 @@ async fn pull_highest_blocks(
         return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
-    let mut by_hash: HashMap<BlockHash, Vec<(Address, PeerListItem)>> = HashMap::new();
+    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)> =
+        HashMap::new();
 
     for (miner_address, peer) in peers {
         match api_client.node_info(peer.address.api).await {
             Ok(info) => {
                 let hash = info.block_hash;
-                let entry = by_hash.entry(hash).or_default();
+                let height = info.block_index_height;
+                let entry = peers_by_top_block_hash
+                    .entry(hash)
+                    .or_insert_with(|| (height, Vec::new()));
+                // Retain the max reported height for this hash
+                if height > entry.0 {
+                    entry.0 = height;
+                }
                 // Avoid duplicates if same miner appears more than once (shouldn't, but safe)
-                if !entry.iter().any(|(addr, _)| addr == &miner_address) {
-                    entry.push((miner_address, peer.clone()));
+                if !entry.1.iter().any(|(addr, _)| addr == &miner_address) {
+                    entry.1.push((miner_address, peer.clone()));
                 }
                 debug!(
                     "Peer {:?} reported highest block hash {:?} (api: {})",
@@ -915,7 +925,7 @@ async fn pull_highest_blocks(
         }
     }
 
-    Ok(by_hash)
+    Ok(peers_by_top_block_hash)
 }
 
 /// Collects unique highest block hashes from peers and pulls each of them in parallel.
@@ -927,18 +937,32 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
     use_trusted_peers_only: bool,
 ) -> ChainSyncResult<()> {
     // Collect unique hashes with their reporting peers (trusted or top-N active peers)
-    let by_hash = pull_highest_blocks(peer_list, api_client, use_trusted_peers_only, None).await?;
+    let peers_by_top_block_hash =
+        pull_highest_blocks(peer_list, api_client, use_trusted_peers_only, None).await?;
 
-    if by_hash.is_empty() {
+    if peers_by_top_block_hash.is_empty() {
         debug!("Post-sync: No unique highest blocks reported by peers");
         return Ok(());
     }
 
     let mut futures = Vec::new();
-    for (block_hash, peers) in by_hash {
-        if peers.is_empty() {
+    for (block_hash, (reported_height, peers)) in peers_by_top_block_hash {
+        // Filter out blocks that are already processed or currently being processed
+        if gossip_data_handler
+            .block_pool
+            .is_block_processing_or_processed(&block_hash, reported_height)
+            .await
+        {
             debug!(
-                "Post-sync: No peers associated with reported block hash {:?} (skipping)",
+                "Post-sync: Skipping already-processed block {:?} (height {})",
+                block_hash, reported_height
+            );
+            continue;
+        }
+
+        if peers.is_empty() {
+            warn!(
+                "Post-sync: No peers associated with the reported block hash {:?} (skipping)",
                 block_hash
             );
             continue;
@@ -1393,8 +1417,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let block_requests = block_requests_clone.lock().unwrap();
-            // One of the requests comes from the post-sync routine
-            assert_eq!(block_requests.len(), 4);
+            assert_eq!(block_requests.len(), 3);
             let requested_first_block = block_requests
                 .iter()
                 .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
