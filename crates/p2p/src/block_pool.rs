@@ -61,6 +61,20 @@ impl From<PeerNetworkError> for BlockPoolError {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ProcessBlockResult {
+    /// Block has been processed successfully
+    Processed,
+    /// Block has been added to the pool, waiting for the parent block
+    ParentRequested,
+    /// Block has been added to the pool, but the parent block is already in the cache, so no request was made
+    ParentAlreadyInCache,
+    /// Block has been added to the pool, and the request for the parent block failed
+    ParentRequestFailed,
+    /// Block has been added to the pool, but no request for the parent block was made (too far ahead of canonical)
+    ParentTooFarAhead,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockPool<B, M>
 where
@@ -458,7 +472,7 @@ where
         &self,
         block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
-    ) -> Result<(), BlockPoolError> {
+    ) -> Result<ProcessBlockResult, BlockPoolError> {
         check_block_status(
             &self.block_status_provider,
             block_header.block_hash,
@@ -515,7 +529,7 @@ where
                     "Parent block {:?} is already in the cache, skipping the request",
                     prev_block_hash
                 );
-                return Ok(());
+                return Ok(ProcessBlockResult::ParentAlreadyInCache);
             }
 
             let canonical_height = self.block_status_provider.canonical_height();
@@ -529,7 +543,7 @@ where
                     current_block_hash, current_block_height, canonical_height
                 );
 
-                return Ok(());
+                return Ok(ProcessBlockResult::ParentTooFarAhead);
             }
 
             // Use the sync service to request parent block (fire and forget)
@@ -544,9 +558,10 @@ where
                     "BlockPool: Failed to send RequestBlockFromTheNetwork message: {:?}",
                     send_err
                 );
+                return Ok(ProcessBlockResult::ParentRequestFailed);
+            } else {
+                return Ok(ProcessBlockResult::ParentRequested);
             }
-
-            return Ok(());
         }
 
         if skip_validation_for_fast_track {
@@ -634,7 +649,7 @@ where
             );
         }
 
-        Ok(())
+        Ok(ProcessBlockResult::Processed)
     }
 
     pub(crate) async fn pull_and_seal_execution_payload(

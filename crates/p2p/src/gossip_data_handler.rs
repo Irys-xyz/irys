@@ -332,6 +332,36 @@ where
         .await
     }
 
+    /// Pulls a block from a specific peer and sends it to the BlockPool for processing
+    pub async fn pull_and_process_block_from_peer(
+        &self,
+        block_hash: BlockHash,
+        peer: &(irys_types::Address, PeerListItem),
+    ) -> GossipResult<()> {
+        let (source_address, irys_block) = self
+            .gossip_client
+            .pull_block_from_peer(block_hash, peer, &self.peer_list)
+            .await?;
+
+        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+            error!(
+                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
+                source_address
+            );
+            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+        };
+
+        self.handle_block_header(
+            GossipRequest {
+                miner_address: source_address,
+                data: irys_block.as_ref().clone(),
+            },
+            peer_info.address.api,
+            peer_info.address.gossip,
+        )
+        .await
+    }
+
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,

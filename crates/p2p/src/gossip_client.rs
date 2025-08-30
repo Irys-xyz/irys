@@ -394,6 +394,32 @@ impl GossipClient {
         .await
     }
 
+    /// Pull a block from a specific peer, updating its score accordingly.
+    pub async fn pull_block_from_peer(
+        &self,
+        block_hash: BlockHash,
+        peer: &(Address, PeerListItem),
+        peer_list: &PeerList,
+    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+        let data_request = GossipDataRequest::Block(block_hash);
+        match self
+            .pull_data_and_update_the_score(peer, data_request, peer_list)
+            .await
+        {
+            Ok(Some(data)) => {
+                let header = Self::block(data)?;
+                Ok((peer.0, header))
+            }
+            Ok(None) => Err(PeerNetworkError::FailedToRequestData(
+                "Peer did not have the requested block".to_string(),
+            )),
+            Err(err) => match err {
+                GossipError::PeerNetwork(e) => Err(e),
+                other => Err(PeerNetworkError::FailedToRequestData(other.to_string())),
+            },
+        }
+    }
+
     fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
             GossipData::Block(block) => Ok(block),
