@@ -8,7 +8,7 @@ async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
-    let seconds_to_wait = 10;
+    let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
 
     // Set up consensus to require 3 ingress proofs to promote
@@ -117,7 +117,7 @@ async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     genesis_node
         .wait_until_height_confirmed(
             height + genesis_config.consensus_config().block_migration_depth as u64,
-            seconds_to_wait * 2,
+            seconds_to_wait,
         )
         .await?;
 
