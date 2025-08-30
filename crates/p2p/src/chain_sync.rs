@@ -666,7 +666,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         debug!("Sync task: No new blocks to process, marking the current sync target height as processed");
         sync_state.mark_processed(sync_state.sync_target_height());
         sync_state.finish_sync();
-        return Ok(());
     } else {
         sync_state.set_is_syncing(true);
     }
@@ -937,10 +936,20 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
 
     let mut futures = Vec::new();
     for (block_hash, peers) in by_hash {
-        // Choose a peer to target for this block. For simplicity, pick the first reported peer.
-        if let Some(peer) = peers.first().cloned() {
-            let handler = gossip_data_handler.clone();
-            futures.push(async move {
+        if peers.is_empty() {
+            debug!(
+                "Post-sync: No peers associated with reported block hash {:?} (skipping)",
+                block_hash
+            );
+            continue;
+        }
+
+        let handler = gossip_data_handler.clone();
+        // Retry sequentially across available peers for this hash until success or exhaustion
+        futures.push(async move {
+            let mut success = false;
+            for (idx, peer) in peers.into_iter().enumerate() {
+                let attempt_num = idx + 1;
                 match tokio::time::timeout(
                     Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
                     handler.pull_and_process_block_from_peer(block_hash, &peer),
@@ -949,30 +958,37 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
                 {
                     Ok(Ok(())) => {
                         debug!(
-                            "Post-sync: Successfully pulled highest block {:?} from peer {:?}",
-                            block_hash, peer.0
+                            "Post-sync: Pulled block {:?} from peer {:?} on attempt {}",
+                            block_hash, peer.0, attempt_num
                         );
+                        success = true;
+                        break;
                     }
                     Ok(Err(e)) => {
                         warn!(
-                            "Post-sync: Failed to pull highest block {:?} from peer {:?}: {}",
-                            block_hash, peer.0, e
+                            "Post-sync: Attempt {} failed to pull block {:?} from peer {:?}: {}",
+                            attempt_num, block_hash, peer.0, e
                         );
                     }
                     Err(_) => {
                         warn!(
-                            "Post-sync: Timeout ({}s) while pulling highest block {:?}",
-                            RETRY_BLOCK_REQUEST_TIMEOUT_SECS, block_hash
+                            "Post-sync: Attempt {} timed out ({}s) pulling block {:?} from peer {:?}",
+                            attempt_num, RETRY_BLOCK_REQUEST_TIMEOUT_SECS, block_hash, peer.0
                         );
                     }
                 }
-            });
-        } else {
-            debug!(
-                "Post-sync: No peers associated with reported block hash {:?} (skipping)",
-                block_hash
-            );
-        }
+
+                // Small backoff before trying another peer
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            if !success {
+                warn!(
+                    "Post-sync: Exhausted all peers without pulling block {:?}",
+                    block_hash
+                );
+            }
+        });
     }
 
     // Run all pulls in parallel and wait for completion
@@ -1419,6 +1435,9 @@ mod tests {
                     move |_query: BlockIndexQuery| Err(eyre!("Simulating index request error")),
                 ))),
                 block_index_calls: Arc::new(Default::default()),
+                node_info_handler: Arc::new(RwLock::new(Box::new(|_| {
+                    Ok(irys_types::NodeInfo::default())
+                }))),
             };
 
             let reth_mock = MockRethServiceActor {};
@@ -1485,6 +1504,276 @@ mod tests {
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
 
+            Ok(())
+        }
+    }
+
+    mod post_sync_unique_highest_blocks {
+        use super::*;
+        use crate::peer_network_service::PeerNetworkService;
+        use crate::tests::util::data_handler_stub;
+        use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+        use crate::GetPeerListGuard;
+        use actix::Actor as _;
+        use eyre::Result as EyreResult;
+        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_types::{
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            SyncMode,
+        };
+        use std::net::SocketAddr;
+        use std::sync::{Arc, Mutex};
+
+        #[actix_web::test]
+        async fn should_retry_next_peer_for_same_hash_and_succeed() -> EyreResult<()> {
+            let sync_state = ChainSyncState::new(true, false);
+            let temp_block_hash = BlockHash::repeat_byte(9);
+
+            // Fake servers: first returns None for block, second returns a block
+            let server1 = FakeGossipServer::new();
+            let server2 = FakeGossipServer::new();
+
+            let s1_calls = Arc::new(Mutex::new(0_usize));
+            let s2_calls = Arc::new(Mutex::new(0_usize));
+            let s1_calls_clone = s1_calls.clone();
+            server1.set_on_pull_data_request(move |req| match req {
+                GossipDataRequest::Block(_hash) => {
+                    let mut c = s1_calls_clone.lock().unwrap();
+                    *c += 1;
+                    None
+                }
+                _ => None,
+            });
+
+            let s2_calls_clone = s2_calls.clone();
+            server2.set_on_pull_data_request(move |req| match req {
+                GossipDataRequest::Block(_hash) => {
+                    let mut c = s2_calls_clone.lock().unwrap();
+                    *c += 1;
+                    Some(GossipData::Block(Arc::new(
+                        IrysBlockHeader::new_mock_header(),
+                    )))
+                }
+                _ => None,
+            });
+
+            let addr1 = server1.spawn();
+            let addr2 = server2.spawn();
+
+            // Config and services
+            let mut node_config = NodeConfig::testing();
+            node_config.sync_mode = SyncMode::Full;
+            let config = Config::new(node_config);
+
+            let api_client_stub = ApiClientStub::new();
+            api_client_stub.set_node_info_handler(move |_api| {
+                let info = NodeInfo {
+                    block_hash: temp_block_hash,
+                    ..NodeInfo::default()
+                };
+                Ok(info)
+            });
+
+            let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+            let reth_mock = MockRethServiceActor {};
+            let reth_mock_addr = reth_mock.start();
+            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir");
+            let db = DatabaseProvider(Arc::new(db_env));
+            let peer_service = PeerNetworkService::new_with_custom_api_client(
+                db.clone(),
+                &config,
+                api_client_stub.clone(),
+                reth_mock_addr.clone(),
+                receiver,
+                sender,
+            );
+            let peer_service_addr = peer_service.start();
+            let peer_list_guard = peer_service_addr
+                .send(GetPeerListGuard)
+                .await
+                .expect("peer list")
+                .expect("peer list");
+
+            // Add two peers reporting the same highest hash
+            let peer1 = PeerListItem {
+                reputation_score: PeerScore::new(100),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: addr1,
+                    api: addr1,
+                    execution: Default::default(),
+                },
+                last_seen: 0,
+                is_online: true,
+            };
+            let peer2 = PeerListItem {
+                reputation_score: PeerScore::new(99),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: addr2,
+                    api: addr2,
+                    execution: Default::default(),
+                },
+                last_seen: 0,
+                is_online: true,
+            };
+
+            let addr_a = Address::repeat_byte(0xA0);
+            let addr_b = Address::repeat_byte(0xB0);
+            peer_list_guard.add_or_update_peer(addr_a, peer1, true);
+            peer_list_guard.add_or_update_peer(addr_b, peer2, true);
+
+            // Build data handler
+            let db = db.clone();
+            let data_handler = data_handler_stub(
+                &config,
+                &peer_list_guard,
+                db,
+                api_client_stub.clone(),
+                sync_state.clone(),
+            )
+            .await;
+
+            // Execute helper
+            pull_unique_highest_blocks::<_, _, _>(
+                &peer_list_guard,
+                &api_client_stub,
+                data_handler,
+                false,
+            )
+            .await?;
+
+            // Validate retries occurred: first peer attempted, second peer attempted and succeeded
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                *s1_calls.lock().unwrap() >= 1,
+                "expected the first peer to be attempted"
+            );
+            assert!(
+                *s2_calls.lock().unwrap() >= 1,
+                "expected retry to second peer"
+            );
+            Ok(())
+        }
+
+        #[actix_web::test]
+        async fn should_try_all_peers_when_all_fail() -> EyreResult<()> {
+            let sync_state = ChainSyncState::new(true, false);
+            let temp_block_hash = BlockHash::repeat_byte(7);
+
+            let server1 = FakeGossipServer::new();
+            let server2 = FakeGossipServer::new();
+            let s1_calls = Arc::new(Mutex::new(0_usize));
+            let s2_calls = Arc::new(Mutex::new(0_usize));
+            let s1_calls_clone = s1_calls.clone();
+            server1.set_on_pull_data_request(move |req| match req {
+                GossipDataRequest::Block(_hash) => {
+                    *s1_calls_clone.lock().unwrap() += 1;
+                    None
+                }
+                _ => None,
+            });
+            let s2_calls_clone = s2_calls.clone();
+            server2.set_on_pull_data_request(move |req| match req {
+                GossipDataRequest::Block(_hash) => {
+                    *s2_calls_clone.lock().unwrap() += 1;
+                    None
+                }
+                _ => None,
+            });
+
+            let addr1: SocketAddr = server1.spawn();
+            let addr2: SocketAddr = server2.spawn();
+
+            let mut node_config = NodeConfig::testing();
+            node_config.sync_mode = SyncMode::Full;
+            let config = Config::new(node_config);
+
+            let api_client_stub = ApiClientStub::new();
+            api_client_stub.set_node_info_handler(move |_api| {
+                let info = NodeInfo {
+                    block_hash: temp_block_hash,
+                    ..NodeInfo::default()
+                };
+                Ok(info)
+            });
+
+            let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+            let reth_mock = MockRethServiceActor {};
+            let reth_mock_addr = reth_mock.start();
+            let temp_dir = setup_tracing_and_temp_dir(None, false);
+            let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir");
+            let db = DatabaseProvider(Arc::new(db_env));
+            let peer_service = PeerNetworkService::new_with_custom_api_client(
+                db.clone(),
+                &config,
+                api_client_stub.clone(),
+                reth_mock_addr.clone(),
+                receiver,
+                sender,
+            );
+            let peer_service_addr = peer_service.start();
+            let peer_list_guard = peer_service_addr
+                .send(GetPeerListGuard)
+                .await
+                .expect("peer list")
+                .expect("peer list");
+
+            let peer1 = PeerListItem {
+                reputation_score: PeerScore::new(100),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: addr1,
+                    api: addr1,
+                    execution: Default::default(),
+                },
+                last_seen: 0,
+                is_online: true,
+            };
+            let peer2 = PeerListItem {
+                reputation_score: PeerScore::new(99),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: addr2,
+                    api: addr2,
+                    execution: Default::default(),
+                },
+                last_seen: 0,
+                is_online: true,
+            };
+            let addr_a = Address::repeat_byte(0xA1);
+            let addr_b = Address::repeat_byte(0xB1);
+            peer_list_guard.add_or_update_peer(addr_a, peer1, true);
+            peer_list_guard.add_or_update_peer(addr_b, peer2, true);
+
+            let db = db.clone();
+            let data_handler = data_handler_stub(
+                &config,
+                &peer_list_guard,
+                db,
+                api_client_stub.clone(),
+                sync_state.clone(),
+            )
+            .await;
+
+            pull_unique_highest_blocks::<_, _, _>(
+                &peer_list_guard,
+                &api_client_stub,
+                data_handler,
+                false,
+            )
+            .await?;
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                *s1_calls.lock().unwrap() >= 1 && *s2_calls.lock().unwrap() >= 1,
+                "expected both peers to be attempted"
+            );
             Ok(())
         }
     }

@@ -216,6 +216,8 @@ pub(crate) struct ApiClientStub {
         RwLock<Box<dyn Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static>>,
     >,
     pub block_index_calls: Arc<RwLock<Vec<BlockIndexQuery>>>,
+    pub node_info_handler:
+        Arc<RwLock<Box<dyn Fn(SocketAddr) -> Result<NodeInfo> + Send + Sync + 'static>>>,
 }
 
 impl ApiClientStub {
@@ -224,6 +226,7 @@ impl ApiClientStub {
             txs: HashMap::new(),
             block_index_handler: Arc::new(RwLock::new(Box::new(|_| Ok(Vec::new())))),
             block_index_calls: Arc::new(Default::default()),
+            node_info_handler: Arc::new(RwLock::new(Box::new(|_| Ok(NodeInfo::default())))),
         }
     }
 
@@ -232,6 +235,17 @@ impl ApiClientStub {
         handler: impl Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static,
     ) {
         let mut guard = self.block_index_handler.write().expect("to unlock handler");
+        *guard = Box::new(handler);
+    }
+
+    pub(crate) fn set_node_info_handler(
+        &self,
+        handler: impl Fn(SocketAddr) -> Result<NodeInfo> + Send + Sync + 'static,
+    ) {
+        let mut guard = self
+            .node_info_handler
+            .write()
+            .expect("to unlock node_info handler");
         *guard = Box::new(handler);
     }
 }
@@ -305,7 +319,11 @@ impl ApiClient for ApiClientStub {
     }
 
     async fn node_info(&self, _peer: SocketAddr) -> Result<NodeInfo> {
-        Ok(NodeInfo::default())
+        let handler = self
+            .node_info_handler
+            .read()
+            .expect("to unlock node_info handler");
+        handler(_peer)
     }
 }
 
