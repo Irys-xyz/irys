@@ -62,7 +62,7 @@ impl From<PeerNetworkError> for BlockPoolError {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum ProcessBlockResult {
+pub(crate) enum ProcessBlockResult {
     /// Block has been processed successfully
     Processed,
     /// Block has been added to the pool, waiting for the parent block

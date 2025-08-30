@@ -8,12 +8,12 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, SyncMode,
-    TokioServiceHandle,
+    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
+    SyncMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -845,10 +845,63 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     Ok(())
 }
 
-async fn pull_highest_blocks_from() {
-    let already_requested = HashSet::new();
+/// Collects unique highest block hashes reported by peers and associates them
+/// with the peers that reported each hash.
+///
+/// Selection strategy:
+/// - If `use_trusted_peers_only` is true, query all trusted peers.
+/// - Otherwise, query the top `top_n` active peers (default 10 if None).
+///
+/// For each selected peer, it requests `/info` and collects the `block_hash`.
+/// Returns a map of `block_hash -> Vec<miner_address>`; multiple peers may report
+/// the same hash, in which case all their miner addresses are grouped together.
+#[allow(dead_code)]
+async fn pull_highest_blocks(
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    use_trusted_peers_only: bool,
+    top_n: Option<usize>,
+) -> ChainSyncResult<HashMap<BlockHash, Vec<Address>>> {
+    // Pick peers: trusted or top N active
+    let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
+        debug!("Collecting highest blocks from trusted peers");
+        peer_list.trusted_peers()
+    } else {
+        let limit = top_n.unwrap_or(10);
+        debug!("Collecting highest blocks from top {} active peers", limit);
+        peer_list.top_active_peers(Some(limit), None)
+    };
 
+    if peers.is_empty() {
+        return Err(ChainSyncError::Network("No peers available".to_string()));
+    }
 
+    let mut by_hash: HashMap<BlockHash, Vec<Address>> = HashMap::new();
+
+    for (miner_address, peer) in peers {
+        match api_client.node_info(peer.address.api).await {
+            Ok(info) => {
+                let hash = info.block_hash;
+                let entry = by_hash.entry(hash).or_default();
+                // Avoid duplicates if same miner appears more than once (shouldn't, but safe)
+                if !entry.contains(&miner_address) {
+                    entry.push(miner_address);
+                }
+                debug!(
+                    "Peer {:?} reported highest block hash {:?} (api: {})",
+                    miner_address, hash, peer.address.api
+                );
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to fetch node info from peer {:?} (api: {}): {}",
+                    miner_address, peer.address.api, err
+                );
+            }
+        }
+    }
+
+    Ok(by_hash)
 }
 
 async fn check_and_update_full_validation_switch_height(
