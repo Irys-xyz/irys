@@ -1393,7 +1393,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let block_requests = block_requests_clone.lock().unwrap();
-            assert_eq!(block_requests.len(), 3);
+            // One of the requests comes from the post-sync routine
+            assert_eq!(block_requests.len(), 4);
             let requested_first_block = block_requests
                 .iter()
                 .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
