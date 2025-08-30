@@ -82,6 +82,8 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await
         .unwrap();
 
+    let anchor = node.get_anchor().await?;
+
     let generate_tx_with_size = |a: &IrysSigner,
                                  data_size: usize,
                                  perm_fee: irys_types::U256,
@@ -90,7 +92,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let tx = a.create_publish_transaction(data_bytes.clone(), None, perm_fee, term_fee)?;
+        let tx = a.create_publish_transaction(data_bytes.clone(), anchor, perm_fee, term_fee)?;
         let tx = a.sign_transaction(tx)?;
         Ok((tx, data_bytes))
     };

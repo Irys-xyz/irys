@@ -203,7 +203,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // DATA TX: Create the data transaction from the chunks
         let mut data_tx = signer1
-            .create_transaction(data, Some(genesis_block.block_hash))
+            .create_transaction(data, genesis_block.block_hash)
             .expect("To make a data transaction");
 
         data_tx.header.perm_fee = Some(U256::from(4_000_000_000_000_u64));

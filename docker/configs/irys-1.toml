@@ -1,30 +1,36 @@
-node_mode = "Peer"
-sync_mode = "Full"
-base_directory = ""
-mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
-trusted_peers = []
-reward_address = "0x0000000000000000000000000000000000000000"
-stake_pledge_drives = false
+mode = "Genesis" #changeme
+base_directory = "/app/data"
+mining_key = "53142d3c5a4a3f49715490456c26df7926d45586179d19afce68d799c08ea8c6" #changeme
+reward_address = "0x10605A299777D44BE5373D120d5479f07860325d" #changeme
+stake_pledge_drives = true #changeme
 genesis_peer_discovery_timeout_millis = 10000
 
-[gossip]
-public_ip = "127.0.0.1"
-public_port = 8081
-bind_ip = "0.0.0.0"
-bind_port = 8081
+# irys-2
+[[trusted_peers]]
+gossip = "172.20.0.3:9009" #changeme
+api = "172.20.0.3:8080" #changeme
+
+[trusted_peers.execution]
+peering_tcp_addr = "127.0.0.3:9010" #changeme
+
 
 [http]
-public_ip = "127.0.0.1"
+public_ip = "172.20.0.2"
 public_port = 8080
 bind_ip = "0.0.0.0"
 bind_port = 8080
 
-[reth.network]
-use_random_ports = false
-public_ip = "127.0.0.1"
-public_port = 30303
+[gossip]
+public_ip = "172.20.0.2"
+public_port = 9009
 bind_ip = "0.0.0.0"
-bind_port = 30303
+bind_port = 9009
+
+[reth.network]
+public_ip = "172.20.0.2"
+public_port = 9010
+bind_ip = "0.0.0.0"
+bind_port = 9010
 
 
 [storage]
@@ -59,8 +65,8 @@ decay_rate = 0.01
 chunk_size = 262144
 block_migration_depth = 6
 block_tree_depth = 50
-num_chunks_in_partition = 51872000
-num_chunks_in_recall_range = 800
+num_chunks_in_partition = 100
+num_chunks_in_recall_range = 10
 num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
 number_of_ingress_proofs_total = 1
@@ -73,12 +79,11 @@ immediate_tx_inclusion_reward_percent = 0.01
 
 [consensus.Custom.genesis]
 timestamp_millis = 0
-miner_address = "0x0000000000000000000000000000000000000000"
-reward_address = "0x0000000000000000000000000000000000000000"
+miner_address = "0x6f8450cfdb7c9aeddab081a5cf43755201f69582"
+reward_address = "0x6f8450cfdb7c9aeddab081a5cf43755201f69582"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
-# Optional: if omitted, defaults to vdf_seed
-# vdf_next_seed = "22222222222222222222222222222222"
+
 
 [consensus.Custom.reth]
 chain = 1270
@@ -97,16 +102,18 @@ chainId = 1
 daoForkSupport = false
 terminalTotalDifficultyPassed = false
 
-[consensus.Custom.reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+# irys-1
+[consensus.Custom.reth.genesis.alloc.0x6f8450cfdb7c9aeddab081a5cf43755201f69582]
 balance = "0x152cf4e72a974f1c0000"
 
-[consensus.Custom.reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+# irys-2
+[consensus.Custom.reth.genesis.alloc.0x81c23e4bde4c7086400cdcbca2dfe9a96dbd0fad]
 balance = "0x152cf4e72a974f1c0000"
 
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
-anchor_expiry_depth = 20
+anchor_expiry_depth = 10
 max_pending_pledge_items = 100
 max_pledges_per_item = 100
 max_pending_chunk_items = 30

@@ -275,22 +275,46 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
     }
 
     /// Process orphaned ancestor block - moved from OrphanBlockProcessingService
-    async fn process_orphaned_ancestor(&self, block_hash: BlockHash) -> Result<(), ChainSyncError> {
-        let maybe_orphaned_block = self
+    async fn process_orphaned_ancestors(
+        &self,
+        block_hash: BlockHash,
+    ) -> Result<(), ChainSyncError> {
+        let maybe_orphaned_blocks = self
             .block_pool
-            .get_orphaned_block_by_parent(&block_hash)
+            .get_orphaned_blocks_by_parent(&block_hash)
             .await;
 
-        if let Some(orphaned_block) = maybe_orphaned_block {
-            info!(
-                "Start processing orphaned ancestor block: {:?}",
-                orphaned_block.header.block_hash
-            );
-
-            self.block_pool
-                .process_block(orphaned_block.header, orphaned_block.is_fast_tracking)
-                .await
-                .map_err(|e| ChainSyncError::Internal(format!("Block processing error: {:?}", e)))
+        if let Some(orphaned_blocks) = maybe_orphaned_blocks {
+            let mut futures = Vec::new();
+            for orphaned_block in orphaned_blocks {
+                info!(
+                    "Start processing orphaned ancestor block: {:?}",
+                    orphaned_block.header.block_hash
+                );
+                let block_pool = self.block_pool.clone();
+                let header = orphaned_block.header;
+                let is_fast_tracking = orphaned_block.is_fast_tracking;
+                futures.push(async move {
+                    block_pool
+                        .process_block(header, is_fast_tracking)
+                        .await
+                        .map_err(|e| {
+                            ChainSyncError::Internal(format!("Block processing error: {:?}", e))
+                        })
+                });
+            }
+            let results = futures::future::join_all(futures).await;
+            let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+            if !errors.is_empty() {
+                for err in &errors {
+                    error!("Error processing orphaned ancestor block: {}", err);
+                }
+                return Err(ChainSyncError::Internal(format!(
+                    "Errors occurred processing orphaned ancestor blocks: {:?}",
+                    errors
+                )));
+            }
+            Ok(())
         } else {
             info!(
                 "No orphaned ancestor block found for block: {:?}",
@@ -305,10 +329,8 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         &self,
         parent_block_hash: BlockHash,
     ) -> Result<(), ChainSyncError> {
-        let parent_is_already_in_the_pool = self
-            .block_pool
-            .is_parent_hash_in_cache(&parent_block_hash)
-            .await;
+        let parent_is_already_in_the_pool =
+            self.block_pool.contains_block(&parent_block_hash).await;
 
         // If the parent is also in the cache, it's likely that processing has already started
         if !parent_is_already_in_the_pool {
@@ -447,7 +469,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
                 let inner = self.inner.clone();
                 tokio::spawn(async move {
-                    let result = inner.process_orphaned_ancestor(block_hash).await;
+                    let result = inner.process_orphaned_ancestors(block_hash).await;
                     if let Some(sender) = response {
                         if let Err(e) = sender.send(result) {
                             tracing::error!("Failed to send response: {:?}", e);
@@ -1028,6 +1050,8 @@ async fn is_local_index_is_behind_trusted_peers(
             if index_tip > peer_height {
                 highest_trusted_peer_height = Some(index_tip);
             }
+        } else {
+            highest_trusted_peer_height = Some(index_tip);
         }
     }
 

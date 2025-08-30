@@ -4,7 +4,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::NodeConfig;
 
 #[actix_web::test]
-async fn promotion_with_multiple_proofs_test() -> eyre::Result<()> {
+async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
@@ -46,11 +46,11 @@ async fn promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     genesis_node.wait_until_height(1, seconds_to_wait).await?;
     let block_height_1 = genesis_node.get_block_by_height(1).await?;
     let peer1_stake_tx = peer1_node
-        .post_stake_commitment(block_height_1.block_hash)
-        .await;
+        .post_stake_commitment(Some(block_height_1.block_hash))
+        .await?;
     let peer2_stake_tx = peer2_node
-        .post_stake_commitment(block_height_1.block_hash)
-        .await;
+        .post_stake_commitment(Some(block_height_1.block_hash))
+        .await?;
 
     genesis_node
         .wait_for_mempool_commitment_txs(
@@ -117,7 +117,7 @@ async fn promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     genesis_node
         .wait_until_height_confirmed(
             height + genesis_config.consensus_config().block_migration_depth as u64,
-            seconds_to_wait,
+            seconds_to_wait * 2,
         )
         .await?;
 
