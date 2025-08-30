@@ -560,7 +560,7 @@ where
                 );
                 return Ok(ProcessBlockResult::ParentRequestFailed);
             } else {
-                return Ok(ProcessBlockResult::ParentRequested)
+                return Ok(ProcessBlockResult::ParentRequested);
             }
         }
 

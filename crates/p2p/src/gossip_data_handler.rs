@@ -351,16 +351,15 @@ where
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
-        self
-            .handle_block_header(
-                GossipRequest {
-                    miner_address: source_address,
-                    data: irys_block.as_ref().clone(),
-                },
-                peer_info.address.api,
-                peer_info.address.gossip,
-            )
-            .await
+        self.handle_block_header(
+            GossipRequest {
+                miner_address: source_address,
+                data: irys_block.as_ref().clone(),
+            },
+            peer_info.address.api,
+            peer_info.address.gossip,
+        )
+        .await
     }
 
     pub(crate) async fn handle_block_header(

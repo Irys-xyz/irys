@@ -841,7 +841,14 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
     // After finishing primary sync, best-effort pull of all unique highest blocks announced by peers.
     // This uses the same timeout logic as the retry path in the main sync loop.
-    match pull_unique_highest_blocks(peer_list, &api_client, gossip_data_handler.clone(), is_trusted_mode).await {
+    match pull_unique_highest_blocks(
+        peer_list,
+        &api_client,
+        gossip_data_handler.clone(),
+        is_trusted_mode,
+    )
+    .await
+    {
         Ok(()) => {
             debug!("Post-sync: Pulled unique highest blocks, if any");
         }
@@ -849,8 +856,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
             warn!("Post-sync: Failed to pull unique highest blocks: {}", e);
         }
     }
-
-
 
     info!("Sync task: Gossip service sync task completed");
     Ok(())
@@ -866,7 +871,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 /// For each selected peer, it requests `/info` and collects the `block_hash`.
 /// Returns a map of `block_hash -> Vec<(miner_address, PeerListItem)>`; multiple peers may report
 /// the same hash, in which case all their miner addresses are grouped together.
-#[allow(dead_code)]
 async fn pull_highest_blocks(
     peer_list: &PeerList,
     api_client: &impl ApiClient,
@@ -934,7 +938,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
     let mut futures = Vec::new();
     for (block_hash, peers) in by_hash {
         // Choose a peer to target for this block. For simplicity, pick the first reported peer.
-        if let Some(peer) = peers.get(0).cloned() {
+        if let Some(peer) = peers.first().cloned() {
             let handler = gossip_data_handler.clone();
             futures.push(async move {
                 match tokio::time::timeout(
