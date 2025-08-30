@@ -178,7 +178,7 @@ impl ShadowTxGenerator<'_> {
         }
 
         // Process all transactions (MUST BE SORTED)
-        for tx in &self.publish_ledger.txs {
+        for (index, tx) in self.publish_ledger.txs.iter().enumerate() {
             // CRITICAL: All publish ledger txs MUST have perm_fee
             let perm_fee = tx
                 .perm_fee
@@ -188,8 +188,13 @@ impl ShadowTxGenerator<'_> {
             // PublishFeeCharges::new will return an error if perm_fee is insufficient
             let publish_charges = PublishFeeCharges::new(perm_fee, tx.term_fee, self.config)?;
 
+            // Get all the ingress proofs for the transaction (assumes these are already validated and present)
+            let start_index = index * self.config.number_of_ingress_proofs_total as usize;
+            let end_index = start_index + self.config.number_of_ingress_proofs_total as usize;
+            let ingress_proofs = &proofs[start_index..end_index];
+
             // Get fee charges for all ingress proofs
-            let fee_charges = publish_charges.ingress_proof_rewards(proofs)?;
+            let fee_charges = publish_charges.ingress_proof_rewards(ingress_proofs)?;
 
             // Aggregate rewards by address and update rolling hash
             for charge in fee_charges {
@@ -914,7 +919,8 @@ mod tests {
 
     #[test]
     fn test_one_publish_tx_with_aggregated_proofs() {
-        let config = ConsensusConfig::testing();
+        let mut config = ConsensusConfig::testing();
+        config.number_of_ingress_proofs_total = 4;
         let parent_block = IrysBlockHeader::new_mock_header();
 
         // Calculate proper fees for publish transaction

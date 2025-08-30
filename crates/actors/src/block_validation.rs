@@ -25,7 +25,6 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, TERM_FEE};
-use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -34,6 +33,7 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
+use irys_types::{get_ingress_proofs, BlockHash};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -1535,9 +1535,9 @@ pub async fn data_txs_are_valid(
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                 // (they're waiting for proofs to arrive)
-                if tx.ingress_proofs.is_some() {
+                if tx.promoted_height.is_some() {
                     tracing::warn!(
-                        "Transaction {} in Submit ledger should not have ingress proofs",
+                        "Transaction {} in Submit ledger should not have a promoted_height",
                         tx.id
                     );
                 }
@@ -1545,53 +1545,49 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    ensure!(
-        publish_ledger
-            .proofs
-            .as_ref()
-            .map(|x| x.0.len())
-            .unwrap_or_default()
-            == publish_txs.len(),
-        "the length of publish ledger proofs in a block does not match the count of publish txs"
-    );
+    if publish_txs.is_empty() {
+        ensure!(
+            publish_ledger.proofs.is_none(),
+            "With no publish transactions in the block there should be no ingress proofs"
+        );
+    }
 
     // Validate ingress proofs list matches Publish ledger transactions
     if let Some(proofs_list) = &publish_ledger.proofs {
+        let expected_proof_count =
+            publish_txs.len() * (config.consensus.number_of_ingress_proofs_total as usize);
+
         ensure!(
-            proofs_list.len() == publish_txs.len(),
-            "Ingress proofs count mismatch. Expected: {}, Actual: {}",
-            publish_txs.len(),
+            proofs_list.len() == expected_proof_count,
+            "Incorrect number of proofs to prove promoted transactions. Expected: {}, Actual: {}",
+            expected_proof_count,
             proofs_list.len()
         );
 
         // Validate each proof corresponds to the correct transaction
-        for item in publish_txs.iter().zip_longest(proofs_list.iter()) {
-            let EitherOrBoth::Both(tx, proof) = item else {
-                tracing::warn!("publish tx and proof length mismatch, cannot validate publish ledger transaction proofs");
-                break;
-            };
+        for tx_header in publish_txs {
+            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)?;
 
-            // Validate ingress proofs are present
-            let Some(tx_proof) = tx.ingress_proofs.as_ref() else {
-                tracing::warn!(
-                    "Transaction {} in Publish ledger missing ingress proofs",
-                    tx.id
-                );
-                continue;
-            };
+            // Loop though all the ingress proofs for the published transaction and pre-validate them
+            for ingress_proof in tx_proofs.iter() {
+                // Validate ingress proof signature and data_root match the transaction
+                let _ = ingress_proof
+                    .pre_validate(&tx_header.data_root)
+                    .map_err(|e| {
+                        eyre::eyre!(
+                            "Transaction {} has invalid ingress proof: {} - {}",
+                            tx_header.id,
+                            ingress_proof.proof,
+                            e
+                        )
+                    })?;
+            }
 
-            // Validate ingress proof signature and data_root match
-            // The proof signature should be valid for the transaction's data_root
-            let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
-                eyre::eyre!("Transaction {} has invalid ingress proof: {}", tx.id, e)
-            })?;
-
-            // TODO: use `verify_ingress_proof` to verify all ingress proof chunks and data
-            // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
             ensure!(
-                tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
-                "Ingress proof mismatch for transaction {}",
-                tx.id
+                tx_proofs.len() as u64 == config.consensus.number_of_ingress_proofs_total,
+                "Number of proofs to promote tx does not match consensus rules. Expected: {}, Actual: {}",
+                config.consensus.number_of_ingress_proofs_total,
+                tx_proofs.len()
             );
         }
     }
@@ -2089,6 +2085,7 @@ mod tests {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -2098,6 +2095,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
             ],
             ..IrysBlockHeader::default()
@@ -2343,6 +2341,7 @@ mod tests {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -2352,6 +2351,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
             ],
             ..IrysBlockHeader::default()

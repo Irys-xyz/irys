@@ -9,10 +9,7 @@ use irys_actors::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     mempool_service::{MempoolServiceMessage, TxIngressError},
 };
-use irys_database::reth_db::transaction::DbTx as _;
-use irys_database::{
-    database, db::IrysDatabaseExt as _, reth_db::Database as _, tables::IngressProofs,
-};
+use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
     IrysTransactionResponse, H256,
@@ -218,16 +215,6 @@ pub async fn get_tx_is_promoted(
     let tx_id: H256 = path.into_inner();
     info!("Get tx_is_promoted by tx_id: {}", tx_id);
 
-    // create db read transaction
-    let ro_tx = state
-        .db
-        .as_ref()
-        .tx()
-        .map_err(|e| {
-            tracing::error!("Failed to create mdbx transaction: {}", e);
-        })
-        .unwrap();
-
     // Retrieve the transaction header from mempool or database
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     state
@@ -247,11 +234,10 @@ pub async fn get_tx_is_promoted(
             err: "Unable to find tx".to_owned(),
         })?;
 
-    // Read its ingress proof
-    if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-        assert_eq!(proof.proof.data_root, tx_header.data_root);
+    // Report its promoted status
+    if tx_header.promoted_height.is_some() {
         return Ok(web::Json(true));
-    };
+    }
 
     Ok(web::Json(false))
 }

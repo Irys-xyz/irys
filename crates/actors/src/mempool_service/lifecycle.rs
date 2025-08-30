@@ -4,7 +4,9 @@ use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, SystemLedger};
-use irys_types::{CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256};
+use irys_types::{
+    get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionId, H256,
+};
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -22,12 +24,7 @@ impl Inner {
         // into the mempool. In the future on a multi node network we may keep
         // ingress proofs around longer
         if !published_txids.is_empty() {
-            for (i, txid) in block.data_ledgers[DataLedger::Publish]
-                .tx_ids
-                .0
-                .iter()
-                .enumerate()
-            {
+            for txid in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter() {
                 // Retrieve the promoted transactions header
                 let tx_headers_result = self.handle_get_data_tx_message(vec![*txid]).await;
                 let mut tx_header = match tx_headers_result.as_slice() {
@@ -42,17 +39,9 @@ impl Inner {
                     }
                 };
 
-                // TODO: In a single node world there is only one ingress proof
-                // per promoted tx, but in the future there will be multiple proofs.
-                let proofs = block.data_ledgers[DataLedger::Publish]
-                    .proofs
-                    .as_ref()
-                    .unwrap();
-                let proof = proofs.0[i].clone();
-                tx_header.ingress_proofs = Some(proof);
+                tx_header.promoted_height = Some(block.height);
 
-                // Update the header record in the mempool to include the ingress
-                // proof, indicating it is promoted.
+                // Update the header record in the mempool to mark it as promoted this block
                 let mempool_state = &self.mempool_state.clone();
                 let mut mempool_state_write_guard = mempool_state.write().await;
 
@@ -400,7 +389,7 @@ impl Inner {
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .entry(tx)
-                    .and_modify(|tx| tx.ingress_proofs = None);
+                    .and_modify(|tx| tx.promoted_height = None);
             }
         }
 
@@ -426,36 +415,17 @@ impl Inner {
         let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
-                let id = tx.id;
+                let txid = tx.id;
                 let promoted_in_block = publish_tx_block_map.get(&tx.id).unwrap_or_else(|| {
                     panic!("new fork publish_tx_block_map missing tx {}", &tx.id)
                 });
 
                 let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
-                // get publish tx pos
-                let proof_idx = publish_ledger
-                    .tx_ids
-                    .iter()
-                    .position(|tx_id| *tx_id == tx.id)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "publish tx {} to be present in block {}",
-                            &tx.id, &promoted_in_block.block_hash
-                        )
-                    });
-                let proofs = publish_ledger.proofs.clone().unwrap_or_else(|| {
-                    panic!(
-                        "Publish ledger of block {} to have proofs",
-                        &promoted_in_block.block_hash
-                    )
-                });
-                let proof = proofs.get(proof_idx).unwrap_or_else(|| {
-                    panic!(
-                        "Publish ledger of block {} to have a proof at index {} for publish tx {}",
-                        &promoted_in_block.block_hash, &proof_idx, &tx.id
-                    )
-                });
-                tx.ingress_proofs = Some(proof.clone());
+
+                // Get the ingress proofs for this txid (also performs some validation)
+                let tx_proofs = get_ingress_proofs(publish_ledger, &txid)?;
+
+                tx.promoted_height = Some(promoted_in_block.height);
                 // update entry
                 {
                     let mut mempool_state_write_guard = self.mempool_state.write().await;
@@ -464,7 +434,11 @@ impl Inner {
                         .entry(tx.id)
                         .and_modify(|t| *t = tx);
                 }
-                debug!("Reorged dual-published proof {} for {}", &proof.proof, &id);
+                debug!(
+                    "Reorged dual-published tx with {} proofs for {}",
+                    &tx_proofs.len(),
+                    &txid
+                );
             } else {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",

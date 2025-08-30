@@ -696,35 +696,32 @@ impl Inner {
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
             for tx_header in &tx_headers {
-                let has_ingress_proof = tx_header.ingress_proofs.is_some();
-                debug!(
-                    "Publish candidate {} has ingress proof? {}",
-                    &tx_header.id, &has_ingress_proof
+                let is_promoted = tx_header.promoted_height.is_some();
+                warn!(
+                    "Publish candidate {} is already promoted? {}",
+                    &tx_header.id, &is_promoted
                 );
-                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
-                if !has_ingress_proof {
+                // If it's not promoted, validate the proofs
+                if !is_promoted {
                     // Get the proofs for this tx
                     let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
-                    // TODO: replace this section to properly handle multiple ingress proofs
-                    match proofs.first() {
-                        Some((_data_root, proof)) => {
-                            let mut tx_header = tx_header.clone();
-                            let ingress_proof = proof.proof.clone();
-                            debug!(
-                                "Got ingress proof {} for publish candidate {}",
-                                &tx_header.data_root, &tx_header.id
-                            );
-                            publish_proofs.push(ingress_proof.clone());
-                            tx_header.ingress_proofs = Some(ingress_proof);
-                            publish_txs.push(tx_header)
+
+                    let mut tx_proofs = Vec::new();
+
+                    // Check for the correct number of ingress proofs
+                    if (proofs.len() as u64) < self.config.consensus.number_of_ingress_proofs_total
+                    {
+                        // Not enough ingress proofs to promote this tx
+                        continue;
+                    } else {
+                        // Collect enough ingress proofs for promotion, but no more
+                        for i in 0..self.config.consensus.number_of_ingress_proofs_total {
+                            tx_proofs.push(proofs[i as usize].1.proof.clone());
                         }
-                        None => {
-                            error!(
-                                "No ingress proof found for data_root: {} tx: {}",
-                                tx_header.data_root, &tx_header.id
-                            );
-                            continue;
-                        }
+
+                        // Update the lists for the publish ledger txid and tx_proofs share an index
+                        publish_txs.push(tx_header.clone());
+                        publish_proofs.append(&mut tx_proofs);
                     }
                 }
             }
