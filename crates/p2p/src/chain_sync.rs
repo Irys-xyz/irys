@@ -13,7 +13,7 @@ use irys_types::{
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -838,8 +838,17 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         .in_current_span()
         .await;
     sync_state.finish_sync();
+
+
+
     info!("Sync task: Gossip service sync task completed");
     Ok(())
+}
+
+async fn pull_highest_blocks_from() {
+    let already_requested = HashSet::new();
+
+
 }
 
 async fn check_and_update_full_validation_switch_height(
