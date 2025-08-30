@@ -144,7 +144,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
             max_chunk_offset: 0,
             expires: None,
             proofs: None,
-            required_proof_count: Some(1),
+            required_proof_count: None,
         },
     ];
     test_signer.sign_block_header(&mut irys_block)?;
