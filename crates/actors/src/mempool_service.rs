@@ -259,6 +259,7 @@ impl Inner {
         }
     }
 
+    #[instrument(skip_all)]
     pub async fn validate_anchor_for_inclusion(
         &self,
         min_anchor_height: u64,
@@ -275,15 +276,18 @@ impl Inner {
             }
         };
         // these have to be inclusive so we handle txs near height 0 correctly
-        let old_enough = anchor_height >= min_anchor_height;
-        let new_enough = anchor_height <= max_anchor_height;
+        let new_enough = anchor_height >= min_anchor_height;
+        let old_enough = anchor_height <= max_anchor_height;
         if old_enough && new_enough {
             true
         } else if !old_enough {
             warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
             false
-        } else {
+        } else if !new_enough {
             warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+            false
+        } else {
+            error!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
             false
         }
     }
