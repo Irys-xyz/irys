@@ -655,8 +655,6 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         }
     };
 
-    let mut target = sync_state.sync_target_height() + block_index.len();
-
     let mut blocks_to_request = block_index.len();
 
     let mut block_queue = VecDeque::new();
@@ -672,6 +670,9 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     } else {
         sync_state.set_is_syncing(true);
     }
+
+    let mut sync_target = sync_state.sync_target_height() + block_queue.len();
+    sync_state.set_sync_target_height(sync_target);
 
     while let Some(block) = block_queue.pop_front() {
         if sync_state.is_queue_full() {
@@ -769,11 +770,11 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         tokio::spawn(
             async move {
                 debug!(
-                    "Sync task: Requesting block {:?} (sync height is {}) from the network",
+                    "Sync task: Requesting block {:?} (sync target height is {}) from the network",
                     block_hash,
                     sync_state_clone.sync_target_height()
                 );
-                sync_state_clone.increment_sync_target_height();
+
                 match data_handler
                     .pull_and_process_block(
                         block_hash,
@@ -809,20 +810,22 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
             let additional_index = get_block_index(
                 peer_list,
                 &api_client,
-                target,
+                sync_target,
                 BLOCK_BATCH_SIZE,
                 5,
                 is_trusted_mode,
             )
             .await?;
 
-            target += additional_index.len();
+            sync_target += additional_index.len();
+            sync_state.set_sync_target_height(sync_target);
+
             block_queue.extend(additional_index);
             blocks_to_request = block_queue.len();
             if blocks_to_request == 0 {
                 debug!(
                     "block index request for entries >{} returned no extra results",
-                    &target
+                    &sync_target
                 );
                 break;
             }
