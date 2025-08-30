@@ -2165,7 +2165,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
-                    required_proof_count: Some(1),
+                    required_proof_count: None,
                 },
             ],
             ..IrysBlockHeader::default()
@@ -2421,7 +2421,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
-                    required_proof_count: Some(1),
+                    required_proof_count: None,
                 },
             ],
             ..IrysBlockHeader::default()
