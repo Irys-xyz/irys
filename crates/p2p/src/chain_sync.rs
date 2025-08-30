@@ -9,7 +9,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
     Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
-    SyncMode, TokioServiceHandle,
+    PeerListItem, SyncMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
@@ -839,6 +839,17 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         .await;
     sync_state.finish_sync();
 
+    // After finishing primary sync, best-effort pull of all unique highest blocks announced by peers.
+    // This uses the same timeout logic as the retry path in the main sync loop.
+    match pull_unique_highest_blocks(peer_list, &api_client, gossip_data_handler.clone(), is_trusted_mode).await {
+        Ok(()) => {
+            debug!("Post-sync: Pulled unique highest blocks, if any");
+        }
+        Err(e) => {
+            warn!("Post-sync: Failed to pull unique highest blocks: {}", e);
+        }
+    }
+
 
 
     info!("Sync task: Gossip service sync task completed");
@@ -853,7 +864,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 /// - Otherwise, query the top `top_n` active peers (default 10 if None).
 ///
 /// For each selected peer, it requests `/info` and collects the `block_hash`.
-/// Returns a map of `block_hash -> Vec<miner_address>`; multiple peers may report
+/// Returns a map of `block_hash -> Vec<(miner_address, PeerListItem)>`; multiple peers may report
 /// the same hash, in which case all their miner addresses are grouped together.
 #[allow(dead_code)]
 async fn pull_highest_blocks(
@@ -861,7 +872,7 @@ async fn pull_highest_blocks(
     api_client: &impl ApiClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
-) -> ChainSyncResult<HashMap<BlockHash, Vec<Address>>> {
+) -> ChainSyncResult<HashMap<BlockHash, Vec<(Address, PeerListItem)>>> {
     // Pick peers: trusted or top N active
     let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Collecting highest blocks from trusted peers");
@@ -876,7 +887,7 @@ async fn pull_highest_blocks(
         return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
-    let mut by_hash: HashMap<BlockHash, Vec<Address>> = HashMap::new();
+    let mut by_hash: HashMap<BlockHash, Vec<(Address, PeerListItem)>> = HashMap::new();
 
     for (miner_address, peer) in peers {
         match api_client.node_info(peer.address.api).await {
@@ -884,8 +895,8 @@ async fn pull_highest_blocks(
                 let hash = info.block_hash;
                 let entry = by_hash.entry(hash).or_default();
                 // Avoid duplicates if same miner appears more than once (shouldn't, but safe)
-                if !entry.contains(&miner_address) {
-                    entry.push(miner_address);
+                if !entry.iter().any(|(addr, _)| addr == &miner_address) {
+                    entry.push((miner_address, peer.clone()));
                 }
                 debug!(
                     "Peer {:?} reported highest block hash {:?} (api: {})",
@@ -902,6 +913,67 @@ async fn pull_highest_blocks(
     }
 
     Ok(by_hash)
+}
+
+/// Collects unique highest block hashes from peers and pulls each of them in parallel.
+/// Each pull uses the same timeout logic as used elsewhere in the sync task.
+async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+    use_trusted_peers_only: bool,
+) -> ChainSyncResult<()> {
+    // Collect unique hashes with their reporting peers (trusted or top-N active peers)
+    let by_hash = pull_highest_blocks(peer_list, api_client, use_trusted_peers_only, None).await?;
+
+    if by_hash.is_empty() {
+        debug!("Post-sync: No unique highest blocks reported by peers");
+        return Ok(());
+    }
+
+    let mut futures = Vec::new();
+    for (block_hash, peers) in by_hash {
+        // Choose a peer to target for this block. For simplicity, pick the first reported peer.
+        if let Some(peer) = peers.get(0).cloned() {
+            let handler = gossip_data_handler.clone();
+            futures.push(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                    handler.pull_and_process_block_from_peer(block_hash, &peer),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        debug!(
+                            "Post-sync: Successfully pulled highest block {:?} from peer {:?}",
+                            block_hash, peer.0
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        warn!(
+                            "Post-sync: Failed to pull highest block {:?} from peer {:?}: {}",
+                            block_hash, peer.0, e
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Post-sync: Timeout ({}s) while pulling highest block {:?}",
+                            RETRY_BLOCK_REQUEST_TIMEOUT_SECS, block_hash
+                        );
+                    }
+                }
+            });
+        } else {
+            debug!(
+                "Post-sync: No peers associated with reported block hash {:?} (skipping)",
+                block_hash
+            );
+        }
+    }
+
+    // Run all pulls in parallel and wait for completion
+    futures::future::join_all(futures).await;
+    Ok(())
 }
 
 async fn check_and_update_full_validation_switch_height(
