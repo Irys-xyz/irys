@@ -25,7 +25,6 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, TERM_FEE};
-use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -34,6 +33,7 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
+use irys_types::{get_ingress_proofs, BlockHash};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -187,7 +187,9 @@ pub enum PreValidationError {
         "Publish ledger proof count ({proof_count}) does not match transaction count ({tx_count})"
     )]
     PublishLedgerProofCountMismatch { proof_count: usize, tx_count: usize },
-    #[error("Ingress proof count mismatch. Expected: {expected}, Actual: {actual}")]
+    #[error(
+        "Incorrect Ingress proof count to publish a transaction. Expected: {expected}, Actual: {actual}"
+    )]
     IngressProofCountMismatch { expected: usize, actual: usize },
     #[error("Transaction {tx_id} has invalid ingress proof: {reason}")]
     InvalidIngressProof { tx_id: H256, reason: String },
@@ -1597,13 +1599,13 @@ pub async fn data_txs_are_valid(
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                 // (they're waiting for proofs to arrive)
-                if tx.ingress_proofs.is_some() {
+                if tx.promoted_height.is_some() {
                     // TODO: This should be a hard error, but the test infrastructure currently
                     // creates transactions with ingress proofs that get placed in Submit ledger.
                     // This needs to be fixed in the block production logic to properly place
                     // transactions with proofs in the Publish ledger.
                     tracing::warn!(
-                        "Transaction {} in Submit ledger should not have ingress proofs",
+                        "Transaction {} in Submit ledger should not have a promoted_height",
                         tx.id
                     );
                 }
@@ -1611,58 +1613,51 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    let publish_proof_count = publish_ledger
-        .proofs
-        .as_ref()
-        .map(|x| x.0.len())
-        .unwrap_or_default();
-    if publish_proof_count != publish_txs.len() {
+    if publish_txs.is_empty() && publish_ledger.proofs.is_some() {
+        let proof_count = publish_ledger.proofs.as_ref().unwrap().len();
         return Err(PreValidationError::PublishLedgerProofCountMismatch {
-            proof_count: publish_proof_count,
+            proof_count,
             tx_count: publish_txs.len(),
         });
     }
 
     // Validate ingress proofs list matches Publish ledger transactions
     if let Some(proofs_list) = &publish_ledger.proofs {
-        if proofs_list.len() != publish_txs.len() {
-            return Err(PreValidationError::IngressProofCountMismatch {
-                expected: publish_txs.len(),
-                actual: proofs_list.len(),
+        let expected_proof_count =
+            publish_txs.len() * (config.consensus.number_of_ingress_proofs_total as usize);
+
+        if proofs_list.len() != expected_proof_count {
+            return Err(PreValidationError::PublishLedgerProofCountMismatch {
+                proof_count: proofs_list.len(),
+                tx_count: publish_txs.len(),
             });
         }
 
         // Validate each proof corresponds to the correct transaction
-        for item in publish_txs.iter().zip_longest(proofs_list.iter()) {
-            let EitherOrBoth::Both(tx, proof) = item else {
-                return Err(PreValidationError::PublishTxProofLengthMismatch);
-            };
-
-            // Validate ingress proofs are present
-            let Some(tx_proof) = tx.ingress_proofs.as_ref() else {
-                // TODO: This should be a hard error, but the current test infrastructure has
-                // race conditions where ingress proofs are generated but not properly attached
-                // to transactions in the Publish ledger during block validation.
-                tracing::warn!(
-                    "Transaction {} in Publish ledger missing ingress proofs",
-                    tx.id
-                );
-                continue;
-            };
-
-            // Validate ingress proof signature and data_root match
-            // The proof signature should be valid for the transaction's data_root
-            let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
+        for tx_header in publish_txs {
+            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|e| {
                 PreValidationError::InvalidIngressProof {
-                    tx_id: tx.id,
+                    tx_id: tx_header.id,
                     reason: e.to_string(),
                 }
             })?;
 
-            // TODO: use `verify_ingress_proof` to verify all ingress proof chunks and data
-            // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
-            if tx_proof.proof != proof.proof || tx_proof.signature != proof.signature {
-                return Err(PreValidationError::IngressProofMismatch { tx_id: tx.id });
+            // Loop though all the ingress proofs for the published transaction and pre-validate them
+            for ingress_proof in tx_proofs.iter() {
+                // Validate ingress proof signature and data_root match the transaction
+                let _ = ingress_proof
+                    .pre_validate(&tx_header.data_root)
+                    .map_err(|e| PreValidationError::InvalidIngressProof {
+                        tx_id: tx_header.id,
+                        reason: e.to_string(),
+                    })?;
+            }
+
+            if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
+                return Err(PreValidationError::IngressProofCountMismatch {
+                    expected: config.consensus.number_of_ingress_proofs_total as usize,
+                    actual: tx_proofs.len(),
+                });
             }
         }
     }
@@ -2160,6 +2155,7 @@ mod tests {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -2169,6 +2165,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
             ],
             ..IrysBlockHeader::default()
@@ -2414,6 +2411,7 @@ mod tests {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -2423,6 +2421,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
             ],
             ..IrysBlockHeader::default()

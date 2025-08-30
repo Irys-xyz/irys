@@ -736,6 +736,13 @@ pub trait BlockProdStrategy {
                     max_chunk_offset: publish_max_chunk_offset,
                     expires: None,
                     proofs: opt_proofs,
+                    required_proof_count: Some(
+                        self.inner()
+                            .config
+                            .consensus
+                            .number_of_ingress_proofs_total
+                            .try_into()?,
+                    ),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -751,6 +758,7 @@ pub trait BlockProdStrategy {
                             .submit_ledger_epoch_length,
                     ),
                     proofs: None,
+                    required_proof_count: None,
                 },
             ],
             evm_block_hash,
@@ -1127,21 +1135,11 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 
     bytes_added / chunk_size
 }
-/// When a block is confirmed, this message broadcasts the block header and the
-/// submit ledger TX that were added as part of this block.
-/// This works for bootstrap node mining, but eventually blocks will be received
-/// from peers and confirmed and their tx will be negotiated though the mempool.
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "eyre::Result<()>")]
-pub struct BlockConfirmedMessage(
-    pub Arc<IrysBlockHeader>,
-    pub Arc<Vec<DataTransactionHeader>>,
-);
 
 /// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
 /// acts as a placeholder for when the node will maintain a block tree of
 /// confirmed blocks and produce migrated blocks for the canonical chain when
-///  enough confirmations have occurred. Chunks are moved from the in-memory
+/// enough confirmations have occurred. Chunks are moved from the in-memory
 /// index to the storage modules when a block is migrated.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "eyre::Result<()>")]
