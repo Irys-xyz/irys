@@ -32,9 +32,8 @@ impl Inner {
                     .valid_submit_ledger_tx
                     .get(txid)
                     .cloned()
-                    .map(|tx| {
+                    .inspect(|_tx| {
                         debug!("Got tx {} from mempool", txid);
-                        tx
                     });
 
                 // Get and update DB header if needed
@@ -42,15 +41,14 @@ impl Inner {
                     .read_tx()
                     .ok()
                     .and_then(|read_tx| tx_header_by_txid(&read_tx, txid).unwrap_or(None))
-                    .map(|tx| {
+                    .inspect(|_tx| {
                         debug!("Got tx {} from DB", txid);
-                        tx
                     });
 
                 if let Some(ref mut db_tx) = db_header {
                     if db_tx.promoted_height.is_none() {
                         db_tx.promoted_height = Some(block.height);
-                        if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, &db_tx)) {
+                        if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
                             error!("Failed to update tx header in DB: {}", e);
                         }
                     }
