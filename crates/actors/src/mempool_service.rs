@@ -265,30 +265,24 @@ impl Inner {
         min_anchor_height: u64,
         max_anchor_height: u64,
         tx: &impl IrysTransactionCommon,
-    ) -> bool {
+    ) -> eyre::Result<bool> {
         let tx_id = tx.id();
         let anchor = tx.anchor();
-        let anchor_height = match self.get_anchor_height(tx_id, anchor).await {
-            Ok(h) => h,
-            Err(e) => {
-                warn!("Unable to get anchor height for {tx_id} {anchor} - {e}");
-                return false;
-            }
-        };
+        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
         let old_enough = anchor_height <= max_anchor_height;
         if old_enough && new_enough {
-            true
+            Ok(true)
         } else if !old_enough {
             warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
-            false
+            Ok(false)
         } else if !new_enough {
             warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
-            false
+            Ok(false)
         } else {
-            error!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
-            false
+            eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
         }
     }
 
@@ -459,7 +453,7 @@ impl Inner {
 
             if !self
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
-                .await
+                .await?
             {
                 continue;
             }
@@ -625,7 +619,7 @@ impl Inner {
 
             if !self
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
-                .await
+                .await?
             {
                 continue;
             }
