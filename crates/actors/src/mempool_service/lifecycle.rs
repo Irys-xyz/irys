@@ -3,7 +3,7 @@ use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_database::{insert_commitment_tx, SystemLedger};
+use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
 use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, H256,
@@ -22,40 +22,60 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
-        // FIXME: Loop though the promoted transactions and insert their ingress proofs
-        // into the mempool. In the future on a multi node network we may keep
-        // ingress proofs around longer
         if !published_txids.is_empty() {
             for txid in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter() {
-                // Retrieve the promoted transactions header
-                let tx_headers_result = self.handle_get_data_tx_message(vec![*txid]).await;
-                let mut tx_header = match tx_headers_result.as_slice() {
-                    [Some(header)] => header.clone(),
-                    [None] => {
-                        error!("No transaction header found for txid: {}", txid);
-                        continue;
+                // Get mempool header if available
+                let mempool_header = self
+                    .mempool_state
+                    .read()
+                    .await
+                    .valid_submit_ledger_tx
+                    .get(txid)
+                    .cloned()
+                    .map(|tx| {
+                        debug!("Got tx {} from mempool", txid);
+                        tx
+                    });
+
+                // Get and update DB header if needed
+                let mut db_header = self
+                    .read_tx()
+                    .ok()
+                    .and_then(|read_tx| tx_header_by_txid(&read_tx, txid).unwrap_or(None))
+                    .map(|tx| {
+                        debug!("Got tx {} from DB", txid);
+                        tx
+                    });
+
+                if let Some(ref mut db_tx) = db_header {
+                    if db_tx.promoted_height.is_none() {
+                        db_tx.promoted_height = Some(block.height);
+                        if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, &db_tx)) {
+                            error!("Failed to update tx header in DB: {}", e);
+                        }
                     }
-                    _ => {
-                        error!("Unexpected number of txids. Error fetching transaction header for txid: {}", txid);
-                        continue;
-                    }
+                }
+
+                // Use best available header and ensure it's promoted
+                let Some(mut header) = mempool_header.or(db_header) else {
+                    error!("No transaction header found for txid: {}", txid);
+                    continue;
                 };
 
-                tx_header.promoted_height = Some(block.height);
+                // This could be true for the mempool header
+                if header.promoted_height.is_none() {
+                    header.promoted_height = Some(block.height);
+                }
 
-                // Update the header record in the mempool to mark it as promoted this block
-                let mempool_state = &self.mempool_state.clone();
-                let mut mempool_state_write_guard = mempool_state.write().await;
-
-                mempool_state_write_guard
+                // Update mempool
+                let mut mempool_guard = self.mempool_state.write().await;
+                mempool_guard
                     .valid_submit_ledger_tx
-                    .insert(tx_header.id, tx_header.clone());
-                mempool_state_write_guard
-                    .recent_valid_tx
-                    .put(tx_header.id, ());
-                drop(mempool_state_write_guard);
+                    .insert(header.id, header.clone());
+                mempool_guard.recent_valid_tx.put(header.id, ());
+                drop(mempool_guard);
 
-                info!("Promoted tx:\n{:#?}", tx_header);
+                info!("Promoted tx:\n{:#?}", header);
             }
         }
 
