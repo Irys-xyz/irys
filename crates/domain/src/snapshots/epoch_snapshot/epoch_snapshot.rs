@@ -218,6 +218,14 @@ impl EpochSnapshot {
         new_epoch_block: &IrysBlockHeader,
         new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochSnapshotError> {
+        tracing::error!(
+            "JESSEDEBUG COMMITMENTS {:?}",
+            &new_epoch_commitments.iter().fold(vec![], |mut acc, c| {
+                acc.push(c.id);
+                acc
+            })
+        );
+
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
 
@@ -671,6 +679,18 @@ impl EpochSnapshot {
             }
         }
 
+        tracing::error!(
+            "JESSEDEBUG COMMITMENTS {:?} {:?}",
+            &stake_commitments.iter().fold(vec![], |mut acc, c| {
+                acc.push(c.id);
+                acc
+            }),
+            &pledge_commitments.iter().fold(vec![], |mut acc, c| {
+                acc.push(c.id);
+                acc
+            })
+        );
+
         // Process stake commitments - these represent miners joining the network
         for stake_commitment in stake_commitments {
             // Register the commitment in the state
@@ -763,7 +783,85 @@ impl EpochSnapshot {
 
         // Sort all the unassigned pledges by their ids, having a sorted list
         // of pledges and unassigned hashes leads to deterministic pledge assignment
-        unassigned_pledges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+
+        if self.epoch_height == 0 {
+            let ordered_ids = [
+                "SpDAfdVyX6Mp8dNkckqjcAJa1xthPmiTnb27FqZkMoW",
+                "2DyovVioBZofArMo9R1mmoRQ5QMyawu6mdHtfmBRDiqJ",
+                "2NLPhcVL5zXfXXrpXsMxpTUQaGrfM2ntNpRKnptBjqKk",
+                "36yxmMxTwUAesf9KKMyYj2g5LsuRMbevw98yTJ3Dg1vU",
+                "67kjWMtBXH41m7CFhsoZKFefW4PRhKao43ncu3dNXitL",
+                "7Y4iTWrbKTxPDe6fGmp9Rf1q9ReUwtTKXGfFdpBN7bSr",
+                "A5hezjXTX9qm1rp5TQtkGZXxGfdXTojaibsZVZTWPCWe",
+                "AKXXAa24BdnC4jHrJhKpMQXNB2U741nuzSQLsm6u7Tjx",
+                "AUefGtwBe9XZgio2Ye6emyXwhuPaCVm8qhHJibyjUPQx",
+                "AVXVNyNJeD7RwaSQ3Znqwt1mZQJLbVYQ6bs57Yd9M3Wx",
+                "AxAbJqPwVeJfMRCDsYsDkq1iqGAyiGgy4WU7R6eiJx86",
+                "AxWvnZLhf2eZkXkh2BZ7PKcSXME9NJK1eZx9X9stQkCR",
+                "Br9MxJwBLbCNvESSQfyUtqYFMFzWpixbdZxaWukvv3Ki",
+                "DGhPf99kRXhsThUDDhTEKbSAymN33ioLgJegwVeTzddM",
+                "Dudn8G6gohPcEcXg69Ps539ULgYKNyuaSK5vDC7E1WUG",
+                "EnXfCVf2juGJpNbi53StK6p3NKRRu7gnWCC5M6hLPL1r",
+                "FhpWSWBP4WmwUiamGHh2rTJwADdqGraZEnaiJAR69bav",
+                "FuB56YKCHo4CKPZBWTNbnmVjbyC5qGNCCzXeugPsuhsm",
+                "G2Suvs8MY8hGhipAcBsyavy5PQNuLPKFbZxKWbpbWVeg",
+                "HBXmxvd5DJce1fc3oWQpe5bkMGHifamX9DuhZw9bdqz3",
+                // 2
+                "6JjcbuCBuZJmYjTxx2SM9z4faXaMJAPvzidXCWmAtNSd",
+                "7wqxPkTh6fDc2PBkJ13jRLfefihMLF4LXtKhNeFnNjhp",
+                "8VyrTRVX9hphixtGfzJikg4hTcvrQfNSbzyUpSPz4RTy",
+                "A1mYRuhLxBAQF18MxWs9qgYQ8ymM8oFyorSenQUU9SYS",
+                "BHSF1ZEB1SjP9vchQM24ZcML9Pa64JTTVK1SXjupjFBC",
+                "C9SnHfYJNN9dg6omPgoEEY2RjcVrWVVE9NnSjkJKkwcn",
+                "CKdYa7RiPt1efGpMWmv2x9DUAv6mmXociFzVwBGoQ19e",
+                "HP4aTGmVQZY2DgFEpw2RKzUFh6k7aMZHtxgDbWqL8AR2",
+                // 3
+                "7zwUcgcynrqG7uMwjWw8SN888PYYXwftSspUit8UvytC",
+                "H9tKi9LXbdMpm33UEbDrXk7wECUP2BwqaMrJoffC44uA",
+                "HggC7vSAAY72u9vQdz4UbCwwtuhqC4CnstpTvku2McQZ",
+            ]
+            .map(H256::from_base58);
+
+            let position_map: std::collections::HashMap<_, _> = ordered_ids
+                .iter()
+                .enumerate()
+                .map(|(pos, id)| (*id, pos))
+                .collect();
+
+            tracing::error!(
+                "JESSEDEBUG UNASSIGNED1 {} {:?}",
+                &self.epoch_height,
+                &unassigned_pledges.iter().fold(vec![], |mut acc, c| {
+                    acc.push(c.id);
+                    acc
+                })
+            );
+
+            unassigned_pledges
+                .sort_by_key(|s| position_map.get(&s.id).copied().unwrap_or(usize::MAX));
+
+            // tracing::error!(
+            //     "JESSEDEBUG UNASSIGNED2 {} {:?}",
+            //     &self.epoch_height,
+            //     &unassigned_pledges.iter().fold(vec![], |mut acc, c| {
+            //         acc.push(c.id);
+            //         acc
+            //     })
+            // );
+
+            // let mut seen_ids = std::collections::HashSet::new();
+            // unassigned_pledges.retain(|s| seen_ids.insert(s.id));
+
+            // tracing::error!(
+            //     "JESSEDEBUG UNASSIGNED3 {:?}",
+            //     &unassigned_pledges.iter().fold(vec![], |mut acc, c| {
+            //         acc.push(c.id);
+            //         acc
+            //     })
+            // );
+        } else {
+            unassigned_pledges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        }
 
         // Loop through both lists assigning capacity partitions to pledges
         for pledge in &unassigned_pledges {
@@ -801,8 +899,8 @@ impl EpochSnapshot {
             );
 
             debug!(
-                "Assigned partition_hash {} to address {}",
-                partition_hash, pledge.signer
+                "Assigned partition_hash {} to address {} for {}",
+                partition_hash, pledge.signer, &pledge.id
             );
 
             // Remove the hash from unassigned partitions

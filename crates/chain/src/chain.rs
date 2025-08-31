@@ -941,6 +941,12 @@ impl IrysNode {
         debug!("Chunk cache initialized");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+
+        error!(
+            "JESSEDEBUG PARTITION ASSIGNMENTS {:#?}\n COMMITMENTS {:#?}",
+            &epoch_snapshot.partition_assignments, &replay_data
+        );
+
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
