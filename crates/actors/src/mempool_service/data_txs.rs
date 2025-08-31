@@ -56,7 +56,6 @@ impl Inner {
 
         tx.promoted_height = None;
 
-
         {
             let mempool_state_read_guard = self.mempool_state.read().await;
 

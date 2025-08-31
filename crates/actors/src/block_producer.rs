@@ -440,7 +440,7 @@ pub trait BlockProdStrategy {
             return Ok(None);
         };
 
-        if block.data_ledgers[DataLedger::Publish].tx_ids.len() > 0 {
+        if !block.data_ledgers[DataLedger::Publish].tx_ids.is_empty() {
             let x = 5;
             debug!(
                 "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?} {}",

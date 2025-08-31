@@ -47,14 +47,9 @@ async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     genesis_node.start_mining().await;
 
     genesis_node.wait_until_height(1, seconds_to_wait).await?;
-    let block_height_1 = genesis_node.get_block_by_height(1).await?;
-    
-    let peer1_stake_tx = peer1_node
-        .post_stake_commitment(None)
-        .await?;
-    let peer2_stake_tx = peer2_node
-        .post_stake_commitment(None)
-        .await?;
+
+    let peer1_stake_tx = peer1_node.post_stake_commitment(None).await?;
+    let peer2_stake_tx = peer2_node.post_stake_commitment(None).await?;
 
     genesis_node
         .wait_for_mempool_commitment_txs(

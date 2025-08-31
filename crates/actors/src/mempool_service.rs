@@ -770,7 +770,10 @@ impl Inner {
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
             for tx_header in &tx_headers {
-                debug!("Processing candidate tx {} {:#?}", &tx_header.id, &tx_header);
+                debug!(
+                    "Processing candidate tx {} {:#?}",
+                    &tx_header.id, &tx_header
+                );
                 let is_promoted = tx_header.promoted_height.is_some();
 
                 if is_promoted {

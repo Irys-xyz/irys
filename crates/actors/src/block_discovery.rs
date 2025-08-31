@@ -903,8 +903,6 @@ where
         } else {
             missing.push(tx_id);
         }
-
-       
     }
 
     if missing.is_empty() {
