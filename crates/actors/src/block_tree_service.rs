@@ -794,7 +794,12 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (arc_block, new_epoch_block, Some(event), finalized_at_prune_depth)
+                    (
+                        arc_block,
+                        new_epoch_block,
+                        Some(event),
+                        finalized_at_prune_depth,
+                    )
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
