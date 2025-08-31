@@ -4,7 +4,6 @@ use irys_database::{
     cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
-    insert_tx_header,
 };
 use irys_domain::{
     get_overlapped_storage_modules, BlockIndex, StorageModule, StorageModulesReadGuard,
@@ -15,7 +14,6 @@ use irys_types::{
     DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     TxChunkOffset, UnpackedChunk, H256,
 };
-use reth_db::Database as _;
 use std::sync::{Arc, RwLock};
 use tracing::{error, instrument};
 
@@ -137,31 +135,6 @@ impl Handler<BlockMigrationMessage> for ChunkMigrationService {
                 &db,
             )
             .map_err(|()| eyre!("Unexpected error processing publish ledger transactions"))?;
-
-            let write_tx = db.tx_mut().map_err(|e| {
-                eyre!(
-                    "Unexpected error processing publish ledger transactions {}",
-                    &e
-                )
-            })?;
-            error!(
-                "JESSEDEBUG WRITING PUBLISH TXS {:?}",
-                &publish_txs.iter().fold(vec![], |mut acc, tx| {
-                    acc.push(tx.id);
-                    acc
-                })
-            );
-
-            for tx in publish_txs {
-                insert_tx_header(&write_tx, &tx).map_err(|e| {
-                    eyre!(
-                        "Unexpected error processing publish ledger transactions {}",
-                        &e
-                    )
-                })?;
-            }
-            use reth_db::transaction::DbTx as _;
-            write_tx.commit()?;
 
             // forward the finalization message to the cache service for cleanup
             let _ = service_senders
