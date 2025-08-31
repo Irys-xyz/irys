@@ -659,7 +659,7 @@ impl Inner {
                 .for_each(|mut header| {
                     if header.promoted_height.is_none() {
                         header.promoted_height = Some(event.block.height);
-                        error!(
+                        panic!(
                             "Migrating publish tx with no promoted_height {} at height {}",
                             header.id, event.block.height
                         );
