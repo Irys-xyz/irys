@@ -54,7 +54,7 @@ impl Inner {
                     .put(tx_header.id, ());
                 drop(mempool_state_write_guard);
 
-                info!("Promoted tx:\n{:?}", tx_header);
+                info!("Promoted tx:\n{:#?}", tx_header);
             }
         }
         self.prune_pending_txs().await;
@@ -640,21 +640,24 @@ impl Inner {
             let publish_tx_headers = self
                 .handle_get_data_tx_message(publish_tx_ids.clone())
                 .await;
+
             publish_tx_headers
                 .into_iter()
-                .for_each(|maybe_header| match maybe_header {
-                    Some(ref header) => {
-                        // When a block was confirmed, handle_block_confirmed_message() updates the mempool submit tx headers with ingress proofs
-                        // this means the header includes the proofs when we now insert (overwrite existing entry) into the database
-                        if let Err(err) = insert_tx_header(&mut_tx, header) {
-                            error!(
-                                "Could not insert transaction header - txid: {} err: {}",
-                                header.id, err
-                            );
-                        }
+                .filter_map(|maybe_header| maybe_header)
+                .for_each(|mut header| {
+                    if header.promoted_height.is_none() {
+                        header.promoted_height = Some(event.block.height);
+                        error!(
+                            "Migrating publish tx with no promoted_height {} at height {}",
+                            header.id, event.block.height
+                        );
                     }
-                    None => {
-                        error!("Could not find transaction header in mempool");
+
+                    if let Err(err) = insert_tx_header(&mut_tx, &header) {
+                        error!(
+                            "Could not insert transaction header - txid: {} err: {}",
+                            header.id, err
+                        );
                     }
                 });
             mut_tx.commit().expect("expect to commit to database");

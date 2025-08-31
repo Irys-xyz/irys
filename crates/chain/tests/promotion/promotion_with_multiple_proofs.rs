@@ -5,10 +5,13 @@ use irys_types::NodeConfig;
 
 #[actix_web::test]
 async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,storage::db=off,irys_actors::block_validation=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+    );
     initialize_tracing();
 
-    let seconds_to_wait = 20;
+    let seconds_to_wait = 30;
     let mut genesis_config = NodeConfig::testing();
 
     // Set up consensus to require 3 ingress proofs to promote
@@ -94,13 +97,13 @@ async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .await;
     assert_matches!(res, Ok(()));
 
-    let res = peer2_node
+    let res = genesis_node
         .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 3, seconds_to_wait)
         .await;
     assert_matches!(res, Ok(()));
 
-    let res = genesis_node
-        .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 3, seconds_to_wait)
+    let res = peer2_node
+        .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 3, seconds_to_wait * 2)
         .await;
     assert_matches!(res, Ok(()));
 

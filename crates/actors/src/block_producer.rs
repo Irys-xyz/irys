@@ -440,6 +440,20 @@ pub trait BlockProdStrategy {
             return Ok(None);
         };
 
+        if block.data_ledgers[DataLedger::Publish].tx_ids.len() > 0 {
+            let x = 5;
+            debug!(
+                "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?} {}",
+                block.block_hash,
+                block.height,
+                block.solution_hash,
+                block.vdf_limiter_info.global_step_number,
+                block.previous_block_hash,
+                block.data_ledgers[DataLedger::Publish].tx_ids,
+                x
+            );
+        }
+
         let block = self.broadcast_block(block, stats).await?;
         let Some(block) = block else { return Ok(None) };
         Ok(Some((block, eth_built_payload)))
