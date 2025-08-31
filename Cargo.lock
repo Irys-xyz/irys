@@ -5333,6 +5333,7 @@ dependencies = [
  "reth-node-metrics",
  "serde",
  "strum 0.27.2",
+ "serde_json",
  "tempfile",
  "test-fuzz",
  "test-log",
