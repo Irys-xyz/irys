@@ -660,7 +660,7 @@ impl IrysBlockHeader {
                     max_chunk_offset: 0,
                     expires: Some(1622543200),
                     proofs: None,
-                    required_proof_count: Some(1),
+                    required_proof_count: None,
                 },
             ],
             evm_block_hash: B256::ZERO,
@@ -980,7 +980,7 @@ mod tests {
                 data_root: H256::random(),
                 chain_id: 1,
             }])),
-            required_proof_count: Some(1),
+            required_proof_count: None,
         };
 
         // action

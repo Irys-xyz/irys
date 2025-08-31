@@ -63,9 +63,7 @@ impl IrysChainSpecBuilder {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
-                    required_proof_count: Some(
-                        config.consensus.number_of_ingress_proofs_total as u8,
-                    ),
+                    required_proof_count: None,
                 },
             ],
             evm_block_hash: B256::ZERO,
