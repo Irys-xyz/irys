@@ -629,10 +629,17 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                 Err(ChainSyncError::Network(
                     "No trusted peers available".to_string(),
                 ))
-            }
+            };
         }
 
-        if let Err(err) = check_and_update_full_validation_switch_height(config, peer_list, &api_client, &sync_state).await {
+        if let Err(err) = check_and_update_full_validation_switch_height(
+            config,
+            peer_list,
+            &api_client,
+            &sync_state,
+        )
+        .await
+        {
             if is_a_genesis_node {
                 warn!("Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}", err);
             } else {
