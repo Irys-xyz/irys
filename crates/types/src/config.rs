@@ -971,8 +971,8 @@ impl NodeConfig {
         }
     }
 
-    pub fn api_uri(&self) -> String {
-        format!("http://{}:{}", self.http.public_ip, self.http.public_port)
+    pub fn local_api_url(&self) -> String {
+        format!("http://{}:{}", self.http.bind_ip, self.http.bind_port)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

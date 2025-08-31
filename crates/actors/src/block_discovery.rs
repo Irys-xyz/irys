@@ -842,16 +842,16 @@ where
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
 
-            let x = tx_ids
+            let x: HashMap<IrysTransactionId, DataTransactionHeader> = tx_ids
                 .into_iter()
                 .zip(results.into_iter())
-                .map(|(id, opt)| {
-                    let header = opt.unwrap_or_else(|| {
-                        panic!("tx header missing after filter for id {:?}", id)
-                    });
-                    (id, header)
-                })
-                .collect::<HashMap<IrysTransactionId, DataTransactionHeader>>();
+                .fold(HashMap::new(), |mut map, (id, opt)| {
+                    if let Some(header) = opt {
+                        map.insert(id, header);
+                    }
+                    map
+                });
+
             Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }
     };

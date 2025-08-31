@@ -1744,7 +1744,7 @@ async fn stake_and_pledge(
     let signer = config.irys_signer();
     let address = signer.address();
 
-    let api_uri = config.node_config.api_uri();
+    let api_uri = config.node_config.local_api_url();
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();
