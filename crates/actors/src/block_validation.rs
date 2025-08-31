@@ -139,10 +139,17 @@ pub enum PreValidationError {
     LastEpochHashMismatch { expected: BlockHash, got: BlockHash },
     #[error("Transaction {tx_id} in Publish ledger must have a prior Submit ledger inclusion")]
     PublishTxMissingPriorSubmit { tx_id: H256 },
+
     #[error("Transaction {tx_id} already included in previous Publish ledger")]
-    PublishTxAlreadyIncluded { tx_id: H256 },
-    #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger")]
-    SubmitTxAlreadyIncluded { tx_id: H256, ledger: DataLedger },
+    PublishTxAlreadyIncluded { tx_id: H256, block_hash: BlockHash },
+
+    #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}")]
+    SubmitTxAlreadyIncluded {
+        tx_id: H256,
+        ledger: DataLedger,
+        block_hash: BlockHash,
+    },
+
     #[error("Transaction {tx_id} found in multiple previous blocks. First occurrence in {ledger:?} ledger at block {block_hash}")]
     TxFoundInMultipleBlocks {
         tx_id: H256,
@@ -1459,6 +1466,7 @@ pub async fn data_txs_are_valid(
                 TxInclusionState::Found {
                     ledger_current: DataLedger::Publish,
                     ledger_historical: DataLedger::Submit,
+                    block_hash: block.block_hash,
                 }
             } else {
                 TxInclusionState::Searching { ledger_current }
@@ -1498,6 +1506,7 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Found {
                 ledger_current,
                 ledger_historical,
+                block_hash,
             } => {
                 match (ledger_current, ledger_historical) {
                     (DataLedger::Publish, DataLedger::Submit) => {
@@ -1508,13 +1517,17 @@ pub async fn data_txs_are_valid(
                         );
                     }
                     (DataLedger::Publish, DataLedger::Publish) => {
-                        return Err(PreValidationError::PublishTxAlreadyIncluded { tx_id: tx.id });
+                        return Err(PreValidationError::PublishTxAlreadyIncluded {
+                            tx_id: tx.id,
+                            block_hash: *block_hash,
+                        });
                     }
                     (DataLedger::Submit, _) => {
                         // Submit tx should not have any past inclusion
                         return Err(PreValidationError::SubmitTxAlreadyIncluded {
                             tx_id: tx.id,
                             ledger: *ledger_historical,
+                            block_hash: *block_hash,
                         });
                     }
                 }
@@ -1697,6 +1710,7 @@ enum TxInclusionState {
     Found {
         ledger_current: DataLedger,
         ledger_historical: DataLedger,
+        block_hash: BlockHash,
     },
     Duplicate {
         ledger_historical: (DataLedger, BlockHash),
@@ -1800,6 +1814,7 @@ fn process_block_ledgers_with_states(
                         *state = TxInclusionState::Found {
                             ledger_current: *ledger_current,
                             ledger_historical: ledger_type,
+                            block_hash,
                         };
                     }
                     TxInclusionState::Found { .. } => {

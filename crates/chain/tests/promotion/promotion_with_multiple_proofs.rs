@@ -7,7 +7,7 @@ use irys_types::NodeConfig;
 async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
-        "debug,storage::db=off,irys_actors::block_validation=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
     );
     initialize_tracing();
 
@@ -48,11 +48,12 @@ async fn heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
 
     genesis_node.wait_until_height(1, seconds_to_wait).await?;
     let block_height_1 = genesis_node.get_block_by_height(1).await?;
+    
     let peer1_stake_tx = peer1_node
-        .post_stake_commitment(Some(block_height_1.block_hash))
+        .post_stake_commitment(None)
         .await?;
     let peer2_stake_tx = peer2_node
-        .post_stake_commitment(Some(block_height_1.block_hash))
+        .post_stake_commitment(None)
         .await?;
 
     genesis_node

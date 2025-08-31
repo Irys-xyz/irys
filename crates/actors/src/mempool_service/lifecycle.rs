@@ -149,7 +149,16 @@ impl Inner {
 
         let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
 
-        anchor_height < resolved_expiry_depth
+        let should_prune = anchor_height < resolved_expiry_depth;
+        debug!(
+            "TX {} anchor {} height {}, expiry is set to <{}, should prune? {}",
+            &tx.id(),
+            &tx.anchor(),
+            &anchor_height,
+            &resolved_expiry_depth,
+            &should_prune
+        );
+        should_prune
     }
 
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
@@ -643,7 +652,7 @@ impl Inner {
 
             publish_tx_headers
                 .into_iter()
-                .filter_map(|maybe_header| maybe_header)
+                .flatten()
                 .for_each(|mut header| {
                     if header.promoted_height.is_none() {
                         header.promoted_height = Some(event.block.height);
