@@ -15,6 +15,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
+    #[instrument(skip_all, fields(hash= %block.block_hash, height = %block.height), err)]
     pub async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
@@ -57,6 +58,7 @@ impl Inner {
                 info!("Promoted tx:\n{:#?}", tx_header);
             }
         }
+
         self.prune_pending_txs().await;
 
         Ok(())
@@ -145,7 +147,8 @@ impl Inner {
         };
 
         let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
-            + self.config.consensus.block_migration_depth;
+            + self.config.consensus.block_migration_depth
+            + 5;
 
         let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
 

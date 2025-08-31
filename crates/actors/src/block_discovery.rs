@@ -500,7 +500,7 @@ impl BlockDiscoveryServiceInner {
             new_block_header.block_hash,
             new_block_header.height,
             new_block_header.get_commitment_ledger_tx_ids(),
-            commitments.iter().map(|x| x.id).collect::<Vec<_>>()
+            new_block_header.get_data_ledger_tx_ids()
         );
 
         // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
@@ -890,6 +890,8 @@ where
     );
 
     // Combine results, preferring mempool
+    // this is because unmigrated promoted txs get their promoted_height updated in the mempool ONLY
+    // so we need to prefer it.
     let mut headers = Vec::with_capacity(data_tx_ids.len());
     let mut missing = Vec::new();
 
@@ -901,6 +903,8 @@ where
         } else {
             missing.push(tx_id);
         }
+
+       
     }
 
     if missing.is_empty() {

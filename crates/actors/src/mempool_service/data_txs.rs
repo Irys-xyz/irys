@@ -55,6 +55,9 @@ impl Inner {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
 
         tx.promoted_height = None;
+        // if tx.promoted_height.is_some() {
+        //     panic!("GOT PROMOTION {:#?}", &tx)
+        // }
 
         {
             let mempool_state_read_guard = self.mempool_state.read().await;

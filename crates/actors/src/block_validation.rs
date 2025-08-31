@@ -140,7 +140,9 @@ pub enum PreValidationError {
     #[error("Transaction {tx_id} in Publish ledger must have a prior Submit ledger inclusion")]
     PublishTxMissingPriorSubmit { tx_id: H256 },
 
-    #[error("Transaction {tx_id} already included in previous Publish ledger")]
+    #[error(
+        "Transaction {tx_id} already included in previous Publish ledger in block {block_hash:?}"
+    )]
     PublishTxAlreadyIncluded { tx_id: H256, block_hash: BlockHash },
 
     #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}")]
