@@ -12,7 +12,7 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, SystemLedger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
     ExecutionPayloadCache,
@@ -48,7 +48,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tracing::{debug, error, info, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
@@ -204,6 +204,8 @@ pub enum PreValidationError {
     InvalidIngressProof { tx_id: H256, reason: String },
     #[error("Ingress proof mismatch for transaction {tx_id}")]
     IngressProofMismatch { tx_id: H256 },
+    #[error("Database Error {error}")]
+    DatabaseError { error: String },
 }
 
 /// Full pre-validation steps for a block
@@ -1488,16 +1490,25 @@ pub async fn data_txs_are_valid(
     .await
     .map_err(|e| PreValidationError::PreviousTxInclusionsFailed(e.to_string()))?;
 
+    let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
+        error: e.to_string(),
+    })?;
+
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // Publish tx with no past inclusion - INVALID
-                        return Err(PreValidationError::PublishTxMissingPriorSubmit {
-                            tx_id: tx.id,
-                        });
+                        // check the db - if we can fetch it, we have a previous inclusion
+                        if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                            warn!("had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth", &_header, &tx.id, &tx);
+                        } else {
+                            // Publish tx with no past inclusion - INVALID
+                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
+                                tx_id: tx.id,
+                            });
+                        }
                     }
                     DataLedger::Submit => {
                         // Submit tx with no past inclusion - VALID (new transaction)
