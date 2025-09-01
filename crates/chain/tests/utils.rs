@@ -1846,10 +1846,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // Announce both ways between two nodes
-    pub async fn announce_between(
-        a: &Self,
-        b: &Self,
-    ) -> eyre::Result<()> {
+    pub async fn announce_between(a: &Self, b: &Self) -> eyre::Result<()> {
         a.announce_to(b).await?;
         b.announce_to(a).await?;
         Ok(())
