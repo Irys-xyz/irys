@@ -19,7 +19,7 @@ impl Inner {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted
-        let whitelist = &self.config.consensus.stake_pledge_whitelist;
+        let whitelist = &self.stake_and_pledge_whitelist;
         if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
             warn!(
                 "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",

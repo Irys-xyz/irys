@@ -788,4 +788,8 @@ where
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
         }
     }
+
+    pub(crate) async fn handle_get_address_whitelist(&self) {
+
+    }
 }
