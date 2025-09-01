@@ -20,6 +20,7 @@ use reth::primitives::Block;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
+use irys_primitives::Address;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -789,7 +790,7 @@ where
         }
     }
 
-    pub(crate) async fn handle_get_address_whitelist(&self) {
-
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
+        self.mempool.get_stake_and_pledge_whitelist().await.into_iter().collect()
     }
 }

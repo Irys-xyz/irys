@@ -136,6 +136,7 @@ pub enum MempoolServiceMessage {
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
     UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
+    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
 }
 
 impl Inner {
@@ -252,6 +253,12 @@ impl Inner {
                 MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
                     self.stake_and_pledge_whitelist.extend(new_entries);
                     if let Err(e) = response.send(()) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
+                    let whitelist = self.stake_and_pledge_whitelist.clone();
+                    if let Err(e) = tx.send(whitelist) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
