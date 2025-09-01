@@ -1192,6 +1192,9 @@ pub enum TxIngressError {
     /// Commitment transaction validation error
     #[error("Commitment validation failed: {0}")]
     CommitmentValidationError(#[from] CommitmentValidationError),
+    /// Failed to fetch account balance from RPC
+    #[error("Failed to fetch balance for address {address}: {reason}")]
+    BalanceFetchError { address: String, reason: String },
 }
 
 impl TxIngressError {
