@@ -94,7 +94,7 @@ impl GossipClient {
 
         let res = self.send_data_internal(url, &requested_data, false).await;
         let response_time = start_time.elapsed();
-        Self::handle_data_provision_score(peer_list, &res, &peer.0, response_time);
+        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
         res
     }
 
@@ -111,7 +111,7 @@ impl GossipClient {
 
         let res = self.send_data_internal(url, &requested_data, false).await;
         let response_time = start_time.elapsed();
-        Self::handle_data_provision_score(peer_list, &res, &peer.0, response_time);
+        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
         res
     }
 
@@ -300,8 +300,8 @@ impl GossipClient {
         }
     }
 
-    /// Handle scoring for data provision requests based on response time and success
-    fn handle_data_provision_score<T>(
+    /// Handle scoring for data retrieval operations based on response time and success
+    fn handle_data_retrieval_score<T>(
         peer_list: &PeerList,
         result: &GossipResult<T>,
         peer_miner_address: &Address,
