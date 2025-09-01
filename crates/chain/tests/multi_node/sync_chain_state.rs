@@ -594,8 +594,9 @@ async fn poll_peer_list(
     ctx_node: &IrysNodeTest<IrysNodeCtx>,
     desired_count_of_items: usize,
 ) -> Vec<PeerAddress> {
-    let max_attempts = 200;
-    for _ in 0..max_attempts {
+    // Increase the window to better accommodate CI variance
+    let max_attempts = 400;
+    for attempt in 0..max_attempts {
         sleep(Duration::from_millis(100)).await;
 
         let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
