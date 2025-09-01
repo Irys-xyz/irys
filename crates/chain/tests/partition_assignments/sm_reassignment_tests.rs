@@ -26,6 +26,7 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     genesis_config.consensus.get_mut().chunk_size = chunk_size as u64;
     genesis_config.consensus.get_mut().num_chunks_in_partition = 10;
     genesis_config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
+    genesis_config.consensus.get_mut().block_migration_depth = 1; // <- so we lose less blocks in the restart
     genesis_config
         .consensus
         .get_mut()
@@ -95,11 +96,14 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
         .expect("to retrieve the partition assignment");
     assert!(reassigned_pa.ledger_id == Some(1) && reassigned_pa.slot_index == Some(2));
 
+    // Mine on block past the epoch so the node restarts with the new assignments
+    let _block9 = genesis_node.mine_block().await?;
+
     let stopped_node = genesis_node.stop().await;
     let restarted_node = stopped_node.start().await;
 
     // Wait for the restarted node to mine a block
-    let _block = restarted_node.mine_block().await?;
+    let _block9 = restarted_node.mine_block().await?;
 
     // Verify all it's partition assignments are correct
     let new_reassigned_pa = restarted_node
