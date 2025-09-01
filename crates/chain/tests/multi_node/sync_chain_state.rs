@@ -554,7 +554,18 @@ async fn poll_until_fetch_at_block_index_height(
             attempts += 1;
         }
 
-        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        let json_response: NodeInfo = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(
+                    "{} attempt {}: failed to parse NodeInfo JSON: {}",
+                    node_name, attempts, e
+                );
+                // wait briefly and retry
+                sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         debug!("Fetched info endpoint response: {:?}", json_response);
         if required_blocks_height > json_response.block_index_height {
             tracing::debug!(
