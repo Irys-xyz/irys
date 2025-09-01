@@ -204,6 +204,8 @@ pub enum PreValidationError {
     InvalidIngressProof { tx_id: H256, reason: String },
     #[error("Ingress proof mismatch for transaction {tx_id}")]
     IngressProofMismatch { tx_id: H256 },
+    #[error("Duplicate ingress proof signer {signer} for transaction {tx_id}")]
+    DuplicateIngressProofSigner { tx_id: H256, signer: Address },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
 }
@@ -392,6 +394,14 @@ pub async fn prevalidate_block(
             expected: reward.amount,
         });
     }
+
+    // Validate ingress proof signer uniqueness
+    validate_unique_ingress_proof_signers(&block)?;
+    debug!(
+        block_hash = ?block.block_hash,
+        ?block.height,
+        "ingress_proof_signers_unique",
+    );
 
     // After pre-validating a bunch of quick checks we validate the signature
     // TODO: We may want to further check if the signer is a staked address
@@ -1647,7 +1657,11 @@ pub async fn data_txs_are_valid(
         });
     }
 
-    // Validate ingress proofs list matches Publish ledger transactions
+    // First validate ingress proof signer uniqueness using the shared function
+    validate_unique_ingress_proof_signers(block)?;
+
+    // Then perform additional validation specific to data_txs_are_valid
+    // This includes validating proofs against actual transaction data_roots and checking proof counts
     if let Some(proofs_list) = &publish_ledger.proofs {
         let expected_proof_count =
             publish_txs.len() * (config.consensus.number_of_ingress_proofs_total as usize);
@@ -1659,7 +1673,7 @@ pub async fn data_txs_are_valid(
             });
         }
 
-        // Validate each proof corresponds to the correct transaction
+        // Validate each proof corresponds to the correct transaction and has valid data_root
         for tx_header in publish_txs {
             let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|e| {
                 PreValidationError::InvalidIngressProof {
@@ -1668,7 +1682,8 @@ pub async fn data_txs_are_valid(
                 }
             })?;
 
-            // Loop though all the ingress proofs for the published transaction and pre-validate them
+            // Validate each proof's signature and data_root match the transaction
+            // Note: uniqueness check is already done by validate_unique_ingress_proof_signers
             for ingress_proof in tx_proofs.iter() {
                 // Validate ingress proof signature and data_root match the transaction
                 let _ = ingress_proof
@@ -1712,6 +1727,66 @@ fn extract_data_ledgers(
         [..] => eyre::bail!("Expect exactly 2 data ledgers to be present on the block"),
     };
     Ok((publish_ledger, submit_ledger))
+}
+
+/// Validates that all ingress proof signers are unique for each transaction in the Publish ledger
+fn validate_unique_ingress_proof_signers(
+    block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    // Extract publish ledger
+    let publish_ledger = block
+        .data_ledgers
+        .iter()
+        .find(|ledger| ledger.ledger_id == DataLedger::Publish as u32)
+        .ok_or_else(|| {
+            PreValidationError::DataLedgerExtractionFailed("Publish ledger not found".to_string())
+        })?;
+
+    // Early return if no proofs
+    let Some(proofs_list) = &publish_ledger.proofs else {
+        return Ok(());
+    };
+
+    // If we have proofs but no transactions, that's an error
+    if publish_ledger.tx_ids.is_empty() && !proofs_list.is_empty() {
+        return Err(PreValidationError::PublishLedgerProofCountMismatch {
+            proof_count: proofs_list.len(),
+            tx_count: 0,
+        });
+    }
+
+    // For each transaction in the publish ledger, validate unique signers
+    for tx_id in &publish_ledger.tx_ids.0 {
+        let tx_proofs = get_ingress_proofs(publish_ledger, tx_id).map_err(|e| {
+            PreValidationError::InvalidIngressProof {
+                tx_id: *tx_id,
+                reason: e.to_string(),
+            }
+        })?;
+
+        // Track signers for this transaction to ensure uniqueness
+        let mut signers_for_tx = std::collections::HashSet::new();
+
+        for ingress_proof in tx_proofs.iter() {
+            // Recover the signer address
+            let signer = ingress_proof.recover_signer().map_err(|e| {
+                PreValidationError::InvalidIngressProof {
+                    tx_id: *tx_id,
+                    reason: e.to_string(),
+                }
+            })?;
+
+            // Check for duplicate signers
+            if !signers_for_tx.insert(signer) {
+                return Err(PreValidationError::DuplicateIngressProofSigner {
+                    tx_id: *tx_id,
+                    signer,
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// State for tracking transaction inclusion search

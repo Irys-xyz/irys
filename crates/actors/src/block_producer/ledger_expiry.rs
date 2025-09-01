@@ -717,8 +717,7 @@ mod tests {
         tx_to_miners.insert(tx2.id, Arc::new(tx2_miners));
 
         // Call aggregate_miner_fees
-        let result =
-            aggregate_miner_fees(vec![tx1, tx2], &tx_to_miners, &config).unwrap();
+        let result = aggregate_miner_fees(vec![tx1, tx2], &tx_to_miners, &config).unwrap();
 
         // Calculate expected fees
         // For tx1: term_fee = 1000, treasury = 950 (95%)
