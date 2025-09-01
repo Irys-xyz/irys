@@ -1,15 +1,14 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
+
 use irys_chain::{
-    peer_utilities::{
-        block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
-    },
+    peer_utilities::{block_index_endpoint_request, info_endpoint_request},
     IrysNodeCtx,
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
     irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
-    NodeMode, PeerAddress, SyncMode, H256,
+    NodeMode, SyncMode, H256,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
@@ -283,34 +282,41 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         )
         .await;
 
+        // Proactively announce peers to each other to converge peer lists deterministically
+        IrysNodeTest::announce_between(&ctx_peer1_node, &ctx_genesis_node)
+            .await
+            .expect("peer1 <-> genesis handshake");
+        IrysNodeTest::announce_between(&ctx_peer2_node, &ctx_genesis_node)
+            .await
+            .expect("peer2 <-> genesis handshake");
+        IrysNodeTest::announce_between(&ctx_peer1_node, &ctx_peer2_node)
+            .await
+            .expect("peer1 <-> peer2");
+
         // Check peer lists - each peer should see the genesis node and the other peer
-        let peer_list_items_1 = poll_peer_list(&ctx_peer1_node, 2).await;
-        let peer_list_items_2 = poll_peer_list(&ctx_peer2_node, 2).await;
 
         // Get the peer addresses for comparison
         let genesis_peer_addr = ctx_genesis_node.node_ctx.config.node_config.peer_address();
         let peer1_peer_addr = ctx_peer1_node.node_ctx.config.node_config.peer_address();
         let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node_config.peer_address();
 
-        // Peer1 should see genesis and peer2
-        assert!(
-            peer_list_items_1.contains(&genesis_peer_addr),
-            "Peer1 should see genesis node"
-        );
-        assert!(
-            peer_list_items_1.contains(&peer2_peer_addr),
-            "Peer1 should see peer2"
-        );
-
-        // Peer2 should see genesis and peer1
-        assert!(
-            peer_list_items_2.contains(&genesis_peer_addr),
-            "Peer2 should see genesis node"
-        );
-        assert!(
-            peer_list_items_2.contains(&peer1_peer_addr),
-            "Peer2 should see peer1"
-        );
+        // Wait until all peers are mutually visible
+        ctx_peer1_node
+            .wait_until_sees_peer(&genesis_peer_addr, 400)
+            .await
+            .expect("Peer1 should see genesis node");
+        ctx_peer1_node
+            .wait_until_sees_peer(&peer2_peer_addr, 400)
+            .await
+            .expect("Peer1 should see peer2");
+        ctx_peer2_node
+            .wait_until_sees_peer(&genesis_peer_addr, 400)
+            .await
+            .expect("Peer2 should see genesis node");
+        ctx_peer2_node
+            .wait_until_sees_peer(&peer1_peer_addr, 400)
+            .await
+            .expect("Peer2 should see peer1");
 
         let result_peer2 = poll_until_fetch_at_block_index_height(
             "peer2".to_owned(),
@@ -587,39 +593,4 @@ async fn poll_until_fetch_at_block_index_height(
         }
     }
     result_peer
-}
-
-/// poll peer_list_endpoint until timeout or we get the expected result
-async fn poll_peer_list(
-    ctx_node: &IrysNodeTest<IrysNodeCtx>,
-    desired_count_of_items: usize,
-) -> Vec<PeerAddress> {
-    // Increase the window to better accommodate CI variance
-    let max_attempts = 400;
-    for _attempt in 0..max_attempts {
-        sleep(Duration::from_millis(100)).await;
-
-        let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
-            &ctx_node.node_ctx.config.node_config.http.bind_port,
-        ))
-        .await;
-
-        match peer_results_genesis.json::<Vec<PeerAddress>>().await {
-            Ok(mut peer_list_items) => {
-                peer_list_items.sort(); // sort for deterministic comparisons
-                                        // Accept once we've reached at least the desired count
-                if peer_list_items.len() >= desired_count_of_items {
-                    return peer_list_items;
-                }
-            }
-            Err(e) => {
-                debug!(
-                    "Attempt {}: failed to parse peer list JSON on {}: {}",
-                    _attempt, ctx_node.node_ctx.config.node_config.http.bind_port, e
-                );
-                // Continue polling
-            }
-        }
-    }
-    panic!("never got the desired amount of items")
 }
