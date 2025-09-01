@@ -12,7 +12,7 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, SystemLedger};
+use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
     ExecutionPayloadCache,
@@ -25,7 +25,6 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, TERM_FEE};
-use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -34,6 +33,7 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
+use irys_types::{get_ingress_proofs, BlockHash};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -48,7 +48,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tracing::{debug, error, info, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 #[derive(Debug, Error)]
 pub enum PreValidationError {
@@ -137,6 +137,75 @@ pub enum PreValidationError {
     HeightInvalid { expected: u64, got: u64 },
     #[error("Invalid last_epoch_hash - expected {expected} got {got}")]
     LastEpochHashMismatch { expected: BlockHash, got: BlockHash },
+    #[error("Transaction {tx_id} in Publish ledger must have a prior Submit ledger inclusion")]
+    PublishTxMissingPriorSubmit { tx_id: H256 },
+
+    #[error(
+        "Transaction {tx_id} already included in previous Publish ledger in block {block_hash:?}"
+    )]
+    PublishTxAlreadyIncluded { tx_id: H256, block_hash: BlockHash },
+
+    #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}")]
+    SubmitTxAlreadyIncluded {
+        tx_id: H256,
+        ledger: DataLedger,
+        block_hash: BlockHash,
+    },
+
+    #[error("Transaction {tx_id} found in multiple previous blocks. First occurrence in {ledger:?} ledger at block {block_hash}")]
+    TxFoundInMultipleBlocks {
+        tx_id: H256,
+        ledger: DataLedger,
+        block_hash: BlockHash,
+    },
+    #[error("Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs")]
+    PublishTxProofLengthMismatch,
+    #[error("Block EMA snapshot not found for block {block_hash}")]
+    BlockEmaSnapshotNotFound { block_hash: BlockHash },
+    #[error("Failed to extract data ledgers: {0}")]
+    DataLedgerExtractionFailed(String),
+    #[error("Failed to fetch transactions: {0}")]
+    TransactionFetchFailed(String),
+    #[error("Failed to get previous transaction inclusions: {0}")]
+    PreviousTxInclusionsFailed(String),
+    #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
+    InvalidLedgerId {
+        tx_id: H256,
+        expected: u32,
+        actual: u32,
+    },
+    #[error("Failed to calculate fees: {0}")]
+    FeeCalculationFailed(String),
+    #[error("Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}")]
+    InsufficientPermFee {
+        tx_id: H256,
+        expected: U256,
+        actual: U256,
+    },
+    #[error("Transaction {tx_id} has insufficient term_fee. Expected at least: {expected}, Actual: {actual}")]
+    InsufficientTermFee {
+        tx_id: H256,
+        expected: U256,
+        actual: U256,
+    },
+    #[error("Transaction {tx_id} has invalid term fee structure: {reason}")]
+    InvalidTermFeeStructure { tx_id: H256, reason: String },
+    #[error("Transaction {tx_id} has invalid perm fee structure: {reason}")]
+    InvalidPermFeeStructure { tx_id: H256, reason: String },
+    #[error(
+        "Publish ledger proof count ({proof_count}) does not match transaction count ({tx_count})"
+    )]
+    PublishLedgerProofCountMismatch { proof_count: usize, tx_count: usize },
+    #[error(
+        "Incorrect Ingress proof count to publish a transaction. Expected: {expected}, Actual: {actual}"
+    )]
+    IngressProofCountMismatch { expected: usize, actual: usize },
+    #[error("Transaction {tx_id} has invalid ingress proof: {reason}")]
+    InvalidIngressProof { tx_id: H256, reason: String },
+    #[error("Ingress proof mismatch for transaction {tx_id}")]
+    IngressProofMismatch { tx_id: H256 },
+    #[error("Database Error {error}")]
+    DatabaseError { error: String },
 }
 
 /// Full pre-validation steps for a block
@@ -359,7 +428,8 @@ pub fn timestamp_is_valid(
     parent: u128,
     allowed_drift: u128,
 ) -> Result<(), PreValidationError> {
-    if current < parent {
+    // note: we have to make sure we don't overlap the parent's timestamp (even though it's very unlikely)
+    if current <= parent {
         return Err(PreValidationError::TimestampOlderThanParent { current, parent });
     }
 
@@ -1334,8 +1404,13 @@ pub fn calculate_term_storage_base_network_fee(
 }
 
 /// Validates that data transactions in a block are correctly placed and have valid properties
-/// based on their ledger placement (Submit or Publish) and ingress proof availability
-/// TODO: All of the warnings below should actually be transformed to hard errors!
+/// based on their ledger placement (Submit or Publish) and ingress proof availability.
+/// - Transactions in Publish ledger must have prior inclusion in Submit ledger
+/// - Transactions should not appear in multiple blocks (duplicate inclusions)
+/// - Submit ledger transactions must not have ingress proofs
+/// - Publish ledger transactions must have valid ingress proofs
+/// - All transactions must meet minimum fee requirements
+/// - Fee structures must be valid for proper reward distribution
 #[tracing::instrument(skip_all, err)]
 pub async fn data_txs_are_valid(
     config: &Config,
@@ -1343,15 +1418,18 @@ pub async fn data_txs_are_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     // Get the block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
         .read()
         .get_ema_snapshot(&block.block_hash)
-        .ok_or_eyre("Block EMA snapshot not found")?;
+        .ok_or(PreValidationError::BlockEmaSnapshotNotFound {
+            block_hash: block.block_hash,
+        })?;
 
     // Extract data transactions from both ledgers
-    let (publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
+    let (publish_ledger, submit_ledger) = extract_data_ledgers(block)
+        .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
 
     // Get transactions from both ledgers
     let publish_txs = get_data_tx_in_parallel(
@@ -1359,11 +1437,13 @@ pub async fn data_txs_are_valid(
         &service_senders.mempool,
         db,
     )
-    .await?;
+    .await
+    .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
 
     let submit_txs =
         get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-            .await?;
+            .await
+            .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
 
     // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
     let submit_ids: HashSet<H256> = submit_txs.iter().map(|tx| tx.id).collect();
@@ -1390,6 +1470,7 @@ pub async fn data_txs_are_valid(
                 TxInclusionState::Found {
                     ledger_current: DataLedger::Publish,
                     ledger_historical: DataLedger::Submit,
+                    block_hash: block.block_hash,
                 }
             } else {
                 TxInclusionState::Searching { ledger_current }
@@ -1406,7 +1487,12 @@ pub async fn data_txs_are_valid(
         service_senders,
         db,
     )
-    .await?;
+    .await
+    .map_err(|e| PreValidationError::PreviousTxInclusionsFailed(e.to_string()))?;
+
+    let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
+        error: e.to_string(),
+    })?;
 
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
@@ -1414,11 +1500,15 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // Publish tx with no past inclusion - INVALID
-                        tracing::warn!(
-                            "Transaction {} in Publish ledger must have prior Submit ledger inclusion",
-                            tx.id
-                        );
+                        // check the db - if we can fetch it, we have a previous inclusion
+                        if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                            warn!("had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth", &_header, &tx.id, &tx);
+                        } else {
+                            // Publish tx with no past inclusion - INVALID
+                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
+                                tx_id: tx.id,
+                            });
+                        }
                     }
                     DataLedger::Submit => {
                         // Submit tx with no past inclusion - VALID (new transaction)
@@ -1429,6 +1519,7 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Found {
                 ledger_current,
                 ledger_historical,
+                block_hash,
             } => {
                 match (ledger_current, ledger_historical) {
                     (DataLedger::Publish, DataLedger::Submit) => {
@@ -1439,26 +1530,28 @@ pub async fn data_txs_are_valid(
                         );
                     }
                     (DataLedger::Publish, DataLedger::Publish) => {
-                        tracing::warn!(
-                            "Transaction {} already included in previous Publish ledger",
-                            tx.id
-                        );
+                        return Err(PreValidationError::PublishTxAlreadyIncluded {
+                            tx_id: tx.id,
+                            block_hash: *block_hash,
+                        });
                     }
                     (DataLedger::Submit, _) => {
                         // Submit tx should not have any past inclusion
-                        tracing::warn!(
-                            "Transaction {} in Submit ledger was already included in past {:?} ledger",
-                            tx.id, ledger_historical
-                        );
+                        return Err(PreValidationError::SubmitTxAlreadyIncluded {
+                            tx_id: tx.id,
+                            ledger: *ledger_historical,
+                            block_hash: *block_hash,
+                        });
                     }
                 }
             }
             TxInclusionState::Duplicate { ledger_historical } => {
                 // Transaction found in multiple past blocks - this is always invalid
-                tracing::warn!(
-                    "Transaction {} found in multiple previous blocks. First occurrence in {:?} ledger at block {}",
-                    tx.id, ledger_historical.0, ledger_historical.1
-                );
+                return Err(PreValidationError::TxFoundInMultipleBlocks {
+                    tx_id: tx.id,
+                    ledger: ledger_historical.0,
+                    block_hash: ledger_historical.1,
+                });
             }
         }
     }
@@ -1472,58 +1565,56 @@ pub async fn data_txs_are_valid(
     for (tx, current_ledger) in all_txs {
         // All data transactions must have ledger_id set to Publish
         // TODO: support other term ledgers here
-        ensure!(
-            tx.ledger_id == DataLedger::Publish as u32,
-            "Transaction {} has invalid ledger_id. Expected: {}, Actual: {}",
-            tx.id,
-            DataLedger::Publish as u32,
-            tx.ledger_id
-        );
+        if tx.ledger_id != DataLedger::Publish as u32 {
+            return Err(PreValidationError::InvalidLedgerId {
+                tx_id: tx.id,
+                expected: DataLedger::Publish as u32,
+                actual: tx.ledger_id,
+            });
+        }
 
         // Calculate expected fees based on data size using block's EMA
         // Calculate term fee first as it's needed for perm fee calculation
         let expected_term_fee =
-            calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)?;
+            calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)
+                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
         let expected_perm_fee =
-            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)?;
+            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)
+                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
         // Validate perm_fee is at least the expected amount
         let actual_perm_fee = tx.perm_fee.unwrap_or(U256::zero());
-        ensure!(
-            actual_perm_fee >= expected_perm_fee.amount,
-            "Transaction {} has insufficient perm_fee. Expected at least: {}, Actual: {}",
-            tx.id,
-            expected_perm_fee.amount,
-            actual_perm_fee
-        );
+        if actual_perm_fee < expected_perm_fee.amount {
+            return Err(PreValidationError::InsufficientPermFee {
+                tx_id: tx.id,
+                expected: expected_perm_fee.amount,
+                actual: actual_perm_fee,
+            });
+        }
 
         // Validate term_fee is at least the expected amount
         let actual_term_fee = tx.term_fee;
-        ensure!(
-            actual_term_fee >= expected_term_fee,
-            "Transaction {} has insufficient term_fee. Expected at least: {}, Actual: {}",
-            tx.id,
-            expected_term_fee,
-            actual_term_fee
-        );
+        if actual_term_fee < expected_term_fee {
+            return Err(PreValidationError::InsufficientTermFee {
+                tx_id: tx.id,
+                expected: expected_term_fee,
+                actual: actual_term_fee,
+            });
+        }
 
         // Validate fee distribution structures can be created successfully
         // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
         TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
-            eyre::eyre!(
-                "Transaction {} has invalid term fee structure: {}",
-                tx.id,
-                e
-            )
+            PreValidationError::InvalidTermFeeStructure {
+                tx_id: tx.id,
+                reason: e.to_string(),
+            }
         })?;
 
         PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
-            |e| {
-                eyre::eyre!(
-                    "Transaction {} has invalid perm fee structure: {}",
-                    tx.id,
-                    e
-                )
+            |e| PreValidationError::InvalidPermFeeStructure {
+                tx_id: tx.id,
+                reason: e.to_string(),
             },
         )?;
 
@@ -1534,9 +1625,13 @@ pub async fn data_txs_are_valid(
             DataLedger::Submit => {
                 // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                 // (they're waiting for proofs to arrive)
-                if tx.ingress_proofs.is_some() {
+                if tx.promoted_height.is_some() {
+                    // TODO: This should be a hard error, but the test infrastructure currently
+                    // creates transactions with ingress proofs that get placed in Submit ledger.
+                    // This needs to be fixed in the block production logic to properly place
+                    // transactions with proofs in the Publish ledger.
                     tracing::warn!(
-                        "Transaction {} in Submit ledger should not have ingress proofs",
+                        "Transaction {} in Submit ledger should not have a promoted_height",
                         tx.id
                     );
                 }
@@ -1544,54 +1639,52 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    ensure!(
-        publish_ledger
-            .proofs
-            .as_ref()
-            .map(|x| x.0.len())
-            .unwrap_or_default()
-            == publish_txs.len(),
-        "the length of publish ledger proofs in a block does not match the count of publish txs"
-    );
+    if publish_txs.is_empty() && publish_ledger.proofs.is_some() {
+        let proof_count = publish_ledger.proofs.as_ref().unwrap().len();
+        return Err(PreValidationError::PublishLedgerProofCountMismatch {
+            proof_count,
+            tx_count: publish_txs.len(),
+        });
+    }
 
     // Validate ingress proofs list matches Publish ledger transactions
     if let Some(proofs_list) = &publish_ledger.proofs {
-        ensure!(
-            proofs_list.len() == publish_txs.len(),
-            "Ingress proofs count mismatch. Expected: {}, Actual: {}",
-            publish_txs.len(),
-            proofs_list.len()
-        );
+        let expected_proof_count =
+            publish_txs.len() * (config.consensus.number_of_ingress_proofs_total as usize);
+
+        if proofs_list.len() != expected_proof_count {
+            return Err(PreValidationError::PublishLedgerProofCountMismatch {
+                proof_count: proofs_list.len(),
+                tx_count: publish_txs.len(),
+            });
+        }
 
         // Validate each proof corresponds to the correct transaction
-        for item in publish_txs.iter().zip_longest(proofs_list.iter()) {
-            let EitherOrBoth::Both(tx, proof) = item else {
-                tracing::warn!("publish tx and proof length mismatch, cannot validate publish ledger transaction proofs");
-                break;
-            };
-
-            // Validate ingress proofs are present
-            let Some(tx_proof) = tx.ingress_proofs.as_ref() else {
-                tracing::warn!(
-                    "Transaction {} in Publish ledger missing ingress proofs",
-                    tx.id
-                );
-                continue;
-            };
-
-            // Validate ingress proof signature and data_root match
-            // The proof signature should be valid for the transaction's data_root
-            let _ = tx_proof.pre_validate(&tx.data_root).map_err(|e| {
-                eyre::eyre!("Transaction {} has invalid ingress proof: {}", tx.id, e)
+        for tx_header in publish_txs {
+            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|e| {
+                PreValidationError::InvalidIngressProof {
+                    tx_id: tx_header.id,
+                    reason: e.to_string(),
+                }
             })?;
 
-            // TODO: use `verify_ingress_proof` to verify all ingress proof chunks and data
-            // TODO: once we refactor ingress proofs - remove the proof field from the tx object.
-            ensure!(
-                tx_proof.proof == proof.proof && tx_proof.signature == proof.signature,
-                "Ingress proof mismatch for transaction {}",
-                tx.id
-            );
+            // Loop though all the ingress proofs for the published transaction and pre-validate them
+            for ingress_proof in tx_proofs.iter() {
+                // Validate ingress proof signature and data_root match the transaction
+                let _ = ingress_proof
+                    .pre_validate(&tx_header.data_root)
+                    .map_err(|e| PreValidationError::InvalidIngressProof {
+                        tx_id: tx_header.id,
+                        reason: e.to_string(),
+                    })?;
+            }
+
+            if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
+                return Err(PreValidationError::IngressProofCountMismatch {
+                    expected: config.consensus.number_of_ingress_proofs_total as usize,
+                    actual: tx_proofs.len(),
+                });
+            }
         }
     }
 
@@ -1630,6 +1723,7 @@ enum TxInclusionState {
     Found {
         ledger_current: DataLedger,
         ledger_historical: DataLedger,
+        block_hash: BlockHash,
     },
     Duplicate {
         ledger_historical: (DataLedger, BlockHash),
@@ -1733,6 +1827,7 @@ fn process_block_ledgers_with_states(
                         *state = TxInclusionState::Found {
                             ledger_current: *ledger_current,
                             ledger_historical: ledger_type,
+                            block_hash,
                         };
                     }
                     TxInclusionState::Found { .. } => {
@@ -1900,7 +1995,7 @@ mod tests {
                 data.extend_from_slice(chunk);
             }
             let tx = signer
-                .create_transaction(data, None)
+                .create_transaction(data, H256::zero())
                 .expect("Expected to create a transaction");
             let tx = signer
                 .sign_transaction(tx)
@@ -1935,7 +2030,7 @@ mod tests {
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
         let tx = signer
-            .create_transaction(data.clone(), None)
+            .create_transaction(data.clone(), H256::zero())
             .expect("Expected to create a transaction");
         let tx = signer
             .sign_transaction(tx)
@@ -2088,6 +2183,7 @@ mod tests {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -2097,6 +2193,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: None,
                 },
             ],
             ..IrysBlockHeader::default()
@@ -2186,7 +2283,7 @@ mod tests {
                 data.extend_from_slice(chunk);
             }
             let tx = signer
-                .create_transaction(data, None)
+                .create_transaction(data, H256::zero())
                 .expect("Expected to create a transaction");
             let tx = signer
                 .sign_transaction(tx)
@@ -2342,6 +2439,7 @@ mod tests {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -2351,6 +2449,7 @@ mod tests {
                     max_chunk_offset: 9,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: None,
                 },
             ],
             ..IrysBlockHeader::default()

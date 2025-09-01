@@ -229,7 +229,7 @@ async fn start_reth_node(
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
-    let random_ports = config.node_config.reth.use_random_ports;
+    let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = match irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
@@ -355,7 +355,7 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block(genesis_block.clone()).await
             }
-            NodeMode::PeerSync | NodeMode::TrustedPeerSync => {
+            NodeMode::Peer => {
                 // Fetch genesis data from trusted peer when joining network
                 self.fetch_genesis_from_trusted_peer().await
             }
@@ -520,7 +520,7 @@ impl IrysNode {
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
-        let node_mode = &config.node_config.mode;
+        let node_mode = &config.node_config.node_mode;
         // Start with base genesis and update fields
         let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
 
@@ -612,7 +612,7 @@ impl IrysNode {
 
         // Log startup information
         info!(
-            "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}",
+            "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}:{}",
             &node_mode,
             &ctx.config.node_config.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
@@ -620,7 +620,9 @@ impl IrysNode {
             &node_config.http.bind_port,
             &node_config.gossip.bind_ip,
             &node_config.gossip.bind_port,
-            &node_config.reth_peer_info.peering_tcp_addr
+            &node_config.reth.network.bind_ip,
+            &node_config.reth.network.bind_port,
+
         );
 
         // This is going to resolve instantly for a genesis node with 0 blocks,
@@ -875,16 +877,15 @@ impl IrysNode {
         // overwrite config as we now have reth peering information
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
         let mut node_config = config.node_config.clone();
-        node_config.reth_peer_info = reth_peering;
-        let config = Config::new(node_config);
+        node_config.reth.network.peer_id = reth_peering.peer_id;
+        node_config.reth.network.bind_ip = reth_peering.peering_tcp_addr.ip().to_string();
+        node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
 
-        let chunk_cache_handle = ChunkCacheService::spawn_service(
-            irys_db.clone(),
-            receivers.chunk_cache,
-            config.clone(),
-            runtime_handle.clone(),
-        );
-        debug!("Chunk cache initialized");
+        if node_config.reth.network.public_port == 0 {
+            node_config.reth.network.public_port = reth_peering.peering_tcp_addr.port();
+        }
+
+        let config = Config::new(node_config);
 
         let block_index_guard = block_index_service_actor
             .send(GetBlockIndexGuardMessage)
@@ -897,11 +898,6 @@ impl IrysNode {
         // start the epoch service
         let replay_data =
             EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
-        // let (genesis_block, commitments, epoch_block_data) = (
-        //     &replay_data.genesis_block_header,
-        //     &replay_data.genesis_commitments,
-        //     &replay_data.epoch_blocks,
-        // );
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
@@ -933,6 +929,16 @@ impl IrysNode {
         let block_tree_guard = oneshot_rx
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
+
+        let chunk_cache_handle = ChunkCacheService::spawn_service(
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            irys_db.clone(),
+            receivers.chunk_cache,
+            config.clone(),
+            runtime_handle.clone(),
+        );
+        debug!("Chunk cache initialized");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
@@ -1155,6 +1161,7 @@ impl IrysNode {
             Arc::clone(&block_pool),
             gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
+            reth_service_actor.clone(),
         );
 
         // set up IrysNodeCtx
@@ -1602,6 +1609,7 @@ impl IrysNode {
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
+        reth_service_addr: Addr<RethServiceActor>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
 
@@ -1612,6 +1620,7 @@ impl IrysNode {
             block_index_guard,
             block_pool,
             gossip_data_handler,
+            Some(reth_service_addr),
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);
@@ -1735,7 +1744,7 @@ async fn stake_and_pledge(
     let signer = config.irys_signer();
     let address = signer.address();
 
-    let api_uri = config.node_config.api_uri();
+    let api_uri = config.node_config.local_api_url();
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();

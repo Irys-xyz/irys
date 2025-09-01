@@ -459,6 +459,10 @@ pub struct DataTransactionLedger {
     /// When transactions are promoted they must include their ingress proofs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proofs: Option<IngressProofsList>,
+    /// Ingress proofs required per transaction for promotion. Stored per-ledger to enable
+    /// different replication levels per ledger and simplify validation / config mappings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_proof_count: Option<u8>,
 }
 
 impl DataTransactionLedger {
@@ -499,6 +503,41 @@ impl IndexMut<DataLedger> for Vec<DataTransactionLedger> {
             .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
             .expect("No transaction ledger found for given ledger type")
     }
+}
+
+/// Retrieves the [`IngressProofsList`] for the given txid.
+///
+/// Checks for the correct number of proofs based on the `required_proof_count` field of the [`DataTransactionLedger`]
+pub fn get_ingress_proofs(
+    data_ledger: &DataTransactionLedger,
+    txid: &H256,
+) -> eyre::Result<IngressProofsList> {
+    let index = data_ledger
+        .tx_ids
+        .iter()
+        .position(|id| id == txid)
+        .ok_or_else(|| eyre::eyre!("Transaction {} not found in ledger", txid))?;
+
+    let proof_count = data_ledger
+        .required_proof_count
+        .ok_or_else(|| eyre::eyre!("Required proof count not set for ledger"))?
+        as usize;
+
+    let proofs_list = data_ledger
+        .proofs
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("No proofs available in ledger"))?;
+
+    let start_index = index * proof_count;
+    let end_index = start_index + proof_count;
+
+    // Check bounds
+    if end_index > proofs_list.len() {
+        eyre::bail!("Not enough proofs available for transaction");
+    }
+
+    let proofs = IngressProofsList((proofs_list[start_index..end_index]).to_vec());
+    Ok(proofs)
 }
 
 #[derive(
@@ -611,6 +650,7 @@ impl IrysBlockHeader {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -620,6 +660,7 @@ impl IrysBlockHeader {
                     max_chunk_offset: 0,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: None,
                 },
             ],
             evm_block_hash: B256::ZERO,
@@ -939,6 +980,7 @@ mod tests {
                 data_root: H256::random(),
                 chain_id: 1,
             }])),
+            required_proof_count: None,
         };
 
         // action
@@ -1000,8 +1042,14 @@ mod tests {
     #[test]
     fn test_irys_header_compact_round_trip() {
         // setup
-        let header = mock_header();
+        let mut header = mock_header();
         let mut buf = vec![];
+
+        header.data_ledgers[DataLedger::Publish].proofs = Some(IngressProofsList(vec![
+            IngressProof::default(),
+            IngressProof::default(),
+            IngressProof::default(),
+        ]));
 
         println!("{}", serde_json::to_string_pretty(&header).unwrap());
 

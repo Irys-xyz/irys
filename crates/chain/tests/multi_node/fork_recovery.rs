@@ -50,12 +50,12 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
         .await;
 
     // Post stake + pledge commitments to peer1
-    let peer1_stake_tx = peer1_node.post_stake_commitment(H256::zero()).await; // zero() is the genesis block hash
-    let peer1_pledge_tx = peer1_node.post_pledge_commitment(H256::zero()).await;
+    let peer1_stake_tx = peer1_node.post_stake_commitment(None).await?; // zero() is the genesis block hash
+    let peer1_pledge_tx = peer1_node.post_pledge_commitment(None).await?;
 
     // Post stake + pledge commitments to peer2
-    let peer2_stake_tx = peer2_node.post_stake_commitment(H256::zero()).await;
-    let peer2_pledge_tx = peer2_node.post_pledge_commitment(H256::zero()).await;
+    let peer2_stake_tx = peer2_node.post_stake_commitment(None).await?;
+    let peer2_pledge_tx = peer2_node.post_pledge_commitment(None).await?;
 
     // Wait for all commitment tx to show up in the genesis_node's mempool
     genesis_node
@@ -426,21 +426,22 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     // Stage 4: GENERATE ISOLATED txs
     //
 
+    let anchor = node_a.get_anchor().await?;
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
-        .post_stake_commitment_without_gossip(block_height_1.block_hash)
-        .await;
+        .post_stake_commitment_without_gossip(Some(anchor))
+        .await?;
     let peer_b_b2_pledge_tx = node_b
-        .post_pledge_commitment_without_gossip(block_height_1.block_hash)
-        .await;
+        .post_pledge_commitment_without_gossip(Some(anchor))
+        .await?;
 
     // node_c generates txs in isolation for inclusion block 2
     let peer_c_b2_stake_tx = node_c
-        .post_stake_commitment_without_gossip(block_height_1.block_hash)
-        .await;
+        .post_stake_commitment_without_gossip(Some(anchor))
+        .await?;
     let peer_c_b2_pledge_tx = node_c
-        .post_pledge_commitment_without_gossip(block_height_1.block_hash)
-        .await;
+        .post_pledge_commitment_without_gossip(Some(anchor))
+        .await?;
 
     //
     // Stage 5: MINE FORK A and B TO HEIGHT 2 and 3
@@ -810,12 +811,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_submit_tx = node_b
-        .post_data_tx(b_block1.block_hash, data.clone(), &b_signer)
+        .post_data_tx(node_b.get_anchor().await?, data.clone(), &b_signer)
         .await;
 
     // node_c generates txs in isolation for inclusion block 2
     let peer_c_b2_submit_tx = node_c
-        .post_data_tx(c_block1.block_hash, data, &c_signer)
+        .post_data_tx(node_c.get_anchor().await?, data, &c_signer)
         .await;
 
     // wait for txs to be in mempools
@@ -1288,13 +1289,14 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // Stage 4: GENERATE ISOLATED txs
     //
 
+    let anchor = node_b.get_anchor().await?;
     // node_b generates txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
-        .post_stake_commitment_without_gossip(block_height_1.block_hash)
-        .await;
+        .post_stake_commitment_without_gossip(Some(anchor))
+        .await?;
     let peer_b_b2_pledge_tx = node_b
-        .post_pledge_commitment_without_gossip(block_height_1.block_hash)
-        .await;
+        .post_pledge_commitment_without_gossip(Some(anchor))
+        .await?;
 
     //
     // Stage 5: MINE FORK A and B TO HEIGHT block_migration_depth - 1 and

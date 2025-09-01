@@ -1,6 +1,7 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
+    rate_limiting::DataRequestTracker,
     types::{InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
@@ -38,6 +39,7 @@ where
     /// Tracing span
     pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,
+    pub data_request_tracker: DataRequestTracker,
 }
 
 impl<M, B, A> Clone for GossipDataHandler<M, B, A>
@@ -57,6 +59,7 @@ where
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
+            data_request_tracker: DataRequestTracker::new(),
         }
     }
 }
@@ -329,6 +332,36 @@ where
         .await
     }
 
+    /// Pulls a block from a specific peer and sends it to the BlockPool for processing
+    pub async fn pull_and_process_block_from_peer(
+        &self,
+        block_hash: BlockHash,
+        peer: &(irys_types::Address, PeerListItem),
+    ) -> GossipResult<()> {
+        let (source_address, irys_block) = self
+            .gossip_client
+            .pull_block_from_peer(block_hash, peer, &self.peer_list)
+            .await?;
+
+        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+            error!(
+                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
+                source_address
+            );
+            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+        };
+
+        self.handle_block_header(
+            GossipRequest {
+                miner_address: source_address,
+                data: irys_block.as_ref().clone(),
+            },
+            peer_info.address.api,
+            peer_info.address.gossip,
+        )
+        .await
+    }
+
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -433,6 +466,15 @@ where
         if !missing_tx_ids.is_empty() {
             debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
         }
+
+        // remove them from the mempool's blacklist
+        self.mempool
+            .remove_from_blacklist(missing_tx_ids.clone())
+            .await
+            .map_err(|error| {
+                error!("Failed to remove txs from mempool blacklist");
+                GossipError::unknown(&error)
+            })?;
 
         // Fetch missing transactions from the source peer
         let missing_txs = self
@@ -588,7 +630,22 @@ where
         &self,
         peer_info: &PeerListItem,
         request: GossipRequest<GossipDataRequest>,
+        duplicate_request_milliseconds: u128,
     ) -> GossipResult<bool> {
+        // Check rate limiting and score cap
+        let check_result = self
+            .data_request_tracker
+            .check_request(&request.miner_address, duplicate_request_milliseconds);
+
+        // If rate limited, don't serve data
+        if !check_result.should_serve() {
+            debug!(
+                "Node {}: Rate limiting peer {:?} for data request",
+                self.gossip_client.mining_address, request.miner_address
+            );
+            return Err(GossipError::RateLimited);
+        }
+
         match request.data {
             GossipDataRequest::Block(block_hash) => {
                 let block_result = self.block_pool.get_block_data(&block_hash).await;
@@ -598,11 +655,18 @@ where
                 match maybe_block {
                     Some(block) => {
                         let data = Arc::new(GossipData::Block(block));
-                        self.gossip_client.send_data_and_update_the_score_detached(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &self.peer_list,
-                        );
+                        if check_result.should_update_score() {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
                         Ok(true)
                     }
                     None => Ok(false),
@@ -621,11 +685,18 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipData::ExecutionPayload(evm_block));
-                        self.gossip_client.send_data_and_update_the_score_detached(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &self.peer_list,
-                        );
+                        if check_result.should_update_score() {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
                         Ok(true)
                     }
                     None => Ok(false),

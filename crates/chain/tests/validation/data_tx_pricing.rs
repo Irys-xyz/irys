@@ -103,7 +103,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     let insufficient_perm_fee = price_info.perm_fee / U256::from(2);
     let malicious_tx = test_signer.create_transaction_with_fees(
         data,
-        Some(H256::zero()),
+        genesis_node.get_anchor().await?,
         DataLedger::Publish,
         price_info.term_fee,
         Some(insufficient_perm_fee), // Insufficient perm_fee!
@@ -134,6 +134,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
             max_chunk_offset: 0,
             expires: None,
             proofs: None,
+            required_proof_count: Some(1),
         },
         // Submit ledger with our malicious tx
         DataTransactionLedger {
@@ -143,6 +144,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
             max_chunk_offset: 0,
             expires: None,
             proofs: None,
+            required_proof_count: None,
         },
     ];
     test_signer.sign_block_header(&mut irys_block)?;

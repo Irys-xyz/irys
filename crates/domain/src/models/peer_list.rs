@@ -30,6 +30,7 @@ pub enum ScoreDecreaseReason {
 pub enum ScoreIncreaseReason {
     Online,
     ValidData,
+    DataRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -458,6 +459,10 @@ impl PeerListDataInner {
                 ScoreIncreaseReason::ValidData => {
                     peer.reputation_score.increase();
                 }
+                ScoreIncreaseReason::DataRequest => {
+                    // Limited increase for data requests to prevent farming
+                    peer.reputation_score.increase_limited(1);
+                }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(mining_addr) {
             // Update score in purgatory
@@ -467,6 +472,10 @@ impl PeerListDataInner {
                 }
                 ScoreIncreaseReason::ValidData => {
                     peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::DataRequest => {
+                    // Limited increase for data requests to prevent farming
+                    peer.reputation_score.increase_limited(1);
                 }
             }
 

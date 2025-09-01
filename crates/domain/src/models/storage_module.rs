@@ -38,7 +38,7 @@
 
 use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
-use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
+use eyre::{bail, ensure, eyre, Context as _, OptionExt as _, Result};
 use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
@@ -274,6 +274,7 @@ impl StorageModule {
             })?;
 
             let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+            // if we don't have an existing packing params file, write it
             if !params_path.exists() {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
@@ -299,24 +300,58 @@ impl StorageModule {
 
                 // check the partition assignment if it's present
                 if let Some(pa) = storage_module_info.partition_assignment {
-                    match params.partition_hash {
-                        Some(ph) => {
-                            ensure!(
+                    // if we have an assignment, check that the partition hash matches
+                    if let Some(ph) = params.partition_hash {
+                        ensure!(
                         params.partition_hash == Some(pa.partition_hash),
                         "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
                         This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
                         assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
                         pa.partition_hash,
                         ph,
-                    )
+                    );
+
+                        // check we have the correct ledger & slot info
+                        match (params.ledger, params.slot, pa.ledger_id, pa.slot_index) {
+                            // if this is a capacity assignment, do nothing
+                            (None, None, None, None) => {},
+                            // if this is a "new" data assignment, write it
+                            (None, None, Some(pa_ledger), Some(pa_slot)) => {
+                                // we update & write the params to disk
+                                params.ledger = Some(pa_ledger);
+                                params.slot = Some(pa_slot);
+                                params.last_updated_height = Some(0);
+                                params.write_to_disk(&params_path);
+                            }
+                            // if we have an existing data assignment, validate the two match
+                            (
+                                Some(params_ledger),
+                                Some(params_slot),
+                                Some(pa_ledger),
+                                Some(pa_slot),
+                            ) => {
+                                ensure!(
+                                    params_ledger == pa_ledger,
+                                    "Module and assignment ledger ID mismatch\n Module: {:?}, got ledger {}, expected ledger {}",
+                                    &sub_base_path, &params_ledger, &pa_ledger
+                                );
+                                ensure!(
+                                    params_slot == pa_slot,
+                                    "Module and assignment slot index mismatch\n Module: {:?}, got slot {}, expected slot {}",
+                                    &sub_base_path, &params_slot, &pa_slot
+                                );
+                            }
+                            // shouldn't happen
+                            invalid => bail!("Invalid match case for {:?} (param ledger, slot, assignment ledger, slot) {:?} ", &sub_base_path, invalid),
                         }
-                        None => {
-                            // need to write the new params to disk
-                            params.partition_hash = Some(pa.partition_hash);
-                            params.ledger = pa.ledger_id;
-                            params.slot = pa.slot_index;
-                            params.write_to_disk(&params_path);
-                        }
+                    } else {
+                        // we don't have the partition hash on disk
+                        // so we need to write the new params to disk
+                        params.partition_hash = Some(pa.partition_hash);
+                        params.ledger = pa.ledger_id;
+                        params.slot = pa.slot_index;
+                        params.last_updated_height = Some(0);
+                        params.write_to_disk(&params_path);
                     }
                 }
             }
