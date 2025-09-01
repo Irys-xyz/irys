@@ -95,6 +95,18 @@ impl TermFeeCharges {
             "Cannot distribute fees to empty miners list"
         );
 
+        // Check for duplicate addresses
+        let unique_count = miners
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        ensure!(
+            unique_count == miners.len(),
+            "Duplicate mining addresses not allowed in fee distribution: found {} unique addresses in list of {}",
+            unique_count,
+            miners.len()
+        );
+
         // When the partition expires we distribute the remainder of the term_fee
         // (which is located in term_fee_treasury) over to all the miners
         let num_miners = U256::from(miners.len());
@@ -356,6 +368,27 @@ mod tests {
         // Should fail with empty miners
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty miners"));
+    }
+
+    #[test]
+    fn test_term_fee_distribution_rejects_duplicates() {
+        let config = ConsensusConfig::testing();
+        let term_fee = U256::from(1000);
+        let charges = TermFeeCharges::new(term_fee, &config).unwrap();
+
+        // Create miners list with duplicates
+        let addr1 = Address::random();
+        let addr2 = Address::random();
+        let miners_with_duplicates = vec![addr1, addr2, addr1]; // addr1 appears twice
+
+        let result = charges.distribution_on_expiry(&miners_with_duplicates);
+
+        // Should fail due to duplicates
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate mining addresses not allowed"));
     }
 
     #[test]
