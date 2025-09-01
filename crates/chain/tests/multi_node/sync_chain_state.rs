@@ -604,13 +604,21 @@ async fn poll_peer_list(
         ))
         .await;
 
-        let mut peer_list_items = peer_results_genesis
-            .json::<Vec<PeerAddress>>()
-            .await
-            .expect("valid PeerAddress");
-        peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
-        if peer_list_items.len() == desired_count_of_items {
-            return peer_list_items;
+        match peer_results_genesis.json::<Vec<PeerAddress>>().await {
+            Ok(mut peer_list_items) => {
+                peer_list_items.sort(); // sort for deterministic comparisons
+                                        // Accept once we've reached at least the desired count
+                if peer_list_items.len() >= desired_count_of_items {
+                    return peer_list_items;
+                }
+            }
+            Err(e) => {
+                debug!(
+                    "Attempt {}: failed to parse peer list JSON on {}: {}",
+                    attempt, ctx_node.node_ctx.config.node_config.http.bind_port, e
+                );
+                // Continue polling
+            }
         }
     }
     panic!("never got the desired amount of items")
