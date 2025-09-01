@@ -1657,11 +1657,6 @@ pub async fn data_txs_are_valid(
         });
     }
 
-    // First validate ingress proof signer uniqueness using the shared function
-    validate_unique_ingress_proof_signers(block)?;
-
-    // Then perform additional validation specific to data_txs_are_valid
-    // This includes validating proofs against actual transaction data_roots and checking proof counts
     if let Some(proofs_list) = &publish_ledger.proofs {
         let expected_proof_count =
             publish_txs.len() * (config.consensus.number_of_ingress_proofs_total as usize);
@@ -1673,7 +1668,7 @@ pub async fn data_txs_are_valid(
             });
         }
 
-        // Validate each proof corresponds to the correct transaction and has valid data_root
+        // Validate each proof corresponds to the correct transaction
         for tx_header in publish_txs {
             let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|e| {
                 PreValidationError::InvalidIngressProof {
@@ -1682,8 +1677,7 @@ pub async fn data_txs_are_valid(
                 }
             })?;
 
-            // Validate each proof's signature and data_root match the transaction
-            // Note: uniqueness check is already done by validate_unique_ingress_proof_signers
+            // Loop though all the ingress proofs for the published transaction and pre-validate them
             for ingress_proof in tx_proofs.iter() {
                 // Validate ingress proof signature and data_root match the transaction
                 let _ = ingress_proof
