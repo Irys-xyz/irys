@@ -14,6 +14,7 @@ use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc, time::Duration};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
@@ -248,6 +249,12 @@ fn default_max_future_timestamp_drift_millis() -> u128 {
     15_000
 }
 
+/// Default for `peer_filter_mode` when the field is not present in the provided TOML.
+/// This keeps legacy configurations working by defaulting to unrestricted mode.
+fn default_peer_filter_mode() -> PeerFilterMode {
+    PeerFilterMode::Unrestricted
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
@@ -296,6 +303,15 @@ pub struct NodeConfig {
 
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<PeerAddress>,
+
+    /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
+    /// trusted-only or trusted-and-handshake mode, you'll be supplied one during the handshake
+    /// with the trusted peers. For the original trusted peer that has to be set.
+    pub initial_whitelist: Vec<SocketAddr>,
+
+    /// Controls how the node filters peer interactions
+    #[serde(default = "default_peer_filter_mode")]
+    pub peer_filter_mode: PeerFilterMode,
 
     pub reward_address: Address,
 
@@ -369,6 +385,23 @@ pub enum SyncMode {
     Trusted,
     /// Full sync mode, fully validates all blocks
     Full,
+}
+
+/// # Peer Filter Mode
+///
+/// Defines how the node filters which peers it will interact with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerFilterMode {
+    /// No restrictions - interact with any discovered peers (default behavior)
+    Unrestricted,
+
+    /// Only interact with peers specified in the `trusted_peers` list
+    TrustedOnly,
+
+    /// Interact with trusted peers and additional peers they return during handshake
+    /// The combination of trusted peers + handshake peers forms the whitelist
+    TrustedAndHandshake,
 }
 
 /// # Consensus Configuration Source
@@ -1027,7 +1060,9 @@ impl NodeConfig {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
-            } */],
+            }*/],
+            initial_whitelist: vec![],
+            peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -1131,6 +1166,8 @@ impl NodeConfig {
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
+            initial_whitelist: vec![],
+            peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 8081,
@@ -1216,6 +1253,21 @@ impl NodeConfig {
                 peer_id: self.reth.network.peer_id,
             },
         }
+    }
+
+    /// Check if the node should only interact with trusted peers
+    pub fn is_trusted_peers_only(&self) -> bool {
+        matches!(self.peer_filter_mode, PeerFilterMode::TrustedOnly)
+    }
+
+    /// Check if the node should interact with trusted peers and their handshake peers
+    pub fn is_trusted_and_handshake_mode(&self) -> bool {
+        matches!(self.peer_filter_mode, PeerFilterMode::TrustedAndHandshake)
+    }
+
+    /// Check if the node has peer filtering enabled (not unrestricted)
+    pub fn has_peer_filtering(&self) -> bool {
+        !matches!(self.peer_filter_mode, PeerFilterMode::Unrestricted)
     }
 }
 
@@ -1559,8 +1611,10 @@ mod tests {
         consensus = "Testing"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
         reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        peer_filter_mode = "trusted_and_handshake"
         genesis_peer_discovery_timeout_millis = 10000
         stake_pledge_drives = false
+        initial_whitelist = ["127.0.0.1:8080"]
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
@@ -1611,13 +1665,14 @@ mod tests {
         bind_port = 0
         public_ip = "0.0.0.0"
         public_port = 0
-        
+
         "#;
 
         // Create the expected config
         let mut expected_config = NodeConfig::testing();
         expected_config.consensus = ConsensusOptions::Testing;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
+        expected_config.peer_filter_mode = PeerFilterMode::TrustedAndHandshake;
         expected_config.trusted_peers = vec![PeerAddress {
             api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
             gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
@@ -1626,6 +1681,7 @@ mod tests {
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
             },
         }];
+        expected_config.initial_whitelist = vec!["127.0.0.1:8080".parse().unwrap()];
         // for debugging purposes
 
         // let expected_toml_data = toml::to_string(&expected_config).unwrap();
