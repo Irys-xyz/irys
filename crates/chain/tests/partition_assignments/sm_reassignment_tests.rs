@@ -50,7 +50,7 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     let partition_assignments = epoch_snapshot.get_partition_assignments(genesis_signer.address());
     let capacity_pa = partition_assignments
         .iter()
-        .find(|pa| pa.ledger_id == None)
+        .find(|pa| pa.ledger_id.is_none())
         .unwrap();
     let submit_pa = partition_assignments
         .iter()
@@ -63,7 +63,7 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     let _block1 = genesis_node.mine_block().await?;
 
     // 2. Post a data_tx that will cause the submit ledger to add a slot (9 chunks worth of bytes)
-    let data = vec![255u8; 9 * chunk_size];
+    let data = vec![255_u8; 9 * chunk_size];
     let data_tx = genesis_node
         .create_publish_data_tx(&genesis_signer, data)
         .await?;
