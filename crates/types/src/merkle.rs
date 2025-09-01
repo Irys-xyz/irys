@@ -471,8 +471,9 @@ pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<V
 
 /// Hashes together a single branch node from a pair of child nodes.
 pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
-    let max_byte_range = left.max_byte_range.to_note_vec();
-    let id = hash_all_sha256(vec![&left.id, &right.id, &max_byte_range]);
+    // pivot = left child’s exclusive upper bound used in branch hashing
+    let pivot_note = left.max_byte_range.to_note_vec();
+    let id = hash_all_sha256(vec![&left.id, &right.id, &pivot_note]);
     Ok(Node {
         id,
         data_hash: None,
