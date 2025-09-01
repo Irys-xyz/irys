@@ -14,6 +14,7 @@ use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::{collections::BTreeMap, env, ops::Deref, path::PathBuf, sync::Arc, time::Duration};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
@@ -302,6 +303,11 @@ pub struct NodeConfig {
 
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<PeerAddress>,
+
+    /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
+    /// trusted-only or trusted-and-handshake mode, you'll be supplied one during the handshake
+    /// with the trusted peers. For the original trusted peer that has to be set.
+    pub initial_whitelist: Vec<SocketAddr>,
 
     /// Controls how the node filters peer interactions
     #[serde(default = "default_peer_filter_mode")]
@@ -1055,6 +1061,7 @@ impl NodeConfig {
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             }*/],
+            initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
@@ -1159,6 +1166,7 @@ impl NodeConfig {
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
+            initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
@@ -1614,6 +1622,9 @@ mod tests {
         [trusted_peers.execution]
         peering_tcp_addr = "127.0.0.1:30303"
         peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+        [[initial_whitelist]]
+        "127.0.0.1:8080"
 
         [oracle]
         type = "mock"

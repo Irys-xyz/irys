@@ -389,10 +389,12 @@ impl PeerListDataInner {
             .collect();
 
         // Initialize whitelist based on peer filter mode
-        let peer_whitelist = match config.node_config.peer_filter_mode {
+        let peer_api_ip_whitelist = match config.node_config.peer_filter_mode {
             PeerFilterMode::Unrestricted => HashSet::new(), // No restrictions
             PeerFilterMode::TrustedOnly | PeerFilterMode::TrustedAndHandshake => {
-                trusted_peers_api_addresses.clone()
+                let mut ip_whitelist = trusted_peers_api_addresses.clone();
+                ip_whitelist.extend(config.node_config.initial_whitelist.clone());
+                ip_whitelist
             }
         };
 
@@ -406,7 +408,7 @@ impl PeerListDataInner {
             ),
             known_peers_cache: HashSet::new(),
             trusted_peers_api_addresses,
-            peer_whitelist,
+            peer_whitelist: peer_api_ip_whitelist,
             peer_network_service_sender: peer_network_sender,
         };
 
