@@ -3,7 +3,6 @@ sync_mode = "Full"
 base_directory = ""
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
 trusted_peers = []
-initial_whitelist = []
 reward_address = "0x0000000000000000000000000000000000000000"
 stake_pledge_drives = false
 genesis_peer_discovery_timeout_millis = 10000

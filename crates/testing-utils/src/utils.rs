@@ -88,7 +88,7 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         // abort the process
         eprintln!("\x1b[1;31mPanic occurred, Aborting process\x1b[0m");
         // TODO: maybe change this so that the panic hook can trigger an orderly shutdown
-        std::process::abort()
+        std::process::exit(1)
     }));
 
     Ok(())

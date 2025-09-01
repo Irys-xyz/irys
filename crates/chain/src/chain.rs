@@ -230,7 +230,7 @@ async fn start_reth_node(
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
-    let (node_handle, _reth_node_adapter) = match irys_reth_node_bridge::node::run_node(
+    let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
         config.node_config.clone(),
@@ -239,25 +239,7 @@ async fn start_reth_node(
         shadow_tx_store.clone(),
     )
     .in_current_span()
-    .await
-    {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Restarting reth thread - reason: {:?}", &e);
-            // One retry attempt
-            irys_reth_node_bridge::node::run_node(
-                Arc::new(chainspec.clone()),
-                task_executor.clone(),
-                config.node_config.clone(),
-                latest_block,
-                random_ports,
-                shadow_tx_store,
-            )
-            .in_current_span()
-            .await
-            .expect("expected reth node to have started")
-        }
-    };
+    .await?;
 
     debug!("Reth node started");
 
