@@ -1614,6 +1614,7 @@ mod tests {
         peer_filter_mode = "trusted_and_handshake"
         genesis_peer_discovery_timeout_millis = 10000
         stake_pledge_drives = false
+        initial_whitelist = ["127.0.0.1:8080"]
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
@@ -1622,9 +1623,6 @@ mod tests {
         [trusted_peers.execution]
         peering_tcp_addr = "127.0.0.1:30303"
         peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-
-        [[initial_whitelist]]
-        "127.0.0.1:8080"
 
         [oracle]
         type = "mock"
@@ -1683,6 +1681,7 @@ mod tests {
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
             },
         }];
+        expected_config.initial_whitelist = vec!["127.0.0.1:8080".parse().unwrap()];
         // for debugging purposes
 
         // let expected_toml_data = toml::to_string(&expected_config).unwrap();
