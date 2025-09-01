@@ -476,6 +476,7 @@ where
                 GossipError::unknown(&error)
             })?;
 
+        // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
         // Fetch and process each missing transaction one-by-one with retries
         for tx_id_to_fetch in missing_tx_ids {
             // Try source peer first
@@ -491,7 +492,7 @@ where
                     fetched = Some((resp, source_miner_address));
                 }
                 Err(e) => {
-                    debug!(
+                    warn!(
                         "Failed to fetch tx {:?} from source peer {}: {:?}",
                         tx_id_to_fetch, source_api_address, e
                     );
@@ -516,7 +517,7 @@ where
                             break;
                         }
                         Err(e) => {
-                            debug!(
+                            warn!(
                                 "Failed to fetch tx {:?} from peer {}: {:?}",
                                 tx_id_to_fetch, peer_item.address.api, e
                             );
@@ -545,7 +546,12 @@ where
             let (tx_id, mempool_response) = match tx_response {
                 IrysTransactionResponse::Commitment(commitment_tx) => {
                     let id = commitment_tx.id;
-                    (id, self.mempool.handle_commitment_transaction_ingress(commitment_tx).await)
+                    (
+                        id,
+                        self.mempool
+                            .handle_commitment_transaction_ingress(commitment_tx)
+                            .await,
+                    )
                 }
                 IrysTransactionResponse::Storage(tx) => {
                     let id = tx.id;
