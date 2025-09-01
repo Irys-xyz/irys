@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  irys-1:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.runtime
+    container_name: irys-1
+    restart: unless-stopped
+    networks:
+      app_network:
+        ipv4_address: 172.20.0.2
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./configs/irys-1.toml:/app/config.toml:ro
+      - ../target/debug-release/irys:/app/irys
+    cap_add:
+      - NET_ADMIN
+    command: []
+
+  irys-2:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.runtime
+    container_name: irys-2
+    restart: unless-stopped
+    networks:
+      app_network:
+        ipv4_address: 172.20.0.3
+    ports:
+      - "8081:8080"
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./configs/irys-2.toml:/app/config.toml:ro
+      - ../target/debug-release/irys:/app/irys
+    cap_add:
+      - NET_ADMIN
+    command: []
+
+networks:
+  app_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
