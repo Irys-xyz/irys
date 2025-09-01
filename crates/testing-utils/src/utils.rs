@@ -88,7 +88,17 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         // abort the process
         eprintln!("\x1b[1;31mPanic occurred, Aborting process\x1b[0m");
         // TODO: maybe change this so that the panic hook can trigger an orderly shutdown
-        std::process::exit(1)
+
+        // this will trigger the existing control-c signal detection
+        let pid = unsafe { libc::getpid() };
+        unsafe {
+            libc::kill(pid, libc::SIGINT);
+        }
+
+        // sleeping the thread will cause SIGINT to not function correctly
+        // std::thread::sleep(std::time::Duration::from_secs(10));
+        // eprintln!("Waited 15s, force exiting...");
+        // std::process::exit(1)
     }));
 
     Ok(())
