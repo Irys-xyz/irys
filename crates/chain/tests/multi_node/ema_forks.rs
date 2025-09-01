@@ -13,7 +13,7 @@ use std::sync::Arc;
 // Assert: EMA snapshots differ after the price adjustment interval during the fork.
 // Assert: After convergence, both nodes have identical chains with matching EMA snapshots.
 #[test_log::test(actix_web::test)]
-async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
+async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // setup
     const PRICE_ADJUSTMENT_INTERVAL: u64 = 2;
     let num_blocks_in_epoch = 13;
@@ -22,6 +22,11 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    genesis_config
+        .consensus
+        .get_mut()
+        .mempool
+        .anchor_expiry_depth = 40;
     genesis_config
         .consensus
         .get_mut()
@@ -42,7 +47,7 @@ async fn heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
 
     let node_2 = node_1
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
-        .await;
+        .await?;
 
     node_1.gossip_disable();
     node_2.gossip_disable();

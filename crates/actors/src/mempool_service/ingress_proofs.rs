@@ -1,6 +1,10 @@
-use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
+use irys_database::{
+    tables::{CompactCachedIngressProof, IngressProofs},
+    walk_all,
+};
 use irys_types::{ingress::CachedIngressProof, GossipBroadcastMessage, IngressProof};
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
+use tracing::debug;
 
 use crate::mempool_service::{IngressProofError, Inner};
 
@@ -43,6 +47,11 @@ impl Inner {
         if res.is_err() {
             return Err(IngressProofError::DatabaseError);
         }
+
+        let read_tx = db.tx().unwrap();
+        let ingress_proofs = walk_all::<IngressProofs, _>(&read_tx).unwrap();
+        debug!("ingress proofs after:\n{:#?}", ingress_proofs);
+        drop(read_tx);
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
         let gossip_broadcast_message = GossipBroadcastMessage::from(ingress_proof);

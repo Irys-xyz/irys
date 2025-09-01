@@ -1,5 +1,5 @@
 use irys_database::{
-    open_or_create_db,
+    commitment_tx_by_txid, open_or_create_db,
     reth_db::{Database as _, DatabaseEnv},
     tables::{IngressProofs, IrysTables, IrysTxHeaders},
     walk_all,
@@ -97,6 +97,11 @@ fn _check_db_for_commitments() -> eyre::Result<()> {
                 Some(ledger) => ledger,
                 None => continue,
             };
+
+        for id in ledger.tx_ids.0.iter() {
+            let tx = commitment_tx_by_txid(&tx, id)?.unwrap();
+            tracing::debug!("got commitment {:#?} in block {}", &tx, &header.height);
+        }
 
         if !ledger.tx_ids.is_empty() {
             tracing::debug!(

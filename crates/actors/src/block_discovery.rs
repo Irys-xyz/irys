@@ -16,8 +16,9 @@ use irys_domain::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionId, TokioServiceHandle,
+    get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
+    IrysTransactionId, TokioServiceHandle,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -441,21 +442,22 @@ impl BlockDiscoveryServiceInner {
         }
 
         if !publish_txs.is_empty() {
-            let publish_proofs = match &publish_ledger.proofs {
-                Some(proofs) => proofs,
-                None => {
-                    return Err(BlockDiscoveryError::BlockValidationError(
-                        PreValidationError::IngressProofsMissing,
-                    ));
-                }
-            };
-
-            // Pre-Validate the ingress-proof by verifying the signature
-            for (i, tx_header) in publish_txs.iter().enumerate() {
-                if let Err(e) = publish_proofs.0[i].pre_validate(&tx_header.data_root) {
-                    return Err(BlockDiscoveryError::BlockValidationError(
-                        PreValidationError::IngressProofSignatureInvalid(e.to_string()),
-                    ));
+            // Pre-Validate the ingress-proofs for each published transaction
+            for tx_header in publish_txs.iter() {
+                // Get the ingress proofs for the transaction
+                let tx_proofs =
+                    get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
+                        BlockDiscoveryError::BlockValidationError(
+                            PreValidationError::IngressProofsMissing,
+                        )
+                    })?;
+                // Validate the signatures and data_roots
+                for proof in tx_proofs.iter() {
+                    proof.pre_validate(&tx_header.data_root).map_err(|e| {
+                        BlockDiscoveryError::BlockValidationError(
+                            PreValidationError::IngressProofSignatureInvalid(e.to_string()),
+                        )
+                    })?;
                 }
             }
         }
@@ -476,6 +478,8 @@ impl BlockDiscoveryServiceInner {
                 "incoming block commitment txids, height {}\n{:#?}",
                 new_block_header.height, commitment_ledger
             );
+            // TODO: we can't get these from the database
+            // if we can, something has gone wrong!
             match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
                 .await
             {
@@ -496,7 +500,7 @@ impl BlockDiscoveryServiceInner {
             new_block_header.block_hash,
             new_block_header.height,
             new_block_header.get_commitment_ledger_tx_ids(),
-            commitments.iter().map(|x| x.id).collect::<Vec<_>>()
+            new_block_header.get_data_ledger_tx_ids()
         );
 
         // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
@@ -840,16 +844,16 @@ where
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
 
-            let x = tx_ids
+            let x: HashMap<IrysTransactionId, DataTransactionHeader> = tx_ids
                 .into_iter()
                 .zip(results.into_iter())
-                .map(|(id, opt)| {
-                    let header = opt.unwrap_or_else(|| {
-                        panic!("tx header missing after filter for id {:?}", id)
-                    });
-                    (id, header)
-                })
-                .collect::<HashMap<IrysTransactionId, DataTransactionHeader>>();
+                .fold(HashMap::new(), |mut map, (id, opt)| {
+                    if let Some(header) = opt {
+                        map.insert(id, header);
+                    }
+                    map
+                });
+
             Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }
     };
@@ -886,6 +890,8 @@ where
     );
 
     // Combine results, preferring mempool
+    // this is because unmigrated promoted txs get their promoted_height updated in the mempool ONLY
+    // so we need to prefer it.
     let mut headers = Vec::with_capacity(data_tx_ids.len());
     let mut missing = Vec::new();
 

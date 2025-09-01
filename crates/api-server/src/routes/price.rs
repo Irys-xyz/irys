@@ -97,7 +97,7 @@ fn cost_of_perm_storage(
             state.config.consensus.safe_minimum_number_of_years,
             state.config.consensus.decay_rate,
         )?
-        .replica_count(state.config.consensus.number_of_ingress_proofs)?;
+        .replica_count(state.config.consensus.number_of_ingress_proofs_total)?;
 
     // calculate the base network fee (protocol cost)
     let base_network_fee = cost_per_gb_per_year
@@ -107,7 +107,7 @@ fn cost_of_perm_storage(
     // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        state.config.consensus.number_of_ingress_proofs,
+        state.config.consensus.number_of_ingress_proofs_total,
         state.config.consensus.immediate_tx_inclusion_reward_percent,
     )?;
 

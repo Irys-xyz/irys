@@ -92,7 +92,7 @@ impl RethBlockProvider {
             let payloads = payloads.read().expect("can always read");
             payloads.get(&evm_block_hash).cloned()
         } else {
-            panic!("Tried to get payload from mock provider, but it is not a mock provider");
+            panic!("Tried to get payload from the mock provider, but it is not a mock provider");
         }
     }
 }
@@ -172,7 +172,11 @@ impl ExecutionPayloadCache {
         }
     }
 
-    pub async fn get_locally_stored_sealed_block(
+    /// Tries to get the sealed block from the local cache first, and if not found, fetches it from
+    /// the EVM node. This method does not request the payload from the network if it is not found
+    /// locally, use [ExecutionPayloadCache::wait_for_sealed_block] instead if you want to
+    /// request the payload from the network.
+    pub async fn get_sealed_block_from_cache(
         &self,
         evm_block_hash: &B256,
     ) -> Option<SealedBlock<Block>> {
@@ -187,6 +191,13 @@ impl ExecutionPayloadCache {
             let block = self.reth_payload_provider.evm_block(*evm_block_hash)?;
             Some(block.seal_slow())
         }
+    }
+
+    /// Checks if the execution payload is stored in the EVM node.
+    pub fn is_stored_in_reth(&self, evm_block_hash: &B256) -> bool {
+        self.reth_payload_provider
+            .evm_block(*evm_block_hash)
+            .is_some()
     }
 
     /// Waits for the execution payload to arrive over gossip. This method will first check the local
@@ -215,7 +226,7 @@ impl ExecutionPayloadCache {
         evm_block_hash: &B256,
         request_only_from_trusted_peers: bool,
     ) -> Option<SealedBlock<Block>> {
-        if let Some(sealed_block) = self.get_locally_stored_sealed_block(evm_block_hash).await {
+        if let Some(sealed_block) = self.get_sealed_block_from_cache(evm_block_hash).await {
             return Some(sealed_block);
         }
 
@@ -223,6 +234,10 @@ impl ExecutionPayloadCache {
         self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
             .await;
         receiver.await.ok()
+    }
+
+    pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
+        self.cache.read().await.payloads.contains(evm_block_hash)
     }
 
     #[instrument(skip(self))]
@@ -281,7 +296,7 @@ impl ExecutionPayloadCache {
         timeout: std::time::Duration,
     ) {
         if self
-            .get_locally_stored_sealed_block(&evm_block_hash)
+            .get_sealed_block_from_cache(&evm_block_hash)
             .await
             .is_none()
         {

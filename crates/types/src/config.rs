@@ -9,6 +9,7 @@ use crate::{
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
+use eyre::ensure;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -34,6 +35,22 @@ impl Config {
             chain_id: self.consensus.chain_id,
             chunk_size: self.consensus.chunk_size,
         }
+    }
+
+    // validate configuration invariants
+    // TODO: expand this!
+    pub fn validate(&self) -> eyre::Result<()> {
+        // ensures the block tree is able to contain all unmigrated blocks
+        ensure!((self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth);
+
+        // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
+        // TODO: once anchor maturity is enforced, apply that value here
+        ensure!(
+            std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
+                <= (self.consensus.mempool.anchor_expiry_depth + 4)
+        );
+
+        Ok(())
     }
 }
 
@@ -141,7 +158,11 @@ pub struct ConsensusConfig {
 
     /// Minimum number of replicas required for data to be considered permanently stored
     /// Higher values increase data durability but require more network resources
-    pub number_of_ingress_proofs: u64,
+    pub number_of_ingress_proofs_total: u64,
+
+    /// Minimum number of proofs from miners assigned to store the associated data
+    /// required for data to be promoted
+    pub number_of_ingress_proofs_from_assignees: u64,
 
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
@@ -256,7 +277,10 @@ pub struct RethChainSpec {
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
-    pub mode: NodeMode,
+    pub node_mode: NodeMode,
+
+    /// The synchronization mode for the node
+    pub sync_mode: SyncMode,
 
     /// The base directory where to look for artifact data
     #[serde(default = "default_irys_path")]
@@ -286,6 +310,9 @@ pub struct NodeConfig {
     /// HTTP API server configuration
     pub http: HttpConfig,
 
+    /// Reth node configuration
+    pub reth: RethConfig,
+
     /// StorageModule configuration
     pub storage: StorageSyncConfig,
 
@@ -301,14 +328,12 @@ pub struct NodeConfig {
     /// Settings for the price oracle system
     pub oracle: OracleConfig,
 
-    /// Reth node configuration
-    pub reth: RethConfig,
-
-    /// Reth settings
-    pub reth_peer_info: RethPeerInfo,
-
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
+
+    /// P2P handshake parameters
+    #[serde(default)]
+    pub p2p_handshake: P2PHandshakeConfig,
 }
 
 impl From<NodeConfig> for Config {
@@ -328,10 +353,22 @@ pub enum NodeMode {
     Genesis,
 
     /// Join an existing network by connecting to trusted peers
-    PeerSync,
+    Peer,
+}
 
-    /// Trusted peer mode, where the node only connects to trusted peers
-    TrustedPeerSync,
+/// # Node Synchronization Mode
+///
+/// Defines the method the node uses to synchronize with the network.
+/// Trusted mode allows for faster sync by relying on trusted peers,
+/// while Full mode ensures complete validation of all blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum SyncMode {
+    /// Fast sync mode, downloads index from the trusted peers and skips
+    /// heavy parts of the block validation
+    Trusted,
+    /// Full sync mode, fully validates all blocks
+    Full,
 }
 
 /// # Consensus Configuration Source
@@ -557,13 +594,33 @@ pub struct GossipConfig {
     pub bind_port: u16,
 }
 
-/// # Reth Configuration
+/// # Reth Node Configuration
 ///
 /// Settings that are passed to the reth node
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RethConfig {
+    pub network: RethNetworkConfig,
+}
+
+/// # Reth network Configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RethNetworkConfig {
+    #[serde(default)]
     pub use_random_ports: bool,
+    /// The IP address that's going to be announced to other peers
+    pub public_ip: String,
+    /// The port to accept connections from other peers
+    pub public_port: u16,
+    /// The IP address that Reth binds to
+    pub bind_ip: String,
+    /// The port number the Reth listens on
+    pub bind_port: u16,
+    // peer ID
+    // WARNING: this gets overridden partway through the startup sequence with the correct value
+    #[serde(default)]
+    pub peer_id: reth_transaction_pool::PeerId,
 }
 
 /// # Data Packing Configuration
@@ -652,7 +709,8 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs: 10,
+            number_of_ingress_proofs_total: 1,
+            number_of_ingress_proofs_from_assignees: 0,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
                 timestamp_millis: 0,
@@ -666,7 +724,7 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 10,
+                anchor_expiry_depth: 20,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
                 max_pledges_per_item: 100,
@@ -770,7 +828,8 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs: 10,
+            number_of_ingress_proofs_total: 1,
+            number_of_ingress_proofs_from_assignees: 0,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
                 timestamp_millis: 0,
@@ -794,7 +853,7 @@ impl ConsensusConfig {
             mempool: MempoolConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 10,
+                anchor_expiry_depth: 20,
                 // TODO: Move the following to a node config
                 max_pending_pledge_items: 100,
                 max_pledges_per_item: 100,
@@ -912,8 +971,8 @@ impl NodeConfig {
         }
     }
 
-    pub fn api_uri(&self) -> String {
-        format!("http://{}:{}", self.http.public_ip, self.http.public_port)
+    pub fn local_api_url(&self) -> String {
+        format!("http://{}:{}", self.http.bind_ip, self.http.bind_port)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -943,7 +1002,8 @@ impl NodeConfig {
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
         Self {
-            mode: NodeMode::Genesis,
+            node_mode: NodeMode::Genesis,
+            sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
@@ -963,11 +1023,11 @@ impl NodeConfig {
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
             },
-            trusted_peers: vec![PeerAddress {
+            trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
-            }],
+            } */],
             gossip: GossipConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -975,7 +1035,14 @@ impl NodeConfig {
                 bind_port: 0,
             },
             reth: RethConfig {
-                use_random_ports: true,
+                network: RethNetworkConfig {
+                    use_random_ports: true,
+                    public_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    public_port: 0,
+                    bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    bind_port: 0,
+                    peer_id: Default::default(),
+                },
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -988,8 +1055,7 @@ impl NodeConfig {
                 bind_ip: "127.0.0.1".parse().expect("valid IP address"),
                 bind_port: 0,
             },
-            reth_peer_info: RethPeerInfo::default(),
-
+            p2p_handshake: P2PHandshakeConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
         }
@@ -1038,7 +1104,8 @@ impl NodeConfig {
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
         Self {
-            mode: NodeMode::PeerSync,
+            node_mode: NodeMode::Peer,
+            sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
@@ -1071,7 +1138,14 @@ impl NodeConfig {
                 bind_port: 8081,
             },
             reth: RethConfig {
-                use_random_ports: false,
+                network: RethNetworkConfig {
+                    use_random_ports: false,
+                    public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    public_port: 9009,
+                    bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    bind_port: 9009,
+                    peer_id: Default::default(),
+                },
             },
             packing: PackingConfig {
                 cpu_packing_concurrency: 4,
@@ -1084,13 +1158,8 @@ impl NodeConfig {
                 bind_ip: "0.0.0.0".parse().expect("valid IP address"),
                 bind_port: 8080,
             },
-            reth_peer_info: crate::RethPeerInfo {
-                peering_tcp_addr: std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                    std::net::Ipv4Addr::new(127, 0, 0, 1),
-                    9009,
-                )),
-                peer_id: Default::default(),
-            },
+
+            p2p_handshake: P2PHandshakeConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
@@ -1137,7 +1206,42 @@ impl NodeConfig {
             gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
                 .parse()
                 .expect("valid SocketAddr expected"),
-            execution: self.reth_peer_info,
+            execution: RethPeerInfo {
+                peering_tcp_addr: format!(
+                    "{}:{}",
+                    &self.reth.network.public_ip, &self.reth.network.public_port
+                )
+                .parse()
+                .expect("valid SocketAddr expected"),
+                peer_id: self.reth.network.peer_id,
+            },
+        }
+    }
+}
+
+/// P2P handshake configuration with sensible defaults
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P2PHandshakeConfig {
+    pub max_concurrent_handshakes: usize,
+    pub max_peers_per_response: usize,
+    pub max_retries: u32,
+    pub backoff_base_secs: u64,
+    pub backoff_cap_secs: u64,
+    pub blocklist_ttl_secs: u64,
+    pub server_peer_list_cap: usize,
+}
+
+impl Default for P2PHandshakeConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_handshakes: 32,
+            max_peers_per_response: 25,
+            max_retries: 8,
+            backoff_base_secs: 1,
+            backoff_cap_secs: 60,
+            blocklist_ttl_secs: 600,
+            server_peer_list_cap: 25,
         }
     }
 }
@@ -1349,7 +1453,8 @@ mod tests {
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
-        number_of_ingress_proofs = 10
+        number_of_ingress_proofs_total = 1
+        number_of_ingress_proofs_from_assignees = 0
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
         pledge_base_value = 950.0
@@ -1391,7 +1496,7 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         max_commitment_txs_per_block = 100
-        anchor_expiry_depth = 10
+        anchor_expiry_depth = 20
         max_pending_pledge_items = 100
         max_pledges_per_item = 100
         max_pending_chunk_items = 30
@@ -1448,7 +1553,8 @@ mod tests {
     #[test]
     fn test_deserialize_config_from_toml() {
         let toml_data = r#"
-        mode = "Genesis"
+        node_mode = "Genesis"
+        sync_mode = "Full"
         base_directory = "~/.tmp/.irys"
         consensus = "Testing"
         mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
@@ -1499,24 +1605,31 @@ mod tests {
         public_ip = "127.0.0.1"
         public_port = 0
 
-        [reth]
+        [reth.network]
         use_random_ports = true
-
-        [reth_peer_info]
-        peering_tcp_addr = "0.0.0.0:0"
-        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        bind_ip = "0.0.0.0"
+        bind_port = 0
+        public_ip = "0.0.0.0"
+        public_port = 0
+        
         "#;
+
         // Create the expected config
         let mut expected_config = NodeConfig::testing();
         expected_config.consensus = ConsensusOptions::Testing;
         expected_config.base_directory = PathBuf::from("~/.tmp/.irys");
-        expected_config.trusted_peers.get_mut(0).unwrap().execution = RethPeerInfo {
-            peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
-            peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
-        };
-        let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        expected_config.trusted_peers = vec![PeerAddress {
+            api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
+            gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
+            execution: RethPeerInfo {
+                peering_tcp_addr: "127.0.0.1:30303".parse().unwrap(),
+                peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
+            },
+        }];
         // for debugging purposes
-        println!("{}", expected_toml_data);
+
+        // let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        // println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a NodeConfig
         let config = toml::from_str::<NodeConfig>(toml_data)
@@ -1552,7 +1665,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert_eq!(config.mode, NodeMode::PeerSync);
+        assert_eq!(config.node_mode, NodeMode::Peer);
 
         // Check consensus config fields
         let consensus = config.consensus_config();

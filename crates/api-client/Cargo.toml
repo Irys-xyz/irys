@@ -10,11 +10,13 @@ irys-types.workspace = true
 serde.workspace = true
 tokio.workspace = true
 async-trait = "0.1"
-tracing = { workspace = true, optional = true }
+tracing = { workspace = true }
+irys-api-server.workspace = true
+serde_json.workspace = true
 
 [features]
 default = []
-test-utils = ["tracing"]
+test-utils = []
 
 [lints]
 workspace = true

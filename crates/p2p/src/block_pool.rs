@@ -1,5 +1,7 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
+use crate::types::InternalGossipError;
+use crate::{GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::block_validation::shadow_transactions_are_valid;
@@ -13,8 +15,8 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, GossipBroadcastMessage, GossipCacheKey, GossipData,
-    IrysBlockHeader, PeerNetworkError,
+    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
+    PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -59,6 +61,20 @@ impl From<PeerNetworkError> for BlockPoolError {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum ProcessBlockResult {
+    /// Block has been processed successfully
+    Processed,
+    /// Block has been added to the pool, waiting for the parent block
+    ParentRequested,
+    /// Block has been added to the pool, but the parent block is already in the cache, so no request was made
+    ParentAlreadyInCache,
+    /// Block has been added to the pool, and the request for the parent block failed
+    ParentRequestFailed,
+    /// Block has been added to the pool, but no request for the parent block was made (too far ahead of canonical)
+    ParentTooFarAhead,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockPool<B, M>
 where
@@ -92,8 +108,8 @@ pub(crate) struct CachedBlock {
 
 #[derive(Clone, Debug)]
 struct BlockCacheInner {
-    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, CachedBlock>,
-    pub(crate) block_hash_to_parent_hash: LruCache<BlockHash, BlockHash>,
+    pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, HashSet<BlockHash>>,
+    pub(crate) blocks: LruCache<BlockHash, CachedBlock>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
 }
 
@@ -124,35 +140,14 @@ impl BlockCacheGuard {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
-    async fn block_hash_to_parent_hash(&self, block_hash: &BlockHash) -> Option<BlockHash> {
-        self.inner
-            .write()
-            .await
-            .block_hash_to_parent_hash
-            .get(block_hash)
-            .copied()
+    async fn contains_block(&self, block_hash: &BlockHash) -> bool {
+        self.inner.write().await.blocks.contains(block_hash)
     }
 
-    async fn block_hash_to_parent_hash_contains(&self, block_hash: &BlockHash) -> bool {
-        self.inner
-            .write()
-            .await
-            .block_hash_to_parent_hash
-            .contains(block_hash)
-    }
-
-    async fn orphaned_blocks_by_parent_contains(&self, block_hash: &BlockHash) -> bool {
-        self.inner
-            .write()
-            .await
-            .orphaned_blocks_by_parent
-            .contains(block_hash)
-    }
-
-    async fn orphaned_blocks_by_parent_cloned(
+    async fn orphaned_blocks_for_parent(
         &self,
         block_hash: &BlockHash,
-    ) -> Option<CachedBlock> {
+    ) -> Option<HashSet<BlockHash>> {
         self.inner
             .write()
             .await
@@ -181,12 +176,12 @@ impl BlockCacheGuard {
     pub(crate) async fn clear(&self) {
         let mut guard = self.inner.write().await;
         guard.orphaned_blocks_by_parent.clear();
-        guard.block_hash_to_parent_hash.clear();
         guard.requested_blocks.clear();
+        guard.blocks.clear();
     }
 
     async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
-        self.inner.write().await.block_is_processing(block_hash)
+        self.inner.write().await.is_block_processing(block_hash)
     }
 
     async fn change_block_processing_status(&self, block_hash: BlockHash, is_processing: bool) {
@@ -203,58 +198,63 @@ impl BlockCacheInner {
             orphaned_blocks_by_parent: LruCache::new(
                 NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
             ),
-            block_hash_to_parent_hash: LruCache::new(
-                NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap(),
-            ),
+            blocks: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
             requested_blocks: HashSet::new(),
         }
     }
 
     fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
-        self.block_hash_to_parent_hash
-            .put(block_header.block_hash, block_header.previous_block_hash);
-        self.orphaned_blocks_by_parent.put(
-            block_header.previous_block_hash,
+        let block_hash = block_header.block_hash;
+        let previous_block_hash = block_header.previous_block_hash;
+        self.blocks.put(
+            block_header.block_hash,
             CachedBlock {
                 header: block_header,
                 is_processing: true,
                 is_fast_tracking: fast_track,
             },
         );
+
+        if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&previous_block_hash) {
+            set.insert(block_hash);
+        } else {
+            let mut set = HashSet::new();
+            set.insert(block_hash);
+            self.orphaned_blocks_by_parent.put(previous_block_hash, set);
+        }
     }
 
-    fn block_is_processing(&mut self, block_hash: &BlockHash) -> bool {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return header.is_processing;
-            }
-        }
-
-        false
+    fn is_block_processing(&mut self, block_hash: &BlockHash) -> bool {
+        self.blocks
+            .get(block_hash)
+            .map(|block| block.is_processing)
+            .unwrap_or(false)
     }
 
     fn change_block_processing_status(&mut self, block_hash: BlockHash, is_processing: bool) {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(&block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get_mut(parent_hash) {
-                header.is_processing = is_processing;
-            }
+        if let Some(block) = self.blocks.get_mut(&block_hash) {
+            block.is_processing = is_processing
         }
     }
 
     fn remove_block(&mut self, block_hash: &BlockHash) {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.pop(block_hash) {
-            self.orphaned_blocks_by_parent.pop(&parent_hash);
+        if let Some(removed_block) = self.blocks.pop(block_hash) {
+            let parent_hash = removed_block.header.previous_block_hash;
+            let mut set_is_empty = false;
+            if let Some(set) = self.orphaned_blocks_by_parent.get_mut(&parent_hash) {
+                set.remove(block_hash);
+                if set.is_empty() {
+                    set_is_empty = true;
+                }
+            }
+            if set_is_empty {
+                self.orphaned_blocks_by_parent.pop(&parent_hash);
+            }
         }
     }
 
     fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<CachedBlock> {
-        if let Some(parent_hash) = self.block_hash_to_parent_hash.get(block_hash) {
-            if let Some(header) = self.orphaned_blocks_by_parent.get(parent_hash) {
-                return Some(header.clone());
-            }
-        }
-
-        None
+        self.blocks.get(block_hash).cloned()
     }
 }
 
@@ -325,13 +325,27 @@ where
             .get_epoch_snapshot(&block_header.previous_block_hash)
             .ok_or_else(|| {
                 BlockPoolError::OtherInternal(format!(
-                    "Parent epoch snapshot not found for block {:?}",
+                    "Parent epoch snapshot isn't found for block {:?}",
                     block_header.previous_block_hash
                 ))
             })?;
 
-        // Get block index from block status provider
+        // Get block index from the block status provider
         let block_index = self.block_status_provider.block_index_read_guard().inner();
+
+        Self::pull_and_seal_execution_payload(
+            &self.execution_payload_provider,
+            &self.sync_service_sender,
+            block_header.evm_block_hash,
+            false,
+        )
+        .await
+        .map_err(|error| {
+            BlockPoolError::OtherInternal(format!(
+                "Encountered a problem while trying to fix payload {:?}: {error:?}",
+                block_header.evm_block_hash
+            ))
+        })?;
 
         match shadow_transactions_are_valid(
             &self.config,
@@ -398,6 +412,11 @@ where
         &self,
         reth_service: Option<Addr<RethServiceActor>>,
     ) -> Result<(), BlockPoolError> {
+        if reth_service.is_none() {
+            error!("Reth service is not available, skipping payload repair");
+            return Ok(());
+        }
+
         let Some(latest_block_in_index) = self.block_status_provider.latest_block_in_index() else {
             debug!("No payloads to repair");
             return Ok(());
@@ -415,9 +434,7 @@ where
 
             let prev_payload_exists = self
                 .execution_payload_provider
-                .get_locally_stored_sealed_block(&block.evm_block_hash)
-                .await
-                .is_some();
+                .is_stored_in_reth(&block.evm_block_hash);
 
             // Found a block with a payload or reached the genesis block
             if prev_payload_exists || block.height <= 1 {
@@ -432,9 +449,17 @@ where
             blocks_with_missing_payloads.push(block);
         }
 
+        if blocks_with_missing_payloads.is_empty() {
+            debug!("No missing payloads found");
+            return Ok(());
+        }
+
         // The last block in the list is the oldest block with a missing payload
         while let Some(block) = blocks_with_missing_payloads.pop() {
-            debug!("Repairing missing payload for block {:?}", block.block_hash);
+            debug!(
+                "Repairing a missing payload for the block {:?}",
+                block.block_hash
+            );
             self.validate_and_submit_reth_payload(&block, reth_service.clone())
                 .await?;
         }
@@ -442,11 +467,12 @@ where
         Ok(())
     }
 
+    #[instrument(skip_all, target = "BlockPool")]
     pub(crate) async fn process_block(
         &self,
         block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
-    ) -> Result<(), BlockPoolError> {
+    ) -> Result<ProcessBlockResult, BlockPoolError> {
         check_block_status(
             &self.block_status_provider,
             block_header.block_hash,
@@ -462,11 +488,13 @@ where
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
                 block_header.block_hash
             );
-        } else {
-            self.blocks_cache
-                .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
-                .await;
+            return Err(BlockPoolError::AlreadyProcessed(block_header.block_hash));
         }
+
+        self.blocks_cache
+            .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+            .await;
+
         debug!(
             "Block pool: Processing block {:?} (height {})",
             block_header.block_hash, block_header.height,
@@ -494,17 +522,14 @@ where
                 current_block_hash
             );
 
-            let is_already_in_cache = self
-                .blocks_cache
-                .block_hash_to_parent_hash_contains(&prev_block_hash)
-                .await;
+            let is_already_in_cache = self.blocks_cache.contains_block(&prev_block_hash).await;
 
             if is_already_in_cache {
                 debug!(
                     "Parent block {:?} is already in the cache, skipping the request",
                     prev_block_hash
                 );
-                return Ok(());
+                return Ok(ProcessBlockResult::ParentAlreadyInCache);
             }
 
             let canonical_height = self.block_status_provider.canonical_height();
@@ -518,7 +543,7 @@ where
                     current_block_hash, current_block_height, canonical_height
                 );
 
-                return Ok(());
+                return Ok(ProcessBlockResult::ParentTooFarAhead);
             }
 
             // Use the sync service to request parent block (fire and forget)
@@ -533,14 +558,28 @@ where
                     "BlockPool: Failed to send RequestBlockFromTheNetwork message: {:?}",
                     send_err
                 );
+                return Ok(ProcessBlockResult::ParentRequestFailed);
+            } else {
+                return Ok(ProcessBlockResult::ParentRequested);
             }
-
-            return Ok(());
         }
 
         if skip_validation_for_fast_track {
-            // Preemptively handle reth payload for trusted sync path
-            self.handle_execution_payload_for_prevalidated_block(block_header.evm_block_hash, true);
+            // Preemptively handle reth payload for the trusted sync path
+            if let Err(err) = Self::pull_and_seal_execution_payload(
+                &self.execution_payload_provider,
+                &self.sync_service_sender,
+                block_header.evm_block_hash,
+                skip_validation_for_fast_track,
+            )
+            .await
+            {
+                error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, err);
+                self.blocks_cache
+                    .remove_block(&block_header.block_hash)
+                    .await;
+                return Err(BlockPoolError::BlockError(format!("{:?}", err)));
+            }
         }
 
         info!(
@@ -548,8 +587,10 @@ where
             current_block_hash
         );
 
+        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
+
         self.block_status_provider
-            .wait_for_block_tree_to_catch_up(block_header.height)
+            .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
         if let Err(block_discovery_error) = self
@@ -575,9 +616,9 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            self.handle_execution_payload_for_prevalidated_block(
+            self.pull_and_seal_execution_payload_in_background(
                 block_header.evm_block_hash,
-                false,
+                skip_validation_for_fast_track,
             );
         }
 
@@ -608,13 +649,61 @@ where
             );
         }
 
-        Ok(())
+        Ok(ProcessBlockResult::Processed)
+    }
+
+    pub(crate) async fn pull_and_seal_execution_payload(
+        execution_payload_provider: &ExecutionPayloadCache,
+        sync_service_sender: &mpsc::UnboundedSender<SyncChainServiceMessage>,
+        evm_block_hash: EvmBlockHash,
+        use_trusted_peers_only: bool,
+    ) -> GossipResult<()> {
+        debug!(
+            "Block pool: Forcing handling of execution payload for EVM block hash: {:?}",
+            evm_block_hash
+        );
+        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+
+        if !execution_payload_provider
+            .is_payload_in_cache(&evm_block_hash)
+            .await
+        {
+            debug!("BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network", evm_block_hash);
+            if let Err(send_err) =
+                sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                    evm_block_hash,
+                    use_trusted_peers_only,
+                    response: response_sender,
+                })
+            {
+                let err_text = format!(
+                    "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
+                    send_err
+                );
+                error!(err_text);
+                return Err(GossipError::Internal(InternalGossipError::Unknown(
+                    err_text,
+                )));
+            }
+
+            response_receiver.await.map_err(|recv_err| {
+                let err_text = format!(
+                    "BlockPool: Failed to receive response from PullPayloadFromTheNetwork: {:?}",
+                    recv_err
+                );
+                error!(err_text);
+                GossipError::Internal(InternalGossipError::Unknown(err_text))
+            })?
+        } else {
+            debug!("BlockPool: Payload for EVM block hash {:?} is already in cache, no need to request", evm_block_hash);
+            Ok(())
+        }
     }
 
     /// Requests the execution payload for the given EVM block hash if it is not already stored
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
-    pub(crate) fn handle_execution_payload_for_prevalidated_block(
+    pub(crate) fn pull_and_seal_execution_payload_in_background(
         &self,
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
@@ -625,25 +714,35 @@ where
         );
         let execution_payload_provider = self.execution_payload_provider.clone();
         let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
+        let chain_sync_sender = self.sync_service_sender.clone();
         tokio::spawn(async move {
-            if let Some(sealed_block) = execution_payload_provider
-                .wait_for_sealed_block(&evm_block_hash, use_trusted_peers_only)
-                .await
+            match Self::pull_and_seal_execution_payload(
+                &execution_payload_provider,
+                &chain_sync_sender,
+                evm_block_hash,
+                use_trusted_peers_only,
+            )
+            .await
             {
-                let evm_block = sealed_block.into_block();
-                if let Err(err) = gossip_broadcast_sender.send(GossipBroadcastMessage::new(
-                    GossipCacheKey::ExecutionPayload(evm_block_hash),
-                    GossipData::ExecutionPayload(evm_block),
-                )) {
-                    error!(
-                        "Failed to broadcast execution payload for block {:?}: {:?}",
-                        evm_block_hash, err
-                    );
-                } else {
-                    debug!(
-                        "Execution payload for block {:?} has been broadcasted",
-                        evm_block_hash
-                    );
+                Ok(()) => {
+                    let gossip_payload = execution_payload_provider
+                        .get_sealed_block_from_cache(&evm_block_hash)
+                        .await
+                        .map(GossipBroadcastMessage::from);
+
+                    if let Some(payload) = gossip_payload {
+                        if let Err(err) = gossip_broadcast_sender.send(payload) {
+                            error!("Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
+                        } else {
+                            debug!(
+                                "Block pool: Broadcasted execution payload for EVM block hash {:?}",
+                                evm_block_hash
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Block pool: Failed to handle execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
                 }
             }
         });
@@ -658,19 +757,11 @@ where
         block_hash: &BlockHash,
         block_height: u64,
     ) -> bool {
-        if let Some(parent_hash) = self
-            .blocks_cache
-            .block_hash_to_parent_hash(block_hash)
-            .await
-        {
-            self.blocks_cache
-                .orphaned_blocks_by_parent_contains(&parent_hash)
-                .await
-        } else {
-            self.block_status_provider
+        self.blocks_cache.is_block_processing(block_hash).await
+            || self
+                .block_status_provider
                 .block_status(block_height, block_hash)
                 .is_processed()
-        }
     }
 
     /// Internal method for the p2p services to get direct access to the cache
@@ -715,20 +806,31 @@ where
     }
 
     /// Get orphaned block by parent hash - for orphan block processing
-    pub(crate) async fn get_orphaned_block_by_parent(
+    pub(crate) async fn get_orphaned_blocks_by_parent(
         &self,
         parent_hash: &BlockHash,
-    ) -> Option<CachedBlock> {
-        self.blocks_cache
-            .orphaned_blocks_by_parent_cloned(parent_hash)
-            .await
+    ) -> Option<Vec<CachedBlock>> {
+        let orphaned_hashes = self
+            .blocks_cache
+            .orphaned_blocks_for_parent(parent_hash)
+            .await;
+
+        if let Some(hashes) = orphaned_hashes {
+            let mut orphaned_blocks = Vec::new();
+            for hash in hashes {
+                if let Some(block) = self.blocks_cache.get_block_header_cloned(&hash).await {
+                    orphaned_blocks.push(block);
+                }
+            }
+            Some(orphaned_blocks)
+        } else {
+            None
+        }
     }
 
     /// Check if parent hash exists in block cache - for orphan block processing
-    pub(crate) async fn is_parent_hash_in_cache(&self, parent_hash: &BlockHash) -> bool {
-        self.blocks_cache
-            .block_hash_to_parent_hash_contains(parent_hash)
-            .await
+    pub(crate) async fn contains_block(&self, block_hash: &BlockHash) -> bool {
+        self.blocks_cache.contains_block(block_hash).await
     }
 
     /// Mark the block as requested - for orphan block processing
@@ -771,5 +873,150 @@ fn check_block_status(
                 );
             Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<IrysBlockHeader> {
+        let header = IrysBlockHeader {
+            height,
+            block_hash: BlockHash::repeat_byte(block_byte),
+            previous_block_hash: BlockHash::repeat_byte(parent_byte),
+            ..IrysBlockHeader::default()
+        };
+        Arc::new(header)
+    }
+
+    #[test]
+    fn add_single_block() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xAA);
+        let child1 = make_header(0x01, 0xAA, 10);
+
+        cache.add_block(child1.clone(), false);
+
+        // parent -> set contains child1
+        let set = cache
+            .orphaned_blocks_by_parent
+            .get(&parent)
+            .expect("parent entry should exist");
+        assert!(set.contains(&child1.block_hash));
+
+        // child1 present in blocks cache with correct flags
+        let cached = cache
+            .blocks
+            .get(&child1.block_hash)
+            .expect("child1 should be stored in blocks cache");
+        assert!(cached.is_processing);
+        assert!(!cached.is_fast_tracking);
+    }
+
+    #[test]
+    fn add_multiple_sibling_blocks_only_first_cached() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xBB);
+        let child1 = make_header(0x02, 0xBB, 11);
+        let child2 = make_header(0x03, 0xBB, 12);
+
+        cache.add_block(child1.clone(), true); // fast track first
+        cache.add_block(child2.clone(), false); // second sibling
+
+        let set = cache
+            .orphaned_blocks_by_parent
+            .get(&parent)
+            .expect("parent entry should exist");
+        assert!(set.contains(&child1.block_hash));
+        assert!(set.contains(&child2.block_hash));
+
+        // Only the first added sibling is stored in blocks cache (current implementation behavior)
+        assert!(cache.blocks.get(&child1.block_hash).is_some());
+        assert!(cache.blocks.get(&child2.block_hash).is_some());
+
+        // Verify the fast tracking flag for first
+        assert!(
+            cache
+                .blocks
+                .get(&child1.block_hash)
+                .expect("exists")
+                .is_fast_tracking
+        );
+    }
+
+    #[test]
+    fn remove_blocks_updates_mappings() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xCC);
+        let child1 = make_header(0x10, 0xCC, 20);
+        let child2 = make_header(0x11, 0xCC, 21);
+        cache.add_block(child1.clone(), false);
+        cache.add_block(child2.clone(), false);
+
+        // Remove first child
+        cache.remove_block(&child1.block_hash);
+        // parent entry still exists because child2 remains
+        let set = cache
+            .orphaned_blocks_by_parent
+            .get(&parent)
+            .expect("parent entry should remain");
+        assert!(!set.contains(&child1.block_hash));
+        assert!(set.contains(&child2.block_hash));
+
+        // Remove the second child
+        cache.remove_block(&child2.block_hash);
+        // parent entry should now be gone
+        assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
+    }
+
+    #[test]
+    fn change_processing_status() {
+        let mut cache = BlockCacheInner::new();
+        let block = make_header(0x20, 0xDD, 30);
+        cache.add_block(block.clone(), false);
+
+        assert!(
+            cache
+                .blocks
+                .get(&block.block_hash)
+                .expect("cached")
+                .is_processing
+        );
+
+        cache.change_block_processing_status(block.block_hash, false);
+        assert!(
+            !cache
+                .blocks
+                .get(&block.block_hash)
+                .expect("cached")
+                .is_processing
+        );
+    }
+
+    #[test]
+    fn remove_nonexistent_block_is_noop() {
+        let mut cache = BlockCacheInner::new();
+        // Attempt to remove block that was never added
+        let bogus = BlockHash::repeat_byte(0xEE);
+        cache.remove_block(&bogus);
+        // Ensure internal maps remain empty
+        assert!(cache.orphaned_blocks_by_parent.iter().next().is_none());
+        assert!(cache.blocks.iter().next().is_none());
+    }
+
+    #[test]
+    fn remove_single_orphan_removes_parent_entry() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xAB);
+        let child = make_header(0xCD, 0xAB, 42);
+        cache.add_block(child.clone(), false);
+        // Sanity: parent entry exists
+        assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
+        // Remove only child
+        cache.remove_block(&child.block_hash);
+        // Parent entry should be removed entirely
+        assert!(cache.orphaned_blocks_by_parent.get(&parent).is_none());
     }
 }

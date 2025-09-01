@@ -1,3 +1,4 @@
+pub mod anchor;
 pub mod block;
 pub mod block_index;
 pub mod commitment;

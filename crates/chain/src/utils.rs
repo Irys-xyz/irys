@@ -36,10 +36,10 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
 
     let is_genesis = std::env::var("GENESIS")
         .map(|_| true)
-        .unwrap_or(matches!(config.mode, NodeMode::Genesis));
+        .unwrap_or(matches!(config.node_mode, NodeMode::Genesis));
 
     if is_genesis {
-        config.mode = NodeMode::Genesis;
+        config.node_mode = NodeMode::Genesis;
     }
 
     Ok(config)

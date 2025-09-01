@@ -40,6 +40,8 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     ) -> Result<usize, TxIngressError>;
 
     async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()>;
+
+    async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +178,15 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .send(MempoolServiceMessage::InsertPoAChunk(
                 block_hash, chunk_data, tx,
             ))
+            .map_err(|send_error| eyre!("{send_error:?}"))?;
+
+        rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
+    }
+
+    async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::RemoveFromBlacklist(tx_ids, tx))
             .map_err(|send_error| eyre!("{send_error:?}"))?;
 
         rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))

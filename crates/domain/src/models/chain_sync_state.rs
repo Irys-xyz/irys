@@ -82,11 +82,6 @@ impl ChainSyncState {
         self.sync_target_height.load(Ordering::Relaxed)
     }
 
-    /// Increments sync height by 1 and returns the new height
-    pub fn increment_sync_target_height(&self) -> usize {
-        self.sync_target_height.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
     /// [`crate::block_pool::BlockPool`] marks block as processed once the
     /// BlockDiscovery finished the pre-validation and scheduled the block for full validation
     pub fn mark_processed(&self, height: usize) {

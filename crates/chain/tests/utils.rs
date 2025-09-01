@@ -20,9 +20,11 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
+use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::walk_all;
 use irys_database::{
     commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
@@ -42,17 +44,18 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List, H256,
-    U256,
+    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
+    SyncMode, H256, U256,
 };
 use irys_types::{
-    Base64, CommitmentTransaction, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
-    DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
-    PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
+    DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
+    NodeConfig, NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
+use rand::{Rng as _, SeedableRng as _};
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
@@ -60,7 +63,7 @@ use reth::{
     providers::BlockReader as _,
     rpc::types::RpcBlockHash,
 };
-use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
+use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -74,87 +77,182 @@ pub async fn capacity_chunk_solution(
     miner_addr: Address,
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
+    difficulty: U256,
 ) -> SolutionContext {
-    let max_retries = 20;
+    // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
+    let max_wait_retries = 20;
     let mut i = 1;
     let initial_step_num = vdf_steps_guard.read().global_step;
     let mut step_num: u64 = 0;
-    // wait to have at least 2 new steps
-    while i < max_retries && step_num < initial_step_num + 2 {
+    while i < max_wait_retries && step_num < initial_step_num + 2 {
         sleep(Duration::from_secs(1)).await;
         step_num = vdf_steps_guard.read().global_step;
         i += 1;
     }
 
-    let steps: H256List = match vdf_steps_guard.read().get_steps(ii(step_num - 1, step_num)) {
-        Ok(s) => s,
-        Err(err) => panic!("Not enough vdf steps {:?}, waiting...", err),
-    };
-
-    // calculate last step checkpoints
-    let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(
-        &config.consensus.vdf,
-        step_num - 1_u64,
-    ));
-    let mut seed = steps[0];
-
-    let mut checkpoints: Vec<H256> =
-        vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
-
-    vdf_sha(
-        &mut hasher,
-        &mut salt,
-        &mut seed,
-        config.consensus.vdf.num_checkpoints_in_vdf_step,
-        config.consensus.vdf.num_iterations_per_checkpoint(),
-        &mut checkpoints,
-    );
-
+    // Scan across VDF steps and chunk offsets within the recall range until we find a valid solution
     let partition_hash = H256::zero();
+    let max_scan_steps: u64 = 100;
+    let mut current_step = step_num;
+
+    for _ in 0..max_scan_steps {
+        // Get steps for (current_step - 1, current_step)
+        let get_steps = {
+            vdf_steps_guard
+                .read()
+                .get_steps(ii(current_step.saturating_sub(1), current_step))
+        };
+        let steps: H256List = match get_steps {
+            Ok(s) => s,
+            Err(_) => {
+                // If steps are not yet available, wait briefly and try again
+                sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+
+        // Calculate last step checkpoints for current_step - 1
+        let mut hasher = Sha256::new();
+        let mut salt = irys_types::U256::from(step_number_to_salt_number(
+            &config.consensus.vdf,
+            current_step.saturating_sub(1),
+        ));
+        let mut seed = steps[0];
+
+        let mut checkpoints: Vec<H256> =
+            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+
+        vdf_sha(
+            &mut hasher,
+            &mut salt,
+            &mut seed,
+            config.consensus.vdf.num_checkpoints_in_vdf_step,
+            config.consensus.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        // Determine recall range for this step
+        let recall_range_idx = block_validation::get_recall_range(
+            current_step,
+            &config.consensus,
+            &vdf_steps_guard,
+            &partition_hash,
+        )
+        .expect("valid recall range");
+
+        // Try each chunk within the recall range window
+        for local_idx in 0..config.consensus.num_chunks_in_recall_range {
+            let offset_u64 =
+                (recall_range_idx as u64) * config.consensus.num_chunks_in_recall_range + local_idx;
+            let partition_chunk_offset: u32 = offset_u64 as u32;
+
+            // Compute the PoA chunk for this offset
+            let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);
+            compute_entropy_chunk(
+                miner_addr,
+                offset_u64,
+                partition_hash.into(),
+                config.consensus.entropy_packing_iterations,
+                config.consensus.chunk_size as usize,
+                &mut entropy_chunk,
+                config.consensus.chain_id,
+            );
+
+            // solution_hash = sha256(poa_chunk || offset_le || vdf_output)
+            let mut hasher_sol = Sha256::new();
+            hasher_sol.update(&entropy_chunk);
+            hasher_sol.update(partition_chunk_offset.to_le_bytes());
+            hasher_sol.update(steps[1].as_bytes());
+            let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+
+            // Check difficulty: interpret hash as little-endian number
+            let solution_val = U256::from_little_endian(&solution_hash.0);
+            if solution_val >= difficulty {
+                return SolutionContext {
+                    partition_hash,
+                    chunk_offset: partition_chunk_offset,
+                    mining_address: miner_addr,
+                    chunk: entropy_chunk,
+                    vdf_step: current_step,
+                    checkpoints: H256List(checkpoints),
+                    seed: Seed(steps[1]),
+                    solution_hash,
+                    ..Default::default()
+                };
+            }
+        }
+
+        // Advance to next step and wait a bit to allow VDF to progress
+        let next_step_target = current_step.saturating_add(1);
+        let mut tries = 0_u8;
+        while vdf_steps_guard.read().global_step < next_step_target && tries < 10 {
+            sleep(Duration::from_millis(200)).await;
+            tries += 1;
+        }
+        current_step = vdf_steps_guard.read().global_step.max(next_step_target);
+    }
+
+    // Fallback: if no valid solution found, return the best-effort solution for the latest step (may fail prevalidation)
+    let steps: H256List = vdf_steps_guard
+        .read()
+        .get_steps(ii(current_step.saturating_sub(1), current_step))
+        .expect("steps available for fallback");
     let recall_range_idx = block_validation::get_recall_range(
-        step_num,
+        current_step,
         &config.consensus,
         &vdf_steps_guard,
         &partition_hash,
     )
     .expect("valid recall range");
+    let offset_u64 = (recall_range_idx as u64) * config.consensus.num_chunks_in_recall_range;
+    let partition_chunk_offset: u32 = offset_u64 as u32;
 
     let mut entropy_chunk = Vec::<u8>::with_capacity(config.consensus.chunk_size as usize);
     compute_entropy_chunk(
         miner_addr,
-        recall_range_idx as u64 * config.consensus.num_chunks_in_recall_range,
+        offset_u64,
         partition_hash.into(),
         config.consensus.entropy_packing_iterations,
-        config.consensus.chunk_size as usize, // take it from storage config
+        config.consensus.chunk_size as usize,
         &mut entropy_chunk,
         config.consensus.chain_id,
     );
 
-    let max: irys_types::serialization::U256 = irys_types::serialization::U256::MAX;
-    let mut le_bytes = [0_u8; 32];
-    max.to_little_endian(&mut le_bytes);
-    let solution_hash = H256(le_bytes);
+    let mut hasher_sol = Sha256::new();
+    hasher_sol.update(&entropy_chunk);
+    hasher_sol.update(partition_chunk_offset.to_le_bytes());
+    hasher_sol.update(steps[1].as_bytes());
+    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
     SolutionContext {
         partition_hash,
-        // FIXME: SolutionContext should in future use PartitionChunkOffset::from()
-        // chunk_offset appears to be the end byte rather than the start byte that gets read
-        // therefore a saturating_mul is fine as it will read all data up to that point
-        // this is also a test util fn, and so less of a concern than a "domain logic" fn
-        chunk_offset: TryInto::<u32>::try_into(recall_range_idx)
-            .expect("Value exceeds u32::MAX")
-            .saturating_mul(
-                config
-                    .consensus
-                    .num_chunks_in_recall_range
-                    .try_into()
-                    .expect("Value exceeds u32::MAX"),
-            ),
+        chunk_offset: partition_chunk_offset,
         mining_address: miner_addr,
         chunk: entropy_chunk,
-        vdf_step: step_num,
-        checkpoints: H256List(checkpoints),
+        vdf_step: current_step,
+        checkpoints: H256List(
+            // recompute checkpoints for fallback
+            {
+                let mut h = Sha256::new();
+                let mut s = irys_types::U256::from(step_number_to_salt_number(
+                    &config.consensus.vdf,
+                    current_step.saturating_sub(1),
+                ));
+                let mut sd = steps[0];
+                let mut cps: Vec<H256> =
+                    vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+                vdf_sha(
+                    &mut h,
+                    &mut s,
+                    &mut sd,
+                    config.consensus.vdf.num_checkpoints_in_vdf_step,
+                    config.consensus.vdf.num_iterations_per_checkpoint(),
+                    &mut cps,
+                );
+                H256List(cps)
+            }
+            .0,
+        ),
         seed: Seed(steps[1]),
         solution_hash,
         ..Default::default()
@@ -187,6 +285,7 @@ pub struct IrysNodeTest<T = ()> {
     pub node_ctx: T,
     pub cfg: NodeConfig,
     pub temp_dir: TempDir,
+    pub name: Option<String>,
 }
 
 impl IrysNodeTest<()> {
@@ -195,15 +294,16 @@ impl IrysNodeTest<()> {
         Self::new_genesis(config)
     }
 
-    /// Start a new test node in peer-sync mode
+    /// Start a new test node in peer-sync mode with full block validation
     pub fn new(mut config: NodeConfig) -> Self {
-        config.mode = NodeMode::PeerSync;
+        config.node_mode = NodeMode::Peer;
+        config.sync_mode = SyncMode::Full;
         Self::new_inner(config)
     }
 
     /// Start a new test node in genesis mode
     pub fn new_genesis(mut config: NodeConfig) -> Self {
-        config.mode = NodeMode::Genesis;
+        config.node_mode = NodeMode::Genesis;
         Self::new_inner(config)
     }
 
@@ -214,23 +314,38 @@ impl IrysNodeTest<()> {
             cfg: config,
             temp_dir,
             node_ctx: (),
+            name: None,
         }
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
-        let node = IrysNode::new(self.cfg.clone()).unwrap();
+        let span = self.get_span();
+        let _enter = span.enter();
+
+        let node = IrysNode::new(self.cfg).unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
-            cfg: self.cfg,
+            cfg: node_ctx.config.node_config.clone(),
             node_ctx,
             temp_dir: self.temp_dir,
+            name: self.name,
         }
     }
 
+    fn get_span(&self) -> tracing::Span {
+        match &self.name {
+            Some(name) => debug_span!("NODE", name = %name),
+            None => tracing::Span::none(),
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+
     pub async fn start_with_name(self, log_name: &str) -> IrysNodeTest<IrysNodeCtx> {
-        let span = debug_span!("NODE", name = %log_name);
-        let _enter = span.enter();
-        self.start().await
+        self.with_name(log_name).start().await
     }
 
     pub async fn start_and_wait_for_packing(
@@ -259,7 +374,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let node_config = &self.node_ctx.config.node_config;
 
-        if node_config.mode == NodeMode::PeerSync {
+        if node_config.node_mode == NodeMode::Peer {
             panic!("Can only create a peer from a genesis config");
         }
 
@@ -274,7 +389,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config.gossip.public_port = 0;
 
         // Make sure to mark this config as a peer
-        peer_config.mode = NodeMode::PeerSync;
+        peer_config.node_mode = NodeMode::Peer;
+        peer_config.sync_mode = SyncMode::Full;
 
         // Add the genesis node details as a trusted peer
         peer_config.trusted_peers = vec![
@@ -297,7 +413,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config
     }
 
-    pub async fn testing_peer_with_assignments(&self, peer_signer: &IrysSigner) -> Self {
+    pub async fn testing_peer_with_assignments(
+        &self,
+        peer_signer: &IrysSigner,
+    ) -> eyre::Result<Self> {
         // Create a new peer config using the provided signer
         let peer_config = self.testing_peer_with_signer(peer_signer);
 
@@ -309,24 +428,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         config: NodeConfig,
         name: &'static str,
-    ) -> Self {
+    ) -> eyre::Result<Self> {
         let seconds_to_wait = 20;
         let peer_address = config.miner_address();
 
         // Start the peer node
         let peer_node = IrysNodeTest::new(config).start_with_name(name).await;
 
-        // Get the latest block hash to use as anchor
-        let current_height = self.get_canonical_chain_height().await;
-        let latest_block = self
-            .get_block_by_height(current_height)
-            .await
-            .expect("to get latest block");
-        let anchor = latest_block.block_hash;
-
         // Post stake + pledge commitments to establish validator status
-        let stake_tx = peer_node.post_stake_commitment(anchor).await;
-        let pledge_tx = peer_node.post_pledge_commitment(anchor).await;
+        let stake_tx = peer_node.post_stake_commitment(None).await?;
+        let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
         // Wait for commitment transactions to show up in this node's mempool
         self.wait_for_mempool(stake_tx.id, seconds_to_wait)
@@ -396,7 +507,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Peer should have at least one partition assignment"
         );
 
-        peer_node
+        Ok(peer_node)
     }
 
     /// get block height in block index
@@ -649,7 +760,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
-        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true)
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true, 1)
             .await
     }
 
@@ -659,7 +770,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
-        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false)
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, 1)
+            .await
+    }
+
+    pub async fn wait_for_multiple_ingress_proofs_no_mining(
+        &self,
+        unconfirmed_promotions: Vec<H256>,
+        num_proofs: usize,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, num_proofs)
             .await
     }
 
@@ -669,6 +790,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         mut unconfirmed_promotions: Vec<H256>,
         seconds: usize,
         mine_blocks: bool,
+        num_proofs: usize,
     ) -> eyre::Result<()> {
         tracing::info!(
             "waiting up to {} seconds for unconfirmed_promotions: {:?}",
@@ -700,12 +822,27 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
             if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
+                let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+
+                let tx_proofs: Vec<_> = ingress_proofs
+                    .iter()
+                    .filter(|(data_root, _)| data_root == &tx_header.data_root)
+                    .map(|p| p.1.clone())
+                    .collect();
+
                 //read its ingressproof(s)
-                if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-                    assert_eq!(proof.proof.data_root, tx_header.data_root);
-                    tracing::info!("Proofs available after {} attempts", attempts);
+                if tx_proofs.len() >= num_proofs {
+                    for ingress_proof in tx_proofs {
+                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                        tracing::info!("proof signer: {}", ingress_proof.address);
+                    }
+                    tracing::info!(
+                        "{} Proofs available after {} attempts",
+                        ingress_proofs.len(),
+                        attempts
+                    );
                     unconfirmed_promotions.pop();
-                };
+                }
             }
             drop(ro_tx);
             if mine_blocks {
@@ -715,7 +852,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         Err(eyre::eyre!(
-            "Failed waiting for ingress proofs. Waited {} seconds",
+            "Failed waiting {} for ingress proofs. Waited {} seconds",
+            num_proofs,
             seconds,
         ))
     }
@@ -880,6 +1018,100 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!(
             "Failed to locate block in block tree after {} retries",
             retries
+        ))
+    }
+
+    pub fn get_evm_block_by_hash(
+        &self,
+        hash: alloy_core::primitives::B256,
+    ) -> eyre::Result<reth::primitives::Block> {
+        use reth::providers::BlockReader as _;
+
+        self.node_ctx
+            .reth_handle
+            .provider
+            .block_by_hash(hash)?
+            .ok_or_eyre("Got None")
+    }
+
+    // kept for future work so we can query EVM info from nodes remotely (via HTTP)
+    pub async fn get_evm_block_by_hash2(
+        &self,
+        hash: alloy_core::primitives::B256,
+    ) -> eyre::Result<alloy_rpc_types_eth::Block> {
+        let client = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc_client()
+            .ok_or_eyre("Unable to get RPC client")?;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::block_by_hash(
+            &client, hash, true,
+        )
+        .await?
+        .ok_or_eyre("Got None")
+    }
+
+    pub async fn wait_for_evm_block(
+        &self,
+        hash: alloy_core::primitives::BlockHash,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<reth::primitives::Block> {
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+        for retry in 0..max_retries {
+            if let Ok(block) = self.get_evm_block_by_hash(hash) {
+                info!(
+                    "block found in {:?} reth after {} retries",
+                    &self.name, &retry
+                );
+                return Ok(block);
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate block in {:?} reth after {} retries",
+            &self.name,
+            max_retries
+        ))
+    }
+
+    pub async fn wait_for_evm_tx(
+        &self,
+        hash: &alloy_core::primitives::B256,
+        seconds_to_wait: usize,
+    ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        let retries_per_second = 50;
+        let max_retries = seconds_to_wait * retries_per_second;
+
+        // wait until the tx shows up
+        let rpc = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc_client()
+            .ok_or_eyre("Unable to get RPC client")?;
+
+        for retry in 0..max_retries {
+            if let Some(tx) = reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::transaction_by_hash(
+                &rpc, *hash,
+            )
+            .await? {
+                info!(
+                    "tx {} found in {:?} reth after {} retries",
+                    &hash, &self.name, &retry
+                );
+                return Ok(tx);
+            }
+            sleep(Duration::from_millis((1000 / retries_per_second) as u64)).await;
+        }
+
+        Err(eyre::eyre!(
+            "Failed to locate tx {} in {:?} reth after {} retries",
+            &hash,
+            &self.name,
+            max_retries
         ))
     }
 
@@ -1060,29 +1292,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         ledger: DataLedger,
         data_size: u64,
     ) -> eyre::Result<PriceInfo> {
-        let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
-        let url = format!("{}/v1/price/{}/{}", api_uri, ledger as u32, data_size);
-
-        let mut response = client
-            .get(url)
-            .send()
+        let client = self.get_api_client();
+        client
+            .get_data_price(self.get_peer_addr(), ledger, data_size)
             .await
-            .map_err(|e| eyre::eyre!("Failed to get price: {}", e))?;
-
-        if response.status() != awc::http::StatusCode::OK {
-            return Err(eyre::eyre!(
-                "Price endpoint returned status: {}",
-                response.status()
-            ));
-        }
-
-        let price_info: PriceInfo = response
-            .json()
-            .await
-            .map_err(|e| eyre::eyre!("Failed to parse price response: {}", e))?;
-
-        Ok(price_info)
     }
 
     pub async fn create_publish_data_tx(
@@ -1103,7 +1316,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account
             .create_publish_transaction(
                 data,
-                None, // anchor
+                self.get_anchor().await.map_err(AddTxError::CreateTx)?, // anchor
                 price_info.perm_fee,
                 price_info.term_fee,
             )
@@ -1149,7 +1362,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account
             .create_publish_transaction(
                 data,
-                None, // anchor
+                self.get_anchor().await.map_err(AddTxError::CreateTx)?, // anchor
                 price_info.perm_fee,
                 price_info.term_fee,
             )
@@ -1166,6 +1379,40 @@ impl IrysNodeTest<IrysNodeCtx> {
             .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
         {
             Ok(Some(tx_header)) => Ok(tx_header),
+            Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+        }
+    }
+
+    pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
+        let mempool_sender = &self.node_ctx.service_senders.mempool;
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        if let Err(e) =
+            mempool_sender.send(MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx))
+        {
+            tracing::info!("Unable to send mempool message: {}", e);
+        } else {
+            match oneshot_rx.await {
+                Ok(txs) => {
+                    if let Some(tx_header) = &txs[0] {
+                        if tx_header.promoted_height.is_some() {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Err(e) => tracing::info!("receive error for mempool {}", e),
+            }
+        }
+
+        match self
+            .node_ctx
+            .db
+            .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+        {
+            Ok(Some(tx_header)) => {
+                debug!("{:?}", tx_header);
+                Ok(tx_header.promoted_height.is_some())
+            }
             Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
             Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
         }
@@ -1324,6 +1571,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             node_ctx: (),
             cfg,
             temp_dir: self.temp_dir,
+            name: self.name,
         }
     }
 
@@ -1469,19 +1717,14 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("Failed to get price");
 
         let tx = signer
-            .create_publish_transaction(
-                data,
-                Some(anchor),
-                price_info.perm_fee,
-                price_info.term_fee,
-            )
+            .create_publish_transaction(data, anchor, price_info.perm_fee, price_info.term_fee)
             .expect("Expect to create a storage transaction from the data");
         let tx = signer
             .sign_transaction(tx)
             .expect("to sign the storage transaction");
 
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
         let mut response = client
             .post(url)
@@ -1512,7 +1755,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
         let mut response = client
             .post(url)
@@ -1555,7 +1798,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
 
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/chunk", api_uri);
         let response = client
             .post(url)
@@ -1567,45 +1810,31 @@ impl IrysNodeTest<IrysNodeCtx> {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    pub fn get_api_client(&self) -> IrysApiClient {
+        IrysApiClient::new()
+    }
+
+    pub fn get_peer_addr(&self) -> SocketAddr {
+        self.node_ctx.config.node_config.peer_address().api
+    }
+
     pub async fn upload_chunks(&self, tx: &DataTransaction) -> eyre::Result<()> {
-        let data = tx.data.clone().unwrap().0;
-
-        let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
-        let url = format!("{}/v1/chunk", api_uri);
-
-        for (idx, chunk) in tx.chunks.iter().enumerate() {
-            let unpacked_chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
-                data_size: tx.header.data_size,
-                data_path: Base64(tx.proofs[idx].proof.clone()),
-                bytes: Base64(data[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(idx as u32),
-            };
-            let response = client
-                .post(&url)
-                .send_json(&unpacked_chunk) // Send the tx as JSON in the request body
-                .await
-                .expect("client post failed");
-
-            assert_eq!(response.status(), StatusCode::OK);
-        }
-
-        Ok(())
+        let client = self.get_api_client();
+        client.upload_chunks(self.get_peer_addr(), tx).await
     }
 
     pub async fn post_commitment_tx(
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/stake", api_uri);
 
         let mut response = client
@@ -1627,7 +1856,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         user_address: Address,
     ) -> eyre::Result<CommitmentPriceInfo> {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
 
         let mut response = client
@@ -1648,7 +1877,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
             .await
     }
@@ -1695,9 +1924,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn post_pledge_commitment(&self, anchor: H256) -> CommitmentTransaction {
+    pub async fn post_pledge_commitment(
+        &self,
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let signer = self.cfg.signer();
+        let anchor = match anchor {
+            Some(anchor) => anchor,
+            None => self.get_anchor().await?,
+        };
         let pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
@@ -1705,16 +1941,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             signer.address(),
         )
         .await;
+
         let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, &pledge_tx)
-            .await
-            .expect("posted commitment tx");
+            .await?;
 
-        pledge_tx
+        Ok(pledge_tx)
     }
 
     pub async fn post_pledge_commitment_with_signer(
@@ -1744,32 +1980,43 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_pledge_commitment_without_gossip(
         &self,
-        anchor: H256,
-    ) -> CommitmentTransaction {
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         self.with_gossip_disabled(self.post_pledge_commitment(anchor))
             .await
     }
 
-    pub async fn post_stake_commitment(&self, anchor: H256) -> CommitmentTransaction {
+    pub async fn get_anchor(&self) -> eyre::Result<H256> {
+        self.get_api_client().get_anchor(self.get_peer_addr()).await
+    }
+
+    pub async fn post_stake_commitment(
+        &self,
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
+        let anchor = match anchor {
+            Some(anchor) => anchor,
+            None => self.get_anchor().await?,
+        };
         let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, &stake_tx)
             .await
             .expect("posted commitment tx");
 
-        stake_tx
+        Ok(stake_tx)
     }
 
     pub async fn post_stake_commitment_without_gossip(
         &self,
-        anchor: H256,
-    ) -> CommitmentTransaction {
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         self.with_gossip_disabled(self.post_stake_commitment(anchor))
             .await
     }
@@ -2011,6 +2258,112 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         Ok(())
     }
+
+    pub fn chunk_bytes_gen(
+        count: u64,
+        chunk_size: usize,
+        seed: u64,
+    ) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
+        chunk_bytes_gen(count, chunk_size, seed)
+    }
+}
+
+// simple "generator" that produces an iterator of deterministically random chunk bytes
+// this is used to create & verify large txs without having to write them to an intermediary
+pub fn chunk_bytes_gen(
+    count: u64,
+    chunk_size: usize,
+    seed: u64,
+) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    (0..count).map(move |i| {
+        debug!("generated chunk {}", &i);
+        let mut chunk_bytes = vec![0; chunk_size];
+        rng.fill(&mut chunk_bytes[..]);
+        Ok(chunk_bytes)
+    })
+}
+
+/// Construct a SolutionContext using a provided PoA chunk for the current step.
+/// Computes solution_hash = sha256(poa_chunk || offset_le || vdf_output) and returns immediately
+/// with a consistent cryptographic link, without attempting to satisfy difficulty or iterate offsets.
+/// This avoids timeouts and nondeterminism when running the full test suite.
+///
+/// Note: This is only used in tests that disable validation when producing the "evil" block.
+/// The block will later be rejected when validation is re-enabled due to PoA verification.
+pub async fn solution_context_with_poa_chunk(
+    node_ctx: &IrysNodeCtx,
+    poa_chunk: Vec<u8>,
+) -> Result<SolutionContext, eyre::Error> {
+    // Ensure the VDF has at least two steps materialized (N-1, N)
+    let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
+    node_ctx.start_vdf().await?;
+    let start = std::time::Instant::now();
+    let max_wait = std::time::Duration::from_secs(5);
+    let (step, steps) = loop {
+        if start.elapsed() > max_wait {
+            node_ctx.stop_vdf().await?;
+            return Err(eyre::eyre!(
+                "VDF steps unavailable: timed out waiting for (prev,current) pair"
+            ));
+        }
+        let s = vdf_steps_guard.read().global_step;
+        if s >= 1 {
+            if let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s)) {
+                if steps.len() >= 2 {
+                    break (s, steps);
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    // Compute checkpoints for (step-1)
+    let mut hasher = Sha256::new();
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(
+        &node_ctx.config.consensus.vdf,
+        step - 1,
+    ));
+    let mut seed = steps[0];
+    let mut checkpoints: Vec<H256> =
+        vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut seed,
+        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
+        node_ctx
+            .config
+            .consensus
+            .vdf
+            .num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
+
+    // For deterministic linkage without recall-range dependency, use offset 0
+    let partition_hash = H256::zero();
+    let partition_chunk_offset: u32 = 0;
+
+    // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
+    let mut hasher_sol = Sha256::new();
+    hasher_sol.update(&poa_chunk);
+    hasher_sol.update(partition_chunk_offset.to_le_bytes());
+    hasher_sol.update(steps[1].as_bytes());
+    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+
+    node_ctx.stop_vdf().await?;
+    Ok(SolutionContext {
+        partition_hash,
+        chunk_offset: partition_chunk_offset,
+        mining_address: node_ctx.config.node_config.miner_address(),
+        tx_path: None,
+        data_path: None,
+        chunk: poa_chunk,
+        vdf_step: step,
+        checkpoints: H256List(checkpoints),
+        seed: Seed(steps[1]),
+        solution_hash,
+    })
 }
 
 pub async fn mine_blocks(
@@ -2043,12 +2396,23 @@ pub async fn mine_block(
 }
 
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
+    // Fetch previous (parent) block difficulty
+    // Get parent block directly from in-memory block tree
+    let prev_block = {
+        let read = node_ctx.block_tree_guard.read();
+        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&parent_hash)
+            .cloned()
+            .ok_or_else(|| eyre!("Parent block header not found in block tree"))?
+    };
+
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     node_ctx.start_vdf().await?;
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
         &node_ctx.config,
+        prev_block.diff,
     )
     .await;
     node_ctx.stop_vdf().await?;
@@ -2198,6 +2562,7 @@ where
     assert_eq!(status, StatusCode::OK);
 }
 
+#[deprecated]
 pub async fn post_commitment_tx<T, B>(app: &T, tx: &CommitmentTransaction)
 where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,

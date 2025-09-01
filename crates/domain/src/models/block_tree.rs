@@ -969,8 +969,10 @@ impl BlockTree {
         None
     }
 
-    /// Get the earliest unvalidated block from the longest chain
+    /// Get the earliest unvalidated block from the longest/canonical chain
     /// Relies on the `longest_chain_cache`
+    /// TODO: rename to "...in_canonical_chain"
+    /// TODO: replace with lookup from canonical chain not_on_chain_count & lookup
     #[must_use]
     pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
@@ -1003,6 +1005,7 @@ impl BlockTree {
         }
     }
 
+    // TODO: replace with reading canonical chain, minusing head block by not on chain count
     pub fn get_earliest_unvalidated_block_height(&self) -> Option<u64> {
         // Get the block with max cumulative difficulty
         self.get_earliest_not_onchain_in_longest_chain()

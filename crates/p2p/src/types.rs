@@ -1,6 +1,6 @@
 use crate::block_pool::BlockPoolError;
 use irys_actors::mempool_service::{IngressProofError, TxIngressError};
-use irys_types::CommitmentValidationError;
+use irys_types::{CommitmentValidationError, PeerNetworkError};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -22,6 +22,10 @@ pub enum GossipError {
     TransactionIsAlreadyHandled,
     #[error("Commitment validation error: {0}")]
     CommitmentValidation(#[from] CommitmentValidationError),
+    #[error(transparent)]
+    PeerNetwork(PeerNetworkError),
+    #[error("Rate limited: too many requests")]
+    RateLimited,
 }
 
 impl From<InternalGossipError> for GossipError {
@@ -80,6 +84,12 @@ impl From<TxIngressError> for GossipError {
                 Self::CommitmentValidation(commitment_validation_error)
             }
         }
+    }
+}
+
+impl From<PeerNetworkError> for GossipError {
+    fn from(value: PeerNetworkError) -> Self {
+        Self::PeerNetwork(value)
     }
 }
 

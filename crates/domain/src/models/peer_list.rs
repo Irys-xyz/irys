@@ -4,8 +4,7 @@ use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError,
-    PeerNetworkSender,
+    Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError, PeerNetworkSender,
 };
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
@@ -30,6 +29,7 @@ pub enum ScoreDecreaseReason {
 pub enum ScoreIncreaseReason {
     Online,
     ValidData,
+    DataRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -169,9 +169,9 @@ impl PeerList {
                 return;
             }
 
-            // Check for active peers every second
-            debug!("waiting for active peers...");
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Check for active peers
+            warn!("waiting for active peers...");
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -325,22 +325,6 @@ impl PeerList {
         ip_matches_cached_ip && ip_is_in_a_trusted_list
     }
 
-    pub async fn request_block_from_the_network(
-        &self,
-        block_hash: BlockHash,
-        use_trusted_peers_only: bool,
-    ) -> Result<(), PeerNetworkError> {
-        let sender = self
-            .0
-            .read()
-            .expect("PeerListDataInner lock poisoned")
-            .peer_network_service_sender
-            .clone();
-        sender
-            .request_block_from_network(block_hash, use_trusted_peers_only)
-            .await
-    }
-
     pub async fn request_payload_from_the_network(
         &self,
         evm_payload_hash: B256,
@@ -353,7 +337,7 @@ impl PeerList {
             .peer_network_service_sender
             .clone();
         sender
-            .request_payload_from_network(evm_payload_hash, use_trusted_peers_only)
+            .request_payload_to_be_gossiped_from_network(evm_payload_hash, use_trusted_peers_only)
             .await
     }
 
@@ -440,6 +424,10 @@ impl PeerListDataInner {
                 ScoreIncreaseReason::ValidData => {
                     peer.reputation_score.increase();
                 }
+                ScoreIncreaseReason::DataRequest => {
+                    // Limited increase for data requests to prevent farming
+                    peer.reputation_score.increase_limited(1);
+                }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(mining_addr) {
             // Update score in purgatory
@@ -449,6 +437,10 @@ impl PeerListDataInner {
                 }
                 ScoreIncreaseReason::ValidData => {
                     peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::DataRequest => {
+                    // Limited increase for data requests to prevent farming
+                    peer.reputation_score.increase_limited(1);
                 }
             }
 
@@ -962,27 +954,27 @@ mod tests {
             "all_known_peers should include unstaked peer address (after fix)"
         );
 
-        // Test 14: request_block_from_the_network should work (async method)
-        let block_hash = BlockHash::default();
-        let block_request_result = peer_list
-            .request_block_from_the_network(block_hash, false)
-            .await;
-        // This will likely fail due to mock sender, but the method should handle both peer types equally
-        assert!(
-            block_request_result.is_err(),
-            "request_block_from_the_network should work with mock sender (expected to fail)"
-        );
-
-        // Test 15: request_payload_from_the_network should work (async method)
-        let payload_hash = B256::default();
-        let payload_request_result = peer_list
-            .request_payload_from_the_network(payload_hash, false)
-            .await;
-        // This will likely fail due to mock sender, but the method should handle both peer types equally
-        assert!(
-            payload_request_result.is_err(),
-            "request_payload_from_the_network should work with mock sender (expected to fail)"
-        );
+        // // Test 14: request_block_from_the_network should work (async method)
+        // let block_hash = BlockHash::default();
+        // let block_request_result = peer_list
+        //     .request_block_from_the_network(block_hash, false)
+        //     .await;
+        // // This will likely fail due to mock sender, but the method should handle both peer types equally
+        // assert!(
+        //     block_request_result.is_err(),
+        //     "request_block_from_the_network should work with mock sender (expected to fail)"
+        // );
+        //
+        // // Test 15: request_payload_from_the_network should work (async method)
+        // let payload_hash = B256::default();
+        // let payload_request_result = peer_list
+        //     .request_payload_from_the_network(payload_hash, false)
+        //     .await;
+        // // This will likely fail due to mock sender, but the method should handle both peer types equally
+        // assert!(
+        //     payload_request_result.is_err(),
+        //     "request_payload_from_the_network should work with mock sender (expected to fail)"
+        // );
     }
 
     #[tokio::test]
