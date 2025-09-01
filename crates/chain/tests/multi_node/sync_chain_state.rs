@@ -596,7 +596,7 @@ async fn poll_peer_list(
 ) -> Vec<PeerAddress> {
     // Increase the window to better accommodate CI variance
     let max_attempts = 400;
-    for attempt in 0..max_attempts {
+    for _attempt in 0..max_attempts {
         sleep(Duration::from_millis(100)).await;
 
         let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
@@ -615,7 +615,7 @@ async fn poll_peer_list(
             Err(e) => {
                 debug!(
                     "Attempt {}: failed to parse peer list JSON on {}: {}",
-                    attempt, ctx_node.node_ctx.config.node_config.http.bind_port, e
+                    _attempt, ctx_node.node_ctx.config.node_config.http.bind_port, e
                 );
                 // Continue polling
             }
