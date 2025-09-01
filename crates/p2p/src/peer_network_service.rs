@@ -489,7 +489,7 @@ where
             .await
             .map_err(|e| {
                 warn!(
-                    "Failed to announce yourself to address {}: {:?}",
+                    "Failed to announce yourself to address {}: {}",
                     api_address, e
                 );
                 PeerListServiceError::PostVersionError(e.to_string())

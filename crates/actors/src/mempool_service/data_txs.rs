@@ -53,8 +53,8 @@ impl Inner {
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
-        // TODO: REMOVE ONCE WE HAVE PROPER INGRESS PROOF LOGIC
-        tx.ingress_proofs = None;
+
+        tx.promoted_height = None;
 
         {
             let mempool_state_read_guard = self.mempool_state.read().await;

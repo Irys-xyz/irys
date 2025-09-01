@@ -1049,7 +1049,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     };
 
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
-    a_blk1_tx1_published.ingress_proofs = Some(a_blk1_tx1_proof1.proof.clone());
+    a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
     assert_eq!(
@@ -1139,18 +1139,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .get_storage_tx_header_from_mempool(&a_blk1_tx1.header.id)
         .await?;
 
-    assert_eq!(
-        a_blk1_tx1_b_blk3_tx1.ingress_proofs,
-        Some(
-            b_blk3.data_ledgers[DataLedger::Publish]
-                .proofs
-                .clone()
-                .unwrap()
-                .first()
-                .unwrap()
-                .clone()
-        )
-    );
+    assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height, Some(b_blk3.height));
 
     // tada!
 

@@ -455,14 +455,6 @@ impl BlockTreeServiceInner {
             }
 
             debug!(?migrated_hash, ?migration_height, "migrating irys block");
-            // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
-            self.reth_service_actor
-                .try_send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(cache.tip),
-                    confirmed_hash: None,
-                    finalized_hash: Some(BlockHashType::Irys(migrated_hash)),
-                })
-                .expect("Unable to send finalization message to reth");
 
             migrated_hash
         }; // RwLockWriteGuard is dropped here, before the await
@@ -628,7 +620,7 @@ impl BlockTreeServiceInner {
 
         let state;
 
-        let (arc_block, epoch_block, reorg_event) = {
+        let (arc_block, epoch_block, reorg_event, finalized_at_prune_depth) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -684,6 +676,18 @@ impl BlockTreeServiceInner {
                 // Subtract 1 to ensure we keep exactly `depth` blocks.
                 // The cache.prune() implementation does not count `tip` into the depth
                 // equation, so it's always tip + `depth` that's kept around
+                // Before pruning, compute which block reaches prune depth behind the new tip
+                let finalized_at_prune_depth = {
+                    let (longest_chain, _) = cache.get_canonical_chain();
+                    let prune_depth = self.config.consensus.block_tree_depth as usize;
+                    if longest_chain.len() > prune_depth {
+                        let idx = longest_chain.len() - 1 - prune_depth;
+                        Some(longest_chain[idx].block_hash)
+                    } else {
+                        None
+                    }
+                };
+
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
                 if is_reorg {
@@ -790,7 +794,12 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (arc_block, new_epoch_block, Some(event))
+                    (
+                        arc_block,
+                        new_epoch_block,
+                        Some(event),
+                        finalized_at_prune_depth,
+                    )
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -807,10 +816,10 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (arc_block, new_epoch_block, None)
+                    (arc_block, new_epoch_block, None, finalized_at_prune_depth)
                 }
             } else {
-                (arc_block, None, None)
+                (arc_block, None, None, None)
             };
 
             state = cache
@@ -833,6 +842,17 @@ impl BlockTreeServiceInner {
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 debug!("No reorg subscribers: {:?}", e);
             }
+        }
+
+        // Send finalization update for block at prune depth, if any
+        if let Some(finalized_hash) = finalized_at_prune_depth {
+            self.reth_service_actor
+                .try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                })
+                .expect("Unable to send finalization message to reth");
         }
 
         self.notify_services_of_block_confirmation(block_hash, &arc_block);

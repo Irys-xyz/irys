@@ -621,13 +621,31 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     if is_trusted_mode {
         let trusted_peers = peer_list.trusted_peers();
         if trusted_peers.is_empty() {
-            return Err(ChainSyncError::Network(
-                "No trusted peers available".to_string(),
-            ));
+            return if is_a_genesis_node {
+                sync_state.mark_processed(sync_state.sync_target_height());
+                sync_state.finish_sync();
+                Ok(())
+            } else {
+                Err(ChainSyncError::Network(
+                    "No trusted peers available".to_string(),
+                ))
+            };
         }
 
-        check_and_update_full_validation_switch_height(config, peer_list, &api_client, &sync_state)
-            .await?;
+        if let Err(err) = check_and_update_full_validation_switch_height(
+            config,
+            peer_list,
+            &api_client,
+            &sync_state,
+        )
+        .await
+        {
+            if is_a_genesis_node {
+                warn!("Since the node is a genesis node, skipping the sync task due to being unable to verify the full validation switch height from trusted peers: {}", err);
+            } else {
+                return Err(err);
+            }
+        }
     }
 
     let block_index = match get_block_index(
@@ -648,10 +666,10 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
             error!("Sync task: Failed to fetch block index: {}", err);
             if is_a_genesis_node {
                 warn!("Sync task: Because the node is a genesis node, skipping the sync task due to being unable to fetch the index from peers");
-                sync_state.finish_sync();
-                return Ok(());
+                vec![]
+            } else {
+                return Err(err);
             }
-            return Err(err);
         }
     };
 

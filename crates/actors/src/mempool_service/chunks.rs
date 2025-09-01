@@ -10,7 +10,7 @@ use irys_database::{
 };
 use irys_types::{
     chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
-    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, H256,
+    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::alloy_primitives::ChainId;
@@ -386,8 +386,10 @@ impl Inner {
             let signer = self.config.irys_signer();
             let latest_height = latest.height;
             let chain_id = self.config.consensus.chain_id;
+            let gossip_sender = self.service_senders.gossip_broadcast.clone();
+
             self.exec.clone().spawn_blocking(async move {
-                generate_ingress_proof(
+                let proof = generate_ingress_proof(
                     db.clone(),
                     root_hash,
                     data_size,
@@ -419,6 +421,12 @@ impl Inner {
                 })
                 .unwrap()
                 .unwrap();
+
+                // Gossip the ingress proof
+                let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
+                if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+                    tracing::error!("Failed to send gossip data: {:?}", error);
+                }
             });
         }
 
@@ -480,7 +488,7 @@ pub fn generate_ingress_proof(
     chunk_size: u64,
     signer: IrysSigner,
     chain_id: ChainId,
-) -> eyre::Result<()> {
+) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
     // in future, we'll need access to whatever unified storage provider API we have to get chunks
@@ -554,10 +562,10 @@ pub fn generate_ingress_proof(
             data_root,
             CompactCachedIngressProof(CachedIngressProof {
                 address: signer.address(),
-                proof,
+                proof: proof.clone(),
             }),
         )
     })??;
 
-    Ok(())
+    Ok(proof)
 }

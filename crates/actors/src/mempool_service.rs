@@ -259,32 +259,30 @@ impl Inner {
         }
     }
 
+    #[instrument(skip_all)]
     pub async fn validate_anchor_for_inclusion(
         &self,
         min_anchor_height: u64,
         max_anchor_height: u64,
         tx: &impl IrysTransactionCommon,
-    ) -> bool {
+    ) -> eyre::Result<bool> {
         let tx_id = tx.id();
         let anchor = tx.anchor();
-        let anchor_height = match self.get_anchor_height(tx_id, anchor).await {
-            Ok(h) => h,
-            Err(e) => {
-                warn!("Unable to get anchor height for {tx_id} {anchor} - {e}");
-                return false;
-            }
-        };
+        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+
         // these have to be inclusive so we handle txs near height 0 correctly
-        let old_enough = anchor_height >= min_anchor_height;
-        let new_enough = anchor_height <= max_anchor_height;
+        let new_enough = anchor_height >= min_anchor_height;
+        let old_enough = anchor_height <= max_anchor_height;
         if old_enough && new_enough {
-            true
+            Ok(true)
         } else if !old_enough {
             warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
-            false
-        } else {
+            Ok(false)
+        } else if !new_enough {
             warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
-            false
+            Ok(false)
+        } else {
+            eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
         }
     }
 
@@ -455,7 +453,7 @@ impl Inner {
 
             if !self
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
-                .await
+                .await?
             {
                 continue;
             }
@@ -621,7 +619,7 @@ impl Inner {
 
             if !self
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
-                .await
+                .await?
             {
                 continue;
             }
@@ -734,6 +732,7 @@ impl Inner {
                 .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
 
             let mut publish_txids: Vec<H256> = Vec::new();
+
             // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
             for data_root in ingress_proofs.keys() {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
@@ -765,35 +764,46 @@ impl Inner {
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
             for tx_header in &tx_headers {
-                let has_ingress_proof = tx_header.ingress_proofs.is_some();
                 debug!(
-                    "Publish candidate {} has ingress proof? {}",
-                    &tx_header.id, &has_ingress_proof
+                    "Processing candidate tx {} {:#?}",
+                    &tx_header.id, &tx_header
                 );
-                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
-                if !has_ingress_proof {
+                let is_promoted = tx_header.promoted_height.is_some();
+
+                if is_promoted {
+                    // If it's promoted skip it
+                    warn!(
+                        "Publish candidate {} is already promoted? {}",
+                        &tx_header.id, &is_promoted
+                    );
+                } else {
+                    // If it's not promoted, validate the proofs
+
                     // Get the proofs for this tx
                     let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
-                    // TODO: replace this section to properly handle multiple ingress proofs
-                    match proofs.first() {
-                        Some((_data_root, proof)) => {
-                            let mut tx_header = tx_header.clone();
-                            let ingress_proof = proof.proof.clone();
-                            debug!(
-                                "Got ingress proof {} for publish candidate {}",
-                                &tx_header.data_root, &tx_header.id
-                            );
-                            publish_proofs.push(ingress_proof.clone());
-                            tx_header.ingress_proofs = Some(ingress_proof);
-                            publish_txs.push(tx_header)
+
+                    let mut tx_proofs = Vec::new();
+
+                    // Check for the correct number of ingress proofs
+                    if (proofs.len() as u64) < self.config.consensus.number_of_ingress_proofs_total
+                    {
+                        // Not enough ingress proofs to promote this tx
+                        info!(
+                            "Not promoting tx {} - insufficient proofs (got {} wanted {})",
+                            &tx_header.id,
+                            &proofs.len(),
+                            self.config.consensus.number_of_ingress_proofs_total
+                        );
+                        continue;
+                    } else {
+                        // Collect enough ingress proofs for promotion, but no more
+                        for i in 0..self.config.consensus.number_of_ingress_proofs_total {
+                            tx_proofs.push(proofs[i as usize].1.proof.clone());
                         }
-                        None => {
-                            error!(
-                                "No ingress proof found for data_root: {} tx: {}",
-                                tx_header.data_root, &tx_header.id
-                            );
-                            continue;
-                        }
+
+                        // Update the lists for the publish ledger txid and tx_proofs share an index
+                        publish_txs.push(tx_header.clone());
+                        publish_proofs.append(&mut tx_proofs);
                     }
                 }
             }
@@ -801,6 +811,8 @@ impl Inner {
 
         let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
         debug!(?txs, "Publish transactions");
+
+        debug!("Processing Publish transactions {:#?}", &publish_txs);
 
         Ok(PublishLedgerWithTxs {
             txs: publish_txs,

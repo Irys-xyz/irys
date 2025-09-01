@@ -24,6 +24,7 @@ use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::walk_all;
 use irys_database::{
     commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
@@ -62,7 +63,7 @@ use reth::{
     providers::BlockReader as _,
     rpc::types::RpcBlockHash,
 };
-use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
+use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -759,7 +760,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
-        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true)
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true, 1)
             .await
     }
 
@@ -769,7 +770,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
-        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false)
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, 1)
+            .await
+    }
+
+    pub async fn wait_for_multiple_ingress_proofs_no_mining(
+        &self,
+        unconfirmed_promotions: Vec<H256>,
+        num_proofs: usize,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, num_proofs)
             .await
     }
 
@@ -779,6 +790,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         mut unconfirmed_promotions: Vec<H256>,
         seconds: usize,
         mine_blocks: bool,
+        num_proofs: usize,
     ) -> eyre::Result<()> {
         tracing::info!(
             "waiting up to {} seconds for unconfirmed_promotions: {:?}",
@@ -810,12 +822,27 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
             if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
+                let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+
+                let tx_proofs: Vec<_> = ingress_proofs
+                    .iter()
+                    .filter(|(data_root, _)| data_root == &tx_header.data_root)
+                    .map(|p| p.1.clone())
+                    .collect();
+
                 //read its ingressproof(s)
-                if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-                    assert_eq!(proof.proof.data_root, tx_header.data_root);
-                    tracing::info!("Proofs available after {} attempts", attempts);
+                if tx_proofs.len() >= num_proofs {
+                    for ingress_proof in tx_proofs {
+                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                        tracing::info!("proof signer: {}", ingress_proof.address);
+                    }
+                    tracing::info!(
+                        "{} Proofs available after {} attempts",
+                        ingress_proofs.len(),
+                        attempts
+                    );
                     unconfirmed_promotions.pop();
-                };
+                }
             }
             drop(ro_tx);
             if mine_blocks {
@@ -825,7 +852,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         Err(eyre::eyre!(
-            "Failed waiting for ingress proofs. Waited {} seconds",
+            "Failed waiting {} for ingress proofs. Waited {} seconds",
+            num_proofs,
             seconds,
         ))
     }
@@ -1351,6 +1379,40 @@ impl IrysNodeTest<IrysNodeCtx> {
             .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
         {
             Ok(Some(tx_header)) => Ok(tx_header),
+            Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+        }
+    }
+
+    pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
+        let mempool_sender = &self.node_ctx.service_senders.mempool;
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        if let Err(e) =
+            mempool_sender.send(MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx))
+        {
+            tracing::info!("Unable to send mempool message: {}", e);
+        } else {
+            match oneshot_rx.await {
+                Ok(txs) => {
+                    if let Some(tx_header) = &txs[0] {
+                        if tx_header.promoted_height.is_some() {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Err(e) => tracing::info!("receive error for mempool {}", e),
+            }
+        }
+
+        match self
+            .node_ctx
+            .db
+            .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+        {
+            Ok(Some(tx_header)) => {
+                debug!("{:?}", tx_header);
+                Ok(tx_header.promoted_height.is_some())
+            }
             Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
             Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
         }
