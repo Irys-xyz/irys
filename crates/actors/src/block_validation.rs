@@ -50,7 +50,7 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, warn, Instrument as _};
 
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Error)]
 pub enum PreValidationError {
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
@@ -1764,8 +1764,8 @@ fn validate_unique_ingress_proof_signers(
             }
         })?;
 
-        // Track signers for this transaction to ensure uniqueness
-        let mut signers_for_tx = std::collections::HashSet::new();
+        // Track signer counts for this transaction to ensure each appears exactly once
+        let mut signer_counts = std::collections::HashMap::new();
 
         for ingress_proof in tx_proofs.iter() {
             // Recover the signer address
@@ -1776,11 +1776,16 @@ fn validate_unique_ingress_proof_signers(
                 }
             })?;
 
-            // Check for duplicate signers
-            if !signers_for_tx.insert(signer) {
+            // Increment the count for this signer
+            *signer_counts.entry(signer).or_insert(0) += 1;
+        }
+
+        // Check that each signer appears exactly once
+        for (signer, count) in signer_counts.iter() {
+            if *count != 1 {
                 return Err(PreValidationError::DuplicateIngressProofSigner {
                     tx_id: *tx_id,
-                    signer,
+                    signer: *signer,
                 });
             }
         }
