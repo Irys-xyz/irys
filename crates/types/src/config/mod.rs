@@ -97,6 +97,7 @@ impl From<&NodeConfig> for MempoolConfig {
             max_preheader_data_path_bytes: value.mempool.max_preheader_data_path_bytes,
             max_valid_items: value.mempool.max_valid_items,
             max_invalid_items: value.mempool.max_invalid_items,
+            max_valid_chunks: value.mempool.max_valid_chunks,
             // consensus
             max_data_txs_per_block: consensus.max_data_txs_per_block,
             max_commitment_txs_per_block: consensus.max_commitment_txs_per_block,
@@ -191,6 +192,10 @@ pub struct MempoolConfig {
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
+
+    /// Maximum number of valid chunk hashes to keep track of
+    /// Prevents re-processing and re-gossipping of recently seen chunks
+    pub max_valid_chunks: usize,
 }
 
 pub mod serde_utils {

@@ -32,6 +32,22 @@ impl Inner {
 
         info!("Processing chunk");
 
+        // Early exit if we've already processed this chunk recently
+        let chunk_path_hash = chunk.chunk_path_hash();
+        {
+            let mempool_state_guard = mempool_state.read().await;
+            if mempool_state_guard
+                .recent_valid_chunks
+                .contains(&chunk_path_hash)
+            {
+                debug!(
+                    "Chunk {} already processed recently, skipping re-gossip",
+                    &chunk_path_hash
+                );
+                return Ok(());
+            }
+        }
+
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
             .read_tx()
@@ -242,6 +258,14 @@ impl Inner {
         {
             error!("Database error: {:?}", e);
             return Err(e);
+        }
+
+        // Add to recent valid chunks cache to prevent re-processing
+        {
+            let mut mempool_state_guard = mempool_state.write().await;
+            mempool_state_guard
+                .recent_valid_chunks
+                .put(chunk_path_hash, ());
         }
 
         for sm in self.storage_modules_guard.read().iter() {

@@ -362,6 +362,10 @@ pub struct MempoolNodeConfig {
     /// Maximum number of invalid tx txids to keep track of
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_invalid_items: usize,
+
+    /// Maximum number of valid chunk hashes to keep track of
+    /// Prevents re-processing and re-gossipping of recently seen chunks
+    pub max_valid_chunks: usize,
 }
 
 impl NodeConfig {
@@ -493,6 +497,7 @@ impl NodeConfig {
                 max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
+                max_valid_chunks: 10_000,
             },
 
             vdf: VdfNodeConfig {
@@ -614,6 +619,7 @@ impl NodeConfig {
                 max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
+                max_valid_chunks: 10_000,
             },
 
             vdf: VdfNodeConfig {
