@@ -283,7 +283,7 @@ mod tests {
         let config = Config::new(NodeConfig::testing());
         let mut hasher = Sha256::new();
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
         let mut hash: H256 = H256::random();
         let original_hash = hash;
         let mut salt: U256 = U256::from(10);
@@ -291,14 +291,14 @@ mod tests {
 
         init_tracing();
 
-        debug!("VDF difficulty: {}", config.consensus.vdf.sha_1s_difficulty);
+        debug!("VDF difficulty: {}", config.vdf.sha_1s_difficulty);
         let now = Instant::now();
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut hash,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
         let elapsed = now.elapsed();
@@ -308,8 +308,8 @@ mod tests {
         let checkpoints2 = vdf_sha_verification(
             original_salt,
             original_hash,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint() as usize,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint() as usize,
         );
         let elapsed = now.elapsed();
         debug!("vdf original code verification: {:.2?}", elapsed);
@@ -350,7 +350,7 @@ mod tests {
             let config = config.clone();
             move || {
                 run_vdf(
-                    &config.consensus.vdf,
+                    &config.vdf,
                     0,
                     seed,
                     reset_seed,
@@ -384,23 +384,20 @@ mod tests {
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(
-            &config.consensus.vdf,
-            step_num - 1_u64,
-        ));
+        let mut salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % config.consensus.vdf.reset_frequency as u64 == 0 {
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        if step_num > 0 && (step_num - 1) % config.vdf.reset_frequency as u64 == 0 {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -415,7 +412,7 @@ mod tests {
         };
 
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+            .num_threads(config.vdf.parallel_verification_thread_limit)
             .build()
             .expect("to be able to build vdf validation pool");
 
@@ -423,7 +420,7 @@ mod tests {
             vdf_steps_are_valid(
                 &pool,
                 &vdf_info,
-                &config.consensus.vdf,
+                &config.vdf,
                 &vdf_steps_guard,
                 Arc::new(AtomicU8::new(CancelEnum::Continue as u8))
             )
@@ -467,7 +464,7 @@ mod tests {
             let config = config.clone();
             move || {
                 run_vdf(
-                    &config.consensus.vdf,
+                    &config.vdf,
                     0,
                     seed,
                     reset_seed,
@@ -497,23 +494,20 @@ mod tests {
 
         // calculate last step checkpoints
         let mut hasher = Sha256::new();
-        let mut salt = U256::from(step_number_to_salt_number(
-            &config.consensus.vdf,
-            step_num - 1_u64,
-        ));
+        let mut salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
         let mut seed = steps[2];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % config.consensus.vdf.reset_frequency as u64 == 0 {
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        if step_num > 0 && (step_num - 1) % config.vdf.reset_frequency as u64 == 0 {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -528,7 +522,7 @@ mod tests {
         };
 
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+            .num_threads(config.vdf.parallel_verification_thread_limit)
             .build()
             .expect("to be able to build vdf validation pool");
 
@@ -536,7 +530,7 @@ mod tests {
             vdf_steps_are_valid(
                 &pool,
                 &vdf_info,
-                &config.consensus.vdf,
+                &config.vdf,
                 &vdf_steps_guard,
                 Arc::new(AtomicU8::new(CancelEnum::Continue as u8))
             )

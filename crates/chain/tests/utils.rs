@@ -116,20 +116,20 @@ pub async fn capacity_chunk_solution(
         // Calculate last step checkpoints for current_step - 1
         let mut hasher = Sha256::new();
         let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.consensus.vdf,
+            &config.vdf,
             current_step.saturating_sub(1),
         ));
         let mut seed = steps[0];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
 
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -237,18 +237,18 @@ pub async fn capacity_chunk_solution(
             {
                 let mut h = Sha256::new();
                 let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.consensus.vdf,
+                    &config.vdf,
                     current_step.saturating_sub(1),
                 ));
                 let mut sd = steps[0];
                 let mut cps: Vec<H256> =
-                    vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
                 vdf_sha(
                     &mut h,
                     &mut s,
                     &mut sd,
-                    config.consensus.vdf.num_checkpoints_in_vdf_step,
-                    config.consensus.vdf.num_iterations_per_checkpoint(),
+                    config.vdf.num_checkpoints_in_vdf_step,
+                    config.vdf.num_iterations_per_checkpoint(),
                     &mut cps,
                 );
                 H256List(cps)
@@ -2291,7 +2291,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         end_height: u64,
     ) -> eyre::Result<Vec<IrysBlockHeader>> {
         let blocks = self.get_blocks(start_height, end_height).await?;
-        let reset_frequency = self.node_ctx.config.consensus.vdf.reset_frequency;
+        let reset_frequency = self.node_ctx.config.vdf.reset_frequency;
 
         Ok(blocks
             .into_iter()
@@ -2392,23 +2392,17 @@ pub async fn solution_context_with_poa_chunk(
 
     // Compute checkpoints for (step-1)
     let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(
-        &node_ctx.config.consensus.vdf,
-        step - 1,
-    ));
+    let mut salt =
+        irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
     let mut seed = steps[0];
     let mut checkpoints: Vec<H256> =
-        vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
+        vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
     vdf_sha(
         &mut hasher,
         &mut salt,
         &mut seed,
-        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
-        node_ctx
-            .config
-            .consensus
-            .vdf
-            .num_iterations_per_checkpoint(),
+        node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+        node_ctx.config.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 

@@ -79,6 +79,15 @@ pub async fn post_commitment_tx(
             TxIngressError::InvalidLedger(_) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
             }
+            TxIngressError::BalanceFetchError { address, reason } => {
+                tracing::error!("API: Balance fetch error for {}: {}", address, reason);
+                Ok(
+                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
+                        "Unable to verify balance for {}: {}",
+                        address, reason
+                    )),
+                )
+            }
         };
     }
 
