@@ -76,60 +76,6 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 std::collections::BTreeMap::new(), // No expired ledger fees
             ))
         }
-
-        // async fn create_evm_block(&self, prev_block_header: &IrysBlockHeader, perv_evm_block: &Block, commitment_txs_to_bill: &[CommitmentTransaction], submit_txs: &[DataTransactionHeader], publish_txs: &mut PublishLedgerWithTxs, reward_amount: Amount<Irys>, timestamp_ms: u128, expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>) -> eyre::Result<(EthBuiltPayload, U256)> {
-        //     let block_height = prev_block_header.height + 1;
-        //     let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
-        //
-        //     // Get treasury balance from previous block
-        //     let initial_treasury_balance = prev_block_header.treasury;
-        //
-        //     // Generate expected shadow transactions using shared logic
-        //     let mut shadow_tx_generator = ShadowTxGenerator::new(
-        //         &block_height,
-        //         &self.inner().config.node_config.reward_address,
-        //         &reward_amount.amount,
-        //         prev_block_header,
-        //         &self.inner().config.consensus,
-        //         commitment_txs_to_bill,
-        //         submit_txs,
-        //         publish_txs,
-        //         initial_treasury_balance,
-        //         &expired_ledger_fees,
-        //     );
-        //
-        //     let mut shadow_txs = Vec::new();
-        //     for tx_result in shadow_tx_generator.by_ref() {
-        //         let metadata = tx_result?;
-        //         let mut tx_raw = compose_shadow_tx(
-        //             self.inner().config.consensus.chain_id,
-        //             &metadata.shadow_tx,
-        //             metadata.transaction_fee,
-        //         );
-        //         let signature = local_signer
-        //             .sign_transaction_sync(&mut tx_raw)
-        //             .expect("shadow tx must always be signable");
-        //         let tx = EthereumTxEnvelope::<TxEip4844>::Eip1559(tx_raw.into_signed(signature))
-        //             .try_into_recovered()
-        //             .expect("shadow tx must always be signable");
-        //
-        //         shadow_txs.push(EthPooledTransaction::new(tx, 300));
-        //     }
-        //
-        //     // Get the final treasury balance after all transactions
-        //     let final_treasury_balance = shadow_tx_generator.treasury_balance();
-        //
-        //     let payload = self
-        //         .build_and_submit_reth_payload(
-        //             prev_block_header,
-        //             timestamp_ms,
-        //             shadow_txs,
-        //             perv_evm_block.header.mix_hash,
-        //         )
-        //         .await?;
-        //
-        //     Ok((payload, final_treasury_balance))
-        // }
     }
 
     // Configure a test network
@@ -229,11 +175,9 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     test_signer.sign_block_header(&mut irys_block)?;
     block = Arc::new(irys_block);
 
-    println!("Heha 1");
     // Send block directly to block tree service for validation
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
-    println!("heah 2");
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     // This should still be rejected because the perm_fee is insufficient
     assert_eq!(outcome, BlockValidationOutcome::Discarded);
