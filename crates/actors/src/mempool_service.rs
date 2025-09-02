@@ -1,9 +1,20 @@
+pub mod chunks;
+pub mod commitment_txs;
+pub mod data_txs;
+pub mod facade;
+pub mod ingress_proofs;
+pub mod lifecycle;
+pub mod pledge_provider;
+
+pub use chunks::*;
+pub use facade::*;
+
 use crate::block_discovery::get_data_tx_in_parallel_inner;
+use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::block_validation::calculate_perm_storage_total_fee;
-use crate::mempool_service::{ChunkIngressError, MempoolPledgeProvider};
+use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
@@ -16,7 +27,6 @@ use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
-use irys_types::IngressProofsList;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
@@ -30,8 +40,10 @@ use irys_types::{
     Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
+use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
 use reth_db::{Database as _, DatabaseError};
@@ -40,12 +52,14 @@ use std::fmt::Display;
 use std::fs;
 use std::io::Write as _;
 use std::num::NonZeroUsize;
+use std::pin::pin;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, error, info, instrument, trace, warn};
+use tokio::sync::broadcast;
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock};
+use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
 #[derive(Debug)]
 pub struct Inner {
@@ -119,6 +133,8 @@ pub enum MempoolServiceMessage {
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
     InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
     GetState(oneshot::Sender<AtomicMempoolState>),
+    /// Remove the set of txids from any blocklists (recent_invalid_txs)
+    RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
 }
 
 impl Inner {
@@ -226,14 +242,54 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+                MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
+                    let response_value = self.remove_from_blacklists(tx_ids).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
             }
             Ok(())
         })
     }
 
+    async fn remove_from_blacklists(&mut self, tx_ids: Vec<H256>) {
+        let mut state = self.mempool_state.write().await;
+        for tx_id in tx_ids {
+            state.recent_invalid_tx.pop(&tx_id);
+        }
+    }
+
+    #[instrument(skip_all)]
+    pub async fn validate_anchor_for_inclusion(
+        &self,
+        min_anchor_height: u64,
+        max_anchor_height: u64,
+        tx: &impl IrysTransactionCommon,
+    ) -> eyre::Result<bool> {
+        let tx_id = tx.id();
+        let anchor = tx.anchor();
+        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+
+        // these have to be inclusive so we handle txs near height 0 correctly
+        let new_enough = anchor_height >= min_anchor_height;
+        let old_enough = anchor_height <= max_anchor_height;
+        if old_enough && new_enough {
+            Ok(true)
+        } else if !old_enough {
+            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too new compared to max height {max_anchor_height}");
+            Ok(false)
+        } else if !new_enough {
+            warn!("Tx {tx_id} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}");
+            Ok(false)
+        } else {
+            eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
+        }
+    }
+
     #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
-        &self,
+        &mut self,
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
@@ -250,6 +306,17 @@ impl Inner {
             .max_commitment_txs_per_block
             .try_into()
             .expect("max_commitment_txs_per_block to fit into usize");
+
+        let current_height = self.get_latest_block_height()?;
+        let min_anchor_height = current_height.saturating_sub(
+            (self.config.consensus.mempool.anchor_expiry_depth as u64)
+                .saturating_sub(self.config.consensus.block_migration_depth as u64),
+        );
+
+        let max_anchor_height =
+            current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
+
+        debug!("Anchor bounds for inclusion @ {current_height}: >= {min_anchor_height}, <= {max_anchor_height}");
 
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
@@ -382,6 +449,13 @@ impl Inner {
 
             // Check funding before simulation
             if !check_funding(tx) {
+                continue;
+            }
+
+            if !self
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
+                .await?
+            {
                 continue;
             }
 
@@ -544,6 +618,13 @@ impl Inner {
                 }
             }
 
+            if !self
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
+                .await?
+            {
+                continue;
+            }
+
             trace!(
                 tx_id = ?tx.id,
                 signer = ?tx.signer(),
@@ -652,6 +733,7 @@ impl Inner {
                 .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
 
             let mut publish_txids: Vec<H256> = Vec::new();
+
             // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
             for data_root in ingress_proofs.keys() {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
@@ -683,45 +765,55 @@ impl Inner {
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
             for tx_header in &tx_headers {
-                let has_ingress_proof = tx_header.ingress_proofs.is_some();
                 debug!(
-                    "Publish candidate {} has ingress proof? {}",
-                    &tx_header.id, &has_ingress_proof
+                    "Processing candidate tx {} {:#?}",
+                    &tx_header.id, &tx_header
                 );
-                // If there's no ingress proof included in the tx header, it means the tx still needs to be promoted
-                if !has_ingress_proof {
+                let is_promoted = tx_header.promoted_height.is_some();
+
+                if is_promoted {
+                    // If it's promoted skip it
+                    warn!(
+                        "Publish candidate {} is already promoted? {}",
+                        &tx_header.id, &is_promoted
+                    );
+                } else {
+                    // If it's not promoted, validate the proofs
+
                     // Get the proofs for this tx
                     let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
-                    // TODO: replace this section to properly handle multiple ingress proofs
-                    match proofs.first() {
-                        Some((_data_root, proof)) => {
-                            let mut tx_header = tx_header.clone();
-                            let ingress_proof = proof.proof.clone();
-                            debug!(
-                                "Got ingress proof {} for publish candidate {}",
-                                &tx_header.data_root, &tx_header.id
-                            );
-                            publish_proofs.push(ingress_proof.clone());
-                            tx_header.ingress_proofs = Some(ingress_proof);
-                            publish_txs.push(tx_header)
+
+                    let mut tx_proofs = Vec::new();
+
+                    // Check for the correct number of ingress proofs
+                    if (proofs.len() as u64) < self.config.consensus.number_of_ingress_proofs_total
+                    {
+                        // Not enough ingress proofs to promote this tx
+                        info!(
+                            "Not promoting tx {} - insufficient proofs (got {} wanted {})",
+                            &tx_header.id,
+                            &proofs.len(),
+                            self.config.consensus.number_of_ingress_proofs_total
+                        );
+                        continue;
+                    } else {
+                        // Collect enough ingress proofs for promotion, but no more
+                        for i in 0..self.config.consensus.number_of_ingress_proofs_total {
+                            tx_proofs.push(proofs[i as usize].1.proof.clone());
                         }
-                        None => {
-                            error!(
-                                "No ingress proof found for data_root: {} tx: {}",
-                                tx_header.data_root, &tx_header.id
-                            );
-                            continue;
-                        }
+
+                        // Update the lists for the publish ledger txid and tx_proofs share an index
+                        publish_txs.push(tx_header.clone());
+                        publish_proofs.append(&mut tx_proofs);
                     }
                 }
             }
         }
 
-        let txs = &publish_txs
-            .iter()
-            .map(|h| h.id.0.to_base58())
-            .collect::<Vec<_>>();
+        let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
         debug!(?txs, "Publish transactions");
+
+        debug!("Processing Publish transactions {:#?}", &publish_txs);
 
         Ok(PublishLedgerWithTxs {
             txs: publish_txs,
@@ -754,6 +846,39 @@ impl Inner {
         block
     }
 
+    // Resolves an anchor (block hash) to it's height
+    pub async fn get_anchor_height(
+        &self,
+        tx_id: IrysTransactionId,
+        anchor: H256,
+    ) -> Result<u64, TxIngressError> {
+        // check the mempool, then block tree, then DB
+        Ok(
+            if let Some(height) = {
+                let guard = self.mempool_state.read().await;
+                guard.prevalidated_blocks.get(&anchor).map(|h| h.height)
+            } {
+                height
+            } else if let Some(height) = {
+                // in a block so rust doesn't complain about it being held across an await point
+                // I suspect if let Some desugars to something that lint doesn't like
+                let guard = self.block_tree_read_guard.read();
+                guard.get_block(&anchor).map(|h| h.height)
+            } {
+                height
+            } else if let Some(hdr) = {
+                let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
+                irys_database::block_header_by_hash(&read_tx, &anchor, false)
+                    .map_err(|_| TxIngressError::DatabaseError)?
+            } {
+                hdr.height
+            } else {
+                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                return Err(TxIngressError::InvalidAnchor);
+            },
+        )
+    }
+
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
     // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
@@ -762,62 +887,33 @@ impl Inner {
         &mut self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
-        let mempool_state = &self.mempool_state;
         let tx_id = tx.id();
         let anchor = tx.anchor();
 
-        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
-
         let latest_height = self.get_latest_block_height()?;
-        let anchor_expiry_depth = self
-            .config
-            .node_config
-            .consensus_config()
-            .mempool
-            .anchor_expiry_depth as u64;
 
-        // check tree / mempool for block header
-        if let Some(hdr) = self
-            .mempool_state
-            .read()
-            .await
-            .prevalidated_blocks
-            .get(&anchor)
-            .cloned()
-        {
-            if hdr.height + anchor_expiry_depth >= latest_height {
-                debug!("valid block hash anchor for tx ");
-                return Ok(hdr.height);
-            } else {
-                let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                warn!(
-                    "Invalid anchor value for tx - header height {} beyond expiry depth {}",
-                    &hdr.height, &anchor_expiry_depth
-                );
-                return Err(TxIngressError::InvalidAnchor);
-            }
-        }
+        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
 
-        // check index for block header
-        match irys_database::block_header_by_hash(&read_tx, &anchor, false) {
-            Ok(Some(hdr)) => {
-                if hdr.height + anchor_expiry_depth >= latest_height {
-                    debug!("valid block hash anchor for tx");
-                    Ok(hdr.height)
-                } else {
-                    let mut mempool_state_write_guard = mempool_state.write().await;
-                    mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                    warn!("Invalid block hash anchor value for tx - header height {} beyond expiry depth {}", &hdr.height, &anchor_expiry_depth);
-                    Err(TxIngressError::InvalidAnchor)
-                }
-            }
-            _ => {
-                let mut mempool_state_write_guard = mempool_state.write().await;
-                mempool_state_write_guard.recent_invalid_tx.put(tx_id, ());
-                warn!("Invalid anchor value for tx - Unknown anchor {}", &anchor);
-                Err(TxIngressError::InvalidAnchor)
-            }
+        // is this anchor too old?
+
+        let min_anchor_height =
+            latest_height.saturating_sub(self.config.consensus.mempool.anchor_expiry_depth as u64);
+
+        let too_old = anchor_height < min_anchor_height;
+
+        if !too_old {
+            debug!("valid block hash anchor for tx ");
+            return Ok(anchor_height);
+        } else {
+            Self::mark_tx_as_invalid(
+                self.mempool_state.write().await,
+                tx_id,
+                format!(
+                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height}"
+                ),
+            );
+
+            return Err(TxIngressError::InvalidAnchor);
         }
     }
 
@@ -850,7 +946,7 @@ impl Inner {
         let commitment_hash_map = self.get_all_commitment_tx().await;
         for tx in commitment_hash_map.values() {
             // Create a filepath for this transaction
-            let tx_path = commitment_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+            let tx_path = commitment_tx_path.join(format!("{}.json", tx.id));
 
             // Check to see if the file exists
             if tx_path.exists() {
@@ -872,7 +968,7 @@ impl Inner {
         let storage_hash_map = self.get_all_storage_tx().await;
         for tx in storage_hash_map.values() {
             // Create a filepath for this transaction
-            let tx_path = storage_tx_path.join(format!("{}.json", tx.id.0.to_base58()));
+            let tx_path = storage_tx_path.join(format!("{}.json", tx.id));
 
             // Check to see if the file exists
             if tx_path.exists() {
@@ -912,6 +1008,15 @@ impl Inner {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")
                 });
         }
+
+        self.wipe_blacklists().await;
+    }
+
+    // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
+    // right now this only wipes `recent_invalid_tx`
+    pub async fn wipe_blacklists(&mut self) {
+        let mut write = self.mempool_state.write().await;
+        write.recent_invalid_tx.clear();
     }
 
     /// Helper that opens a read-only database transaction from the Irys mempool state.
@@ -952,6 +1057,18 @@ impl Inner {
             warn!("Tx {} signature is invalid", &tx.id());
             Err(TxIngressError::InvalidSignature)
         }
+    }
+
+    /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
+    pub fn mark_tx_as_invalid(
+        mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState>,
+        tx_id: IrysTransactionId,
+        err_reason: impl ToString,
+    ) {
+        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
+        // let mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState> = self.mempool_state.write().await;
+        state.recent_invalid_tx.put(tx_id, ());
+        state.recent_valid_tx.pop(&tx_id);
     }
 
     // Helper to get the canonical chain and latest height
@@ -1136,4 +1253,161 @@ pub enum IngressProofError {
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
+}
+
+/// The Mempool oversees pending transactions and validation of incoming tx.
+#[derive(Debug)]
+pub struct MempoolService {
+    shutdown: Shutdown,
+    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
+    block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
+    inner: Inner,
+}
+
+impl Default for MempoolService {
+    fn default() -> Self {
+        unimplemented!("don't rely on the default implementation of the `MempoolService`");
+    }
+}
+
+impl MempoolService {
+    /// Spawn a new Mempool service
+    pub fn spawn_service(
+        irys_db: DatabaseProvider,
+        reth_node_adapter: IrysRethNodeAdapter,
+        storage_modules_guard: StorageModulesReadGuard,
+        block_tree_read_guard: &BlockTreeReadGuard,
+        rx: UnboundedReceiver<MempoolServiceMessage>,
+        config: &Config,
+        service_senders: &ServiceSenders,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> eyre::Result<TokioServiceHandle> {
+        info!("Spawning mempool service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let block_tree_read_guard = block_tree_read_guard.clone();
+        let config = config.clone();
+        let mempool_config = &config.consensus.mempool;
+        let mempool_state = create_state(mempool_config);
+        let storage_modules_guard = storage_modules_guard;
+        let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
+        let block_migrated_rx = service_senders.subscribe_block_migrated();
+
+        let handle = runtime_handle.spawn(
+            async move {
+                let mempool_state = Arc::new(RwLock::new(mempool_state));
+                let pledge_provider = MempoolPledgeProvider::new(
+                    mempool_state.clone(),
+                    block_tree_read_guard.clone(),
+                );
+
+                let mempool_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    reorg_rx,
+                    block_migrated_rx,
+                    inner: Inner {
+                        block_tree_read_guard,
+                        config,
+                        exec: TaskExecutor::current(),
+                        irys_db,
+                        mempool_state,
+                        reth_node_adapter,
+                        service_senders,
+                        storage_modules_guard,
+                        pledge_provider,
+                    },
+                };
+                mempool_service
+                    .start()
+                    .await
+                    .expect("Mempool service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
+
+        Ok(TokioServiceHandle {
+            name: "mempool_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        })
+    }
+
+    async fn start(mut self) -> eyre::Result<()> {
+        tracing::info!("starting Mempool service");
+
+        self.inner.restore_mempool_from_disk().await;
+
+        let mut shutdown_future = pin!(self.shutdown);
+        loop {
+            tokio::select! {
+                // Handle regular mempool messages
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.inner.handle_message(msg).await?;
+                        }
+                        None => {
+                            tracing::warn!("receiver channel closed");
+                            break;
+                        }
+                    }
+                }
+
+                // Handle reorg events
+                reorg_result = self.reorg_rx.recv() => {
+                    if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
+                        self.inner.handle_reorg(event).await?;
+                    }
+                }
+
+                // Handle block migrated events
+                 migrated_result = self.block_migrated_rx.recv() => {
+                    if let Some(event) = handle_broadcast_recv(migrated_result, "BlockMigrated") {
+                        self.inner.handle_block_migrated(event).await?;
+                    }
+                }
+
+
+                // Handle shutdown signal
+                _ = &mut shutdown_future => {
+                    info!("Shutdown signal received for mempool service");
+                    break;
+                }
+            }
+        }
+
+        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg).await?;
+        }
+
+        self.inner.persist_mempool_to_disk().await?;
+
+        tracing::info!("shutting down Mempool service");
+        Ok(())
+    }
+}
+
+pub fn handle_broadcast_recv<T>(
+    result: Result<T, broadcast::error::RecvError>,
+    channel_name: &str,
+) -> Option<T> {
+    match result {
+        Ok(event) => Some(event),
+        Err(broadcast::error::RecvError::Closed) => {
+            tracing::debug!("{} channel closed", channel_name);
+            None
+        }
+        Err(broadcast::error::RecvError::Lagged(n)) => {
+            tracing::warn!("{} lagged by {} events", channel_name, n);
+            if n > 5 {
+                tracing::error!("{} significantly lagged", channel_name);
+            }
+            None
+        }
+    }
 }

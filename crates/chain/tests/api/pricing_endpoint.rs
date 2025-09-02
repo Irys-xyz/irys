@@ -3,7 +3,7 @@
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
 use actix_web::{http::header::ContentType, HttpMessage as _};
 use irys_api_server::routes::price::PriceInfo;
-use irys_types::{storage_pricing::calculate_term_fee_from_config, DataLedger, U256};
+use irys_types::{storage_pricing::{calculate_term_fee_from_config, calculate_perm_fee_from_config}, DataLedger, U256};
 
 #[test_log::test(actix::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
@@ -15,34 +15,6 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
 
-    // Calculate the expected base storage fee
-    let expected_base_fee = {
-        let epochs_for_storage = ctx
-            .node_ctx
-            .config
-            .consensus
-            .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
-        // Convert annual decay rate to per-epoch
-        let epochs_per_year =
-            irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
-        let decay_rate_per_epoch =
-            irys_types::storage_pricing::Amount::new(irys_types::storage_pricing::safe_div(
-                ctx.node_ctx.config.consensus.decay_rate_per_year.amount,
-                epochs_per_year,
-            )?);
-        let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
-            .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
-
-        cost_per_chunk_duration_adjusted.base_network_fee(
-            U256::from(data_size_bytes),
-            ctx.node_ctx.config.consensus.chunk_size,
-            // node just started up, using genesis ema price
-            ctx.node_ctx.config.consensus.genesis_price,
-        )?
-    };
-
     // Calculate the expected term fee
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
@@ -51,13 +23,11 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     )?;
 
     // Calculate expected perm_fee using the same method as the API
-    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        ctx.node_ctx.config.consensus.genesis_price,
         expected_term_fee,
-        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
-        ctx.node_ctx
-            .config
-            .consensus
-            .immediate_tx_inclusion_reward_percent,
     )?;
 
     // action
@@ -110,7 +80,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs_total)?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
             // the original data_size_bytes is too small to fill up a whole chunk
@@ -131,7 +101,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         expected_term_fee,
-        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus
@@ -211,7 +181,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs)?;
+            .replica_count(ctx.node_ctx.config.consensus.number_of_ingress_proofs_total)?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
             // round to the chunk size boundary
@@ -232,7 +202,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         expected_term_fee,
-        ctx.node_ctx.config.consensus.number_of_ingress_proofs,
+        ctx.node_ctx.config.consensus.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus

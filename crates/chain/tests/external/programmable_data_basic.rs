@@ -5,7 +5,6 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use base58::ToBase58 as _;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
@@ -176,7 +175,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     );
     assert_eq!(&ingress_proof.proof.data_root, &recv_tx.data_root);
 
-    let id: String = tx_id.as_bytes().to_base58();
+    let id: String = tx_id.to_string();
 
     // wait for the chunks to migrate
     let mut start_offset_fut = Box::pin(async {

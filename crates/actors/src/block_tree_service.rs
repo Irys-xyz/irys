@@ -10,7 +10,6 @@ use crate::{
     BlockMigrationMessage, StorageModuleServiceMessage,
 };
 use actix::prelude::*;
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
@@ -43,15 +42,12 @@ pub enum BlockTreeServiceMessage {
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
+        skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
     },
     BlockValidationFinished {
         block_hash: H256,
         validation_result: ValidationResult,
-    },
-    FastTrackBlockMigration {
-        block_header: IrysBlockHeader,
-        response: oneshot::Sender<eyre::Result<Option<Addr<RethServiceActor>>>>,
     },
     ReloadCacheFromDb {
         response: oneshot::Sender<eyre::Result<()>>,
@@ -231,9 +227,10 @@ impl BlockTreeServiceInner {
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
                 commitment_txs,
+                skip_vdf_validation: skip_vdf,
                 response,
             } => {
-                let result = self.on_block_prevalidated(block, commitment_txs);
+                let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
                 let _ = response.send(result);
             }
             BlockTreeServiceMessage::BlockValidationFinished {
@@ -242,13 +239,6 @@ impl BlockTreeServiceInner {
             } => {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
-            }
-            BlockTreeServiceMessage::FastTrackBlockMigration {
-                block_header,
-                response,
-            } => {
-                let result = self.fast_track_block_migration(block_header).await;
-                let _ = response.send(result);
             }
             BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
                 let res = self.reload_cache_from_db().await;
@@ -296,44 +286,6 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    /// Fast tracks block migration by retrieving transaction headers. Do
-    /// after the block has been migrated.
-    async fn fast_track_block_migration(
-        &self,
-        block_header: IrysBlockHeader,
-    ) -> eyre::Result<Option<Addr<RethServiceActor>>> {
-        let submit_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
-            .await?;
-        let publish_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
-            .await?;
-
-        let mut all_txs = vec![];
-        all_txs.extend(publish_txs);
-        all_txs.extend(submit_txs);
-
-        info!(
-            "Migrating to block_index - hash: {} height: {}",
-            &block_header.block_hash.0.to_base58(),
-            &block_header.height
-        );
-
-        // HACK
-        System::set_current(self.system.clone());
-
-        let chunk_migration = ChunkMigrationService::from_registry();
-        let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: Arc::new(block_header),
-            all_txs: Arc::new(all_txs),
-        };
-
-        block_index.do_send(block_finalized_message.clone());
-        chunk_migration.do_send(block_finalized_message);
-        Ok(Some(self.reth_service_actor.clone()))
-    }
-
     /// Sends block-migration notifications to services after a block reaches migration depth.
     ///
     /// This method:
@@ -374,8 +326,7 @@ impl BlockTreeServiceInner {
 
         info!(
             "Migrating to block_index - hash: {} height: {}",
-            &block_header.block_hash.0.to_base58(),
-            &block_header.height
+            &block_header.block_hash, &block_header.height
         );
 
         // HACK
@@ -504,21 +455,14 @@ impl BlockTreeServiceInner {
             }
 
             debug!(?migrated_hash, ?migration_height, "migrating irys block");
-            // TODO: this is the wrong place for this, it should be at the prune depth not the block_migration_depth
-            self.reth_service_actor
-                .try_send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(cache.tip),
-                    confirmed_hash: None,
-                    finalized_hash: Some(BlockHashType::Irys(migrated_hash)),
-                })
-                .expect("Unable to send finalization message to reth");
 
             migrated_hash
         }; // RwLockWriteGuard is dropped here, before the await
 
-        if let Err(e) = self.send_block_migration_message(migrated_hash).await {
-            error!("Unable to send block migration message: {:?}", e);
-        }
+        self.send_block_migration_message(migrated_hash)
+            .await
+            .map_err(|e| format!("Unable to send block migration message: {:?}", e))
+            .unwrap()
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -526,7 +470,8 @@ impl BlockTreeServiceInner {
         &mut self,
         block: Arc<IrysBlockHeader>,
         commitment_txs: Arc<Vec<CommitmentTransaction>>,
-    ) -> Result<(), PreValidationError> {
+        skip_vdf: bool,
+    ) -> eyre::Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
         let mut cache = self.cache.write().expect("cache lock poisoned");
 
@@ -579,6 +524,7 @@ impl BlockTreeServiceInner {
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
                     block: block.clone(),
+                    skip_vdf_validation: skip_vdf,
                 })
                 .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
 
@@ -639,13 +585,13 @@ impl BlockTreeServiceInner {
         );
 
         if validation_result == ValidationResult::Invalid {
-            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            error!(block_hash = %block_hash,"invalid block");
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(block_hash = %block_hash.0.to_base58(),"invalid block");
+            error!(block_hash = %block_hash,"invalid block");
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());
@@ -675,7 +621,7 @@ impl BlockTreeServiceInner {
 
         let state;
 
-        let (arc_block, epoch_block, reorg_event) = {
+        let (arc_block, epoch_block, reorg_event, finalized_at_prune_depth) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -731,6 +677,18 @@ impl BlockTreeServiceInner {
                 // Subtract 1 to ensure we keep exactly `depth` blocks.
                 // The cache.prune() implementation does not count `tip` into the depth
                 // equation, so it's always tip + `depth` that's kept around
+                // Before pruning, compute which block reaches prune depth behind the new tip
+                let finalized_at_prune_depth = {
+                    let (longest_chain, _) = cache.get_canonical_chain();
+                    let prune_depth = self.config.consensus.block_tree_depth as usize;
+                    if longest_chain.len() > prune_depth {
+                        let idx = longest_chain.len() - 1 - prune_depth;
+                        Some(longest_chain[idx].block_hash)
+                    } else {
+                        None
+                    }
+                };
+
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
                 if is_reorg {
@@ -837,7 +795,12 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (arc_block, new_epoch_block, Some(event))
+                    (
+                        arc_block,
+                        new_epoch_block,
+                        Some(event),
+                        finalized_at_prune_depth,
+                    )
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -854,10 +817,10 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (arc_block, new_epoch_block, None)
+                    (arc_block, new_epoch_block, None, finalized_at_prune_depth)
                 }
             } else {
-                (arc_block, None, None)
+                (arc_block, None, None, None)
             };
 
             state = cache
@@ -880,6 +843,17 @@ impl BlockTreeServiceInner {
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 debug!("No reorg subscribers: {:?}", e);
             }
+        }
+
+        // Send finalization update for block at prune depth, if any
+        if let Some(finalized_hash) = finalized_at_prune_depth {
+            self.reth_service_actor
+                .try_send(ForkChoiceUpdateMessage {
+                    head_hash: BlockHashType::Irys(block_hash),
+                    confirmed_hash: None,
+                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                })
+                .expect("Unable to send finalization message to reth");
         }
 
         self.notify_services_of_block_confirmation(block_hash, &arc_block);
@@ -917,20 +891,38 @@ impl BlockTreeServiceInner {
                 epoch_block.block_hash
             )
         });
-        let expired_partition_hashes = &epoch_snapshot.expired_partition_hashes;
 
-        // Let the mining actors know about expired partitions
-        System::set_current(self.system.clone());
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-            expired_partition_hashes.clone(),
-        )));
+        // Check for partitions expired at this epoch boundary
+        if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
+            let expired_partition_hashes: Vec<_> = expired_partition_infos
+                .iter()
+                .map(|i| i.partition_hash)
+                .collect();
+
+            // Let the mining actors know about expired partitions
+            System::set_current(self.system.clone());
+            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+            mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+                expired_partition_hashes,
+            )));
+
+            // Let the cache service know some term ledger slots expired
+            if let Err(e) = self.service_senders.chunk_cache.send(
+                crate::cache_service::CacheServiceAction::OnEpochProcessed(
+                    epoch_snapshot.clone(),
+                    None,
+                ),
+            ) {
+                error!("Failed to send EpochProcessed event to CacheService: {}", e);
+            }
+        }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
         if let Err(e) = self.service_senders.storage_modules.send(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
+                update_height: epoch_block.height,
             },
         ) {
             error!("Failed to send partition assignments update: {}", e);

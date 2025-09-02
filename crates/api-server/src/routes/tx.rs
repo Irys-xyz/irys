@@ -11,7 +11,7 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
+    option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
     IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
@@ -204,17 +204,54 @@ pub async fn get_tx_local_start_offset(
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PromotionStatus {
+    is_promoted: bool,
+    #[serde(default, with = "option_u64_stringify")]
+    promotion_height: Option<u64>,
+}
+
 // TODO: REMOVE ME ONCE WE HAVE A GATEWAY
 /// Returns whether or not a transaction has been promoted
 /// by checking if the ingress_proofs field of the tx's header is `Some`,
 ///  which only occurs when it's been promoted.
-pub async fn get_tx_is_promoted(
+pub async fn get_tx_promotion_status(
     state: web::Data<ApiState>,
     path: web::Path<H256>,
-) -> Result<Json<bool>, ApiError> {
+) -> Result<Json<PromotionStatus>, ApiError> {
     let tx_id: H256 = path.into_inner();
     info!("Get tx_is_promoted by tx_id: {}", tx_id);
-    let tx_header = get_storage_transaction(&state, tx_id)?;
 
-    Ok(web::Json(tx_header.ingress_proofs.is_some()))
+    // Retrieve the transaction header from mempool or database
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+    state
+        .mempool_service
+        .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
+        .unwrap();
+
+    let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
+        err: "Unable to read result from oneshot".to_owned(),
+    })?;
+
+    let tx_header = oneshot_res
+        .first()
+        .and_then(|opt| opt.as_ref())
+        .ok_or_else(|| ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: "Unable to find tx".to_owned(),
+        })?;
+
+    // Report its promoted status
+
+    Ok(web::Json(match tx_header.promoted_height {
+        Some(height) => PromotionStatus {
+            is_promoted: true,
+            promotion_height: Some(height),
+        },
+        None => PromotionStatus {
+            is_promoted: false,
+            promotion_height: None,
+        },
+    }))
 }

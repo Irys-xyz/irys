@@ -8,7 +8,6 @@ use alloy_network::EthereumWallet;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
-use base58::ToBase58 as _;
 use k256::ecdsa::SigningKey;
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
@@ -149,7 +148,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let tx = account1
         .create_publish_transaction(
             data_bytes.clone(),
-            None,
+            node.get_anchor().await?,
             price_info.perm_fee,
             price_info.term_fee,
         )
@@ -165,7 +164,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let id: String = tx.header.id.as_bytes().to_base58();
+    let id: String = tx.header.id.to_string();
     let mut tx_header_fut = Box::pin(async {
         let delay = Duration::from_secs(1);
         // sleep(delay).await;

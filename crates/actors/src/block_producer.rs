@@ -16,7 +16,6 @@ use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, PayloadAttributes, PayloadStatusEnum,
 };
 use alloy_signer_local::LocalSigner;
-use base58::ToBase58 as _;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
@@ -200,7 +199,7 @@ impl BlockProducerService {
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
-                let solution_hash = solution.solution_hash.0.to_base58();
+                let solution_hash = solution.solution_hash;
                 info!(
                     solution_hash = %solution_hash,
                     vdf_step = solution.vdf_step,
@@ -226,7 +225,7 @@ impl BlockProducerService {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
                 if let Some((irys_block_header, eth_built_payload)) = &result {
                     info!(
-                        block_hash = %irys_block_header.block_hash.0.to_base58(),
+                        block_hash = %irys_block_header.block_hash,
                         block_height = irys_block_header.height,
                         "Block production completed successfully"
                     );
@@ -270,7 +269,7 @@ impl BlockProducerService {
 
     /// Internal method to produce a block without the non-Send trait
     #[tracing::instrument(skip_all, fields(
-        solution_hash = %solution.solution_hash.0.to_base58(),
+        solution_hash = %solution.solution_hash,
         vdf_step = solution.vdf_step,
         mining_address = %solution.mining_address
     ))]
@@ -279,7 +278,7 @@ impl BlockProducerService {
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
-            partition_hash = %solution.partition_hash.0.to_base58(),
+            partition_hash = %solution.partition_hash,
             chunk_offset = solution.chunk_offset,
             "Starting block production for solution"
         );
@@ -445,6 +444,20 @@ pub trait BlockProdStrategy {
         let Some((block, stats, eth_built_payload)) = result else {
             return Ok(None);
         };
+
+        if !block.data_ledgers[DataLedger::Publish].tx_ids.is_empty() {
+            let x = 5;
+            debug!(
+                "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?} {}",
+                block.block_hash,
+                block.height,
+                block.solution_hash,
+                block.vdf_limiter_info.global_step_number,
+                block.previous_block_hash,
+                block.data_ledgers[DataLedger::Publish].tx_ids,
+                x
+            );
+        }
 
         let block = self.broadcast_block(block, stats).await?;
         let Some(block) = block else { return Ok(None) };
@@ -631,7 +644,7 @@ pub trait BlockProdStrategy {
         let evm_block_hash = eth_built_payload.hash();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash.0.to_base58());
+            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash);
             return Ok(None);
         }
 
@@ -742,6 +755,13 @@ pub trait BlockProdStrategy {
                     max_chunk_offset: publish_max_chunk_offset,
                     expires: None,
                     proofs: opt_proofs,
+                    required_proof_count: Some(
+                        self.inner()
+                            .config
+                            .consensus
+                            .number_of_ingress_proofs_total
+                            .try_into()?,
+                    ),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -772,6 +792,7 @@ pub trait BlockProdStrategy {
                         Some(submit_ledger_epoch_length - epoch_in_cycle)
                     },
                     proofs: None,
+                    required_proof_count: None,
                 },
             ],
             evm_block_hash,
@@ -827,20 +848,18 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block))
+            .handle_block(Arc::clone(&block), false)
             .await
         {
             Ok(()) => Ok(()),
             e @ Err(BlockDiscoveryError::InternalError(_)) => {
                 error!(
                     "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block.block_hash.0.to_base58(),
-                    &block.height,
-                    e
+                    &block.block_hash, &block.height, e
                 );
                 Err(eyre!(
                     "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block.block_hash.0.to_base58(),
+                    &block.block_hash,
                     &block.height,
                     e
                 ))
@@ -939,7 +958,7 @@ pub trait BlockProdStrategy {
         let system_transaction_ledger;
         let aggregated_miner_fees;
         if is_epoch_block {
-            let epoch_snapshot = self
+            let parent_epoch_snapshot = self
                 .inner()
                 .block_tree_guard
                 .read()
@@ -949,7 +968,7 @@ pub trait BlockProdStrategy {
             tracing::error!("about to calculate fees");
             // Calculate fees for expired ledgers
             aggregated_miner_fees = self
-                .calculate_expired_ledger_fees(&epoch_snapshot, block_height)
+                .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
                 .await?;
 
             // todo - if tx is of publish ledger and did not get promoted then we refund the perm fee
@@ -1084,11 +1103,11 @@ pub trait BlockProdStrategy {
     /// Currently processes Submit ledger as that's the only expiring ledger type.
     async fn calculate_expired_ledger_fees(
         &self,
-        epoch_snapshot: &EpochSnapshot,
+        parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
     ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
         ledger_expiry::calculate_expired_ledger_fees(
-            epoch_snapshot,
+            parent_epoch_snapshot,
             block_height,
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
@@ -1150,21 +1169,11 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 
     bytes_added / chunk_size
 }
-/// When a block is confirmed, this message broadcasts the block header and the
-/// submit ledger TX that were added as part of this block.
-/// This works for bootstrap node mining, but eventually blocks will be received
-/// from peers and confirmed and their tx will be negotiated though the mempool.
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "eyre::Result<()>")]
-pub struct BlockConfirmedMessage(
-    pub Arc<IrysBlockHeader>,
-    pub Arc<Vec<DataTransactionHeader>>,
-);
 
 /// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
 /// acts as a placeholder for when the node will maintain a block tree of
 /// confirmed blocks and produce migrated blocks for the canonical chain when
-///  enough confirmations have occurred. Chunks are moved from the in-memory
+/// enough confirmations have occurred. Chunks are moved from the in-memory
 /// index to the storage modules when a block is migrated.
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "eyre::Result<()>")]

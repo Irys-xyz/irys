@@ -13,6 +13,7 @@ use crate::{
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -458,6 +459,10 @@ pub struct DataTransactionLedger {
     /// When transactions are promoted they must include their ingress proofs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proofs: Option<IngressProofsList>,
+    /// Ingress proofs required per transaction for promotion. Stored per-ledger to enable
+    /// different replication levels per ledger and simplify validation / config mappings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_proof_count: Option<u8>,
 }
 
 impl DataTransactionLedger {
@@ -500,6 +505,41 @@ impl IndexMut<DataLedger> for Vec<DataTransactionLedger> {
     }
 }
 
+/// Retrieves the [`IngressProofsList`] for the given txid.
+///
+/// Checks for the correct number of proofs based on the `required_proof_count` field of the [`DataTransactionLedger`]
+pub fn get_ingress_proofs(
+    data_ledger: &DataTransactionLedger,
+    txid: &H256,
+) -> eyre::Result<IngressProofsList> {
+    let index = data_ledger
+        .tx_ids
+        .iter()
+        .position(|id| id == txid)
+        .ok_or_else(|| eyre::eyre!("Transaction {} not found in ledger", txid))?;
+
+    let proof_count = data_ledger
+        .required_proof_count
+        .ok_or_else(|| eyre::eyre!("Required proof count not set for ledger"))?
+        as usize;
+
+    let proofs_list = data_ledger
+        .proofs
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("No proofs available in ledger"))?;
+
+    let start_index = index * proof_count;
+    let end_index = start_index + proof_count;
+
+    // Check bounds
+    if end_index > proofs_list.len() {
+        eyre::bail!("Not enough proofs available for transaction");
+    }
+
+    let proofs = IngressProofsList((proofs_list[start_index..end_index]).to_vec());
+    Ok(proofs)
+}
+
 #[derive(
     Default,
     Clone,
@@ -532,6 +572,30 @@ impl fmt::Display for IrysBlockHeader {
     }
 }
 
+/// Compute the solution hash as sha256(poa_chunk || offset_le || seed)
+///
+/// This is the canonical utility used across the codebase to avoid duplicate
+/// implementations of the hashing logic.
+///
+/// # Examples
+/// ```
+/// use irys_types::{compute_solution_hash, H256};
+///
+/// let poa_chunk = b"example chunk data";
+/// let offset = 42u32;
+/// let seed = H256::from([7u8; 32]);
+///
+/// // This should compile and produce a 32-byte hash.
+/// let _hash = compute_solution_hash(poa_chunk, offset, &seed);
+/// ```
+pub fn compute_solution_hash(poa_chunk: &[u8], offset_le: u32, seed: &H256) -> H256 {
+    let mut hasher = sha::Sha256::new();
+    hasher.update(poa_chunk);
+    hasher.update(&offset_le.to_le_bytes());
+    hasher.update(seed.as_bytes());
+    H256::from(hasher.finish())
+}
+
 impl IrysBlockHeader {
     pub fn new_mock_header() -> Self {
         use std::str::FromStr as _;
@@ -540,15 +604,26 @@ impl IrysBlockHeader {
         let tx_ids = H256List::new();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
+        // Compute default PoA chunk, chunk_hash, and solution_hash so mock headers satisfy solution_hash_link_is_valid
+        let default_poa_chunk: Vec<u8> = Vec::new();
+        let default_partition_chunk_offset: u32 = 0;
+        let default_vdf_output = H256::zero();
+        let default_chunk_hash: H256 = H256(openssl::sha::sha256(&default_poa_chunk));
+        let default_solution_hash = compute_solution_hash(
+            &default_poa_chunk,
+            default_partition_chunk_offset,
+            &default_vdf_output,
+        );
+
         // Create a sample IrysBlockHeader object with mock data
         Self {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
             last_diff_timestamp: 1622543200,
-            solution_hash: H256::zero(),
+            solution_hash: default_solution_hash,
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
-            chunk_hash: H256::zero(),
+            chunk_hash: default_chunk_hash,
             height: 42,
             block_hash: H256::zero(),
             previous_block_hash: H256::zero(),
@@ -575,6 +650,7 @@ impl IrysBlockHeader {
                     max_chunk_offset: 0,
                     expires: None,
                     proofs: None,
+                    required_proof_count: Some(1),
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
@@ -584,6 +660,7 @@ impl IrysBlockHeader {
                     max_chunk_offset: 0,
                     expires: Some(1622543200),
                     proofs: None,
+                    required_proof_count: None,
                 },
             ],
             evm_block_hash: B256::ZERO,
@@ -903,6 +980,7 @@ mod tests {
                 data_root: H256::random(),
                 chain_id: 1,
             }])),
+            required_proof_count: None,
         };
 
         // action
@@ -964,8 +1042,14 @@ mod tests {
     #[test]
     fn test_irys_header_compact_round_trip() {
         // setup
-        let header = mock_header();
+        let mut header = mock_header();
         let mut buf = vec![];
+
+        header.data_ledgers[DataLedger::Publish].proofs = Some(IngressProofsList(vec![
+            IngressProof::default(),
+            IngressProof::default(),
+            IngressProof::default(),
+        ]));
 
         println!("{}", serde_json::to_string_pretty(&header).unwrap());
 

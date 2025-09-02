@@ -183,10 +183,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x551c1d5360361c8f02552b17fd33b7edb2ec8b65e7bc1bcee6539441fa7fce846ffb399cf3bd3ab29f2cb2b90d68520046b2f2cc1e0fa389a628546720a7b44e1c";
+    const SIG_HEX: &str = "0xe735ff5a5e0eefdf5c5298f919ff5b94f35804f44c5db842db078dcbc7b5d499544cfbf8ffcb4113dea13433d5a739f354cb4551cf5384c9e9bb290d39d39b891b";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"8WcdA5FKZvQdi6m7c7UNhbVmFggA1rRzdrFxQaMCfq2sHXbZJDmkBEXbtNqGYtAdbj7aXkmkgHYrZpTH9PmUos9VM\"";
+        "\"MQQ4dsjqX4iU5F34h6SSLKE1YVHV9Hk2XBnJCprchLdmG71dq1nZStc12oMc7bHjnFo6emHQ1oDpnkCZQEShGDQwL\"";
 
     // spellchecker:on
 
@@ -206,13 +206,14 @@ mod tests {
             signer: Address::ZERO,
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
+            header_size: 0,
             term_fee: U256::from(100_u64),
             perm_fee: Some(U256::from(1_u64)),
             ledger_id: 0,
             bundle_format: Some(0),
             chain_id: testing_config.chain_id,
             version: 0,
-            ingress_proofs: None,
+            promoted_height: None,
             signature: Default::default(),
         };
         let transaction = DataTransaction {
@@ -242,6 +243,17 @@ mod tests {
         // assert parity against hardcoded signatures
         assert_eq!(SIG_BS58, ser);
         let decoded_js_sig = Signature::try_from(&hex::decode(SIG_HEX)?[..])?;
+
+        let d2 = hex::encode(transaction.header.signature.as_bytes());
+        println!("{}", d2);
+
+        // let d2 = hex::encode(transaction.header.signature.as_bytes());
+        // assert_eq!(
+        //     transaction.header.signature,
+        //     Signature::try_from(&hex::decode(&d2)?[..])?.into()
+        // );
+        // assert_eq!(SIG_HEX, format!("0x{}", d2));
+
         assert_eq!(transaction.header.signature, decoded_js_sig.into());
 
         // test RLP roundtrip

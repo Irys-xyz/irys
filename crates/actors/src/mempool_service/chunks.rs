@@ -10,7 +10,7 @@ use irys_database::{
 };
 use irys_types::{
     chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
-    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, H256,
+    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::alloy_primitives::ChainId;
@@ -18,9 +18,10 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display, num::NonZeroUsize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
+    #[instrument(skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -29,7 +30,7 @@ impl Inner {
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
 
-        info!(data_root = ?chunk.data_root, number = ?chunk.tx_offset, "Processing chunk");
+        info!("Processing chunk");
 
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
@@ -131,7 +132,7 @@ impl Inner {
                 return Ok(());
             }
         };
-
+        debug!("Got data root and data size");
         // Validate that the data_size for this chunk matches the data_size
         // recorded in the transaction header.
         if data_size != chunk.data_size {
@@ -385,8 +386,10 @@ impl Inner {
             let signer = self.config.irys_signer();
             let latest_height = latest.height;
             let chain_id = self.config.consensus.chain_id;
+            let gossip_sender = self.service_senders.gossip_broadcast.clone();
+
             self.exec.clone().spawn_blocking(async move {
-                generate_ingress_proof(
+                let proof = generate_ingress_proof(
                     db.clone(),
                     root_hash,
                     data_size,
@@ -418,6 +421,12 @@ impl Inner {
                 })
                 .unwrap()
                 .unwrap();
+
+                // Gossip the ingress proof
+                let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
+                if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+                    tracing::error!("Failed to send gossip data: {:?}", error);
+                }
             });
         }
 
@@ -479,7 +488,7 @@ pub fn generate_ingress_proof(
     chunk_size: u64,
     signer: IrysSigner,
     chain_id: ChainId,
-) -> eyre::Result<()> {
+) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
     // in future, we'll need access to whatever unified storage provider API we have to get chunks
@@ -553,10 +562,10 @@ pub fn generate_ingress_proof(
             data_root,
             CompactCachedIngressProof(CachedIngressProof {
                 address: signer.address(),
-                proof,
+                proof: proof.clone(),
             }),
         )
     })??;
 
-    Ok(())
+    Ok(proof)
 }

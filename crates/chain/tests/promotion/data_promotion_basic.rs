@@ -4,7 +4,6 @@ use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
-use base58::ToBase58 as _;
 use irys_actors::packing::wait_for_packing;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
@@ -12,7 +11,7 @@ use std::time::Duration;
 use tracing::debug;
 
 #[test_log::test(actix_web::test)]
-async fn heavy_data_promotion_test() {
+async fn heavy_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
@@ -65,10 +64,15 @@ async fn heavy_data_promotion_test() {
             .expect("Failed to get price");
 
         let tx = signer
-            .create_publish_transaction(data, None, price_info.perm_fee, price_info.term_fee)
+            .create_publish_transaction(
+                data,
+                node.get_anchor().await?,
+                price_info.perm_fee,
+                price_info.term_fee,
+            )
             .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
-        println!("tx[{}] {}", i, tx.header.id.as_bytes().to_base58());
+        println!("tx[{}] {}", i, tx.header.id);
         txs.push(tx);
     }
 
@@ -256,4 +260,6 @@ async fn heavy_data_promotion_test() {
     .await;
 
     node.node_ctx.stop().await;
+
+    Ok(())
 }

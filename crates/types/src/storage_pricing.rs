@@ -532,7 +532,7 @@ pub fn calculate_term_fee(
 
     // Apply same replica count as perm storage
     let cost_with_replicas =
-        cost_per_chunk_duration.replica_count(config.number_of_ingress_proofs)?;
+        cost_per_chunk_duration.replica_count(config.number_of_ingress_proofs_total)?;
 
     // Calculate base network fee using current EMA price
     let base_fee = cost_with_replicas.base_network_fee(
@@ -595,7 +595,7 @@ pub fn calculate_perm_fee_from_config(
     // Apply decay over storage duration
     let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
         .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-        .replica_count(config.number_of_ingress_proofs)?;
+        .replica_count(config.number_of_ingress_proofs_total)?;
 
     // Calculate base network fee
     let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
@@ -607,7 +607,7 @@ pub fn calculate_perm_fee_from_config(
     // Add ingress proof rewards to the base network fee
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        config.number_of_ingress_proofs,
+        config.number_of_ingress_proofs_total,
         config.immediate_tx_inclusion_reward_percent,
     )?;
 
@@ -1632,7 +1632,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(config.number_of_ingress_proofs)?;
+                .replica_count(config.number_of_ingress_proofs_total)?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -1719,7 +1719,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(config.number_of_ingress_proofs)?;
+                .replica_count(config.number_of_ingress_proofs_total)?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -2048,7 +2048,7 @@ mod tests {
             )?);
             let cost_with_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-                .replica_count(config.number_of_ingress_proofs)?;
+                .replica_count(config.number_of_ingress_proofs_total)?;
             let base_fee_with_decay = cost_with_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,
@@ -2058,7 +2058,7 @@ mod tests {
             // Calculate without decay (decay_rate_per_year =  0)
             let cost_no_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, Amount::percentage(dec!(0))?)?
-                .replica_count(config.number_of_ingress_proofs)?;
+                .replica_count(config.number_of_ingress_proofs_total)?;
             let base_fee_no_decay = cost_no_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,

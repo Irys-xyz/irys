@@ -1,4 +1,5 @@
-mode = "PeerSync"
+node_mode = "Peer"
+sync_mode = "Full"
 base_directory = ""
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
 trusted_peers = []
@@ -17,6 +18,14 @@ public_ip = "127.0.0.1"
 public_port = 8080
 bind_ip = "0.0.0.0"
 bind_port = 8080
+
+[reth.network]
+use_random_ports = false
+public_ip = "127.0.0.1"
+public_port = 30303
+bind_ip = "0.0.0.0"
+bind_port = 30303
+
 
 [storage]
 num_writes_before_sync = 1
@@ -40,12 +49,6 @@ initial_price = 1.0
 incremental_change = 0.00000000000001
 smoothing_interval = 15
 
-[reth]
-use_random_ports = false
-
-[reth_peer_info]
-peering_tcp_addr = "127.0.0.1:9009"
-peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
 [consensus.Custom]
 chain_id = 1270
@@ -62,7 +65,8 @@ num_chunks_in_partition = 51872000
 num_chunks_in_recall_range = 800
 num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
-number_of_ingress_proofs = 10
+number_of_ingress_proofs_total = 1
+number_of_ingress_proofs_from_assignees = 0
 # Target storage duration in years
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
@@ -106,7 +110,7 @@ balance = "0x152cf4e72a974f1c0000"
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
-anchor_expiry_depth = 10
+anchor_expiry_depth = 20
 max_pending_pledge_items = 100
 max_pledges_per_item = 100
 max_pending_chunk_items = 30

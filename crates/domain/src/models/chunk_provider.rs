@@ -1,4 +1,3 @@
-use base58::ToBase58 as _;
 use eyre::OptionExt as _;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
@@ -47,9 +46,7 @@ impl ChunkProvider {
 
         debug!(
             "getting ledger: {:?}, data_root: {}, offset: {}",
-            &ledger,
-            &data_root.0.to_base58(),
-            &data_tx_offset
+            &ledger, &data_root, &data_tx_offset
         );
         // map hashes to SMs
         let binding = self.storage_modules_guard.read();
@@ -88,11 +85,7 @@ impl ChunkProvider {
         ledger: DataLedger,
         data_root: DataRoot,
     ) -> eyre::Result<Option<Vec<u64>>> {
-        debug!(
-            "getting ledger: {:?}, data_root: {}",
-            &ledger,
-            &data_root.0.to_base58(),
-        );
+        debug!("getting ledger: {:?}, data_root: {}", &ledger, &data_root,);
 
         // get all SMs for this ledger
         let binding = self.storage_modules_guard.read();
@@ -139,7 +132,7 @@ mod tests {
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
         partition_chunk_offset_ie, Base64, ConsensusConfig, DataTransactionLedger,
-        LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk,
+        LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk, H256,
     };
     use nodit::interval::{ie, ii};
     use rand::Rng as _;
@@ -176,7 +169,9 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         let irys = IrysSigner::random_signer(&config.consensus);
-        let tx = irys.create_transaction(data_bytes.clone(), None).unwrap();
+        let tx = irys
+            .create_transaction(data_bytes.clone(), H256::zero())
+            .unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
 
         // fake the tx_path

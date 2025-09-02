@@ -1,6 +1,5 @@
 use crate::utils::*;
 use assert_matches::assert_matches;
-use base58::ToBase58 as _;
 use eyre::eyre;
 use irys_actors::packing::wait_for_packing;
 use irys_chain::IrysNodeCtx;
@@ -204,7 +203,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // DATA TX: Create the data transaction from the chunks
         let mut data_tx = signer1
-            .create_transaction(data, Some(genesis_block.block_hash))
+            .create_transaction(data, genesis_block.block_hash)
             .expect("To make a data transaction");
 
         data_tx.header.perm_fee = Some(U256::from(4_000_000_000_000_u64));
@@ -535,7 +534,7 @@ async fn post_stake_commitment(
 
     info!("Created stake_tx with value: {:?}", stake_tx.value);
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
-    info!("Generated stake_tx.id: {}", stake_tx.id.0.to_base58());
+    info!("Generated stake_tx.id: {}", stake_tx.id);
 
     // Submit stake commitment via API
     node.post_commitment_tx(&stake_tx)
@@ -567,7 +566,7 @@ async fn post_pledge_commitment(
     };
 
     let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
-    info!("Generated pledge_tx.id: {}", pledge_tx.id.0.to_base58());
+    info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Submit pledge commitment via API
     node.post_commitment_tx(&pledge_tx)

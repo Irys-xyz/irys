@@ -86,6 +86,10 @@ pub struct DataTransactionHeader {
     #[serde(with = "string_u64")]
     pub data_size: u64,
 
+    /// Size of the header (to store tags etc.) in bytes
+    #[serde(with = "string_u64")]
+    pub header_size: u64,
+
     /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
     pub term_fee: U256,
 
@@ -108,12 +112,11 @@ pub struct DataTransactionHeader {
     #[serde(default)]
     pub perm_fee: Option<U256>,
 
-    /// INTERNAL: Signed ingress proofs used to promote this transaction to the Publish ledger
-    /// TODO: put these somewhere else?
+    /// INTERNAL: Tracks what block this transaction was promoted in, can look up ingress proofs there
     #[rlp(skip)]
     #[rlp(default)]
     #[serde(skip)]
-    pub ingress_proofs: Option<IngressProof>,
+    pub promoted_height: Option<u64>,
 }
 
 /// Ordering for DataTransactionHeader by transaction ID
@@ -200,6 +203,7 @@ impl DataTransactionHeader {
             signer: Address::default(),
             data_root: H256::zero(),
             data_size: 0,
+            header_size: 0,
             term_fee: U256::zero(),
             perm_fee: None,
             ledger_id: 0,
@@ -207,7 +211,7 @@ impl DataTransactionHeader {
             version: 0,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
-            ingress_proofs: None,
+            promoted_height: None,
         }
     }
 }
@@ -637,7 +641,6 @@ pub enum IrysTransaction {
 
 impl TryInto<DataTransactionHeader> for IrysTransaction {
     type Error = eyre::Report;
-
     fn try_into(self) -> Result<DataTransactionHeader, Self::Error> {
         match self {
             Self::Data(tx) => Ok(tx),
@@ -954,13 +957,14 @@ mod tests {
             signer: Address::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
+            header_size: 0,
             term_fee: U256::from(100),
             perm_fee: Some(U256::from(200)),
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,
             version: 0,
-            ingress_proofs: None,
+            promoted_height: None,
             signature: Signature::test_signature().into(),
         }
     }

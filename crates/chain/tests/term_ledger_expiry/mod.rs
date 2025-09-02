@@ -11,6 +11,25 @@ use reth::rpc::types::TransactionTrait as _;
 use std::ops::{Deref, DerefMut};
 use tracing::info;
 
+// Test 0: Complete slot expiry with 0 transactions
+
+#[test_log::test(actix_web::test)]
+async fn heavy_ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
+    info!("Testing ledger expiry with no transactions at all");
+
+    ledger_expiry_test(LedgerExpiryTestParams {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,   // 320 bytes per partition
+        submit_ledger_epoch_length: 2, // expires after 2 epochs to ensure proper setup
+        num_blocks_in_epoch: 3,        // 3 blocks per epoch
+        num_transactions: 0,           // 0 txs to create 0 partitions
+        txs_per_block: 0,              // batch more txs per block (11 txs / 3 blocks ≈ 4)
+        data_size_per_tx: 32,          // 1 chunk per tx
+        expected_expired_tx_count: 0,  // No transactions posted
+    })
+    .await
+}
+
 // Test 1: Complete slot expiry with 11 transactions
 //
 // ═══ DATA LAYOUT ═══
@@ -275,6 +294,7 @@ impl LedgerExpiryTestContext {
         num_transactions: usize,
         txs_per_block: usize,
         data_size_per_tx: usize,
+        num_blocks_in_epoch: u64,
     ) -> eyre::Result<()> {
         let genesis_block = self.get_block_by_height(0).await?;
         let anchor = genesis_block.block_hash;
@@ -292,6 +312,18 @@ impl LedgerExpiryTestContext {
         info!("  Partition size: {} bytes", partition_size);
         info!("  Data size per tx: {} bytes", data_size_per_tx);
         info!("  Chunks per tx: {}", chunks_per_tx);
+
+        // Just mine two epochs if there are no transactions in this test
+        if num_transactions == 0 {
+            for _ in 0..(num_blocks_in_epoch * 2) {
+                let block = self.mine_block().await?;
+                self.total_block_rewards =
+                    self.total_block_rewards.saturating_add(block.reward_amount);
+                self.blocks_mined.push(block);
+            }
+
+            return Ok(());
+        }
 
         for i in 0..num_transactions {
             info!("Posting transaction {} with {} bytes", i, data_size_per_tx);
@@ -654,6 +686,7 @@ async fn ledger_expiry_test(params: LedgerExpiryTestParams) -> eyre::Result<()> 
         params.num_transactions,
         params.txs_per_block,
         params.data_size_per_tx,
+        params.num_blocks_in_epoch,
     )
     .await?;
     ctx.calculate_immediate_rewards()?;

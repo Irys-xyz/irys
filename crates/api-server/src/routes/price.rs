@@ -3,8 +3,13 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
+use eyre::OptionExt as _;
 use irys_types::{
-    storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
+    storage_pricing::{
+        calculate_perm_fee_from_config, calculate_term_fee,
+        phantoms::{Irys, NetworkFee},
+        Amount,
+    },
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
 };

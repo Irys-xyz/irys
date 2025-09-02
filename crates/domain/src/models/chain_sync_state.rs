@@ -1,3 +1,4 @@
+use irys_types::BlockHash;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ pub struct ChainSyncState {
     trusted_sync: Arc<AtomicBool>,
     sync_target_height: Arc<AtomicUsize>,
     highest_processed_block: Arc<AtomicUsize>,
+    last_synced_block_hash: Arc<RwLock<Option<BlockHash>>>,
     switch_to_full_validation_at_height: Arc<RwLock<Option<usize>>>,
     gossip_broadcast_enabled: Arc<AtomicBool>,
     gossip_reception_enabled: Arc<AtomicBool>,
@@ -24,6 +26,7 @@ impl ChainSyncState {
             trusted_sync: Arc::new(AtomicBool::new(is_trusted_sync)),
             sync_target_height: Arc::new(AtomicUsize::new(0)),
             highest_processed_block: Arc::new(AtomicUsize::new(0)),
+            last_synced_block_hash: Arc::new(RwLock::new(None)),
             switch_to_full_validation_at_height: Arc::new(RwLock::new(None)),
             gossip_broadcast_enabled: Arc::new(AtomicBool::new(true)),
             gossip_reception_enabled: Arc::new(AtomicBool::new(true)),
@@ -36,7 +39,6 @@ impl ChainSyncState {
     }
 
     pub fn set_syncing_from(&self, height: usize) {
-        self.set_is_syncing(true);
         self.set_sync_target_height(height);
         self.mark_processed(height.saturating_sub(1));
     }
@@ -80,11 +82,6 @@ impl ChainSyncState {
         self.sync_target_height.load(Ordering::Relaxed)
     }
 
-    /// Increments sync height by 1 and returns the new height
-    pub fn increment_sync_target_height(&self) -> usize {
-        self.sync_target_height.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
     /// [`crate::block_pool::BlockPool`] marks block as processed once the
     /// BlockDiscovery finished the pre-validation and scheduled the block for full validation
     pub fn mark_processed(&self, height: usize) {
@@ -99,6 +96,18 @@ impl ChainSyncState {
                 }
             }
         }
+    }
+
+    /// Mark a block as processed with its hash
+    pub fn mark_processed_with_hash(&self, height: usize, block_hash: BlockHash) {
+        self.mark_processed(height);
+        let mut hash_lock = self.last_synced_block_hash.write().unwrap();
+        *hash_lock = Some(block_hash);
+    }
+
+    /// Get the last synced block hash
+    pub fn last_synced_block_hash(&self) -> Option<BlockHash> {
+        *self.last_synced_block_hash.read().unwrap()
     }
 
     /// Sets the height at which the node should switch to full validation.
@@ -162,11 +171,24 @@ impl ChainSyncState {
     }
 
     /// Waits until the length of the validation queue is less than the maximum
-    /// allowed size.
-    pub async fn wait_for_an_empty_queue_slot(&self) {
-        while self.is_queue_full() {
-            tokio::time::sleep(Duration::from_millis(100)).await
-        }
+    /// allowed size. Cancels after 30 seconds.
+    pub async fn wait_for_an_empty_queue_slot(&self) -> Result<(), tokio::time::error::Elapsed> {
+        self.wait_for_an_empty_queue_slot_with_timeout(Duration::from_secs(30))
+            .await
+    }
+
+    /// Waits until the length of the validation queue is less than the maximum
+    /// allowed size, with a custom timeout.
+    pub async fn wait_for_an_empty_queue_slot_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), tokio::time::error::Elapsed> {
+        tokio::time::timeout(timeout, async {
+            while self.is_queue_full() {
+                tokio::time::sleep(Duration::from_millis(100)).await
+            }
+        })
+        .await
     }
 
     /// Waits for the highest pre-validated block to reach target sync height
