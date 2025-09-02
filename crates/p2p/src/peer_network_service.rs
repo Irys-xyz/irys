@@ -180,7 +180,7 @@ where
     ) -> Self {
         let peer_list_data =
             PeerList::new(config, &db, service_sender).expect("Failed to load peer list data");
-        PEERS_LIMIT.get_or_init(|| config.node.p2p_handshake.max_peers_per_response);
+        PEERS_LIMIT.get_or_init(|| config.node_config.p2p_handshake.max_peers_per_response);
 
         Self {
             db,
@@ -188,30 +188,30 @@ where
             currently_running_announcements: HashSet::new(),
             successful_announcements: HashMap::new(),
             failed_announcements: HashMap::new(),
-            gossip_client: GossipClient::new(Duration::from_secs(5), config.node.miner_address()),
+            gossip_client: GossipClient::new(Duration::from_secs(5), config.node_config.miner_address()),
             irys_api_client,
             chain_id: config.consensus.chain_id,
             peer_address: PeerAddress {
                 gossip: format!(
                     "{}:{}",
-                    config.node.gossip.public_ip, config.node.gossip.public_port
+                    config.node_config.gossip.public_ip, config.node_config.gossip.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
                 api: format!(
                     "{}:{}",
-                    config.node.http.public_ip, config.node.http.public_port
+                    config.node_config.http.public_ip, config.node_config.http.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
                 execution: RethPeerInfo {
                     peering_tcp_addr: format!(
                         "{}:{}",
-                        &config.node.reth.network.public_ip, &config.node.reth.network.public_port
+                        &config.node_config.reth.network.public_ip, &config.node_config.reth.network.public_port
                     )
                     .parse()
                     .expect("valid SocketAddr expected"),
-                    peer_id: config.node.reth.network.peer_id,
+                    peer_id: config.node_config.reth.network.peer_id,
                 },
             },
             reth_service_addr: reth_actor,
@@ -680,7 +680,7 @@ where
             version_request,
             peer_service_addr,
             is_trusted_peer,
-            self.config.node.peer_filter_mode,
+            self.config.node_config.peer_filter_mode,
             self.peer_list.clone(),
         );
         ctx.spawn(handshake_task.into_actor(self));
@@ -733,7 +733,7 @@ where
         if !self.peer_list.is_peer_allowed(&msg.api_address) {
             debug!(
                 "Peer {:?} is not in whitelist, ignoring based on filter mode: {:?}",
-                msg.api_address, self.config.node.peer_filter_mode
+                msg.api_address, self.config.node_config.peer_filter_mode
             );
             return;
         }
@@ -776,13 +776,13 @@ where
             let version_request = self.create_version_request();
             let peer_service_addr = ctx.address();
             let is_trusted_peer = self.peer_list.is_trusted_peer(&msg.api_address);
-            let peer_filter_mode = self.config.node.peer_filter_mode;
+            let peer_filter_mode = self.config.node_config.peer_filter_mode;
             let peer_list = self.peer_list.clone();
 
             let api_client = self.irys_api_client.clone();
             let addr = msg.api_address;
             let semaphore = handshake_semaphore_with_max(
-                self.config.node.p2p_handshake.max_concurrent_handshakes,
+                self.config.node_config.p2p_handshake.max_concurrent_handshakes,
             );
             let handshake_task = async move {
                 // Limit concurrent handshakes globally
@@ -852,10 +852,10 @@ where
                 *entry
             };
 
-            if attempts >= self.config.node.p2p_handshake.max_retries {
+            if attempts >= self.config.node_config.p2p_handshake.max_retries {
                 let until = std::time::Instant::now()
                     + std::time::Duration::from_secs(
-                        self.config.node.p2p_handshake.blocklist_ttl_secs,
+                        self.config.node_config.p2p_handshake.blocklist_ttl_secs,
                     );
                 blocklist_until()
                     .lock()
@@ -873,8 +873,8 @@ where
             }
 
             let backoff_secs = (1_u64 << (attempts - 1))
-                .saturating_mul(self.config.node.p2p_handshake.backoff_base_secs);
-            let backoff_secs = backoff_secs.min(self.config.node.p2p_handshake.backoff_cap_secs);
+                .saturating_mul(self.config.node_config.p2p_handshake.backoff_base_secs);
+            let backoff_secs = backoff_secs.min(self.config.node_config.p2p_handshake.backoff_cap_secs);
             let backoff = std::time::Duration::from_secs(backoff_secs);
 
             let message = NewPotentialPeer::new(msg.peer_api_address);
@@ -1871,7 +1871,7 @@ mod tests {
         let service_addr = service.start();
 
         let target_addr: std::net::SocketAddr = "127.0.0.1:18080".parse().unwrap();
-        let max_retries = config.node.p2p_handshake.max_retries;
+        let max_retries = config.node_config.p2p_handshake.max_retries;
 
         for _ in 0..max_retries {
             service_addr

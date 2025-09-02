@@ -874,7 +874,7 @@ impl EpochSnapshot {
     /// # Returns
     /// * `Vec<StorageModuleInfo>` - Vector of storage module information with assigned partitions
     pub fn map_storage_modules_to_partition_assignments(&self) -> Vec<StorageModuleInfo> {
-        let miner = self.config.node.miner_address();
+        let miner = self.config.node_config.miner_address();
         let assignments = self.get_partition_assignments(miner);
         let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
         let paths = &self
@@ -971,7 +971,7 @@ impl EpochSnapshot {
         paths
             .iter()
             .map(|path| {
-                let sub_base_path = self.config.node.base_directory.join(path.clone());
+                let sub_base_path = self.config.node_config.base_directory.join(path.clone());
                 let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
 
                 let params = if params_path.exists() {

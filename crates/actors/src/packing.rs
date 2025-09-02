@@ -56,7 +56,7 @@ impl PackingConfig {
     pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
-            concurrency: config.node.packing.cpu_packing_concurrency,
+            concurrency: config.node_config.packing.cpu_packing_concurrency,
             chain_id: config.consensus.chain_id,
             #[cfg(feature = "nvidia")]
             max_chunks: config.node_config.packing.gpu_packing_batch_size,
@@ -125,7 +125,7 @@ impl PackingActor {
             let end_value = *chunk_range.0.end();
             let short_writes_before_sync: u32 = (storage_module
                 .config
-                .node
+                .node_config
                 .storage
                 .num_writes_before_sync
                 .div_ceil(2))
@@ -446,7 +446,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
-                miner_address: config.node.miner_address(),
+                miner_address: config.node_config.miner_address(),
                 ledger_id: None,
                 slot_index: None,
             }),
@@ -513,7 +513,7 @@ mod tests {
 
             let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
             compute_entropy_chunk(
-                config.node.miner_address(),
+                config.node_config.miner_address(),
                 i,
                 partition_hash.0,
                 config.consensus.entropy_packing_iterations,

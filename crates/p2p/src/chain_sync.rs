@@ -559,8 +559,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     config: &irys_types::Config,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
 ) -> ChainSyncResult<()> {
-    let sync_mode = config.node.sync_mode;
-    let genesis_peer_discovery_timeout_millis = config.node.genesis_peer_discovery_timeout_millis;
+    let sync_mode = config.node_config.sync_mode;
+    let genesis_peer_discovery_timeout_millis = config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
     if !sync_state.is_gossip_reception_enabled() {
         debug!("Sync task: Gossip reception is disabled, skipping sync");
@@ -578,7 +578,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     sync_state.set_syncing_from(start_sync_from_height);
     sync_state.set_trusted_sync(is_trusted_mode);
 
-    let is_a_genesis_node = matches!(config.node.node_mode, NodeMode::Genesis);
+    let is_a_genesis_node = matches!(config.node_config.node_mode, NodeMode::Genesis);
     if is_a_genesis_node && sync_state.sync_target_height() <= 1 {
         debug!("Sync task: The node is a genesis node with no blocks, skipping the sync task");
         sync_state.finish_sync();

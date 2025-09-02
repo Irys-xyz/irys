@@ -418,7 +418,7 @@ impl GossipServiceTestFixture {
         let mempool_txs = Arc::clone(&mempool_stub.txs);
         let mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
             internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
@@ -428,7 +428,7 @@ impl GossipServiceTestFixture {
 
         let tokio_runtime = tokio::runtime::Handle::current();
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
 
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
@@ -477,7 +477,7 @@ impl GossipServiceTestFixture {
             api_port,
             execution: RethPeerInfo::default(),
             db,
-            mining_address: config.node.miner_address(),
+            mining_address: config.node_config.miner_address(),
             mempool_stub,
             peer_list,
             // block_discovery_stub,
@@ -522,7 +522,7 @@ impl GossipServiceTestFixture {
 
         self.mempool_stub = mempool_stub.clone();
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node_config).await;
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: Some(self.service_senders.gossip_broadcast.clone()),
@@ -847,7 +847,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
     let genesis_block = IrysBlockHeader::new_mock_header();
-    let block_index = BlockIndex::new(&config.node)
+    let block_index = BlockIndex::new(&config.node_config)
         .await
         .expect("expected to create a block index");
     let block_index_read_guard_stub = BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
@@ -859,7 +859,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
     let mempool_stub = MempoolStub::new(gossip_tx);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
-    let block_status_provider_mock = BlockStatusProvider::mock(&config.node).await;
+    let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
     let block_discovery_stub = BlockDiscoveryStub {
         blocks: Arc::new(RwLock::new(Vec::new())),
         internal_message_bus: Some(service_senders.gossip_broadcast.clone()),

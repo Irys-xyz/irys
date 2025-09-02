@@ -88,7 +88,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     let alloy_provider = ProviderBuilder::new().wallet(wallet).connect_http(
         format!(
             "http://127.0.0.1:{}/v1/execution-rpc",
-            node.node_ctx.config.node.http.bind_port
+            node.node_ctx.config.node_config.http.bind_port
         )
         .parse()?,
     );
@@ -116,7 +116,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let http_url = format!(
         "http://127.0.0.1:{}",
-        node.node_ctx.config.node.http.bind_port
+        node.node_ctx.config.node_config.http.bind_port
     );
 
     // server should be running

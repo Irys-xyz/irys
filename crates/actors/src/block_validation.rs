@@ -348,7 +348,7 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.node.vdf())
+    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.node_config.vdf())
         .await
         .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
@@ -1928,7 +1928,7 @@ mod tests {
         SystemRegistry::set(block_index_actor.clone());
 
         let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node.base_directory.clone())
+            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
                 .expect("Expected to load storage submodules config");
 
         // Create an epoch snapshot for the genesis block

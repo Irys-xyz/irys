@@ -184,7 +184,7 @@ impl ChunkCacheService {
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
         debug!("Pruning cache for height {}", &migration_height);
         let prune_height =
-            migration_height.saturating_sub(u64::from(self.config.node.cache.cache_clean_lag));
+            migration_height.saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         self.prune_pd_cache(prune_height)?;
         let (
             (chunk_cache_count, chunk_cache_size),

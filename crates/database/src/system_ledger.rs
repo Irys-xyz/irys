@@ -136,7 +136,7 @@ async fn create_pledge_commitment_transaction(
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
 pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
-    let base_dir = config.node.base_directory.clone();
+    let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
     let storage_submodule_config = StorageSubmodulesConfig::load(base_dir).unwrap();

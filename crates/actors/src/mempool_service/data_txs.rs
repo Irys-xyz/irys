@@ -112,7 +112,7 @@ impl Inner {
                 // properly distributed to block producers, ingress proof providers, etc.
 
                 // Validate term fee distribution structure
-                TermFeeCharges::new(actual_term_fee, &self.config.node.consensus_config())
+                TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
                     .map_err(|e| {
                         TxIngressError::Other(format!("Invalid term fee structure: {}", e))
                     })?;
@@ -121,7 +121,7 @@ impl Inner {
                 PublishFeeCharges::new(
                     actual_perm_fee,
                     actual_term_fee,
-                    &self.config.node.consensus_config(),
+                    &self.config.node_config.consensus_config(),
                 )
                 .map_err(|e| TxIngressError::Other(format!("Invalid perm fee structure: {}", e)))?;
             }
@@ -139,7 +139,7 @@ impl Inner {
         if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
             let anchor_expiry_depth = self
                 .config
-                .node
+                .node_config
                 .consensus_config()
                 .mempool
                 .anchor_expiry_depth as u64;

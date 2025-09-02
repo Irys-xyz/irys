@@ -165,7 +165,7 @@ impl BlockProducerService {
         info!("Starting block producer service");
         debug!(
             "Service configuration - reward_address: {}, chain_id: {}",
-            self.inner.config.node.reward_address, self.inner.config.consensus.chain_id
+            self.inner.config.node_config.reward_address, self.inner.config.consensus.chain_id
         );
         loop {
             tokio::select! {
@@ -481,7 +481,7 @@ pub trait BlockProdStrategy {
         // Generate expected shadow transactions using shared logic
         let mut shadow_tx_generator = ShadowTxGenerator::new(
             &block_height,
-            &self.inner().config.node.reward_address,
+            &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
             &self.inner().config.consensus,
@@ -543,7 +543,7 @@ pub trait BlockProdStrategy {
         let attributes = PayloadAttributes {
             timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
             prev_randao: parent_mix_hash,
-            suggested_fee_recipient: self.inner().config.node.reward_address,
+            suggested_fee_recipient: self.inner().config.node_config.reward_address,
             withdrawals: None, // these should ALWAYS be none
             parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
         };
@@ -735,7 +735,7 @@ pub trait BlockProdStrategy {
             previous_block_hash: prev_block_hash,
             previous_cumulative_diff: prev_block_header.cumulative_diff,
             poa,
-            reward_address: self.inner().config.node.reward_address,
+            reward_address: self.inner().config.node_config.reward_address,
             reward_amount: block_reward.amount,
             miner_address: solution.mining_address,
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer

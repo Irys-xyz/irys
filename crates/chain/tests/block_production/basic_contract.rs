@@ -48,7 +48,7 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
         .connect_http(
             format!(
                 "http://127.0.0.1:{}/v1/execution-rpc",
-                node.node_ctx.config.node.http.bind_port
+                node.node_ctx.config.node_config.http.bind_port
             )
             .parse()?,
         );

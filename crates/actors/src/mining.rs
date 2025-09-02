@@ -213,7 +213,7 @@ impl PartitionMiningActor {
                     partition_hash,
                     chunk_offset: *partition_chunk_offset,
 
-                    mining_address: self.config.node.miner_address(),
+                    mining_address: self.config.node_config.miner_address(),
                     tx_path, // capacity partitions have no tx_path nor data_path
                     data_path,
                     chunk: chunk_bytes.clone(),
@@ -486,7 +486,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
-                miner_address: config.node.miner_address(),
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),
@@ -592,7 +592,7 @@ mod tests {
         );
 
         assert_eq!(
-            config.node.miner_address(),
+            config.node_config.miner_address(),
             solution.mining_address,
             "Not expected partition"
         );
@@ -635,7 +635,7 @@ mod tests {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
-                miner_address: config.node.miner_address(),
+                miner_address: config.node_config.miner_address(),
                 ledger_id: Some(0),
                 slot_index: Some(0), // Submit Ledger Slot 0
             }),

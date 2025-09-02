@@ -20,13 +20,13 @@ impl Config {
             consensus,
             mempool: node_config.mempool(),
             vdf: node_config.vdf(),
-            node: node_config,
+            node_config,
         }))
     }
 
     pub fn irys_signer(&self) -> IrysSigner {
         IrysSigner {
-            signer: self.node.mining_key.clone(),
+            signer: self.node_config.mining_key.clone(),
             chain_id: self.consensus.chain_id,
             chunk_size: self.consensus.chunk_size,
         }
@@ -66,7 +66,7 @@ impl From<NodeConfig> for Config {
 #[derive(Debug)]
 pub struct CombinedConfigInner {
     pub consensus: ConsensusConfig,
-    pub node: NodeConfig,
+    pub node_config: NodeConfig,
     // composite configs - here to amortize the creation cost
     pub vdf: VdfConfig,
     pub mempool: MempoolConfig,

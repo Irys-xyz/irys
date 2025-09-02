@@ -14,7 +14,7 @@ pub struct PeerBandwidthManager {
 impl PeerBandwidthManager {
     pub fn new(miner_address: &Address, peer_list_item: &PeerListItem, config: &Config) -> Self {
         let chunk_size = config.consensus.chunk_size;
-        let timeout = config.node.data_sync.chunk_request_timeout;
+        let timeout = config.node_config.data_sync.chunk_request_timeout;
         let target_bandwidth_mbps = 100; // Default target, adjust as needed
 
         Self {

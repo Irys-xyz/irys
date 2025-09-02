@@ -261,7 +261,7 @@ impl LedgerExpiryTestContext {
             .await;
 
         // Get initial balance
-        let miner_address = node.node_ctx.config.node.miner_address();
+        let miner_address = node.node_ctx.config.node_config.miner_address();
         let genesis_block = node.get_block_by_height(0).await?;
         let initial_balance = U256::from_be_bytes(
             node.get_balance(miner_address, genesis_block.evm_block_hash)

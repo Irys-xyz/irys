@@ -28,7 +28,7 @@ impl Inner {
     ) -> Result<(), ChunkIngressError> {
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
-        let max_chunks_per_item = self.config.node.mempool().max_chunks_per_item;
+        let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
 
         info!("Processing chunk");
 

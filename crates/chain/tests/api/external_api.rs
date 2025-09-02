@@ -23,7 +23,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     let address = format!(
         "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node.http.bind_port
+        ctx.node_ctx.config.node_config.http.bind_port
     );
 
     // FIXME: Test to be updated with future endpoint work

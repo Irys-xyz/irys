@@ -124,7 +124,7 @@ impl BlockTreeService {
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
         // Dereference miner_address here, before the closure
-        let miner_address = config.node.miner_address();
+        let miner_address = config.node_config.miner_address();
         let service_senders = service_senders.clone();
         let system = System::current();
         let bi_guard = block_index_guard;

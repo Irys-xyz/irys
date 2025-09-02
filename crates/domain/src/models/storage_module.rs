@@ -240,7 +240,7 @@ impl StorageModule {
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
-            let sub_base_path = config.node.base_directory.join(dir.clone());
+            let sub_base_path = config.node_config.base_directory.join(dir.clone());
 
             tracing::info!(?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
@@ -277,7 +277,7 @@ impl StorageModule {
             // if we don't have an existing packing params file, write it
             if !params_path.exists() {
                 let mut params = PackingParams {
-                    packing_address: config.node.miner_address(),
+                    packing_address: config.node_config.miner_address(),
                     ..Default::default()
                 };
                 if let Some(pa) = storage_module_info.partition_assignment {
@@ -292,9 +292,9 @@ impl StorageModule {
                     PackingParams::from_toml(&params_path).expect("packing params to load");
 
                 ensure!(
-                    params.packing_address == config.node.miner_address(),
+                    params.packing_address == config.node_config.miner_address(),
                     "Active mining address: {} does not match partition packing address {}",
-                    config.node.miner_address(),
+                    config.node_config.miner_address(),
                     params.packing_address
                 );
 
@@ -397,7 +397,7 @@ impl StorageModule {
         // Also update the packing params file in each submodule
         for (_, submodule) in self.submodules.iter() {
             let params = PackingParams {
-                packing_address: self.config.node.miner_address(),
+                packing_address: self.config.node_config.miner_address(),
                 partition_hash: Some(partition_assignment.partition_hash),
                 ledger: partition_assignment.ledger_id,
                 slot: partition_assignment.slot_index,
@@ -495,7 +495,7 @@ impl StorageModule {
         let threshold = if force {
             0
         } else {
-            self.config.node.storage.num_writes_before_sync
+            self.config.node_config.storage.num_writes_before_sync
         };
 
         let arc = self.pending_writes.clone();
@@ -1077,7 +1077,7 @@ impl StorageModule {
             bytes: Base64::from(chunk_info.0),
             partition_offset,
             tx_offset: chunk_offset,
-            packing_address: self.config.node.miner_address(),
+            packing_address: self.config.node_config.miner_address(),
             partition_hash: self.partition_hash().unwrap(),
         }))
     }
@@ -1560,7 +1560,7 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
     let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
 
     compute_entropy_chunk(
-        sm.config.node.miner_address(),
+        sm.config.node_config.miner_address(),
         point as u64,
         sm.partition_hash().unwrap().0,
         sm.config.consensus.entropy_packing_iterations,

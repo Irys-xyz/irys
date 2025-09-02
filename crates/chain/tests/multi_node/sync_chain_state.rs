@@ -36,13 +36,13 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.node.reth);
+    tracing::info!("peer info: {:?}", &genesis.node_ctx.config.node_config.reth);
 
     tracing::info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node.reth,
-        &peer1.node_ctx.config.node.reth,
-        &peer2.node_ctx.config.node.reth
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -113,9 +113,9 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 
     info!(
         "genesis: {:?}, peer 1: {:?}, peer 2: {:?}",
-        &genesis.node_ctx.config.node.reth,
-        &peer1.node_ctx.config.node.reth,
-        &peer2.node_ctx.config.node.reth
+        &genesis.node_ctx.config.node_config.reth,
+        &peer1.node_ctx.config.node_config.reth,
+        &peer2.node_ctx.config.node_config.reth
     );
 
     // mine_blocks(&genesis.node_ctx, 3).await.unwrap();
@@ -296,9 +296,9 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         // Check peer lists - each peer should see the genesis node and the other peer
 
         // Get the peer addresses for comparison
-        let genesis_peer_addr = ctx_genesis_node.node_ctx.config.node.peer_address();
-        let peer1_peer_addr = ctx_peer1_node.node_ctx.config.node.peer_address();
-        let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node.peer_address();
+        let genesis_peer_addr = ctx_genesis_node.node_ctx.config.node_config.peer_address();
+        let peer1_peer_addr = ctx_peer1_node.node_ctx.config.node_config.peer_address();
+        let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node_config.peer_address();
 
         // Wait until all peers are mutually visible
         ctx_peer1_node
@@ -327,7 +327,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await;
 
         let mut result_genesis = block_index_endpoint_request(
-            &local_test_url(&ctx_genesis_node.node_ctx.config.node.http.bind_port),
+            &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             required_index_blocks_height.try_into()?,
         )
@@ -444,7 +444,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
             .await?;
 
         let mut result_genesis = block_index_endpoint_request(
-            &local_test_url(&ctx_genesis_node.node_ctx.config.node.http.bind_port),
+            &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             genesis_starting_index_height + 1,
         )
@@ -546,7 +546,7 @@ async fn poll_until_fetch_at_block_index_height(
     let mut attempts = 0;
     let mut result_peer = None;
     let max_attempts = max_attempts * 10;
-    let url = local_test_url(&node_ctx.config.node.http.bind_port);
+    let url = local_test_url(&node_ctx.config.node_config.http.bind_port);
     loop {
         let mut response = info_endpoint_request(&url).await;
 
@@ -583,7 +583,7 @@ async fn poll_until_fetch_at_block_index_height(
         } else {
             result_peer = Some(
                 block_index_endpoint_request(
-                    &local_test_url(&node_ctx.config.node.http.bind_port),
+                    &local_test_url(&node_ctx.config.node_config.http.bind_port),
                     0,
                     required_blocks_height,
                 )

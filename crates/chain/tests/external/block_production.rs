@@ -48,7 +48,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(config).start().await;
 
     assert_eq!(
-        node.node_ctx.config.node.miner_address(),
+        node.node_ctx.config.node_config.miner_address(),
         Address::from_slice(expected_addr.as_slice())
     );
     let account1_address = hex::decode(DEV2_ADDRESS)?;

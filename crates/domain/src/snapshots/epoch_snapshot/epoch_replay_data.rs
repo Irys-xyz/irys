@@ -44,7 +44,7 @@ impl EpochReplayData {
     ) -> eyre::Result<Self> {
         // Recover any mempool commitment transactions that were persisted
         let recovered =
-            RecoveredMempoolState::load_from_disk(&config.node.mempool_dir(), false).await;
+            RecoveredMempoolState::load_from_disk(&config.node_config.mempool_dir(), false).await;
 
         let block_index = block_index_guard.read();
 
