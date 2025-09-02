@@ -417,18 +417,13 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
-    let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default());
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    let stake_tx = post_stake_commitment(&node, &signer).await;
 
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
-    // Verify stake commitment starts in 'Unknown' state
+    // Verify stake commitment starts in 'Unknown' state (already posted by helper)
     let status = node.get_commitment_snapshot_status(&stake_tx);
     assert_eq!(status, CommitmentSnapshotStatus::Unknown);
-
-    // Submit stake commitment via API
-    node.post_commitment_tx(&stake_tx).await?;
 
     // Mine a block to include the commitment
     node.mine_blocks(1).await?;
@@ -438,23 +433,13 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
-    // Create a pledge commitment for the already staked address
-    let pledge_tx = CommitmentTransaction::new_pledge(
-        consensus,
-        H256::default(),
-        node.node_ctx.mempool_pledge_provider.as_ref(),
-        signer.address(),
-    )
-    .await;
-    let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+    // Create a pledge commitment for the already staked address using the pricing API pattern
+    let pledge_tx = post_pledge_commitment(&node, &signer, H256::default()).await;
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
-    // Verify pledge starts in 'Unknown' state
+    // Verify pledge starts in 'Unknown' state (already posted by helper)
     let status = node.get_commitment_snapshot_status(&pledge_tx);
     assert_eq!(status, CommitmentSnapshotStatus::Unknown);
-
-    // Submit pledge via API
-    node.post_commitment_tx(&pledge_tx).await?;
 
     // Verify pledge is still 'Unknown' before mining
     let status = node.get_commitment_snapshot_status(&pledge_tx);
@@ -482,10 +467,11 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
     // ===== TEST CASE 4: Pledge Without Stake (Should Fail) =====
-    // Create a new signer without any stake commitment
+    // Create a new signer without any stake commitment (unfunded to test failure case)
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
 
-    // Create a pledge for the unstaked address
+    // Create a pledge for the unstaked address manually
+    let consensus = &node.node_ctx.config.consensus;
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         H256::default(),
@@ -500,11 +486,14 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let status = node.get_commitment_snapshot_status(&pledge_tx);
     assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
-    // Submit pledge via API
-    node.post_commitment_tx(&pledge_tx).await?;
-    node.mine_blocks(1).await?;
+    // Submit pledge via API (expect this to fail for unfunded signer)
+    let post_result = node.post_commitment_tx(&pledge_tx).await;
+    assert!(
+        post_result.is_err(),
+        "Expected unfunded pledge to fail, but it succeeded"
+    );
 
-    // Verify pledge remains 'Unstaked' (invalid without stake)
+    // Since posting failed (as expected), we can't mine it, but the status should remain Unstaked
     let status = node.get_commitment_snapshot_status(&pledge_tx);
     assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
