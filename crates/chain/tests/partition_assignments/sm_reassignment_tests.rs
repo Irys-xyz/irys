@@ -26,6 +26,7 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     genesis_config.consensus.get_mut().chunk_size = chunk_size as u64;
     genesis_config.consensus.get_mut().num_chunks_in_partition = 10;
     genesis_config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
+    genesis_config.genesis_peer_discovery_timeout_millis = 1000; // Faster restart
     genesis_config.consensus.get_mut().block_migration_depth = 1; // <- so we lose less blocks in the restart
     genesis_config
         .consensus
