@@ -116,20 +116,20 @@ pub async fn capacity_chunk_solution(
         // Calculate last step checkpoints for current_step - 1
         let mut hasher = Sha256::new();
         let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.consensus.vdf,
+            &config.vdf,
             current_step.saturating_sub(1),
         ));
         let mut seed = steps[0];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
 
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -237,18 +237,18 @@ pub async fn capacity_chunk_solution(
             {
                 let mut h = Sha256::new();
                 let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.consensus.vdf,
+                    &config.vdf,
                     current_step.saturating_sub(1),
                 ));
                 let mut sd = steps[0];
                 let mut cps: Vec<H256> =
-                    vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
                 vdf_sha(
                     &mut h,
                     &mut s,
                     &mut sd,
-                    config.consensus.vdf.num_checkpoints_in_vdf_step,
-                    config.consensus.vdf.num_iterations_per_checkpoint(),
+                    config.vdf.num_checkpoints_in_vdf_step,
+                    config.vdf.num_iterations_per_checkpoint(),
                     &mut cps,
                 );
                 H256List(cps)
@@ -327,7 +327,7 @@ impl IrysNodeTest<()> {
         let node = IrysNode::new(self.cfg).unwrap();
         let node_ctx = node.start().await.expect("node cannot be initialized");
         IrysNodeTest {
-            cfg: node_ctx.config.node_config.clone(),
+            cfg: node_ctx.config.node.clone(),
             node_ctx,
             temp_dir: self.temp_dir,
             name: self.name,
@@ -365,7 +365,7 @@ impl IrysNodeTest<()> {
 
 impl IrysNodeTest<IrysNodeCtx> {
     pub fn testing_peer(&self) -> NodeConfig {
-        let node_config = &self.node_ctx.config.node_config;
+        let node_config = &self.node_ctx.config.node;
         // Initialize the peer with a random signer, copying the genesis config
         let peer_signer = IrysSigner::random_signer(&node_config.consensus_config());
         self.testing_peer_with_signer(&peer_signer)
@@ -374,7 +374,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub fn testing_peer_with_signer(&self, peer_signer: &IrysSigner) -> NodeConfig {
         use irys_types::{PeerAddress, RethPeerInfo};
 
-        let node_config = &self.node_ctx.config.node_config;
+        let node_config = &self.node_ctx.config.node;
 
         if node_config.node_mode == NodeMode::Peer {
             panic!("Can only create a peer from a genesis config");
@@ -1262,8 +1262,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub fn peer_address(&self) -> PeerAddress {
-        let http = &self.node_ctx.config.node_config.http;
-        let gossip = &self.node_ctx.config.node_config.gossip;
+        let http = &self.node_ctx.config.node.http;
+        let gossip = &self.node_ctx.config.node.gossip;
 
         PeerAddress {
             api: format!("{}:{}", http.bind_ip, http.bind_port)
@@ -1726,7 +1726,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("to sign the storage transaction");
 
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
         let mut response = client
             .post(url)
@@ -1757,7 +1757,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
         let mut response = client
             .post(url)
@@ -1800,7 +1800,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
 
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         let url = format!("{}/v1/chunk", api_uri);
         let response = client
             .post(url)
@@ -1817,15 +1817,15 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub fn get_peer_addr(&self) -> SocketAddr {
-        self.node_ctx.config.node_config.peer_address().api
+        self.node_ctx.config.node.peer_address().api
     }
 
     // Build a signed VersionRequest describing this node
     pub fn build_version_request(&self) -> VersionRequest {
         let mut vr = VersionRequest {
             chain_id: self.node_ctx.config.consensus.chain_id,
-            address: self.node_ctx.config.node_config.peer_address(),
-            mining_address: self.node_ctx.config.node_config.reward_address,
+            address: self.node_ctx.config.node.peer_address(),
+            mining_address: self.node_ctx.config.node.reward_address,
             ..VersionRequest::default()
         };
         self.node_ctx
@@ -1872,7 +1872,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let client = awc::Client::default();
-            let api_uri = self.node_ctx.config.node_config.local_api_url();
+            let api_uri = self.node_ctx.config.node.local_api_url();
             let url = format!("{}/v1/peer_list", api_uri);
 
             if let Ok(mut resp) = client.get(url).send().await {
@@ -1899,14 +1899,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         let url = format!("{}/v1/price/commitment/stake", api_uri);
 
         let mut response = client
@@ -1928,7 +1928,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         user_address: Address,
     ) -> eyre::Result<CommitmentPriceInfo> {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
 
         let mut response = client
@@ -1949,7 +1949,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
             .await
     }
@@ -2018,7 +2018,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         self.post_commitment_tx_request(&api_uri, &pledge_tx)
             .await?;
 
@@ -2077,7 +2077,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
-        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let api_uri = self.node_ctx.config.node.local_api_url();
         self.post_commitment_tx_request(&api_uri, &stake_tx)
             .await
             .expect("posted commitment tx");
@@ -2291,7 +2291,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         end_height: u64,
     ) -> eyre::Result<Vec<IrysBlockHeader>> {
         let blocks = self.get_blocks(start_height, end_height).await?;
-        let reset_frequency = self.node_ctx.config.consensus.vdf.reset_frequency;
+        let reset_frequency = self.node_ctx.config.vdf.reset_frequency;
 
         Ok(blocks
             .into_iter()
@@ -2392,23 +2392,17 @@ pub async fn solution_context_with_poa_chunk(
 
     // Compute checkpoints for (step-1)
     let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(
-        &node_ctx.config.consensus.vdf,
-        step - 1,
-    ));
+    let mut salt =
+        irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
     let mut seed = steps[0];
     let mut checkpoints: Vec<H256> =
-        vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
+        vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
     vdf_sha(
         &mut hasher,
         &mut salt,
         &mut seed,
-        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
-        node_ctx
-            .config
-            .consensus
-            .vdf
-            .num_iterations_per_checkpoint(),
+        node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+        node_ctx.config.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 
@@ -2427,7 +2421,7 @@ pub async fn solution_context_with_poa_chunk(
     Ok(SolutionContext {
         partition_hash,
         chunk_offset: partition_chunk_offset,
-        mining_address: node_ctx.config.node_config.miner_address(),
+        mining_address: node_ctx.config.node.miner_address(),
         tx_path: None,
         data_path: None,
         chunk: poa_chunk,
@@ -2481,7 +2475,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     node_ctx.start_vdf().await?;
     let poa_solution = capacity_chunk_solution(
-        node_ctx.config.node_config.miner_address(),
+        node_ctx.config.node.miner_address(),
         vdf_steps_guard.clone(),
         &node_ctx.config,
         prev_block.diff,

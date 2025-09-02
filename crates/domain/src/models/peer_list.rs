@@ -381,19 +381,15 @@ impl PeerListDataInner {
         peer_network_sender: PeerNetworkSender,
         config: &Config,
     ) -> Result<Self, PeerNetworkError> {
-        let trusted_peers_api_addresses: HashSet<SocketAddr> = config
-            .node_config
-            .trusted_peers
-            .iter()
-            .map(|p| p.api)
-            .collect();
+        let trusted_peers_api_addresses: HashSet<SocketAddr> =
+            config.node.trusted_peers.iter().map(|p| p.api).collect();
 
         // Initialize whitelist based on peer filter mode
-        let peer_api_ip_whitelist = match config.node_config.peer_filter_mode {
+        let peer_api_ip_whitelist = match config.node.peer_filter_mode {
             PeerFilterMode::Unrestricted => HashSet::new(), // No restrictions
             PeerFilterMode::TrustedOnly | PeerFilterMode::TrustedAndHandshake => {
                 let mut ip_whitelist = trusted_peers_api_addresses.clone();
-                ip_whitelist.extend(config.node_config.initial_whitelist.clone());
+                ip_whitelist.extend(config.node.initial_whitelist.clone());
                 ip_whitelist
             }
         };

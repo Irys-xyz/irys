@@ -106,7 +106,7 @@ struct MockedServices {
 impl MockedServices {
     async fn new(config: &Config) -> Self {
         let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(&config.node_config.base_directory)
+            open_or_create_irys_consensus_data_db(&config.node.base_directory)
                 .expect("can't open temp dir"),
         ));
 
@@ -114,7 +114,7 @@ impl MockedServices {
             block_response: None,
         };
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node).await;
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(vec![])),

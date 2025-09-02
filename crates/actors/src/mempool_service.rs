@@ -299,7 +299,7 @@ impl Inner {
 
         let max_commitments: usize = self
             .config
-            .node_config
+            .node
             .consensus_config()
             .mempool
             .max_commitment_txs_per_block
@@ -543,7 +543,7 @@ impl Inner {
         let mut submit_tx = Vec::new();
         let max_data_txs = self
             .config
-            .node_config
+            .node
             .consensus_config()
             .mempool
             .max_data_txs_per_block
@@ -937,7 +937,7 @@ impl Inner {
     }
 
     pub async fn persist_mempool_to_disk(&self) -> eyre::Result<()> {
-        let base_path = self.config.node_config.mempool_dir();
+        let base_path = self.config.node.mempool_dir();
 
         let commitment_tx_path = base_path.join("commitment_tx");
         fs::create_dir_all(commitment_tx_path.clone())
@@ -987,8 +987,7 @@ impl Inner {
 
     pub async fn restore_mempool_from_disk(&mut self) {
         let recovered =
-            RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
-                .await;
+            RecoveredMempoolState::load_from_disk(&self.config.node.mempool_dir(), true).await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
             let _ = self
@@ -1274,7 +1273,7 @@ impl MempoolService {
 
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
-        let mempool_config = &config.consensus.mempool;
+        let mempool_config = &config.mempool;
         let mempool_state = create_state(mempool_config);
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();

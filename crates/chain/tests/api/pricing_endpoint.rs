@@ -11,7 +11,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node_config.http.bind_port
+        ctx.node_ctx.config.node.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
 
@@ -74,7 +74,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node_config.http.bind_port
+        ctx.node_ctx.config.node.http.bind_port
     );
     let data_size_bytes = 4_u64;
 
@@ -138,7 +138,7 @@ async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node_config.http.bind_port
+        ctx.node_ctx.config.node.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
 
@@ -161,7 +161,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     let ctx = IrysNodeTest::default_async().start().await;
     let address = format!(
         "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node_config.http.bind_port
+        ctx.node_ctx.config.node.http.bind_port
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size + 1;
 

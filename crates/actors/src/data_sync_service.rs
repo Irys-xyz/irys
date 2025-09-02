@@ -373,7 +373,7 @@ impl DataSyncServiceInner {
                 self.block_tree.clone(),
                 &self.service_senders,
                 chunk_fetcher,
-                self.config.node_config.clone(),
+                self.config.node.clone(),
             );
 
             self.chunk_orchestrators.insert(sm_id, orchestrator);

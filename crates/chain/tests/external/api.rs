@@ -67,7 +67,7 @@ async fn external_api() -> eyre::Result<()> {
 
     let http_url = format!(
         "http://127.0.0.1:{}",
-        node.node_ctx.config.node_config.http.bind_port
+        node.node_ctx.config.node.http.bind_port
     );
 
     // server should be running

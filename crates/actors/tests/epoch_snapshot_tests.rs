@@ -50,15 +50,14 @@ async fn genesis_test() {
     genesis_block.treasury = initial_treasury;
 
     // Create epoch service with random miner address
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
+    let block_index: Arc<RwLock<BlockIndex>> =
+        Arc::new(RwLock::new(BlockIndex::new(&config.node).await.unwrap()));
 
     let block_index_actor = BlockIndexService::new(block_index, &config.consensus).start();
     SystemRegistry::set(block_index_actor);
 
     let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        StorageSubmodulesConfig::load(config.node.base_directory.clone()).unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -66,7 +65,7 @@ async fn genesis_test() {
         commitments.clone(),
         &config,
     );
-    let miner_address = config.node_config.miner_address();
+    let miner_address = config.node.miner_address();
 
     // Process genesis message directly instead of through actor system
     // This allows us to inspect the actor's state after processing
@@ -210,7 +209,7 @@ async fn add_slots_test() {
     genesis_block.treasury = initial_treasury;
 
     let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        StorageSubmodulesConfig::load(config.node.base_directory.clone()).unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -312,7 +311,7 @@ async fn unique_addresses_per_slot_test() {
     commitments.append(&mut comm2);
 
     let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        StorageSubmodulesConfig::load(config.node.base_directory.clone()).unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -768,9 +767,8 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
+    let block_index: Arc<RwLock<BlockIndex>> =
+        Arc::new(RwLock::new(BlockIndex::new(&config.node).await.unwrap()));
 
     let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
     SystemRegistry::set(block_index_actor.clone());
@@ -784,7 +782,7 @@ async fn epoch_blocks_reinitialization_test() {
     genesis_block.treasury = initial_treasury;
 
     let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+        StorageSubmodulesConfig::load(config.node.base_directory.clone()).unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,

@@ -143,7 +143,7 @@ impl IrysNodeCtx {
     }
 
     pub fn get_http_port(&self) -> u16 {
-        self.config.node_config.http.bind_port
+        self.config.node.http.bind_port
     }
 
     /// Stop the VDF thread and send a message to all known partition actors to ignore any received VDF steps
@@ -229,11 +229,11 @@ async fn start_reth_node(
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
-    let random_ports = config.node_config.reth.network.use_random_ports;
+    let random_ports = config.node.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
-        config.node_config.clone(),
+        config.node.clone(),
         latest_block,
         random_ports,
         shadow_tx_store.clone(),
@@ -321,7 +321,7 @@ impl IrysNode {
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
-        info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
+        info!(miner_address = ?self.config.node.miner_address(), "Starting Irys Node: {:?}", node_mode);
 
         // Check if blockchain data already exists
         let has_existing_data = block_index.num_blocks() > 0;
@@ -421,7 +421,7 @@ impl IrysNode {
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
-        run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
+        run_vdf_for_genesis_block(&mut genesis_block, &self.config.vdf);
 
         (genesis_block, commitments)
     }
@@ -432,7 +432,7 @@ impl IrysNode {
         // Get trusted peer from config
         let trusted_peer = &self
             .config
-            .node_config
+            .node
             .trusted_peers
             .first()
             .expect("expected at least one trusted peer in config")
@@ -502,13 +502,13 @@ impl IrysNode {
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
-        let node_mode = &config.node_config.node_mode;
+        let node_mode = &config.node.node_mode;
         // Start with base genesis and update fields
         let (chain_spec, genesis_block) = IrysChainSpecBuilder::from_config(&self.config).build();
 
         // In all startup modes, irys_db and block_index are prerequisites
         let irys_db = init_irys_db(config).expect("could not open irys db");
-        let mut block_index = BlockIndex::new(&config.node_config)
+        let mut block_index = BlockIndex::new(&config.node)
             .await
             .expect("initializing a new block index should be doable");
 
@@ -590,13 +590,13 @@ impl IrysNode {
 
         let mut ctx = irys_node_ctx_rx.await?;
         ctx.reth_thread_handle = Some(reth_thread.into());
-        let node_config = &ctx.config.node_config;
+        let node_config = &ctx.config.node;
 
         // Log startup information
         info!(
             "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}:{}",
             &node_mode,
-            &ctx.config.node_config.miner_address().to_base58(),
+            &ctx.config.node.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
             &node_config.http.bind_ip,
             &node_config.http.bind_port,
@@ -612,7 +612,7 @@ impl IrysNode {
         ctx.sync_service_facade.initial_sync().await?;
 
         // Call stake_and_pledge after mempool service is initialized
-        if ctx.config.node_config.stake_pledge_drives {
+        if ctx.config.node.stake_pledge_drives {
             const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
             let mut validation_tracker = BlockValidationTracker::new(
                 ctx.block_tree_guard.clone(),
@@ -858,7 +858,7 @@ impl IrysNode {
 
         // overwrite config as we now have reth peering information
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
-        let mut node_config = config.node_config.clone();
+        let mut node_config = config.node.clone();
         node_config.reth.network.peer_id = reth_peering.peer_id;
         node_config.reth.network.bind_ip = reth_peering.peering_tcp_addr.ip().to_string();
         node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
@@ -882,12 +882,9 @@ impl IrysNode {
             EpochReplayData::query_replay_data(&irys_db, &block_index_guard, &config).await?;
 
         let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
+            StorageSubmodulesConfig::load(config.node.base_directory.clone())?;
 
-        let p2p_service = P2PService::new(
-            config.node_config.miner_address(),
-            receivers.gossip_broadcast,
-        );
+        let p2p_service = P2PService::new(config.node.miner_address(), receivers.gossip_broadcast);
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
@@ -1325,7 +1322,7 @@ impl IrysNode {
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
         // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
         let is_test_based_on_base_dir = config
-            .node_config
+            .node
             .base_directory
             .parent()
             .is_some_and(|p| p.ends_with(".tmp"));
@@ -1336,7 +1333,7 @@ impl IrysNode {
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
-            let vdf_config = config.consensus.vdf.clone();
+            let vdf_config = config.vdf.clone();
 
             move || {
                 let _span = span.enter();
@@ -1494,7 +1491,7 @@ impl IrysNode {
     }
 
     fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
-        let price_oracle = match config.node_config.oracle {
+        let price_oracle = match config.node.oracle {
             OracleConfig::Mock {
                 initial_price,
                 incremental_change,
@@ -1699,7 +1696,7 @@ async fn init_reth_db(
 
 fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
-        open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir())?;
+        open_or_create_irys_consensus_data_db(&config.node.irys_consensus_data_dir())?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
     debug!("Irys DB initialized");
     Ok(irys_db)
@@ -1726,7 +1723,7 @@ async fn stake_and_pledge(
     let signer = config.irys_signer();
     let address = signer.address();
 
-    let api_uri = config.node_config.local_api_url();
+    let api_uri = config.node.local_api_url();
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = awc::Client::default();

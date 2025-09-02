@@ -473,7 +473,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     let mut prev_ts: Option<u128> = None;
-    let reward_address = node.node_ctx.config.node_config.reward_address;
+    let reward_address = node.node_ctx.config.node.reward_address;
     let mut _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
 
     for _ in 0..3 {
