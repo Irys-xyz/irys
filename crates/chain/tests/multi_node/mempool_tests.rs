@@ -1170,7 +1170,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
 #[actix_web::test]
-async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
+async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
@@ -1429,7 +1429,7 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
 #[actix_web::test]
-async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
+async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",
