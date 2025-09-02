@@ -546,8 +546,53 @@ impl GossipClient {
                     peer.1.address.gossip
                 );
 
-                let res: GossipResult<Vec<Address>> =
-                    self.send_data_internal(url, &(), false).await;
+                let response = self
+                    .client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|response_error| {
+                        PeerNetworkError::FailedToRequestData(format!(
+                            "Failed to get the stake/pledge whitelist {}: {:?}",
+                            url, response_error
+                        ))
+                    })?;
+
+                let status = response.status();
+
+                let res: GossipResult<Vec<Address>> = match status {
+                    StatusCode::OK => {
+                        let text = response.text().await.map_err(|e| {
+                            PeerNetworkError::FailedToRequestData(format!(
+                                "Failed to read response from {}: {}",
+                                url, e
+                            ))
+                        })?;
+
+                        if text.trim().is_empty() {
+                            return Err(PeerNetworkError::FailedToRequestData(format!(
+                                "Empty response from {}",
+                                url
+                            )));
+                        }
+
+                        let body = serde_json::from_str(&text).map_err(|e| {
+                            PeerNetworkError::FailedToRequestData(format!(
+                                "Failed to parse JSON: {} - Response: {}",
+                                e, text
+                            ))
+                        })?;
+                        Ok(body)
+                    }
+                    _ => {
+                        let error_text = response.text().await.unwrap_or_default();
+                        Err(PeerNetworkError::FailedToRequestData(format!(
+                            "API request failed with status: {} - {}",
+                            status, error_text
+                        ))
+                        .into())
+                    }
+                };
 
                 // Update score for the peer based on the result
                 Self::handle_score(peer_list, &res, &peer.0);

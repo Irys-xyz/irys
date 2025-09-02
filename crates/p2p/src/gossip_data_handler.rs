@@ -800,15 +800,16 @@ where
     }
 
     pub(crate) async fn pull_and_process_stake_and_pledge_whitelist(&self) -> GossipResult<()> {
-        let new_entries = HashSet::from_iter(
-            self.gossip_client
-                .stake_and_pledge_whitelist(&self.peer_list)
-                .await?
-                .into_iter(),
-        );
+        let allowed_miner_addresses = self
+            .gossip_client
+            .clone()
+            .stake_and_pledge_whitelist(&self.peer_list)
+            .await?;
 
         self.mempool
-            .update_stake_and_pledge_whitelist(new_entries)
+            .update_stake_and_pledge_whitelist(HashSet::from_iter(
+                allowed_miner_addresses.into_iter(),
+            ))
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
