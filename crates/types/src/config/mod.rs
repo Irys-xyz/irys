@@ -572,6 +572,7 @@ mod tests {
         max_preheader_data_path_bytes= 65536
         max_invalid_items = 10_000
         max_valid_items = 10_000
+        max_valid_chunks = 10000
         "#;
 
         // Create the expected config
