@@ -334,8 +334,7 @@ impl PeerList {
         use_trusted_peers_only: bool,
     ) -> Result<(), PeerNetworkError> {
         let sender = {
-            self
-                .0
+            self.0
                 .read()
                 .expect("PeerListDataInner lock poisoned")
                 .peer_network_service_sender
