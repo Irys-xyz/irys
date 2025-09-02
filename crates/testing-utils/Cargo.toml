@@ -11,6 +11,6 @@ tempfile.workspace = true
 color-eyre.workspace = true
 tracing-error.workspace = true
 chrono = { version = "0.4.41", default-features = false, features = ["now"] }
-
+libc = "0.2.172"                                                              # same version as was already in the lockfile
 [lints]
 workspace = true

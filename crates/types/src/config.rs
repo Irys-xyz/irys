@@ -307,6 +307,7 @@ pub struct NodeConfig {
     /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
     /// trusted-only or trusted-and-handshake mode, you'll be supplied one during the handshake
     /// with the trusted peers. For the original trusted peer that has to be set.
+    #[serde(default)]
     pub initial_whitelist: Vec<SocketAddr>,
 
     /// Controls how the node filters peer interactions
