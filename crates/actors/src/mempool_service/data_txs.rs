@@ -113,7 +113,9 @@ impl Inner {
 
                 // Validate term fee distribution structure
                 TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
-                    .map_err(|e| TxIngressError::Other(format!("Invalid term fee structure: {}", e)))?;
+                    .map_err(|e| {
+                        TxIngressError::Other(format!("Invalid term fee structure: {}", e))
+                    })?;
 
                 // Validate publish fee distribution structure
                 PublishFeeCharges::new(
