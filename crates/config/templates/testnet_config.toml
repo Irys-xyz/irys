@@ -65,7 +65,7 @@ num_chunks_in_partition = 51872000
 num_chunks_in_recall_range = 800
 num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
-number_of_ingress_proofs_total = 1
+number_of_ingress_proofs_total = 10
 number_of_ingress_proofs_from_assignees = 0
 # Target storage duration in years
 safe_minimum_number_of_years = 200

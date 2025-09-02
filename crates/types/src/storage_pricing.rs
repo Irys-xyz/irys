@@ -1619,6 +1619,7 @@ mod tests {
             // $0.00753 per TB per epoch per replica = $197.9064 per TB per year per replica
             // $197.9064 per TB per year = $0.193245 per GB per year
             config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
+            config.number_of_ingress_proofs_total = 10; // Spreadsheet assumes 10 replicas
 
             // Term storage: 1 epoch (not 5), 10 replicas, 0% decay
             let tb_in_bytes = 1024_u64.pow(4); // 1TB
@@ -1668,6 +1669,7 @@ mod tests {
 
             // Use the same annual cost that achieves $0.0753/TB/epoch
             config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
+            config.number_of_ingress_proofs_total = 10; // Spreadsheet assumes 10 replicas
 
             // Term storage: 5 epochs, 10 replicas, 0% decay
             let tb_in_bytes = 1024_u64.pow(4); // 1TB
@@ -1707,6 +1709,7 @@ mod tests {
             // = $0.000007358 per GB per epoch per replica
             // With 26280 epochs/year: $0.193368 per GB per year
             config.annual_cost_per_gb = Amount::token(dec!(0.193368))?;
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
 
             let gb_in_bytes = 1024_u64.pow(3); // 1GB
             let bytes_to_store = gb_in_bytes;
