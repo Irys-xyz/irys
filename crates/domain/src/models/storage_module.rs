@@ -274,6 +274,7 @@ impl StorageModule {
             })?;
 
             let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+            // if we don't have an existing packing params file, write it
             if !params_path.exists() {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
@@ -299,24 +300,24 @@ impl StorageModule {
 
                 // check the partition assignment if it's present
                 if let Some(pa) = storage_module_info.partition_assignment {
-                    match params.partition_hash {
-                        Some(ph) => {
-                            ensure!(
-                        params.partition_hash == Some(pa.partition_hash),
-                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash,
-                        ph,
-                    )
-                        }
-                        None => {
-                            // need to write the new params to disk
-                            params.partition_hash = Some(pa.partition_hash);
-                            params.ledger = pa.ledger_id;
-                            params.slot = pa.slot_index;
-                            params.write_to_disk(&params_path);
-                        }
+                    // if we have an assignment, check that the partition hash matches
+                    if let Some(ph) = params.partition_hash {
+                        ensure!(
+                            params.partition_hash == Some(pa.partition_hash),
+                            "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+                            This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+                            assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+                            pa.partition_hash,
+                            ph,
+                        );
+                    } else {
+                        // we don't have the partition hash on disk
+                        // so we need to write the new params to disk
+                        params.partition_hash = Some(pa.partition_hash);
+                        params.ledger = pa.ledger_id;
+                        params.slot = pa.slot_index;
+                        params.last_updated_height = Some(0);
+                        params.write_to_disk(&params_path);
                     }
                 }
             }

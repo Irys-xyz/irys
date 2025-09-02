@@ -801,8 +801,8 @@ impl EpochSnapshot {
             );
 
             debug!(
-                "Assigned partition_hash {} to address {}",
-                partition_hash, pledge.signer
+                "Assigned partition_hash {} to address {} for pledge {}",
+                &partition_hash, &pledge.signer, &pledge.id
             );
 
             // Remove the hash from unassigned partitions

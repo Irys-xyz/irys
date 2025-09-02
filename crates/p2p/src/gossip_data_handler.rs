@@ -332,6 +332,36 @@ where
         .await
     }
 
+    /// Pulls a block from a specific peer and sends it to the BlockPool for processing
+    pub async fn pull_and_process_block_from_peer(
+        &self,
+        block_hash: BlockHash,
+        peer: &(irys_types::Address, PeerListItem),
+    ) -> GossipResult<()> {
+        let (source_address, irys_block) = self
+            .gossip_client
+            .pull_block_from_peer(block_hash, peer, &self.peer_list)
+            .await?;
+
+        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+            error!(
+                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
+                source_address
+            );
+            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+        };
+
+        self.handle_block_header(
+            GossipRequest {
+                miner_address: source_address,
+                data: irys_block.as_ref().clone(),
+            },
+            peer_info.address.api,
+            peer_info.address.gossip,
+        )
+        .await
+    }
+
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -446,43 +476,101 @@ where
                 GossipError::unknown(&error)
             })?;
 
-        // Fetch missing transactions from the source peer
-        let missing_txs = self
-            .api_client
-            .get_transactions(source_api_address, &missing_tx_ids)
-            .await
-            .map_err(|error| {
-                error!(
-                    "Failed to fetch transactions from peer {}: {}",
-                    source_api_address, error
-                );
-                GossipError::unknown(&error)
-            })?;
+        // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
+        // Fetch and process each missing transaction one-by-one with retries
+        for tx_id_to_fetch in missing_tx_ids {
+            // Try source peer first
+            let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
+            let mut last_err: Option<String> = None;
 
-        // Process each transaction
-        for tx_response in missing_txs {
-            let tx_id;
-            let mempool_response = match tx_response {
-                IrysTransactionResponse::Commitment(commitment_tx) => {
-                    tx_id = commitment_tx.id;
-                    self.mempool
-                        .handle_commitment_transaction_ingress(commitment_tx)
+            match self
+                .api_client
+                .get_transaction(source_api_address, tx_id_to_fetch)
+                .await
+            {
+                Ok(resp) => {
+                    fetched = Some((resp, source_miner_address));
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to fetch tx {:?} from source peer {}: {:?}",
+                        tx_id_to_fetch, source_api_address, e
+                    );
+                    last_err = Some(e.to_string());
+                }
+            }
+
+            // If source failed, try top 5 active peers (excluding the source)
+            if fetched.is_none() {
+                let mut exclude = std::collections::HashSet::new();
+                exclude.insert(source_miner_address);
+                let top_peers = self.peer_list.top_active_peers(Some(5), Some(exclude));
+
+                for (peer_addr, peer_item) in top_peers {
+                    match self
+                        .api_client
+                        .get_transaction(peer_item.address.api, tx_id_to_fetch)
                         .await
+                    {
+                        Ok(resp) => {
+                            fetched = Some((resp, peer_addr));
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to fetch tx {:?} from peer {}: {:?}",
+                                tx_id_to_fetch, peer_item.address.api, e
+                            );
+                            last_err = Some(e.to_string());
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let Some((tx_response, from_miner_addr)) = fetched else {
+                let err_msg = format!(
+                    "Failed to fetch transaction {:?} from source {} and top peers{:?}",
+                    tx_id_to_fetch,
+                    source_api_address,
+                    last_err
+                        .as_ref()
+                        .map(|e| format!("; last error: {}", e))
+                        .unwrap_or_default()
+                );
+                error!("{:?}", err_msg);
+                return Err(GossipError::Network(err_msg));
+            };
+
+            // Process the fetched transaction immediately
+            let (tx_id, mempool_response) = match tx_response {
+                IrysTransactionResponse::Commitment(commitment_tx) => {
+                    let id = commitment_tx.id;
+                    (
+                        id,
+                        self.mempool
+                            .handle_commitment_transaction_ingress(commitment_tx)
+                            .await,
+                    )
                 }
                 IrysTransactionResponse::Storage(tx) => {
-                    tx_id = tx.id;
-                    self.mempool.handle_data_transaction_ingress(tx).await
+                    let id = tx.id;
+                    (id, self.mempool.handle_data_transaction_ingress(tx).await)
                 }
             };
 
             match mempool_response.map_err(GossipError::from) {
                 Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
-                    debug!("Transaction sent to mempool");
+                    debug!("Transaction {:?} sent to mempool", tx_id);
+                    // Record that we have seen this transaction from the peer that served it
                     self.cache
-                        .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?
+                        .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
                 }
                 Err(error) => {
-                    error!("Error when sending transaction to mempool: {:?}", error);
+                    error!(
+                        "Error when sending transaction {:?} to mempool: {:?}",
+                        tx_id, error
+                    );
                     return Err(error);
                 }
             }

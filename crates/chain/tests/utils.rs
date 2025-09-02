@@ -20,10 +20,12 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
+use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::walk_all;
 use irys_database::{
     commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
@@ -41,6 +43,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
+use irys_types::VersionRequest;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
@@ -62,7 +65,7 @@ use reth::{
     providers::BlockReader as _,
     rpc::types::RpcBlockHash,
 };
-use reth_db::{cursor::*, transaction::DbTx as _, Database as _};
+use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -759,7 +762,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
-        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true)
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, true, 1)
             .await
     }
 
@@ -769,7 +772,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
     ) -> eyre::Result<()> {
-        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false)
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, 1)
+            .await
+    }
+
+    pub async fn wait_for_multiple_ingress_proofs_no_mining(
+        &self,
+        unconfirmed_promotions: Vec<H256>,
+        num_proofs: usize,
+        seconds: usize,
+    ) -> eyre::Result<()> {
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, num_proofs)
             .await
     }
 
@@ -779,6 +792,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         mut unconfirmed_promotions: Vec<H256>,
         seconds: usize,
         mine_blocks: bool,
+        num_proofs: usize,
     ) -> eyre::Result<()> {
         tracing::info!(
             "waiting up to {} seconds for unconfirmed_promotions: {:?}",
@@ -810,12 +824,27 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
             if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
+                let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+
+                let tx_proofs: Vec<_> = ingress_proofs
+                    .iter()
+                    .filter(|(data_root, _)| data_root == &tx_header.data_root)
+                    .map(|p| p.1.clone())
+                    .collect();
+
                 //read its ingressproof(s)
-                if let Some(proof) = ro_tx.get::<IngressProofs>(tx_header.data_root).unwrap() {
-                    assert_eq!(proof.proof.data_root, tx_header.data_root);
-                    tracing::info!("Proofs available after {} attempts", attempts);
+                if tx_proofs.len() >= num_proofs {
+                    for ingress_proof in tx_proofs {
+                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                        tracing::info!("proof signer: {}", ingress_proof.address);
+                    }
+                    tracing::info!(
+                        "{} Proofs available after {} attempts",
+                        ingress_proofs.len(),
+                        attempts
+                    );
                     unconfirmed_promotions.pop();
-                };
+                }
             }
             drop(ro_tx);
             if mine_blocks {
@@ -825,7 +854,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         Err(eyre::eyre!(
-            "Failed waiting for ingress proofs. Waited {} seconds",
+            "Failed waiting {} for ingress proofs. Waited {} seconds",
+            num_proofs,
             seconds,
         ))
     }
@@ -1356,6 +1386,40 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
+        let mempool_sender = &self.node_ctx.service_senders.mempool;
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        if let Err(e) =
+            mempool_sender.send(MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx))
+        {
+            tracing::info!("Unable to send mempool message: {}", e);
+        } else {
+            match oneshot_rx.await {
+                Ok(txs) => {
+                    if let Some(tx_header) = &txs[0] {
+                        if tx_header.promoted_height.is_some() {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Err(e) => tracing::info!("receive error for mempool {}", e),
+            }
+        }
+
+        match self
+            .node_ctx
+            .db
+            .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+        {
+            Ok(Some(tx_header)) => {
+                debug!("{:?}", tx_header);
+                Ok(tx_header.promoted_height.is_some())
+            }
+            Ok(None) => Err(eyre::eyre!("No tx header found for txid {:?}", tx_id)),
+            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+        }
+    }
+
     /// read storage tx from mempool
     pub async fn get_storage_tx_header_from_mempool(
         &self,
@@ -1662,7 +1726,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("to sign the storage transaction");
 
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
         let mut response = client
             .post(url)
@@ -1693,7 +1757,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
         let mut response = client
             .post(url)
@@ -1736,7 +1800,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
 
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/chunk", api_uri);
         let response = client
             .post(url)
@@ -1756,6 +1820,76 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.config.node_config.peer_address().api
     }
 
+    // Build a signed VersionRequest describing this node
+    pub fn build_version_request(&self) -> VersionRequest {
+        let mut vr = VersionRequest {
+            chain_id: self.node_ctx.config.consensus.chain_id,
+            address: self.node_ctx.config.node_config.peer_address(),
+            mining_address: self.node_ctx.config.node_config.reward_address,
+            ..VersionRequest::default()
+        };
+        self.node_ctx
+            .config
+            .irys_signer()
+            .sign_p2p_handshake(&mut vr)
+            .expect("sign p2p handshake");
+        vr
+    }
+
+    // Announce this node to another node (HTTP POST /v1/version)
+    pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
+        let vr = self.build_version_request();
+        self.get_api_client()
+            .post_version(dst.get_peer_addr(), vr)
+            .await?;
+        Ok(())
+    }
+
+    // Announce both ways between two nodes
+    pub async fn announce_between(a: &Self, b: &Self) -> eyre::Result<()> {
+        a.announce_to(b).await?;
+        b.announce_to(a).await?;
+        Ok(())
+    }
+
+    // Announce full mesh among a list of nodes
+    pub async fn announce_mesh(nodes: &[&Self]) -> eyre::Result<()> {
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                Self::announce_between(nodes[i], nodes[j]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // Wait until this node's peer list includes the target peer address
+    pub async fn wait_until_sees_peer(
+        &self,
+        target: &PeerAddress,
+        max_attempts: usize,
+    ) -> eyre::Result<()> {
+        for _ in 0..max_attempts {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let client = awc::Client::default();
+            let api_uri = self.node_ctx.config.node_config.local_api_url();
+            let url = format!("{}/v1/peer_list", api_uri);
+
+            if let Ok(mut resp) = client.get(url).send().await {
+                if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
+                    if list.contains(target) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        eyre::bail!(
+            "peer {:?} not visible after {} attempts",
+            target,
+            max_attempts
+        )
+    }
+
     pub async fn upload_chunks(&self, tx: &DataTransaction) -> eyre::Result<()> {
         let client = self.get_api_client();
         client.upload_chunks(self.get_peer_addr(), tx).await
@@ -1765,14 +1899,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/stake", api_uri);
 
         let mut response = client
@@ -1794,7 +1928,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         user_address: Address,
     ) -> eyre::Result<CommitmentPriceInfo> {
         let client = awc::Client::default();
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
 
         let mut response = client
@@ -1815,7 +1949,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
             .await
     }
@@ -1884,7 +2018,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, &pledge_tx)
             .await?;
 
@@ -1943,7 +2077,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
-        let api_uri = self.node_ctx.config.node_config.api_uri();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, &stake_tx)
             .await
             .expect("posted commitment tx");
