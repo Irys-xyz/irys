@@ -1298,7 +1298,10 @@ impl MempoolService {
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
-        let initial_stake_and_pledge_whitelist = config.node_config.initial_stake_and_pledge_whitelist.clone();
+        let initial_stake_and_pledge_whitelist = config
+            .node_config
+            .initial_stake_and_pledge_whitelist
+            .clone();
 
         let handle = runtime_handle.spawn(
             async move {

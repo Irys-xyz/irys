@@ -4,8 +4,8 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256, CommitmentValidationError
+    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
+    IrysTransactionCommon as _, IrysTransactionId, H256,
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
