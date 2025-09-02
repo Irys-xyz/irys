@@ -83,6 +83,12 @@ impl From<TxIngressError> for GossipError {
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Self::CommitmentValidation(commitment_validation_error)
             }
+            TxIngressError::BalanceFetchError { address, reason } => {
+                Self::Internal(InternalGossipError::Unknown(format!(
+                    "Failed to fetch balance for {}: {}",
+                    address, reason
+                )))
+            }
         }
     }
 }

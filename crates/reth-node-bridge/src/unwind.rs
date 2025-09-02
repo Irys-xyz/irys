@@ -8,7 +8,7 @@ use reth_node_ethereum::EthExecutorProvider;
 use std::sync::Arc;
 
 pub async fn unwind_to(
-    config: NodeConfig,
+    config: &NodeConfig,
     chainspec: Arc<ChainSpec>,
     height: u64,
 ) -> eyre::Result<()> {

@@ -30,7 +30,7 @@ impl IrysSignature {
         self.0
     }
 
-    /// Validates this signature by performing signer recovery  
+    /// Validates this signature by performing signer recovery
     /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
     pub fn validate_signature(&self, prehash: [u8; 32], expected_address: Address) -> bool {
         recover_signer(&self.0, prehash.into())
@@ -111,8 +111,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
 
         // Decode the base58 string into bytes
         let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .expect("base58 should prase");
+            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
 
         // Ensure the byte array is exactly 65 bytes (r, s, and v values of the signature)
         if bytes.len() != 65 {
