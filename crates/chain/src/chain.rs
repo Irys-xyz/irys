@@ -230,7 +230,7 @@ async fn start_reth_node(
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
-    let (node_handle, _reth_node_adapter) = match irys_reth_node_bridge::node::run_node(
+    let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
         Arc::new(chainspec.clone()),
         task_executor.clone(),
         config.node_config.clone(),
@@ -239,25 +239,7 @@ async fn start_reth_node(
         shadow_tx_store.clone(),
     )
     .in_current_span()
-    .await
-    {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("Restarting reth thread - reason: {:?}", &e);
-            // One retry attempt
-            irys_reth_node_bridge::node::run_node(
-                Arc::new(chainspec.clone()),
-                task_executor.clone(),
-                config.node_config.clone(),
-                latest_block,
-                random_ports,
-                shadow_tx_store,
-            )
-            .in_current_span()
-            .await
-            .expect("expected reth node to have started")
-        }
-    };
+    .await?;
 
     debug!("Reth node started");
 
@@ -439,7 +421,7 @@ impl IrysNode {
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
-        run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
+        run_vdf_for_genesis_block(&mut genesis_block, &self.config.vdf);
 
         (genesis_block, commitments)
     }
@@ -1354,7 +1336,7 @@ impl IrysNode {
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
-            let vdf_config = config.consensus.vdf.clone();
+            let vdf_config = config.vdf.clone();
 
             move || {
                 let _span = span.enter();

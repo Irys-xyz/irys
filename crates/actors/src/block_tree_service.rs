@@ -459,9 +459,10 @@ impl BlockTreeServiceInner {
             migrated_hash
         }; // RwLockWriteGuard is dropped here, before the await
 
-        if let Err(e) = self.send_block_migration_message(migrated_hash).await {
-            error!("Unable to send block migration message: {:?}", e);
-        }
+        self.send_block_migration_message(migrated_hash)
+            .await
+            .map_err(|e| format!("Unable to send block migration message: {:?}", e))
+            .unwrap()
     }
 
     /// Handles pre-validated blocks received from the validation service.

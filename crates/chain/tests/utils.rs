@@ -20,6 +20,7 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
+use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
@@ -42,6 +43,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
+use irys_types::VersionRequest;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
@@ -114,20 +116,20 @@ pub async fn capacity_chunk_solution(
         // Calculate last step checkpoints for current_step - 1
         let mut hasher = Sha256::new();
         let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.consensus.vdf,
+            &config.vdf,
             current_step.saturating_sub(1),
         ));
         let mut seed = steps[0];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
 
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -235,18 +237,18 @@ pub async fn capacity_chunk_solution(
             {
                 let mut h = Sha256::new();
                 let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.consensus.vdf,
+                    &config.vdf,
                     current_step.saturating_sub(1),
                 ));
                 let mut sd = steps[0];
                 let mut cps: Vec<H256> =
-                    vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
                 vdf_sha(
                     &mut h,
                     &mut s,
                     &mut sd,
-                    config.consensus.vdf.num_checkpoints_in_vdf_step,
-                    config.consensus.vdf.num_iterations_per_checkpoint(),
+                    config.vdf.num_checkpoints_in_vdf_step,
+                    config.vdf.num_iterations_per_checkpoint(),
                     &mut cps,
                 );
                 H256List(cps)
@@ -1818,6 +1820,76 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.config.node_config.peer_address().api
     }
 
+    // Build a signed VersionRequest describing this node
+    pub fn build_version_request(&self) -> VersionRequest {
+        let mut vr = VersionRequest {
+            chain_id: self.node_ctx.config.consensus.chain_id,
+            address: self.node_ctx.config.node_config.peer_address(),
+            mining_address: self.node_ctx.config.node_config.reward_address,
+            ..VersionRequest::default()
+        };
+        self.node_ctx
+            .config
+            .irys_signer()
+            .sign_p2p_handshake(&mut vr)
+            .expect("sign p2p handshake");
+        vr
+    }
+
+    // Announce this node to another node (HTTP POST /v1/version)
+    pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
+        let vr = self.build_version_request();
+        self.get_api_client()
+            .post_version(dst.get_peer_addr(), vr)
+            .await?;
+        Ok(())
+    }
+
+    // Announce both ways between two nodes
+    pub async fn announce_between(a: &Self, b: &Self) -> eyre::Result<()> {
+        a.announce_to(b).await?;
+        b.announce_to(a).await?;
+        Ok(())
+    }
+
+    // Announce full mesh among a list of nodes
+    pub async fn announce_mesh(nodes: &[&Self]) -> eyre::Result<()> {
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                Self::announce_between(nodes[i], nodes[j]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // Wait until this node's peer list includes the target peer address
+    pub async fn wait_until_sees_peer(
+        &self,
+        target: &PeerAddress,
+        max_attempts: usize,
+    ) -> eyre::Result<()> {
+        for _ in 0..max_attempts {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let client = awc::Client::default();
+            let api_uri = self.node_ctx.config.node_config.local_api_url();
+            let url = format!("{}/v1/peer_list", api_uri);
+
+            if let Ok(mut resp) = client.get(url).send().await {
+                if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
+                    if list.contains(target) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        eyre::bail!(
+            "peer {:?} not visible after {} attempts",
+            target,
+            max_attempts
+        )
+    }
+
     pub async fn upload_chunks(&self, tx: &DataTransaction) -> eyre::Result<()> {
         let client = self.get_api_client();
         client.upload_chunks(self.get_peer_addr(), tx).await
@@ -2219,7 +2291,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         end_height: u64,
     ) -> eyre::Result<Vec<IrysBlockHeader>> {
         let blocks = self.get_blocks(start_height, end_height).await?;
-        let reset_frequency = self.node_ctx.config.consensus.vdf.reset_frequency;
+        let reset_frequency = self.node_ctx.config.vdf.reset_frequency;
 
         Ok(blocks
             .into_iter()
@@ -2320,23 +2392,17 @@ pub async fn solution_context_with_poa_chunk(
 
     // Compute checkpoints for (step-1)
     let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(
-        &node_ctx.config.consensus.vdf,
-        step - 1,
-    ));
+    let mut salt =
+        irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
     let mut seed = steps[0];
     let mut checkpoints: Vec<H256> =
-        vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
+        vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
     vdf_sha(
         &mut hasher,
         &mut salt,
         &mut seed,
-        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
-        node_ctx
-            .config
-            .consensus
-            .vdf
-            .num_iterations_per_checkpoint(),
+        node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+        node_ctx.config.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 
