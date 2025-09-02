@@ -36,7 +36,7 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    Address, Base64, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{IngressProofsList, TokioServiceHandle};
@@ -853,14 +853,11 @@ impl Inner {
     ) -> Result<u64, TxIngressError> {
         // check the mempool, then block tree, then DB
         Ok(
-            if let Some(hdr) = self
-                .mempool_state
-                .read()
-                .await
-                .prevalidated_blocks
-                .get(&anchor)
-            {
-                hdr.height
+            if let Some(height) = {
+                let guard = self.mempool_state.read().await;
+                guard.prevalidated_blocks.get(&anchor).map(|h| h.height)
+            } {
+                height
             } else if let Some(height) = {
                 // in a block so rust doesn't complain about it being held across an await point
                 // I suspect if let Some desugars to something that lint doesn't like
@@ -1123,6 +1120,8 @@ pub struct MempoolState {
     pub recent_invalid_tx: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
     pub recent_valid_tx: LruCache<H256, ()>,
+    /// Tracks recently processed chunk hashes to prevent re-gossip
+    pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
@@ -1143,6 +1142,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         valid_commitment_tx: BTreeMap::new(),
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
+        recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
     }
@@ -1204,6 +1204,9 @@ pub enum TxIngressError {
     /// Commitment transaction validation error
     #[error("Commitment validation failed: {0}")]
     CommitmentValidationError(#[from] CommitmentValidationError),
+    /// Failed to fetch account balance from RPC
+    #[error("Failed to fetch balance for address {address}: {reason}")]
+    BalanceFetchError { address: String, reason: String },
 }
 
 impl TxIngressError {

@@ -20,6 +20,7 @@ use irys_actors::{
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
 };
+use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
@@ -42,6 +43,7 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
+use irys_types::VersionRequest;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
@@ -1816,6 +1818,76 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub fn get_peer_addr(&self) -> SocketAddr {
         self.node_ctx.config.node_config.peer_address().api
+    }
+
+    // Build a signed VersionRequest describing this node
+    pub fn build_version_request(&self) -> VersionRequest {
+        let mut vr = VersionRequest {
+            chain_id: self.node_ctx.config.consensus.chain_id,
+            address: self.node_ctx.config.node_config.peer_address(),
+            mining_address: self.node_ctx.config.node_config.reward_address,
+            ..VersionRequest::default()
+        };
+        self.node_ctx
+            .config
+            .irys_signer()
+            .sign_p2p_handshake(&mut vr)
+            .expect("sign p2p handshake");
+        vr
+    }
+
+    // Announce this node to another node (HTTP POST /v1/version)
+    pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
+        let vr = self.build_version_request();
+        self.get_api_client()
+            .post_version(dst.get_peer_addr(), vr)
+            .await?;
+        Ok(())
+    }
+
+    // Announce both ways between two nodes
+    pub async fn announce_between(a: &Self, b: &Self) -> eyre::Result<()> {
+        a.announce_to(b).await?;
+        b.announce_to(a).await?;
+        Ok(())
+    }
+
+    // Announce full mesh among a list of nodes
+    pub async fn announce_mesh(nodes: &[&Self]) -> eyre::Result<()> {
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                Self::announce_between(nodes[i], nodes[j]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // Wait until this node's peer list includes the target peer address
+    pub async fn wait_until_sees_peer(
+        &self,
+        target: &PeerAddress,
+        max_attempts: usize,
+    ) -> eyre::Result<()> {
+        for _ in 0..max_attempts {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let client = awc::Client::default();
+            let api_uri = self.node_ctx.config.node_config.local_api_url();
+            let url = format!("{}/v1/peer_list", api_uri);
+
+            if let Ok(mut resp) = client.get(url).send().await {
+                if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
+                    if list.contains(target) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        eyre::bail!(
+            "peer {:?} not visible after {} attempts",
+            target,
+            max_attempts
+        )
     }
 
     pub async fn upload_chunks(&self, tx: &DataTransaction) -> eyre::Result<()> {

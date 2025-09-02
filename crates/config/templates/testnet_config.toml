@@ -111,8 +111,11 @@ max_pending_pledge_items = 100
 max_pledges_per_item = 100
 max_pending_chunk_items = 30
 max_chunks_per_item = 500
+max_preheader_chunks_per_item = 64
+max_preheader_data_path_bytes = 65536
 max_valid_items = 10000
 max_invalid_items = 10000
+max_valid_chunks = 10000
 commitment_fee = 100
 
 [consensus.Custom.difficulty_adjustment]
