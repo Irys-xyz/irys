@@ -8,6 +8,10 @@ irys-c.workspace = true
 irys-types.workspace = true
 rand.workspace = true
 
+
+[dev-dependencies]
+irys-types = { workspace = true, features = ["test-utils"] }
+
 [features]
 nvidia = ["irys-c/nvidia"]
 
