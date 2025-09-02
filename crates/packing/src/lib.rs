@@ -128,6 +128,16 @@ pub fn capacity_pack_range_cuda_c(
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
 
+    // Sanity check: enforce capacity matches CUDA C implementation expectations
+    let expected_entropy_capacity =
+        (num_chunks as usize) * (irys_types::ConsensusConfig::CHUNK_SIZE as usize);
+    assert!(
+        entropy.capacity() == expected_entropy_capacity,
+        "CUDA entropy buffer capacity must equal num_chunks * CHUNK_SIZE ({}), got {}",
+        expected_entropy_capacity,
+        entropy.capacity()
+    );
+
     let result;
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
