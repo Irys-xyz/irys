@@ -4,9 +4,7 @@ use actix_web::{
     HttpResponse, Result as ActixResult,
 };
 use irys_types::{
-    storage_pricing::{
-        calculate_perm_fee_from_config, calculate_term_fee,
-    },
+    storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
 };
@@ -80,15 +78,12 @@ pub async fn get_price(
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {:?}", e)))?;
 
             // If the cost calculation fails, return 400 with the error text
-            let total_perm_cost = {
-                let ema: &irys_domain::EmaSnapshot = &ema;
-                calculate_perm_fee_from_config(
-                    bytes_to_store,
-                    &state.config.consensus,
-                    ema.ema_for_public_pricing(),
-                    term_fee,
-                )
-            }
+            let total_perm_cost = calculate_perm_fee_from_config(
+                bytes_to_store,
+                &state.config.consensus,
+                ema.ema_for_public_pricing(),
+                term_fee,
+            )
             .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {

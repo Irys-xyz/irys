@@ -587,10 +587,7 @@ pub fn calculate_perm_fee_from_config(
     // The decay_rate is annual (e.g., 0.01 = 1% per year) stored in PRECISION_SCALE
     // We need to convert it to per-epoch: decay_per_epoch = decay_annual / epochs_per_year
     let epochs_per_year = U256::from(config.epochs_per_year());
-    let decay_rate_per_epoch = Amount::new(safe_div(
-        config.decay_rate_per_year.amount,
-        epochs_per_year,
-    )?);
+    let decay_rate_per_epoch = Amount::new(safe_div(config.decay_rate.amount, epochs_per_year)?);
 
     // Apply decay over storage duration
     let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
@@ -2046,7 +2043,7 @@ mod tests {
             // Calculate with decay (convert annual decay to per-epoch)
             let epochs_per_year = U256::from(config.epochs_per_year());
             let decay_rate_per_epoch = Amount::new(safe_div(
-                config.decay_rate_per_year.amount,
+                config.decay_rate.amount,
                 epochs_per_year,
             )?);
             let cost_with_decay = cost_per_chunk_per_epoch

@@ -78,7 +78,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
         let decay_rate_per_epoch =
             irys_types::storage_pricing::Amount::new(irys_types::storage_pricing::safe_div(
-                ctx.node_ctx.config.consensus.decay_rate_per_year.amount,
+                ctx.node_ctx.config.consensus.decay_rate.amount,
                 epochs_per_year,
             )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
@@ -179,7 +179,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
         let decay_rate_per_epoch =
             irys_types::storage_pricing::Amount::new(irys_types::storage_pricing::safe_div(
-                ctx.node_ctx.config.consensus.decay_rate_per_year.amount,
+                ctx.node_ctx.config.consensus.decay_rate.amount,
                 epochs_per_year,
             )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
