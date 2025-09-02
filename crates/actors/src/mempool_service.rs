@@ -853,14 +853,11 @@ impl Inner {
     ) -> Result<u64, TxIngressError> {
         // check the mempool, then block tree, then DB
         Ok(
-            if let Some(hdr) = self
-                .mempool_state
-                .read()
-                .await
-                .prevalidated_blocks
-                .get(&anchor)
-            {
-                hdr.height
+            if let Some(height) = {
+                let guard = self.mempool_state.read().await;
+                guard.prevalidated_blocks.get(&anchor).map(|h| h.height)
+            } {
+                height
             } else if let Some(height) = {
                 // in a block so rust doesn't complain about it being held across an await point
                 // I suspect if let Some desugars to something that lint doesn't like

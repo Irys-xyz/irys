@@ -12,3 +12,4 @@ ext/
 config.toml
 emission_simulation.csv
 .local/
+.idea/

@@ -21,7 +21,7 @@ use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
-use tracing::{error, Instrument as _};
+use tracing::Instrument as _;
 
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
@@ -90,6 +90,8 @@ pub async fn run_node(
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
+
+    unwind_to(&node_config, chainspec.clone(), latest_block).await?;
 
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
@@ -160,14 +162,13 @@ pub async fn run_node(
         .expect("latest block should be Some");
 
     if latest.header.number > latest_block {
-        error!("\x1b[1;31m!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth head is {}, Irys head is {}\x1b[0m", &latest.header.number, &latest_block);
-        database.close(); // important! otherwise we get MDBX error 11
-        drop(context);
-        drop(handle);
-
-        unwind_to(node_config, chainspec.clone(), latest_block).await?;
-        return Err(eyre::eyre!("Unwound blocks"));
-    };
+        //Note: if this happens, let Jesse know ASAP
+        eyre::bail!(
+            "Error: Reth is ahead of Irys (Reth: {}, Irys: {})",
+            &latest.header.number,
+            &latest_block
+        )
+    }
 
     Ok((handle, context))
 }
