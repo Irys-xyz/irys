@@ -114,7 +114,7 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < chunks_count) {
         unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
-        unsigned char chunk_id_thread[CHUNK_ID_LEN];
+        __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
         memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + idx;
         compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
