@@ -4,7 +4,8 @@ use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
 use irys_primitives::Address;
 use irys_types::{
-    Config, DatabaseProvider, PeerAddress, PeerListItem, PeerNetworkError, PeerNetworkSender,
+    Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
+    PeerNetworkSender,
 };
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +44,8 @@ pub struct PeerListDataInner {
     unstaked_peer_purgatory: LruCache<Address, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_addresses: HashSet<SocketAddr>,
+    /// Whitelist of allowed peer API addresses based on peer filter mode
+    peer_whitelist: HashSet<SocketAddr>,
     peer_network_service_sender: PeerNetworkSender,
 }
 
@@ -349,6 +352,27 @@ impl PeerList {
         let guard = self.read();
         guard.persistent_peers_cache.len() + guard.unstaked_peer_purgatory.len()
     }
+
+    /// Check if a peer API address is allowed based on the peer filter mode
+    pub fn is_peer_allowed(&self, api_address: &SocketAddr) -> bool {
+        let guard = self.read();
+        // If whitelist is empty, all peers are allowed (unrestricted mode)
+        guard.peer_whitelist.is_empty() || guard.peer_whitelist.contains(api_address)
+    }
+
+    /// Add peers to the whitelist (used for TrustedAndHandshake mode)
+    pub fn add_peers_to_whitelist(&self, peer_addresses: Vec<SocketAddr>) {
+        let mut guard = self.0.write().expect("PeerListDataInner lock poisoned");
+        for address in peer_addresses {
+            guard.peer_whitelist.insert(address);
+        }
+    }
+
+    /// Check if an API address is a trusted peer
+    pub fn is_trusted_peer(&self, api_address: &SocketAddr) -> bool {
+        let guard = self.read();
+        guard.trusted_peers_api_addresses.contains(api_address)
+    }
 }
 
 impl PeerListDataInner {
@@ -357,6 +381,23 @@ impl PeerListDataInner {
         peer_network_sender: PeerNetworkSender,
         config: &Config,
     ) -> Result<Self, PeerNetworkError> {
+        let trusted_peers_api_addresses: HashSet<SocketAddr> = config
+            .node_config
+            .trusted_peers
+            .iter()
+            .map(|p| p.api)
+            .collect();
+
+        // Initialize whitelist based on peer filter mode
+        let peer_api_ip_whitelist = match config.node_config.peer_filter_mode {
+            PeerFilterMode::Unrestricted => HashSet::new(), // No restrictions
+            PeerFilterMode::TrustedOnly | PeerFilterMode::TrustedAndHandshake => {
+                let mut ip_whitelist = trusted_peers_api_addresses.clone();
+                ip_whitelist.extend(config.node_config.initial_whitelist.clone());
+                ip_whitelist
+            }
+        };
+
         let mut peer_list = Self {
             gossip_addr_to_mining_addr_map: HashMap::new(),
             api_addr_to_mining_addr_map: HashMap::new(),
@@ -366,12 +407,8 @@ impl PeerListDataInner {
                     .expect("Expected to be able to create an LRU cache"),
             ),
             known_peers_cache: HashSet::new(),
-            trusted_peers_api_addresses: config
-                .node_config
-                .trusted_peers
-                .iter()
-                .map(|p| p.api)
-                .collect(),
+            trusted_peers_api_addresses,
+            peer_whitelist: peer_api_ip_whitelist,
             peer_network_service_sender: peer_network_sender,
         };
 
@@ -748,6 +785,7 @@ mod tests {
             gossip_addr_to_mining_addr_map: HashMap::new(),
             api_addr_to_mining_addr_map: HashMap::new(),
             trusted_peers_api_addresses: HashSet::new(),
+            peer_whitelist: HashSet::new(),
             peer_network_service_sender: create_mock_sender(),
         };
         PeerList(Arc::new(RwLock::new(peer_list_data)))

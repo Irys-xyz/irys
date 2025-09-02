@@ -85,6 +85,10 @@ impl SystemService for ChunkMigrationService {
 impl Handler<BlockMigrationMessage> for ChunkMigrationService {
     type Result = ResponseFuture<eyre::Result<()>>;
 
+    #[instrument(skip_all, fields(
+    height = %block.height, // instrument seems to be just wrapping the Boxed future
+    hash = %block.block_hash
+))]
     fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Early return if not initialized
         if self.block_index.is_none() || self.db.is_none() {

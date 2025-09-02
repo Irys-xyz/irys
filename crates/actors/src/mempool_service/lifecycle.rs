@@ -3,10 +3,10 @@ use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_database::{insert_commitment_tx, SystemLedger};
+use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
 use irys_types::{
-    CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
-    H256,
+    get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
+    IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
@@ -15,61 +15,68 @@ use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
+    #[instrument(skip_all, fields(hash= %block.block_hash, height = %block.height), err)]
     pub async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
-        // FIXME: Loop though the promoted transactions and insert their ingress proofs
-        // into the mempool. In the future on a multi node network we may keep
-        // ingress proofs around longer
         if !published_txids.is_empty() {
-            for (i, txid) in block.data_ledgers[DataLedger::Publish]
-                .tx_ids
-                .0
-                .iter()
-                .enumerate()
-            {
-                // Retrieve the promoted transactions header
-                let tx_headers_result = self.handle_get_data_tx_message(vec![*txid]).await;
-                let mut tx_header = match tx_headers_result.as_slice() {
-                    [Some(header)] => header.clone(),
-                    [None] => {
-                        error!("No transaction header found for txid: {}", txid);
-                        continue;
+            for txid in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter() {
+                // Get mempool header if available
+                let mempool_header = self
+                    .mempool_state
+                    .read()
+                    .await
+                    .valid_submit_ledger_tx
+                    .get(txid)
+                    .cloned()
+                    .inspect(|_tx| {
+                        debug!("Got tx {} from mempool", txid);
+                    });
+
+                // Get and update DB header if needed
+                let mut db_header = self
+                    .read_tx()
+                    .ok()
+                    .and_then(|read_tx| tx_header_by_txid(&read_tx, txid).unwrap_or(None))
+                    .inspect(|_tx| {
+                        debug!("Got tx {} from DB", txid);
+                    });
+
+                if let Some(ref mut db_tx) = db_header {
+                    if db_tx.promoted_height.is_none() {
+                        db_tx.promoted_height = Some(block.height);
+                        if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
+                            error!("Failed to update tx header in DB: {}", e);
+                        }
                     }
-                    _ => {
-                        error!("Unexpected number of txids. Error fetching transaction header for txid: {}", txid);
-                        continue;
-                    }
+                }
+
+                // Use best available header and ensure it's promoted
+                let Some(mut header) = mempool_header.or(db_header) else {
+                    error!("No transaction header found for txid: {}", txid);
+                    continue;
                 };
 
-                // TODO: In a single node world there is only one ingress proof
-                // per promoted tx, but in the future there will be multiple proofs.
-                let proofs = block.data_ledgers[DataLedger::Publish]
-                    .proofs
-                    .as_ref()
-                    .unwrap();
-                let proof = proofs.0[i].clone();
-                tx_header.ingress_proofs = Some(proof);
+                // This could be true for the mempool header
+                if header.promoted_height.is_none() {
+                    header.promoted_height = Some(block.height);
+                }
 
-                // Update the header record in the mempool to include the ingress
-                // proof, indicating it is promoted.
-                let mempool_state = &self.mempool_state.clone();
-                let mut mempool_state_write_guard = mempool_state.write().await;
-
-                mempool_state_write_guard
+                // Update mempool
+                let mut mempool_guard = self.mempool_state.write().await;
+                mempool_guard
                     .valid_submit_ledger_tx
-                    .insert(tx_header.id, tx_header.clone());
-                mempool_state_write_guard
-                    .recent_valid_tx
-                    .put(tx_header.id, ());
-                drop(mempool_state_write_guard);
+                    .insert(header.id, header.clone());
+                mempool_guard.recent_valid_tx.put(header.id, ());
+                drop(mempool_guard);
 
-                info!("Promoted tx:\n{:?}", tx_header);
+                info!("Promoted tx:\n{:#?}", header);
             }
         }
+
         self.prune_pending_txs().await;
 
         Ok(())
@@ -158,11 +165,21 @@ impl Inner {
         };
 
         let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
-            + self.config.consensus.block_migration_depth;
+            + self.config.consensus.block_migration_depth
+            + 5;
 
         let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
 
-        anchor_height < resolved_expiry_depth
+        let should_prune = anchor_height < resolved_expiry_depth;
+        debug!(
+            "TX {} anchor {} height {}, expiry is set to <{}, should prune? {}",
+            &tx.id(),
+            &tx.anchor(),
+            &anchor_height,
+            &resolved_expiry_depth,
+            &should_prune
+        );
+        should_prune
     }
 
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
@@ -500,7 +517,7 @@ impl Inner {
                 mempool_state_write_guard
                     .valid_submit_ledger_tx
                     .entry(tx)
-                    .and_modify(|tx| tx.ingress_proofs = None);
+                    .and_modify(|tx| tx.promoted_height = None);
             }
         }
 
@@ -526,36 +543,17 @@ impl Inner {
         let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
-                let id = tx.id;
+                let txid = tx.id;
                 let promoted_in_block = publish_tx_block_map.get(&tx.id).unwrap_or_else(|| {
                     panic!("new fork publish_tx_block_map missing tx {}", &tx.id)
                 });
 
                 let publish_ledger = &promoted_in_block.data_ledgers[DataLedger::Publish];
-                // get publish tx pos
-                let proof_idx = publish_ledger
-                    .tx_ids
-                    .iter()
-                    .position(|tx_id| *tx_id == tx.id)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "publish tx {} to be present in block {}",
-                            &tx.id, &promoted_in_block.block_hash
-                        )
-                    });
-                let proofs = publish_ledger.proofs.clone().unwrap_or_else(|| {
-                    panic!(
-                        "Publish ledger of block {} to have proofs",
-                        &promoted_in_block.block_hash
-                    )
-                });
-                let proof = proofs.get(proof_idx).unwrap_or_else(|| {
-                    panic!(
-                        "Publish ledger of block {} to have a proof at index {} for publish tx {}",
-                        &promoted_in_block.block_hash, &proof_idx, &tx.id
-                    )
-                });
-                tx.ingress_proofs = Some(proof.clone());
+
+                // Get the ingress proofs for this txid (also performs some validation)
+                let tx_proofs = get_ingress_proofs(publish_ledger, &txid)?;
+
+                tx.promoted_height = Some(promoted_in_block.height);
                 // update entry
                 {
                     let mut mempool_state_write_guard = self.mempool_state.write().await;
@@ -564,7 +562,11 @@ impl Inner {
                         .entry(tx.id)
                         .and_modify(|t| *t = tx);
                 }
-                debug!("Reorged dual-published proof {} for {}", &proof.proof, &id);
+                debug!(
+                    "Reorged dual-published tx with {} proofs for {}",
+                    &tx_proofs.len(),
+                    &txid
+                );
             } else {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",
@@ -668,21 +670,24 @@ impl Inner {
             let publish_tx_headers = self
                 .handle_get_data_tx_message(publish_tx_ids.clone())
                 .await;
+
             publish_tx_headers
                 .into_iter()
-                .for_each(|maybe_header| match maybe_header {
-                    Some(ref header) => {
-                        // When a block was confirmed, handle_block_confirmed_message() updates the mempool submit tx headers with ingress proofs
-                        // this means the header includes the proofs when we now insert (overwrite existing entry) into the database
-                        if let Err(err) = insert_tx_header(&mut_tx, header) {
-                            error!(
-                                "Could not insert transaction header - txid: {} err: {}",
-                                header.id, err
-                            );
-                        }
+                .flatten()
+                .for_each(|mut header| {
+                    if header.promoted_height.is_none() {
+                        header.promoted_height = Some(event.block.height);
+                        panic!(
+                            "Migrating publish tx with no promoted_height {} at height {}",
+                            header.id, event.block.height
+                        );
                     }
-                    None => {
-                        error!("Could not find transaction header in mempool");
+
+                    if let Err(err) = insert_tx_header(&mut_tx, &header) {
+                        error!(
+                            "Could not insert transaction header - txid: {} err: {}",
+                            header.id, err
+                        );
                     }
                 });
             mut_tx.commit().expect("expect to commit to database");
