@@ -28,9 +28,25 @@ impl Inner {
     ) -> Result<(), ChunkIngressError> {
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
-        let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
+        let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
 
         info!("Processing chunk");
+
+        // Early exit if we've already processed this chunk recently
+        let chunk_path_hash = chunk.chunk_path_hash();
+        {
+            let mempool_state_guard = mempool_state.read().await;
+            if mempool_state_guard
+                .recent_valid_chunks
+                .contains(&chunk_path_hash)
+            {
+                debug!(
+                    "Chunk {} already processed recently, skipping re-gossip",
+                    &chunk_path_hash
+                );
+                return Ok(());
+            }
+        }
 
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
@@ -84,9 +100,9 @@ impl Inner {
                     return Err(ChunkIngressError::PreHeaderOversizedBytes);
                 }
                 let preheader_data_path_max_bytes =
-                    self.config.consensus.mempool.max_preheader_data_path_bytes;
+                    self.config.mempool.max_preheader_data_path_bytes;
                 let preheader_chunks_per_item_cap =
-                    self.config.consensus.mempool.max_preheader_chunks_per_item;
+                    self.config.mempool.max_preheader_chunks_per_item;
                 if chunk.data_path.0.len() > preheader_data_path_max_bytes {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
@@ -242,6 +258,14 @@ impl Inner {
         {
             error!("Database error: {:?}", e);
             return Err(e);
+        }
+
+        // Add to recent valid chunks cache to prevent re-processing
+        {
+            let mut mempool_state_guard = mempool_state.write().await;
+            mempool_state_guard
+                .recent_valid_chunks
+                .put(chunk_path_hash, ());
         }
 
         for sm in self.storage_modules_guard.read().iter() {

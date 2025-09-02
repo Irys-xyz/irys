@@ -421,7 +421,7 @@ impl IrysNode {
 
         // Note: commitments are persisted to DB in `persist_genesis_block_and_commitments()` later on
 
-        run_vdf_for_genesis_block(&mut genesis_block, &self.config.consensus.vdf);
+        run_vdf_for_genesis_block(&mut genesis_block, &self.config.vdf);
 
         (genesis_block, commitments)
     }
@@ -1336,7 +1336,7 @@ impl IrysNode {
         let span = Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
-            let vdf_config = config.consensus.vdf.clone();
+            let vdf_config = config.vdf.clone();
 
             move || {
                 let _span = span.enter();

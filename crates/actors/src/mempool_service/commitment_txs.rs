@@ -2,9 +2,10 @@ use crate::mempool_service::{Inner, MempoolServiceMessage, TxIngressError, TxRea
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
+use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionId, H256,
+    Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionCommon as _,
+    IrysTransactionId, H256, CommitmentValidationError
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
@@ -109,6 +110,22 @@ impl Inner {
             return Err(TxIngressError::CommitmentValidationError(e));
         }
 
+        // Validate funding before storing in mempool
+        if let Err(e) = self.validate_funding(&commitment_tx) {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
+
+            tracing::info!(
+                "Rejected unfunded commitment tx {} from signer {}",
+                commitment_tx.id,
+                commitment_tx.signer
+            );
+
+            return Err(e);
+        }
+
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
         trace!(
@@ -184,8 +201,7 @@ impl Inner {
                 pledges_cache.put(commitment_tx.id, commitment_tx.clone());
             } else {
                 // First pledge from this address - create a new nested lru cache
-                let max_pending_pledge_items =
-                    self.config.consensus.mempool.max_pending_pledge_items;
+                let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
                 let mut new_address_cache =
                     LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
 
@@ -337,6 +353,53 @@ impl Inner {
         drop(mempool_state_guard);
 
         found
+    }
+
+    fn validate_funding(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        // Get the current balance of the transaction signer
+        let balance: irys_types::U256 = self
+            .reth_node_adapter
+            .rpc
+            .get_balance(commitment_tx.signer, None)
+            .map(From::from)
+            .map_err(|e| {
+                tracing::error!(
+                    tx_id = %commitment_tx.id,
+                    signer = %commitment_tx.signer,
+                    error = %e,
+                    "Failed to fetch balance for commitment tx"
+                );
+                TxIngressError::BalanceFetchError {
+                    address: commitment_tx.signer.to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+
+        // Calculate total cost (value + fee)
+        let total_cost = commitment_tx.total_cost();
+
+        // Ensure balance is sufficient
+        if balance < total_cost {
+            tracing::warn!(
+                tx_id = %commitment_tx.id,
+                balance = %balance,
+                required = %total_cost,
+                "Insufficient balance for commitment tx"
+            );
+            return Err(TxIngressError::Unfunded);
+        }
+
+        tracing::debug!(
+            tx_id = %commitment_tx.id,
+            balance = %balance,
+            required = %total_cost,
+            "Funding validated for commitment tx"
+        );
+
+        Ok(())
     }
 
     pub async fn get_commitment_status(
