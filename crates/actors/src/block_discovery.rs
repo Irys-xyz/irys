@@ -595,18 +595,18 @@ impl BlockDiscoveryServiceInner {
 
                 let arc_commitment_txs = Arc::new(commitments);
 
-                let epoch_snapshot = block_tree_guard
-                    .read()
-                    .get_epoch_snapshot(&parent_block_hash)
-                    .expect("parent blocks epoch_snapshot should be retrievable");
-
-                // Get the current epoch snapshot from the parent block
-                let mut parent_commitment_snapshot = block_tree_guard
-                    .read()
-                    .get_commitment_snapshot(&parent_block_hash)
-                    .expect("parent block to be in block_tree")
-                    .as_ref()
-                    .clone();
+                let (epoch_snapshot, mut parent_commitment_snapshot) = {
+                    let read = block_tree_guard.read();
+                    let epoch_snapshot = read
+                        .get_epoch_snapshot(&parent_block_hash)
+                        .expect("parent blocks epoch_snapshot should be retrievable");
+                    let parent_commitment_snapshot = read
+                        .get_commitment_snapshot(&parent_block_hash)
+                        .expect("parent block to be in block_tree")
+                        .as_ref()
+                        .clone();
+                    (epoch_snapshot, parent_commitment_snapshot)
+                };
 
                 if is_epoch_block {
                     let expected_commitment_tx = parent_commitment_snapshot.get_epoch_commitments();
