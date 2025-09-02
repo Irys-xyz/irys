@@ -2049,10 +2049,8 @@ mod tests {
 
             // Calculate with decay (convert annual decay to per-epoch)
             let epochs_per_year = U256::from(config.epochs_per_year());
-            let decay_rate_per_epoch = Amount::new(safe_div(
-                config.decay_rate.amount,
-                epochs_per_year,
-            )?);
+            let decay_rate_per_epoch =
+                Amount::new(safe_div(config.decay_rate.amount, epochs_per_year)?);
             let cost_with_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
                 .replica_count(config.number_of_ingress_proofs_total)?;
