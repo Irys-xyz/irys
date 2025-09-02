@@ -608,6 +608,10 @@ pub struct MempoolConfig {
     /// Decreasing this will increase the amount of validation the node will have to perform
     pub max_invalid_items: usize,
 
+    /// Maximum number of valid chunk hashes to keep track of
+    /// Prevents re-processing and re-gossipping of recently seen chunks
+    pub max_valid_chunks: usize,
+
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
 }
@@ -768,6 +772,7 @@ impl ConsensusConfig {
                 max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
+                max_valid_chunks: 10_000,
                 commitment_fee: 100,
             },
             vdf: VdfConfig {
@@ -897,6 +902,7 @@ impl ConsensusConfig {
                 max_preheader_data_path_bytes: 64 * 1024,
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
+                max_valid_chunks: 10_000,
                 commitment_fee: 100,
             },
             vdf: VdfConfig {
@@ -1558,6 +1564,7 @@ mod tests {
         max_preheader_data_path_bytes = 65536
         max_invalid_items = 10000
         max_valid_items = 10000
+        max_valid_chunks = 10000
         commitment_fee = 100
 
 
