@@ -15,6 +15,10 @@
 
 #define SHA256_DIGEST_LENGTH   PACKING_HASH_SIZE
 
+// Compile-time sanity checks to ensure chunk sizing remains consistent with SHA-256 packing.
+static_assert(PACKING_HASH_SIZE == 32, "PACKING_HASH_SIZE must be 32 bytes (SHA-256)");
+static_assert(DATA_CHUNK_SIZE == (HASH_ITERATIONS_PER_BLOCK * PACKING_HASH_SIZE), "DATA_CHUNK_SIZE must equal HASH_ITERATIONS_PER_BLOCK * PACKING_HASH_SIZE");
+
 /**
  * Computes the seed hash for the given chunk.
  * @param chunk_id The chunk id
@@ -129,6 +133,16 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
 {
     unsigned char *d_chunks;
     unsigned char *d_chunk_id;
+
+    // Runtime sanity checks for clearer errors when host/test chunk sizing mismatches CUDA expectations.
+    if (DATA_CHUNK_SIZE != (HASH_ITERATIONS_PER_BLOCK * PACKING_HASH_SIZE)) {
+        printf("CUDA: DATA_CHUNK_SIZE (%d) must equal HASH_ITERATIONS_PER_BLOCK (%d) * PACKING_HASH_SIZE (%d)\n", DATA_CHUNK_SIZE, HASH_ITERATIONS_PER_BLOCK, PACKING_HASH_SIZE);
+        return INVALID_ARGUMENTS;
+    }
+    if (DATA_CHUNK_SIZE < (int)PACKING_HASH_SIZE * 2) {
+        printf("CUDA: DATA_CHUNK_SIZE (%d) looks too small. Expected at least %d bytes (HASH_ITERATIONS_PER_BLOCK=%d, PACKING_HASH_SIZE=%d). Ensure host buffer is chunks_count * DATA_CHUNK_SIZE bytes.\n", DATA_CHUNK_SIZE, HASH_ITERATIONS_PER_BLOCK * PACKING_HASH_SIZE, HASH_ITERATIONS_PER_BLOCK, PACKING_HASH_SIZE);
+        return INVALID_ARGUMENTS;
+    }
 
     // We need to allocate memory for each layer here, as kernel/device functions can't allocate any
     // additional memory, so we need to prepare it for them.
