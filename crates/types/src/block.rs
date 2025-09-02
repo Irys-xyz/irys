@@ -89,7 +89,7 @@ impl VDFLimiterInfo {
             ..Self::default()
         };
 
-        let reset_frequency = config.consensus.vdf.reset_frequency;
+        let reset_frequency = config.vdf.reset_frequency;
         vdf_limiter_info.set_seeds(reset_frequency as u64, prev_block_header);
 
         vdf_limiter_info

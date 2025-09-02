@@ -270,7 +270,7 @@ pub fn create_state(
 fn calc_capacity(config: &Config) -> usize {
     let capacity_from_config: u64 = num_recall_ranges_in_partition(&config.consensus);
 
-    let max_allowed_vdf_fork_steps = config.consensus.vdf.max_allowed_vdf_fork_steps;
+    let max_allowed_vdf_fork_steps = config.vdf.max_allowed_vdf_fork_steps;
 
     let capacity = if capacity_from_config < max_allowed_vdf_fork_steps {
         warn!(

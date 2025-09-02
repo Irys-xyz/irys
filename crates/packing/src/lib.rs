@@ -336,13 +336,14 @@ mod tests {
         use irys_types::NodeConfig;
 
         let mut rng = rand::thread_rng();
-        let testing_config = ConsensusConfig::testing();
-        let node_config = NodeConfig::testing();
+        let mut testing_config = ConsensusConfig::testing();
+        testing_config.chunk_size = 256 * 1024;
+        let node_config = NodeConfig::testnet();
         let mining_address = node_config.miner_address();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 2 * testing_config.chunk_size as u32;
+        let iterations = 50_000; /* 2 * testing_config.chunk_size as u32; */
 
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
