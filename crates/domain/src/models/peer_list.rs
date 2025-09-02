@@ -333,12 +333,13 @@ impl PeerList {
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
     ) -> Result<(), PeerNetworkError> {
-        let sender = self
-            .0
-            .read()
-            .expect("PeerListDataInner lock poisoned")
-            .peer_network_service_sender
-            .clone();
+        let sender = {
+            self.0
+                .read()
+                .expect("PeerListDataInner lock poisoned")
+                .peer_network_service_sender
+                .clone()
+        };
         sender
             .request_payload_to_be_gossiped_from_network(evm_payload_hash, use_trusted_peers_only)
             .await
