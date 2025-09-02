@@ -344,7 +344,10 @@ where
     }
 
     async fn handle_stake_and_pledge_whitelist(server: Data<Self>) -> HttpResponse {
-        let whitelist = server.data_handler.handle_get_stake_and_pledge_whitelist().await;
+        let whitelist = server
+            .data_handler
+            .handle_get_stake_and_pledge_whitelist()
+            .await;
         HttpResponse::Ok().json(whitelist)
     }
 
@@ -474,7 +477,10 @@ where
                         .route("/get_data", web::post().to(Self::handle_data_request))
                         .route("/pull_data", web::post().to(Self::handle_pull_data))
                         .route("/health", web::get().to(Self::handle_health_check))
-                        .route("/stake_and_pledge_whitelist", web::get().to(Self::handle_stake_and_pledge_whitelist)),
+                        .route(
+                            "/stake_and_pledge_whitelist",
+                            web::get().to(Self::handle_stake_and_pledge_whitelist),
+                        ),
                 )
         })
         .shutdown_timeout(5)
