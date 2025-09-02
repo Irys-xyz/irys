@@ -191,8 +191,7 @@ impl Inner {
                 pledges_cache.put(commitment_tx.id, commitment_tx.clone());
             } else {
                 // First pledge from this address - create a new nested lru cache
-                let max_pending_pledge_items =
-                    self.config.consensus.mempool.max_pending_pledge_items;
+                let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
                 let mut new_address_cache =
                     LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
 

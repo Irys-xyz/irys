@@ -49,6 +49,18 @@ initial_price = 1.0
 incremental_change = 0.00000000000001
 smoothing_interval = 15
 
+[mempool]
+max_pending_pledge_items = 100
+max_pledges_per_item = 100
+max_pending_chunk_items = 30
+max_chunks_per_item = 500
+max_valid_items = 10000
+max_invalid_items = 10000
+max_valid_chunks = 10000
+
+[vdf]
+parallel_verification_thread_limit = 4
+
 
 [consensus.Custom]
 chain_id = 1270
@@ -107,15 +119,6 @@ balance = "0x152cf4e72a974f1c0000"
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
 anchor_expiry_depth = 20
-max_pending_pledge_items = 100
-max_pledges_per_item = 100
-max_pending_chunk_items = 30
-max_chunks_per_item = 500
-max_preheader_chunks_per_item = 64
-max_preheader_data_path_bytes = 65536
-max_valid_items = 10000
-max_invalid_items = 10000
-max_valid_chunks = 10000
 commitment_fee = 100
 
 [consensus.Custom.difficulty_adjustment]
@@ -126,7 +129,6 @@ min_difficulty_adjustment_factor = "0.25"
 
 [consensus.Custom.vdf]
 reset_frequency = 600
-parallel_verification_thread_limit = 4
 num_checkpoints_in_vdf_step = 25
 max_allowed_vdf_fork_steps = 60000
 sha_1s_difficulty = 1800000

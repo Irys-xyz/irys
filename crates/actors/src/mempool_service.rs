@@ -1277,7 +1277,7 @@ impl MempoolService {
 
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
-        let mempool_config = &config.consensus.mempool;
+        let mempool_config = &config.mempool;
         let mempool_state = create_state(mempool_config);
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();

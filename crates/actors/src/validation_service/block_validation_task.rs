@@ -321,7 +321,7 @@ impl BlockValidationTask {
             .unwrap_or(ValidationResult::Invalid)
         };
 
-        let vdf_reset_frequency = self.service_inner.config.consensus.vdf.reset_frequency as u64;
+        let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
         let seeds_validation_task = async move {
             let binding = self.block_tree_guard.read();
             let previous_block = binding
