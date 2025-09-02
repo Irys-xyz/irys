@@ -188,7 +188,10 @@ where
             currently_running_announcements: HashSet::new(),
             successful_announcements: HashMap::new(),
             failed_announcements: HashMap::new(),
-            gossip_client: GossipClient::new(Duration::from_secs(5), config.node_config.miner_address()),
+            gossip_client: GossipClient::new(
+                Duration::from_secs(5),
+                config.node_config.miner_address(),
+            ),
             irys_api_client,
             chain_id: config.consensus.chain_id,
             peer_address: PeerAddress {
@@ -207,7 +210,8 @@ where
                 execution: RethPeerInfo {
                     peering_tcp_addr: format!(
                         "{}:{}",
-                        &config.node_config.reth.network.public_ip, &config.node_config.reth.network.public_port
+                        &config.node_config.reth.network.public_ip,
+                        &config.node_config.reth.network.public_port
                     )
                     .parse()
                     .expect("valid SocketAddr expected"),
@@ -782,7 +786,10 @@ where
             let api_client = self.irys_api_client.clone();
             let addr = msg.api_address;
             let semaphore = handshake_semaphore_with_max(
-                self.config.node_config.p2p_handshake.max_concurrent_handshakes,
+                self.config
+                    .node_config
+                    .p2p_handshake
+                    .max_concurrent_handshakes,
             );
             let handshake_task = async move {
                 // Limit concurrent handshakes globally
@@ -874,7 +881,8 @@ where
 
             let backoff_secs = (1_u64 << (attempts - 1))
                 .saturating_mul(self.config.node_config.p2p_handshake.backoff_base_secs);
-            let backoff_secs = backoff_secs.min(self.config.node_config.p2p_handshake.backoff_cap_secs);
+            let backoff_secs =
+                backoff_secs.min(self.config.node_config.p2p_handshake.backoff_cap_secs);
             let backoff = std::time::Duration::from_secs(backoff_secs);
 
             let message = NewPotentialPeer::new(msg.peer_api_address);

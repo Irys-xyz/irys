@@ -560,7 +560,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
 ) -> ChainSyncResult<()> {
     let sync_mode = config.node_config.sync_mode;
-    let genesis_peer_discovery_timeout_millis = config.node_config.genesis_peer_discovery_timeout_millis;
+    let genesis_peer_discovery_timeout_millis =
+        config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
     if !sync_state.is_gossip_reception_enabled() {
         debug!("Sync task: Gossip reception is disabled, skipping sync");

@@ -50,8 +50,9 @@ async fn genesis_test() {
     genesis_block.treasury = initial_treasury;
 
     // Create epoch service with random miner address
-    let block_index: Arc<RwLock<BlockIndex>> =
-        Arc::new(RwLock::new(BlockIndex::new(&config.node_config).await.unwrap()));
+    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
+        BlockIndex::new(&config.node_config).await.unwrap(),
+    ));
 
     let block_index_actor = BlockIndexService::new(block_index, &config.consensus).start();
     SystemRegistry::set(block_index_actor);
@@ -767,8 +768,9 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let block_index: Arc<RwLock<BlockIndex>> =
-        Arc::new(RwLock::new(BlockIndex::new(&config.node_config).await.unwrap()));
+    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
+        BlockIndex::new(&config.node_config).await.unwrap(),
+    ));
 
     let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
     SystemRegistry::set(block_index_actor.clone());

@@ -381,8 +381,12 @@ impl PeerListDataInner {
         peer_network_sender: PeerNetworkSender,
         config: &Config,
     ) -> Result<Self, PeerNetworkError> {
-        let trusted_peers_api_addresses: HashSet<SocketAddr> =
-            config.node_config.trusted_peers.iter().map(|p| p.api).collect();
+        let trusted_peers_api_addresses: HashSet<SocketAddr> = config
+            .node_config
+            .trusted_peers
+            .iter()
+            .map(|p| p.api)
+            .collect();
 
         // Initialize whitelist based on peer filter mode
         let peer_api_ip_whitelist = match config.node_config.peer_filter_mode {

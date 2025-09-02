@@ -72,7 +72,10 @@ pub async fn post_version(
     // Fetch peers and handle potential errors
     let mut peers = state.get_known_peers();
     // Cap the number of peers returned using configured limit
-    peers = cap_peers(peers, state.config.node_config.p2p_handshake.server_peer_list_cap);
+    peers = cap_peers(
+        peers,
+        state.config.node_config.p2p_handshake.server_peer_list_cap,
+    );
 
     let peer_address = version_request.address;
     let mining_addr = version_request.mining_address;
