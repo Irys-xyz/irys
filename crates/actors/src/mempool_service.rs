@@ -1109,13 +1109,12 @@ impl Inner {
         let latest_height = self.get_latest_block_height()?;
         let next_block_height = latest_height + 1;
 
-        // Calculate expires for the next block using modulo arithmetic
-        let num_blocks_in_epoch = self.config.consensus.epoch.num_blocks_in_epoch;
-        let submit_ledger_epoch_length = self.config.consensus.epoch.submit_ledger_epoch_length;
-        let blocks_per_term_cycle = submit_ledger_epoch_length * num_blocks_in_epoch;
-        let position_in_cycle = next_block_height % blocks_per_term_cycle;
-        let epoch_in_cycle = position_in_cycle / num_blocks_in_epoch;
-        let epochs_for_storage = submit_ledger_epoch_length - epoch_in_cycle;
+        // Calculate expires for the next block using the shared utility
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            next_block_height,
+            self.config.consensus.epoch.num_blocks_in_epoch,
+            self.config.consensus.epoch.submit_ledger_epoch_length,
+        );
 
         // Calculate term fee using the storage pricing module
         calculate_term_fee(

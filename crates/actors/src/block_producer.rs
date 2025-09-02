@@ -32,10 +32,11 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    ledger_expiry::calculate_submit_ledger_expiry, next_cumulative_diff, storage_pricing::Amount,
+    Address, AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
+    IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::interval::ii;
@@ -638,7 +639,12 @@ pub trait BlockProdStrategy {
         let evm_block_hash = eth_built_payload.hash();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash);
+            warn!(
+                "Skipping solution for old step number {}, previous block step number {} for block {}",
+                solution.vdf_step,
+                prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_hash
+            );
             return Ok(None);
         }
 
@@ -763,28 +769,13 @@ pub trait BlockProdStrategy {
                     tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                     tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
                     max_chunk_offset: submit_max_chunk_offset,
-                    expires: {
-                        // Calculate remaining epochs using modulo arithmetic
-                        let num_blocks_in_epoch =
-                            self.inner().config.consensus.epoch.num_blocks_in_epoch;
-                        let submit_ledger_epoch_length = self
-                            .inner()
+                    expires: Some(
+                        self.inner()
                             .config
                             .consensus
                             .epoch
-                            .submit_ledger_epoch_length;
-
-                        // Calculate position in the term ledger cycle
-                        let blocks_per_term_cycle =
-                            submit_ledger_epoch_length * num_blocks_in_epoch;
-                        let position_in_cycle = block_height % blocks_per_term_cycle;
-
-                        // Calculate which epoch we're in within this cycle
-                        let epoch_in_cycle = position_in_cycle / num_blocks_in_epoch;
-
-                        // Remaining epochs = total epochs - current epoch in cycle
-                        Some(submit_ledger_epoch_length - epoch_in_cycle)
-                    },
+                            .submit_ledger_epoch_length,
+                    ),
                     proofs: None,
                     required_proof_count: None,
                 },
@@ -826,7 +817,13 @@ pub trait BlockProdStrategy {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {
             if stats.is_adjusted {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                info!(
+                    "🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ",
+                    stats.actual_block_time,
+                    stats.percent_different,
+                    stats.target_block_time,
+                    stats.min_threshold
+                );
                 info!(
                     max_difficulty = ?U256::MAX,
                     previous_cumulative_diff = ?block.previous_cumulative_diff,
@@ -835,7 +832,13 @@ pub trait BlockProdStrategy {
                 );
                 is_difficulty_updated = true;
             } else {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                info!(
+                    "🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.",
+                    stats.actual_block_time,
+                    stats.percent_different,
+                    stats.target_block_time,
+                    stats.min_threshold
+                );
             }
         }
 

@@ -23,6 +23,7 @@ use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTIN
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
+use irys_types::get_ingress_proofs;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
 use irys_types::BlockHash;
@@ -34,7 +35,6 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
-use irys_types::get_ingress_proofs;
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -402,6 +402,10 @@ pub async fn prevalidate_block(
     if !block.is_signature_valid() {
         return Err(PreValidationError::BlockSignatureInvalid);
     }
+
+    // TODO: add validation for the term ledger 'expires' field,
+    // ensuring it gets properly updated on epoch boundaries, and it's
+    // consistent with the block's height and parent block's height
 
     Ok(())
 }

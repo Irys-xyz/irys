@@ -61,18 +61,15 @@ pub async fn get_price(
                 .get_ema_snapshot(&tip)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
 
-            // Get the expires field from the latest block's Submit ledger
-            let epochs_for_storage = if let Some(tip_block) = tree.get_block(&tip) {
-                tip_block
-                    .data_ledgers
-                    .iter()
-                    .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
-                    .and_then(|ledger| ledger.expires)
-                    .unwrap_or(state.config.consensus.epoch.submit_ledger_epoch_length)
-            } else {
-                // Fallback to config value if we can't get the block
-                state.config.consensus.epoch.submit_ledger_epoch_length
-            };
+            // Calculate the actual epochs remaining for the next block based on height
+            let tip_height = tree.get_block(&tip).map(|b| b.height).unwrap_or(0);
+            let next_block_height = tip_height + 1;
+            
+            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                next_block_height,
+                state.config.consensus.epoch.num_blocks_in_epoch,
+                state.config.consensus.epoch.submit_ledger_epoch_length,
+            );
 
             drop(tree);
 
