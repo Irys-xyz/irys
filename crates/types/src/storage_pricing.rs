@@ -1351,7 +1351,8 @@ mod tests {
         #[test]
         fn test_term_fee_16tb() -> Result<()> {
             // Setup: 16TB = 16 * 1024^4 bytes
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes; // 16TB
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
@@ -1447,7 +1448,8 @@ mod tests {
         #[test]
         fn test_term_fee_1tb() -> Result<()> {
             // Setup: 1TB - common user scenario that's above minimum fee
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let tb_in_bytes = 1024_u64.pow(4); // 1TB = 1,099,511,627,776 bytes
             let bytes_to_store = tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
@@ -1478,7 +1480,8 @@ mod tests {
         #[test]
         fn test_term_fee_1pb_extreme() -> Result<()> {
             // Setup: 1PB - extreme case to test large numbers
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let pb_in_bytes = 1024_u64.pow(5); // 1PB = 1,125,899,906,842,624 bytes
             let bytes_to_store = pb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
@@ -1512,7 +1515,8 @@ mod tests {
 
         #[test]
         fn test_term_fee_chunk_boundaries() -> Result<()> {
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let chunk_size = config.chunk_size;
             let irys_price = Amount::token(dec!(1.0))?;
 
@@ -1915,7 +1919,8 @@ mod tests {
         #[test]
         fn test_very_large_epoch_count() -> Result<()> {
             // Test that large epoch counts don't cause overflow
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let bytes_to_store = 1024_u64.pow(3); // 1GB
             let irys_price = Amount::token(dec!(1.0))?;
 
@@ -1950,7 +1955,8 @@ mod tests {
         #[test]
         fn test_perm_fee_16tb() -> Result<()> {
             // Setup: 16TB - same as term test for comparison
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
@@ -1993,7 +1999,8 @@ mod tests {
         #[test]
         fn test_perm_fee_1tb() -> Result<()> {
             // Setup: 1TB - reasonable size for permanent storage
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?;
