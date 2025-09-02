@@ -793,7 +793,6 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// assert txs return to mempool
 /// gossip returned txs to C
 /// mine a block on C, assert that all reorgd txs are present
-
 #[actix_web::test]
 async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     std::env::set_var(

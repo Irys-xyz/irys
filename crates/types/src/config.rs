@@ -786,7 +786,7 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // $0.01/GB/year
             decay_rate_per_year: Amount::percentage(dec!(0.01)).unwrap(), // 1% annual decay
             safe_minimum_number_of_years: 200,                      // 200 years storage duration
-            number_of_ingress_proofs_total: 10,
+            number_of_ingress_proofs_total: 1,
             number_of_ingress_proofs_from_assignees: 0,
             genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
