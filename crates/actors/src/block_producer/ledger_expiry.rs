@@ -64,11 +64,11 @@ use eyre::OptionExt as _;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
-    Address, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysBlockHeader,
-    LedgerChunkOffset, LedgerChunkRange, U256, app_state::DatabaseProvider,
-    fee_distribution::TermFeeCharges, ledger_chunk_offset_ii,
+    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
+    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
+    LedgerChunkRange, H256, U256,
 };
-use nodit::{InclusiveInterval as _, interval::ii};
+use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};

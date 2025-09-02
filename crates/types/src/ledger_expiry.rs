@@ -38,7 +38,11 @@ pub fn calculate_submit_ledger_expiry(
     num_blocks_in_epoch: u64,
     submit_ledger_epoch_length: u64,
 ) -> u64 {
-    let metadata = SubmitLedgerMetadata::new(block_height, num_blocks_in_epoch, submit_ledger_epoch_length);
+    let metadata = SubmitLedgerMetadata::new(
+        block_height,
+        num_blocks_in_epoch,
+        submit_ledger_epoch_length,
+    );
     metadata.epochs_remaining
 }
 

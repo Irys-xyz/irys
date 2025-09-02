@@ -3,12 +3,9 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
-use eyre::OptionExt as _;
 use irys_types::{
     storage_pricing::{
         calculate_perm_fee_from_config, calculate_term_fee,
-        phantoms::{Irys, NetworkFee},
-        Amount,
     },
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
@@ -64,7 +61,7 @@ pub async fn get_price(
             // Calculate the actual epochs remaining for the next block based on height
             let tip_height = tree.get_block(&tip).map(|b| b.height).unwrap_or(0);
             let next_block_height = tip_height + 1;
-            
+
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
                 next_block_height,
                 state.config.consensus.epoch.num_blocks_in_epoch,
