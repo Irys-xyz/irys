@@ -938,12 +938,14 @@ pub trait BlockProdStrategy {
         let system_transaction_ledger;
         let aggregated_miner_fees;
         if is_epoch_block {
-            let parent_epoch_snapshot = self
-                .inner()
-                .block_tree_guard
-                .read()
-                .get_epoch_snapshot(&prev_block_header.block_hash)
-                .ok_or_eyre("parent blocks epoch snapshot must be available")?;
+            let (parent_epoch_snapshot, parent_commitment_snapshot_result) = {
+                let read = self.inner().block_tree_guard.read();
+                let epoch = read
+                    .get_epoch_snapshot(&prev_block_header.block_hash)
+                    .ok_or_eyre("parent blocks epoch snapshot must be available")?;
+                let commit = read.get_commitment_snapshot(&prev_block_header.block_hash);
+                (epoch, commit)
+            };
 
             tracing::error!("about to calculate fees");
             // Calculate fees for expired ledgers
@@ -956,11 +958,7 @@ pub trait BlockProdStrategy {
             // === EPOCH BLOCK: Rollup all commitments from the current epoch ===
             // Epoch blocks don't add new commitments - they summarize all commitments
             // that were validated throughout the epoch into a single rollup entry
-            let entry = self
-                .inner()
-                .block_tree_guard
-                .read()
-                .get_commitment_snapshot(&prev_block_header.block_hash);
+            let entry = parent_commitment_snapshot_result;
 
             if let Ok(entry) = entry {
                 let mut txids = H256List::new();
