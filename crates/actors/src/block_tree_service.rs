@@ -519,7 +519,13 @@ impl BlockTreeServiceInner {
         );
 
         if add_result.is_ok() {
-            // Schedule validation and mark as scheduled
+            // Mark as scheduled and schedule validation
+            if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
+                error!("Unable to mark block as ValidationScheduled: {:?}", err);
+                return Err(PreValidationError::UpdateCacheForScheduledValidationError(
+                    *block_hash,
+                ));
+            }
             self.service_senders
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
@@ -527,13 +533,6 @@ impl BlockTreeServiceInner {
                     skip_vdf_validation: skip_vdf,
                 })
                 .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
-
-            if cache
-                .mark_block_as_validation_scheduled(block_hash)
-                .is_err()
-            {
-                error!("Unable to mark block as ValidationScheduled");
-            }
 
             debug!(
                 "scheduling block for validation: {} height: {}",
