@@ -35,14 +35,14 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
+                balance: U256::from(1000000000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             account1.address(),
             GenesisAccount {
-                balance: U256::from(420000000000000_u128),
+                balance: U256::from(100000000000000000_u128),
                 ..Default::default()
             },
         ),

@@ -66,8 +66,9 @@ parallel_verification_thread_limit = 4
 chain_id = 1270
 token_price_safe_range = 1.0
 genesis_price = 1.0
-annual_cost_per_gb = 0.01
-decay_rate = 0.01
+# Storage economics: Based on 0.01 USD/GB/year target
+annual_cost_per_gb = 0.01                   # $0.01 USD/GB/year
+decay_rate = 0.01                  # 1% annual decay per year
 chunk_size = 262144
 block_migration_depth = 6
 block_tree_depth = 50
@@ -77,11 +78,13 @@ num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
 number_of_ingress_proofs_total = 1
 number_of_ingress_proofs_from_assignees = 0
+# Target storage duration in years
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
 pledge_base_value = 950.0
 pledge_decay = 0.9
 immediate_tx_inclusion_reward_percent = 0.01
+minimum_term_fee_usd = 0.01                  # $0.01 USD minimum for term storage
 
 [consensus.Custom.genesis]
 timestamp_millis = 0
