@@ -1,0 +1,43 @@
+# Keep this file at repo root: applies to build context ".." in docker-compose
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Rust build outputs
+/target
+**/target
+**/.fingerprint
+**/.cargo
+
+# IDE/editor
+.vscode
+.idea
+**/*.iml
+.DS_Store
+
+# CI/cache
+.cargo-cache
+**/Cargo.lock.bak
+
+# Large or unused for container build
+fixtures/
+ext/
+
+# Logs and temp
+**/*.log
+**/*.tmp
+**/*.swp
+**/*.swo
+
+# Node or other package dirs if present
+node_modules/
+**/node_modules/
+
+# Python/jupyter leftovers (if any)
+**/__pycache__
+**/*.ipynb_checkpoints
+
+# Ensure we DO NOT ignore Docker files we need
+# (Keep docker/ included)

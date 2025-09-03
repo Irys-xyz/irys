@@ -65,8 +65,8 @@ use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
     app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
-    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
-    LedgerChunkRange, H256, U256,
+    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, IrysTransactionId,
+    LedgerChunkOffset, LedgerChunkRange, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
@@ -133,13 +133,13 @@ pub async fn calculate_expired_ledger_fees(
         same_block
     );
 
-    let (earliest_txs, earliest_miners);
-    let (latest_txs, latest_miners);
+    let earliest_miners;
+    let latest_miners;
 
     if same_block {
         // When min and max are the same block, process it only once to avoid double-counting
         // Process as earliest block (will include all transactions in the partition range)
-        let (txs, miners) = process_boundary_block(
+        let miners = process_boundary_block(
             &block_range.min_block,
             block_range.min_block.item.block_hash,
             Arc::clone(&block_range.min_block_miners),
@@ -152,13 +152,11 @@ pub async fn calculate_expired_ledger_fees(
         )
         .await?;
 
-        earliest_txs = txs;
         earliest_miners = miners;
-        latest_txs = Vec::new();
         latest_miners = BTreeMap::new();
     } else {
         // Different blocks - process both boundaries
-        let (e_txs, e_miners) = process_boundary_block(
+        let e_miners = process_boundary_block(
             &block_range.min_block,
             block_range.min_block.item.block_hash,
             Arc::clone(&block_range.min_block_miners),
@@ -171,7 +169,7 @@ pub async fn calculate_expired_ledger_fees(
         )
         .await?;
 
-        let (l_txs, l_miners) = process_boundary_block(
+        let l_miners = process_boundary_block(
             &block_range.max_block,
             block_range.max_block.item.block_hash,
             Arc::clone(&block_range.max_block_miners),
@@ -184,27 +182,25 @@ pub async fn calculate_expired_ledger_fees(
         )
         .await?;
 
-        earliest_txs = e_txs;
         earliest_miners = e_miners;
-        latest_txs = l_txs;
         latest_miners = l_miners;
     }
 
     // Step 4: Process middle blocks
-    let (middle_txs, middle_miners) =
+    let middle_miners =
         process_middle_blocks(block_range.middle_blocks, ledger_type, &mempool_sender, &db).await?;
 
     // Step 5: Combine all transactions
     let mut all_tx_ids = Vec::new();
-    all_tx_ids.extend(earliest_txs.clone());
-    all_tx_ids.extend(latest_txs.clone());
-    all_tx_ids.extend(middle_txs.clone());
+    all_tx_ids.extend(earliest_miners.keys());
+    all_tx_ids.extend(latest_miners.keys());
+    all_tx_ids.extend(middle_miners.keys());
 
     tracing::info!(
         "Collected transactions: earliest={}, latest={}, middle={}, total={}",
-        earliest_txs.len(),
-        latest_txs.len(),
-        middle_txs.len(),
+        earliest_miners.len(),
+        latest_miners.len(),
+        middle_miners.len(),
         all_tx_ids.len()
     );
 
@@ -463,7 +459,7 @@ async fn process_boundary_block(
     block_index: &std::sync::RwLock<BlockIndex>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<(Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>)> {
+) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     // Get the block and its transactions
     let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
     let ledger_tx_ids = block
@@ -512,7 +508,7 @@ async fn process_boundary_block(
 ///
 /// # Returns
 ///
-/// Tuple of (transaction IDs to include, mapping of tx ID to miners who stored it)
+/// mapping of tx ID to miners who stored it
 fn filter_transactions_by_chunk_range(
     transactions: Vec<DataTransactionHeader>,
     prev_max_offset: LedgerChunkOffset,
@@ -520,9 +516,8 @@ fn filter_transactions_by_chunk_range(
     is_earliest: bool,
     chunk_size: u64,
     miners: Arc<Vec<Address>>,
-) -> (Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>) {
+) -> BTreeMap<IrysTransactionId, Arc<Vec<Address>>> {
     let mut current_offset = prev_max_offset;
-    let mut filtered_txs = Vec::new();
     let mut tx_to_miners = BTreeMap::new();
 
     tracing::info!(
@@ -569,14 +564,13 @@ fn filter_transactions_by_chunk_range(
 
             // Include this transaction
             tracing::debug!("  Including transaction");
-            filtered_txs.push(tx.id);
             tx_to_miners.insert(tx.id, Arc::clone(&miners));
             current_offset = tx_end;
         }
     }
 
-    tracing::info!("Filtered to {} transactions", filtered_txs.len());
-    (filtered_txs, tx_to_miners)
+    tracing::info!("Filtered to {} transactions", tx_to_miners.len());
+    tx_to_miners
 }
 
 /// Processes all middle blocks (non-boundary blocks)
@@ -585,8 +579,7 @@ async fn process_middle_blocks(
     ledger_type: DataLedger,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<(Vec<H256>, BTreeMap<H256, Arc<Vec<Address>>>)> {
-    let mut all_tx_ids = Vec::new();
+) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     let mut tx_to_miners = BTreeMap::new();
 
     for (block_hash, miners) in middle_blocks {
@@ -597,17 +590,16 @@ async fn process_middle_blocks(
 
         for tx_id in ledger_tx_ids.iter() {
             tx_to_miners.insert(*tx_id, Arc::clone(&miners));
-            all_tx_ids.push(*tx_id);
         }
     }
 
-    Ok((all_tx_ids, tx_to_miners))
+    Ok(tx_to_miners)
 }
 
 /// Calculates and aggregates fees for each miner
 fn aggregate_miner_fees(
     mut transactions: Vec<DataTransactionHeader>,
-    tx_to_miners: &BTreeMap<H256, Arc<Vec<Address>>>,
+    tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<Address>>>,
     config: &Config,
 ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
     let mut aggregated_miner_fees = BTreeMap::<Address, (U256, RollingHash)>::new();
@@ -618,14 +610,18 @@ fn aggregate_miner_fees(
             .get(&data_tx.id)
             .expect("guaranteed to have the miner list");
 
-        let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
-        let fee_distribution_per_miner =
-            fee_charges.distribution_on_expiry(miners_that_stored_this_tx)?;
-
-        for (miner, fee) in miners_that_stored_this_tx
+        // Deduplicate miners - each address should only get one share
+        let unique_miners: Vec<Address> = miners_that_stored_this_tx
             .iter()
-            .zip(fee_distribution_per_miner)
-        {
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
+        let fee_distribution_per_miner = fee_charges.distribution_on_expiry(&unique_miners)?;
+
+        for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
             aggregated_miner_fees
                 .entry(*miner)
                 .and_modify(|(current_fee, hash)| {
@@ -678,4 +674,87 @@ struct BlockRange {
     min_block_miners: Arc<Vec<Address>>,
     max_block_miners: Arc<Vec<Address>>,
     middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aggregate_miner_fees_handles_duplicates() {
+        // Setup config
+        let node_config = irys_types::NodeConfig::testing();
+        let config = Config::new(node_config);
+
+        // Create test transactions
+        let tx1 = DataTransactionHeader {
+            id: H256::random(),
+            term_fee: U256::from(1000),
+            data_size: 100,
+            ..Default::default()
+        };
+
+        let tx2 = DataTransactionHeader {
+            id: H256::random(),
+            term_fee: U256::from(2000),
+            data_size: 200,
+            ..Default::default()
+        };
+
+        // Create miners with duplicates
+        let miner1 = Address::random();
+        let miner2 = Address::random();
+
+        // For tx1: miner1 appears twice (duplicate)
+        let tx1_miners_with_dup = vec![miner1, miner2, miner1];
+
+        // For tx2: only unique miners
+        let tx2_miners = vec![miner1, miner2];
+
+        // Create tx_to_miners mapping
+        let mut tx_to_miners = BTreeMap::new();
+        tx_to_miners.insert(tx1.id, Arc::new(tx1_miners_with_dup));
+        tx_to_miners.insert(tx2.id, Arc::new(tx2_miners));
+
+        // Call aggregate_miner_fees
+        let result = aggregate_miner_fees(vec![tx1, tx2], &tx_to_miners, &config).unwrap();
+
+        // Calculate expected fees
+        // For tx1: term_fee = 1000, treasury = 950 (95%)
+        // With deduplication: 2 unique miners, so each gets 950/2 = 475
+        let tx1_treasury = U256::from(950);
+        let tx1_fee_per_miner = tx1_treasury / U256::from(2);
+
+        // For tx2: term_fee = 2000, treasury = 1900 (95%)
+        // 2 unique miners, so each gets 1900/2 = 950
+        let tx2_treasury = U256::from(1900);
+        let tx2_fee_per_miner = tx2_treasury / U256::from(2);
+
+        // Verify each miner's total fees
+        let miner1_total = tx1_fee_per_miner + tx2_fee_per_miner;
+        let miner2_total = tx1_fee_per_miner + tx2_fee_per_miner;
+
+        assert_eq!(
+            result.get(&miner1).unwrap().0,
+            miner1_total,
+            "Miner1 should receive correct deduplicated fee"
+        );
+        assert_eq!(
+            result.get(&miner2).unwrap().0,
+            miner2_total,
+            "Miner2 should receive correct fee"
+        );
+
+        // Verify total fees distributed equals treasury amounts
+        let total_distributed: U256 = result
+            .values()
+            .map(|(fee, _)| *fee)
+            .fold(U256::from(0), |acc, fee| acc + fee);
+        let expected_total = tx1_treasury + tx2_treasury;
+
+        assert_eq!(
+            total_distributed, expected_total,
+            "Total distributed should equal sum of treasury amounts"
+        );
+    }
 }

@@ -21,7 +21,7 @@ env:
 jobs:
   gate:
     name: gate
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     outputs:
       should-run: ${{ steps.set-output.outputs.should-run }}  # register we have some output other actions should reference
     steps:
@@ -161,7 +161,7 @@ jobs:
 
   cargo-check:
     name: cargo check
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
@@ -181,7 +181,7 @@ jobs:
 
   cargo-fmt:
     name: cargo fmt
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
@@ -198,7 +198,7 @@ jobs:
 
   cargo-clippy:
     name: cargo clippy
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
@@ -215,7 +215,7 @@ jobs:
 
   cargo-doc:
     name: cargo doc
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
@@ -235,7 +235,7 @@ jobs:
 
   cargo-unused-deps:
     name: cargo unused-deps
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30
@@ -251,7 +251,7 @@ jobs:
         run: cargo xtask unused-deps
 
   typos:
-    runs-on: self-hosted
+    runs-on: [self-hosted, misc-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
     timeout-minutes: 30

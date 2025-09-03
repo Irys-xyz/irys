@@ -191,8 +191,7 @@ impl Inner {
                 pledges_cache.put(commitment_tx.id, commitment_tx.clone());
             } else {
                 // First pledge from this address - create a new nested lru cache
-                let max_pending_pledge_items =
-                    self.config.consensus.mempool.max_pending_pledge_items;
+                let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
                 let mut new_address_cache =
                     LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
 
@@ -398,12 +397,13 @@ impl Inner {
         commitment_tx: &CommitmentTransaction,
     ) -> CommitmentSnapshotStatus {
         // Get the commitment snapshot for the current canonical chain
-        let commitment_snapshot = self
-            .block_tree_read_guard
-            .read()
-            .canonical_commitment_snapshot();
-
-        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+        let (commitment_snapshot, epoch_snapshot) = {
+            let tree = self.block_tree_read_guard.read();
+            (
+                tree.canonical_commitment_snapshot(),
+                tree.canonical_epoch_snapshot(),
+            )
+        };
 
         let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
 

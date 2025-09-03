@@ -116,7 +116,7 @@ __global__ void compute_entropy_chunks_hip_kernel(unsigned char *chunk_id, unsig
     if (idx < chunks_count) {
         unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
         unsigned char *chunk_1 = chunks_1 + idx * DATA_CHUNK_SIZE;
-        unsigned char chunk_id_thread[CHUNK_ID_LEN];
+        __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
         memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + idx * DATA_CHUNK_SIZE;
         compute_entropy_chunk_hip(chunk_id_thread, CHUNK_ID_LEN, output, chunk_1, packing_sha_1_5_s);
