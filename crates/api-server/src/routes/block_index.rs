@@ -22,14 +22,14 @@ pub async fn block_index_route(
     }
     let height = query.height;
 
-    let block_index_read = state.block_index.read();
-    let requested_blocks: Vec<&BlockIndexItem> = block_index_read
-        .items
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i >= height && *i < height + limit)
-        .map(|(_, block)| block)
-        .collect();
+    // Clone only the requested range while holding the read lock briefly
+    let requested_blocks: Vec<BlockIndexItem> = {
+        let block_index_read = state.block_index.read();
+        let total = block_index_read.items.len();
+        let start = height.min(total);
+        let end = start.saturating_add(limit).min(total);
+        block_index_read.items[start..end].to_vec()
+    };
 
     HttpResponse::Ok()
         .content_type(ContentType::json())
