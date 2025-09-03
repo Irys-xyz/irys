@@ -24,6 +24,8 @@ pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
 pub enum ScoreDecreaseReason {
     BogusData,
     Offline,
+    SlowResponse,
+    NoResponse,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -31,6 +33,7 @@ pub enum ScoreIncreaseReason {
     Online,
     ValidData,
     DataRequest,
+    TimelyResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -463,8 +466,10 @@ impl PeerListDataInner {
                     peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    // Limited increase for data requests to prevent farming
-                    peer.reputation_score.increase_limited(1);
+                    peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::TimelyResponse => {
+                    peer.reputation_score.increase();
                 }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(mining_addr) {
@@ -477,8 +482,10 @@ impl PeerListDataInner {
                     peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    // Limited increase for data requests to prevent farming
-                    peer.reputation_score.increase_limited(1);
+                    peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::TimelyResponse => {
+                    peer.reputation_score.increase();
                 }
             }
 
@@ -505,6 +512,12 @@ impl PeerListDataInner {
                     peer_item.reputation_score.decrease_bogus_data();
                 }
                 ScoreDecreaseReason::Offline => {
+                    peer_item.reputation_score.decrease_offline();
+                }
+                ScoreDecreaseReason::SlowResponse => {
+                    peer_item.reputation_score.decrease();
+                }
+                ScoreDecreaseReason::NoResponse => {
                     peer_item.reputation_score.decrease_offline();
                 }
             }
