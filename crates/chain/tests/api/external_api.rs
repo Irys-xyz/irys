@@ -70,26 +70,42 @@ async fn heavy_external_api() -> eyre::Result<()> {
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
 
+    // The block index is 0-based, so the total number of entries is height + 1.
+    let total_entries = json_response.block_index_height + 1;
+
     // check the api endpoint again, and it should now show 2 blocks are in the index
     assert_eq!(json_response.block_index_height, 2);
 
-    // tests should check total number of json objects returned are equal to the number requested.
-    // Ideally should also check that the expected fields of those objects are present.
-    let migrated_blocks = 2;
-    for limit in 0..migrated_blocks {
-        for height in 0..migrated_blocks {
+    // For this endpoint:
+    // - height is the start index (0-based), inclusive
+    // - limit == 0 means "use default limit", which is large enough to include all
+    //   remaining items from height onward, so expected = total_entries - height
+    // - otherwise, expected = min(limit, total_entries - height)
+    fn expected_count(total_entries: u64, height: u64, limit: u64) -> u64 {
+        let remaining = total_entries.saturating_sub(height);
+        if limit == 0 {
+            remaining
+        } else {
+            remaining.min(limit)
+        }
+    }
+
+    // tests should check total number of json objects returned are equal to the expected number.
+    for limit in 0..2 {
+        for height in 0..2 {
             let mut response = block_index_endpoint_request(&address, height, limit).await;
             assert_eq!(response.status(), 200);
             assert_eq!(response.content_type(), ContentType::json().to_string());
-            let json_response: Vec<BlockIndexItem> =
-                response.json().await.expect("valid BlockIndexItem");
-            if limit == 0 {
-                // check the returned items, when default limit is 0 or the limit is omitted
-                assert_eq!(json_response.len() as u64, migrated_blocks + 1 - height);
-            } else {
-                // check the number of items returned matches the limit
-                assert_eq!(json_response.len() as u64, limit);
-            }
+            let items: Vec<BlockIndexItem> = response.json().await.expect("valid BlockIndexItem");
+            let expected = expected_count(total_entries, height, limit);
+            assert_eq!(
+                items.len() as u64,
+                expected,
+                "unexpected length for height={}, limit={}, total_entries={}",
+                height,
+                limit,
+                total_entries
+            );
         }
     }
 
