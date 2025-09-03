@@ -267,7 +267,7 @@ impl Encode for H256 {
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         let arr: [u8; 32] = value.try_into().map_err(|_| DatabaseError::Decode)?;
-        Ok(<Self as std::convert::From<[u8; 32]>>::from(arr))
+        Ok(H256(arr))
     }
 }
 
@@ -499,7 +499,7 @@ impl DecodeHash for H256 {
                 bytes.len()
             )
         })?;
-        Ok(<Self as std::convert::From<[u8; 32]>>::from(arr))
+        Ok(H256(arr))
     }
 
     fn empty() -> Self {

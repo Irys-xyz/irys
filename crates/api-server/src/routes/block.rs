@@ -158,9 +158,7 @@ impl FromStr for BlockParam {
                 match s.from_base58() {
                     Ok(v) => {
                         match <&[u8] as std::convert::TryInto<[u8; 32]>>::try_into(v.as_slice()) {
-                            Ok(arr) => Ok(Self::Hash(
-                                <H256 as std::convert::From<[u8; 32]>>::from(arr),
-                            )),
+                            Ok(arr) => Ok(Self::Hash(H256(arr))),
                             Err(_) => Err(format!(
                                 "Invalid block tag parameter: expected 32 bytes, got {}",
                                 v.len()
