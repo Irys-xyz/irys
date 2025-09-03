@@ -3,9 +3,10 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use irys_actors::{
-    async_trait, mempool_service::TxIngressError, reth_ethereum_primitives,
-    shadow_tx_generator::PublishLedgerWithTxs, shadow_tx_generator::RollingHash, BlockProdStrategy,
-    BlockProducerInner, ProductionStrategy,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDiff,
+    mempool_service::TxIngressError, reth_ethereum_primitives,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
 use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState, EmaSnapshot};
@@ -16,8 +17,8 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, storage_pricing::Amount, Address, CommitmentTransaction,
-    DataTransactionHeader, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
+    irys::IrysSigner, storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader,
+    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -27,7 +28,7 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::info;
 
@@ -1094,7 +1095,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-            expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
+            expired_ledger_fees: LedgerExpiryBalanceDiff,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
             let mut submit_txs = submit_txs.to_vec();

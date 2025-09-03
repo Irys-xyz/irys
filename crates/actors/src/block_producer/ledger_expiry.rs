@@ -64,10 +64,9 @@ use eyre::OptionExt as _;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
-    app_state::DatabaseProvider,
-    fee_distribution::TermFeeCharges,
-    ledger_chunk_offset_ii, Address, BlockIndexItem, Config, DataLedger, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, H256, U256,
+    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
+    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, IrysTransactionId,
+    LedgerChunkOffset, LedgerChunkRange, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
@@ -669,7 +668,7 @@ fn aggregate_balance_diff(
                     .and_modify(|refund_vec| {
                         refund_vec.push((data_tx.id, perm_fee));
                     })
-                    .or_insert_with(|| vec![]);
+                    .or_default();
             }
         }
     }

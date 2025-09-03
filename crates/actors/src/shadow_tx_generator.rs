@@ -425,10 +425,18 @@ impl ShadowTxGenerator<'_> {
     fn try_process_expired_ledger_fees(&mut self) -> Result<Option<ShadowMetadata>> {
         // On first entry to ExpiredLedgerFees phase, prepare all rewards
         if self.current_expired_ledger_iter.is_none() {
-            if !self.ledger_expiry_balance_diff.miner_balance_increment.is_empty() 
-                || !self.ledger_expiry_balance_diff.user_perm_fee_refunds.is_empty() {
+            if !self
+                .ledger_expiry_balance_diff
+                .miner_balance_increment
+                .is_empty()
+                || !self
+                    .ledger_expiry_balance_diff
+                    .user_perm_fee_refunds
+                    .is_empty()
+            {
                 // Create TermFeeReward and refund transactions
-                let shadow_txs = self.create_expired_ledger_shadow_txs(self.ledger_expiry_balance_diff)?;
+                let shadow_txs =
+                    self.create_expired_ledger_shadow_txs(self.ledger_expiry_balance_diff)?;
                 self.current_expired_ledger_iter = Some(
                     shadow_txs
                         .into_iter()
@@ -448,20 +456,20 @@ impl ShadowTxGenerator<'_> {
             if let Some(result) = iter.next() {
                 // Update treasury balance with checked arithmetic
                 if let Ok(ref metadata) = result {
-                    if let ShadowTransaction::V1 { packet, .. } = &metadata.shadow_tx {
-                        match packet {
-                            TransactionPacket::TermFeeReward(increment) |
-                            TransactionPacket::PermFeeRefund(increment) => {
-                                // Decrement treasury for both miner rewards and user refunds
-                                self.treasury_balance = self
-                                    .treasury_balance
-                                    .checked_sub(U256::from(increment.amount))
-                                    .ok_or_else(|| {
-                                        eyre!("Treasury balance underflow when paying expired ledger fees")
-                                    })?;
-                            }
-                            _ => {} // Other packet types don't affect treasury in this phase
-                        }
+                    if let ShadowTransaction::V1 {
+                        packet:
+                            TransactionPacket::TermFeeReward(increment)
+                            | TransactionPacket::PermFeeRefund(increment),
+                        ..
+                    } = &metadata.shadow_tx
+                    {
+                        // Decrement treasury for both miner rewards and user refunds
+                        self.treasury_balance = self
+                            .treasury_balance
+                            .checked_sub(U256::from(increment.amount))
+                            .ok_or_else(|| {
+                                eyre!("Treasury balance underflow when paying expired ledger fees")
+                            })?;
                     }
                 }
                 // result is already Result<ShadowMetadata, _>, wrap in Some
@@ -480,7 +488,7 @@ impl ShadowTxGenerator<'_> {
         balance_diff: &LedgerExpiryBalanceDiff,
     ) -> Result<Vec<ShadowMetadata>> {
         let mut shadow_txs = Vec::new();
-        
+
         // First process miner rewards for storing the expired data
         for (address, (amount, rolling_hash)) in balance_diff.miner_balance_increment.iter() {
             // Convert the rolling hash to FixedBytes<32> for irys_ref
@@ -499,7 +507,7 @@ impl ShadowTxGenerator<'_> {
                 transaction_fee: 0, // No block producer reward for term fee rewards
             });
         }
-        
+
         // Then process user refunds for non-promoted transactions
         for (user_address, refund_list) in balance_diff.user_perm_fee_refunds.iter() {
             for (tx_id, refund_amount) in refund_list.iter() {
@@ -1121,37 +1129,37 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
-        
+
         // Create miners and their rewards
         let miner1 = Address::from([10_u8; 20]);
         let miner2 = Address::from([11_u8; 20]);
         let miner3 = Address::from([12_u8; 20]);
-        
+
         let miner1_reward = U256::from(1000);
         let miner2_reward = U256::from(2000);
         let miner3_reward = U256::from(1500);
         let total_miner_rewards = miner1_reward + miner2_reward + miner3_reward;
-        
+
         // Create rolling hashes for each miner (simulating aggregated tx IDs)
         let miner1_hash = RollingHash(U256::from_be_bytes([1_u8; 32]));
         let miner2_hash = RollingHash(U256::from_be_bytes([2_u8; 32]));
         let miner3_hash = RollingHash(U256::from_be_bytes([3_u8; 32]));
-        
+
         let mut miner_balance_increment = BTreeMap::new();
         miner_balance_increment.insert(miner1, (miner1_reward, miner1_hash));
         miner_balance_increment.insert(miner2, (miner2_reward, miner2_hash));
         miner_balance_increment.insert(miner3, (miner3_reward, miner3_hash));
-        
+
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment,
             user_perm_fee_refunds: BTreeMap::new(),
         };
-        
+
         let mut publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
-        
+
         // Create expected shadow transactions (sorted by miner address)
         let mut expected_shadow_txs = vec![
             // Block reward
@@ -1164,7 +1172,7 @@ mod tests {
                 transaction_fee: 0,
             },
         ];
-        
+
         // Add miner rewards in sorted order (BTreeMap guarantees this)
         for (miner, (reward, hash)) in expired_fees.miner_balance_increment.iter() {
             expected_shadow_txs.push(ShadowMetadata {
@@ -1178,7 +1186,7 @@ mod tests {
                 transaction_fee: 0,
             });
         }
-        
+
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1191,7 +1199,7 @@ mod tests {
             initial_treasury,
             &expired_fees,
         );
-        
+
         // Compare actual with expected
         generator
             .by_ref()
@@ -1200,7 +1208,7 @@ mod tests {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
             });
-        
+
         // Treasury should decrease by total miner rewards
         let expected_treasury = initial_treasury - total_miner_rewards;
         assert_eq!(generator.treasury_balance(), expected_treasury);
@@ -1214,36 +1222,36 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
-        
+
         // Create users and their refunds
         let user1 = Address::from([30_u8; 20]);
         let user2 = Address::from([31_u8; 20]);
-        
+
         let tx1_id = H256::from([40_u8; 32]);
         let tx2_id = H256::from([41_u8; 32]);
         let tx3_id = H256::from([42_u8; 32]);
-        
+
         let refund1 = U256::from(500);
         let refund2 = U256::from(700);
         let refund3 = U256::from(300);
         let total_refunds = refund1 + refund2 + refund3;
-        
+
         let mut user_perm_fee_refunds = BTreeMap::new();
         // User1 has two refunds
         user_perm_fee_refunds.insert(user1, vec![(tx1_id, refund1), (tx2_id, refund2)]);
         // User2 has one refund
         user_perm_fee_refunds.insert(user2, vec![(tx3_id, refund3)]);
-        
+
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds,
         };
-        
+
         let mut publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
-        
+
         // Create expected shadow transactions
         let mut expected_shadow_txs = vec![
             // Block reward
@@ -1256,7 +1264,7 @@ mod tests {
                 transaction_fee: 0,
             },
         ];
-        
+
         // Add user refunds in sorted order (BTreeMap guarantees address order)
         for (user, refund_list) in expired_fees.user_perm_fee_refunds.iter() {
             for (tx_id, refund_amount) in refund_list.iter() {
@@ -1272,7 +1280,7 @@ mod tests {
                 });
             }
         }
-        
+
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1285,7 +1293,7 @@ mod tests {
             initial_treasury,
             &expired_fees,
         );
-        
+
         // Compare actual with expected
         generator
             .by_ref()
@@ -1294,7 +1302,7 @@ mod tests {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
             });
-        
+
         // Treasury should decrease by total refunds
         let expected_treasury = initial_treasury - total_refunds;
         assert_eq!(generator.treasury_balance(), expected_treasury);
@@ -1308,40 +1316,40 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
-        
+
         // Create miners and rewards
         let miner1 = Address::from([10_u8; 20]);
         let miner2 = Address::from([11_u8; 20]);
         let miner1_reward = U256::from(2000);
         let miner2_reward = U256::from(3000);
-        
+
         let miner1_hash = RollingHash(U256::from_be_bytes([1_u8; 32]));
         let miner2_hash = RollingHash(U256::from_be_bytes([2_u8; 32]));
-        
+
         let mut miner_balance_increment = BTreeMap::new();
         miner_balance_increment.insert(miner1, (miner1_reward, miner1_hash));
         miner_balance_increment.insert(miner2, (miner2_reward, miner2_hash));
-        
+
         // Create users and refunds
         let user1 = Address::from([30_u8; 20]);
         let tx1_id = H256::from([40_u8; 32]);
         let refund1 = U256::from(800);
-        
+
         let mut user_perm_fee_refunds = BTreeMap::new();
         user_perm_fee_refunds.insert(user1, vec![(tx1_id, refund1)]);
-        
+
         let total_payouts = miner1_reward + miner2_reward + refund1;
-        
+
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment,
             user_perm_fee_refunds,
         };
-        
+
         let mut publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
-        
+
         // Create expected shadow transactions
         let mut expected_shadow_txs = vec![
             // Block reward
@@ -1354,7 +1362,7 @@ mod tests {
                 transaction_fee: 0,
             },
         ];
-        
+
         // Add miner rewards first
         for (miner, (reward, hash)) in expired_fees.miner_balance_increment.iter() {
             expected_shadow_txs.push(ShadowMetadata {
@@ -1368,7 +1376,7 @@ mod tests {
                 transaction_fee: 0,
             });
         }
-        
+
         // Then add user refunds
         for (user, refund_list) in expired_fees.user_perm_fee_refunds.iter() {
             for (tx_id, refund_amount) in refund_list.iter() {
@@ -1384,7 +1392,7 @@ mod tests {
                 });
             }
         }
-        
+
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1397,7 +1405,7 @@ mod tests {
             initial_treasury,
             &expired_fees,
         );
-        
+
         // Compare actual with expected
         generator
             .by_ref()
@@ -1406,7 +1414,7 @@ mod tests {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
             });
-        
+
         // Treasury should decrease by total payouts (rewards + refunds)
         let expected_treasury = initial_treasury - total_payouts;
         assert_eq!(generator.treasury_balance(), expected_treasury);
@@ -1420,30 +1428,28 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
-        
+
         // Empty expired fees
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: BTreeMap::new(),
         };
-        
+
         let mut publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
-        
+
         // Only expect block reward
-        let expected_shadow_txs = vec![
-            ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                    BlockRewardIncrement {
-                        amount: reward_amount.into(),
-                    },
-                )),
-                transaction_fee: 0,
-            },
-        ];
-        
+        let expected_shadow_txs = vec![ShadowMetadata {
+            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                BlockRewardIncrement {
+                    amount: reward_amount.into(),
+                },
+            )),
+            transaction_fee: 0,
+        }];
+
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
@@ -1456,7 +1462,7 @@ mod tests {
             initial_treasury,
             &expired_fees,
         );
-        
+
         // Compare actual with expected
         generator
             .by_ref()
@@ -1465,7 +1471,7 @@ mod tests {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
             });
-        
+
         // Treasury should remain unchanged (no expired fees to pay)
         assert_eq!(generator.treasury_balance(), initial_treasury);
     }

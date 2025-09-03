@@ -591,7 +591,7 @@ mod tests {
             irys_ref: FixedBytes::<32>::from_slice(&[0xcc; 32]),
         }));
         let topic = tx.topic();
-        let expected_topic = FixedBytes::<32>::from(keccak256("SHADOW_TX_PERM_FEE_REFUND"));
+        let expected_topic = keccak256("SHADOW_TX_PERM_FEE_REFUND");
         assert_eq!(topic, expected_topic, "topic mismatch");
     }
 }

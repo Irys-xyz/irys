@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, block_tree_service::BlockTreeServiceMessage,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDiff,
+    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
@@ -65,13 +65,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDiff,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -84,7 +78,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
+                LedgerExpiryBalanceDiff {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                },
             ))
         }
     }
@@ -171,13 +168,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDiff,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -190,7 +181,10 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
+                LedgerExpiryBalanceDiff {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                },
             ))
         }
     }
@@ -277,13 +271,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDiff,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -296,7 +284,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
+                LedgerExpiryBalanceDiff {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                },
             ))
         }
     }
@@ -394,13 +385,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDiff,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -413,7 +398,10 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
+                LedgerExpiryBalanceDiff {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                },
             ))
         }
     }
@@ -619,13 +607,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDiff,
         )> {
             // Create publish ledger with duplicate proofs from the same signer for one transaction
             // This tests that each transaction must have unique signers
@@ -644,7 +626,10 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                     txs: vec![self.data_tx.clone()],
                     proofs: Some(proofs),
                 },
-                std::collections::BTreeMap::new(),
+                LedgerExpiryBalanceDiff {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                },
             ))
         }
     }
@@ -817,13 +802,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDiff,
         )> {
             Ok((
                 vec![SystemTransactionLedger {
@@ -836,7 +815,10 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
+                LedgerExpiryBalanceDiff {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                },
             ))
         }
     }
