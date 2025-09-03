@@ -444,7 +444,8 @@ impl NodeConfig {
 
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
-                incremental_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+                incremental_change: Amount::token(dec!(0.00000000000001))
+                    .expect("valid token amount"),
                 smoothing_interval: 15,
             },
             mining_key,
@@ -565,7 +566,8 @@ impl NodeConfig {
 
             oracle: OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
-                incremental_change: Amount::percentage(dec!(0.01)).expect("valid percentage"),
+                incremental_change: Amount::token(dec!(0.00000000000001))
+                    .expect("valid token amount"),
                 smoothing_interval: 15,
             },
             mining_key,

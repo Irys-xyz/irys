@@ -290,7 +290,7 @@ mod tests {
     const TEST_SLEEP_MS: u64 = 11_000; // Test sleep duration
                                        //
     #[tokio::test]
-    async fn test_data_request_tracker_score_limiting() {
+    async fn slow_test_data_request_tracker_score_limiting() {
         let tracker = DataRequestTracker::new();
         let peer_addr = Address::from([1_u8; 20]);
 

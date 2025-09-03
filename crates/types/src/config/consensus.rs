@@ -1,7 +1,10 @@
 use crate::serde_utils;
 use crate::{
     storage_pricing::{
-        phantoms::{CostPerGb, DecayRate, Irys, IrysPrice, Percentage, Usd},
+        phantoms::{
+            CostPerChunk, CostPerChunkDurationAdjusted, CostPerGb, DecayRate, Irys, IrysPrice,
+            Percentage, Usd,
+        },
         Amount,
     },
     H256,
@@ -9,6 +12,7 @@ use crate::{
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
+use eyre::Result;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -149,6 +153,14 @@ pub struct ConsensusConfig {
         serialize_with = "serde_utils::serializes_percentage_amount"
     )]
     pub immediate_tx_inclusion_reward_percent: Amount<Percentage>,
+
+    /// Minimum term fee in USD that must be paid for term storage
+    /// If calculated fee is below this threshold, it will be rounded up
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub minimum_term_fee_usd: Amount<(CostPerChunkDurationAdjusted, Usd)>,
 
     /// Maximum future drift
     #[serde(
@@ -353,6 +365,34 @@ impl ConsensusConfig {
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
+    /// Calculate the number of epochs in one year based on network parameters
+    pub fn epochs_per_year(&self) -> u64 {
+        const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
+        let seconds_per_epoch =
+            self.difficulty_adjustment.block_time * self.epoch.num_blocks_in_epoch;
+        SECONDS_PER_YEAR / seconds_per_epoch
+    }
+
+    /// Convert years to epochs based on network parameters
+    pub fn years_to_epochs(&self, years: u64) -> u64 {
+        years * self.epochs_per_year()
+    }
+
+    /// Compute cost per chunk per epoch from annual cost per GB
+    pub fn cost_per_chunk_per_epoch(&self) -> Result<Amount<(CostPerChunk, Usd)>> {
+        const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
+        let chunks_per_gb = BYTES_PER_GB / self.chunk_size;
+        let epochs_per_year = self.epochs_per_year();
+
+        // Convert annual_cost_per_gb to cost_per_chunk_per_epoch
+        // annual_cost_per_gb / chunks_per_gb / epochs_per_year
+        let annual_decimal = self.annual_cost_per_gb.token_to_decimal()?;
+        let cost_per_chunk_per_year = annual_decimal / Decimal::from(chunks_per_gb);
+        let cost_per_chunk_per_epoch = cost_per_chunk_per_year / Decimal::from(epochs_per_year);
+
+        Amount::token(cost_per_chunk_per_epoch)
+    }
+
     // this is a config used for testing
     pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
@@ -460,6 +500,7 @@ impl ConsensusConfig {
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             max_future_timestamp_drift_millis: 15_000,
         }
     }
@@ -571,6 +612,7 @@ impl ConsensusConfig {
             },
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             max_future_timestamp_drift_millis: 15_000,
         }
     }

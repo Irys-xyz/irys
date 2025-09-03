@@ -416,6 +416,7 @@ mod tests {
         pledge_base_value = 950.0
         pledge_decay = 0.9
         immediate_tx_inclusion_reward_percent = 0.05
+        minimum_term_fee_usd = 0.01
 
         [genesis]
         miner_address = "0x0000000000000000000000000000000000000000"
