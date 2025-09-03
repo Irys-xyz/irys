@@ -57,11 +57,11 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     assert_eq!(json_response.block_index_height, 0);
 
-    // advance enough blocks to cause 1 block to migrate from mempool to index
-    ctx.mine_blocks(block_migration_depth as usize + 1).await?;
+    // advance enough blocks to cause 2 blocks to migrate from mempool to index
+    ctx.mine_blocks(block_migration_depth as usize + 2).await?;
 
-    // wait for 1 block in the index
-    if let Err(e) = ctx.wait_until_block_index_height(1, 10).await {
+    // wait for 2 blocks in the index
+    if let Err(e) = ctx.wait_until_block_index_height(2, 10).await {
         panic!("Error waiting for block height on chain. Error: {:?}", e);
     }
 
@@ -70,8 +70,8 @@ async fn heavy_external_api() -> eyre::Result<()> {
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
 
-    // check the api endpoint again, and it should now show 1 block in the index
-    assert_eq!(json_response.block_index_height, 1);
+    // check the api endpoint again, and it should now show 2 blocks are in the index
+    assert_eq!(json_response.block_index_height, 2);
 
     // tests should check total number of json objects returned are equal to the number requested.
     // Ideally should also check that the expected fields of those objects are present.
@@ -85,7 +85,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
                 response.json().await.expect("valid BlockIndexItem");
             if limit == 0 {
                 // check the returned items, when default limit is 0 or the limit is omitted
-                assert_eq!(json_response.len() as u64, migrated_blocks);
+                assert_eq!(json_response.len() as u64, migrated_blocks + 1 - height);
             } else {
                 // check the number of items returned matches the limit
                 assert_eq!(json_response.len() as u64, limit);
