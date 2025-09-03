@@ -1564,13 +1564,12 @@ pub async fn data_txs_are_valid(
 
         // Calculate expected fees based on data size using block's EMA
         // Calculate term fee first as it's needed for perm fee calculation
-        // Get the epochs from the Submit ledger in the block
-        let epochs_for_storage = block
-            .data_ledgers
-            .iter()
-            .find(|ledger| ledger.ledger_id == DataLedger::Submit as u32)
-            .and_then(|ledger| ledger.expires)
-            .unwrap_or(config.consensus.epoch.submit_ledger_epoch_length);
+        // Calculate epochs for storage using the same method as mempool
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            block.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            config.consensus.epoch.submit_ledger_epoch_length,
+        );
 
         let expected_term_fee = calculate_term_storage_base_network_fee(
             tx.data_size,
