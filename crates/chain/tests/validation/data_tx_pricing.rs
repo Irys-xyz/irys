@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
     async_trait, block_tree_service::BlockTreeServiceMessage,
@@ -7,10 +5,12 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
+use irys_types::storage_pricing::Amount;
 use irys_types::{
-    CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
+    H256List, IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
+use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
@@ -110,14 +110,39 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
-    // Create block with evil strategy
+    let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
+
+    let mut evil_config = genesis_node.node_ctx.config.node_config.clone();
+    evil_config
+        .consensus
+        .get_mut()
+        .immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+
+    // Create a block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
-            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+            inner: Arc::new(BlockProducerInner {
+                config: Config::new(evil_config),
+                db: genesis_block_prod.db.clone(),
+                block_discovery: genesis_block_prod.block_discovery.clone(),
+                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
+                service_senders: genesis_block_prod.service_senders.clone(),
+                reward_curve: genesis_block_prod.reward_curve.clone(),
+                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
+                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
+                price_oracle: genesis_block_prod.price_oracle.clone(),
+                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
+                reth_provider: genesis_block_prod.reth_provider.clone(),
+                shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
+                reth_service: genesis_block_prod.reth_service.clone(),
+                beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
+                block_index: genesis_block_prod.block_index.clone(),
+            }),
         },
     };
 
+    // This is the line that doesn't work
     let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
         .await?

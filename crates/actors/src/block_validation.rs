@@ -23,8 +23,10 @@ use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTIN
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
+use irys_types::get_ingress_proofs;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{Amount, TERM_FEE};
+use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -33,7 +35,6 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
-use irys_types::{get_ingress_proofs, BlockHash};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -411,6 +412,10 @@ pub async fn prevalidate_block(
     if !block.is_signature_valid() {
         return Err(PreValidationError::BlockSignatureInvalid);
     }
+
+    // TODO: add validation for the term ledger 'expires' field,
+    // ensuring it gets properly updated on epoch boundaries, and it's
+    // consistent with the block's height and parent block's height
 
     Ok(())
 }
@@ -1373,44 +1378,28 @@ pub fn calculate_perm_storage_total_fee(
     ema_snapshot: &EmaSnapshot,
     config: &Config,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    // Calculate the cost per GB (take into account replica count & cost per replica)
-    let cost_per_gb = config
-        .consensus
-        .annual_cost_per_gb
-        .cost_per_replica(
-            config.consensus.safe_minimum_number_of_years,
-            config.consensus.decay_rate,
-        )?
-        .replica_count(config.consensus.number_of_ingress_proofs_total)?;
-
-    // Calculate the base network fee (protocol cost) using the provided EMA snapshot
-    let base_network_fee = cost_per_gb.base_network_fee(
-        U256::from(bytes_to_store),
+    calculate_perm_fee_from_config(
+        bytes_to_store,
+        &config.consensus,
         ema_snapshot.ema_for_public_pricing(),
-    )?;
-
-    // Add ingress proof rewards to the base network fee
-    // Total perm_fee = base network fee + (num_ingress_proofs × immediate_tx_inclusion_reward_percent × term_fee)
-    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        config.consensus.number_of_ingress_proofs_total,
-        config.consensus.immediate_tx_inclusion_reward_percent,
-    )?;
-
-    Ok(total_perm_fee)
+    )
 }
 
 /// Helper function to calculate term storage fee using a specific EMA snapshot
-/// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
-/// when term storage pricing is fully implemented
+/// Uses the same replica count as permanent storage but for the specified number of epochs
 pub fn calculate_term_storage_base_network_fee(
-    _bytes_to_store: u64,
-    _ema_snapshot: &EmaSnapshot,
-    _config: &Config,
+    bytes_to_store: u64,
+    epochs_for_storage: u64,
+    ema_snapshot: &EmaSnapshot,
+    config: &Config,
 ) -> eyre::Result<U256> {
-    // Placeholder implementation matching the mempool service
-    // Returns a fixed value until proper term fee calculation is implemented
-    Ok(TERM_FEE)
+    irys_types::storage_pricing::calculate_term_fee(
+        bytes_to_store,
+        epochs_for_storage,
+        &config.consensus,
+        ema_snapshot.ema_for_public_pricing(),
+    )
 }
 
 /// Validates that data transactions in a block are correctly placed and have valid properties
@@ -1585,9 +1574,20 @@ pub async fn data_txs_are_valid(
 
         // Calculate expected fees based on data size using block's EMA
         // Calculate term fee first as it's needed for perm fee calculation
-        let expected_term_fee =
-            calculate_term_storage_base_network_fee(tx.data_size, &block_ema, config)
-                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+        // Calculate epochs for storage using the same method as mempool
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            block.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            config.consensus.epoch.submit_ledger_epoch_length,
+        );
+
+        let expected_term_fee = calculate_term_storage_base_network_fee(
+            tx.data_size,
+            epochs_for_storage,
+            &block_ema,
+            config,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
         let expected_perm_fee =
             calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)
                 .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;

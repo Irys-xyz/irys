@@ -793,7 +793,6 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// assert txs return to mempool
 /// gossip returned txs to C
 /// mine a block on C, assert that all reorgd txs are present
-
 #[actix_web::test]
 async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     std::env::set_var(
@@ -1468,7 +1467,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis_config.consensus.extend_genesis_accounts(vec![(
         rich_account.address(),
         GenesisAccount {
-            balance: U256::from(1000000000000000000_u128), // 1 IRYS
+            balance: U256::from(100000000000000000000_u128), // 100 IRYS
             ..Default::default()
         },
     )]);
@@ -1566,7 +1565,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
-        value: Some(U256::from(1000000000000000_u128)),
+        value: Some(U256::from(1000000000000000000_u128)),
         nonce: Some(1),
         chain_id: Some(chain_id),
         ..Default::default()
@@ -1658,7 +1657,8 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     wait_for_evm_tx(&peer2_reth_context, tx_env2.hash()).await?;
 
-    expected_recipient2_balance += U256::from(1000000000000000_u128);
+    // Initial balance + received value
+    expected_recipient2_balance += U256::from(1000000000000000000_u128);
 
     // Mine blocks on both peers in parallel to create a fork
     let (result1, result2) = tokio::join!(

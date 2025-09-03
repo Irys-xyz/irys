@@ -391,6 +391,7 @@ pub trait BlockProdStrategy {
             mut publish_txs,
             expired_ledger_fees,
         ) = self.get_mempool_txs(&prev_block_header).await?;
+
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -441,16 +442,14 @@ pub trait BlockProdStrategy {
         };
 
         if !block.data_ledgers[DataLedger::Publish].tx_ids.is_empty() {
-            let x = 5;
             debug!(
-                "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?} {}",
+                "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?}",
                 block.block_hash,
                 block.height,
                 block.solution_hash,
                 block.vdf_limiter_info.global_step_number,
                 block.previous_block_hash,
                 block.data_ledgers[DataLedger::Publish].tx_ids,
-                x
             );
         }
 
@@ -639,7 +638,12 @@ pub trait BlockProdStrategy {
         let evm_block_hash = eth_built_payload.hash();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash);
+            warn!(
+                "Skipping solution for old step number {}, previous block step number {} for block {}",
+                solution.vdf_step,
+                prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_hash
+            );
             return Ok(None);
         }
 
@@ -812,7 +816,13 @@ pub trait BlockProdStrategy {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {
             if stats.is_adjusted {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                info!(
+                    "🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ",
+                    stats.actual_block_time,
+                    stats.percent_different,
+                    stats.target_block_time,
+                    stats.min_threshold
+                );
                 info!(
                     max_difficulty = ?U256::MAX,
                     previous_cumulative_diff = ?block.previous_cumulative_diff,
@@ -821,7 +831,13 @@ pub trait BlockProdStrategy {
                 );
                 is_difficulty_updated = true;
             } else {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                info!(
+                    "🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.",
+                    stats.actual_block_time,
+                    stats.percent_different,
+                    stats.target_block_time,
+                    stats.min_threshold
+                );
             }
         }
 
