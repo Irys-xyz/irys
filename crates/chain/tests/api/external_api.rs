@@ -84,10 +84,10 @@ async fn heavy_external_api() -> eyre::Result<()> {
             let json_response: Vec<BlockIndexItem> =
                 response.json().await.expect("valid BlockIndexItem");
             if limit == 0 {
-                // check the returned items, when default limit is 0 or the limit is ommitted
+                // check the returned items, when default limit is 0 or the limit is omitted
                 assert_eq!(json_response.len() as u64, migrated_blocks);
             } else {
-                // check the number of itms returned matches the limit
+                // check the number of items returned matches the limit
                 assert_eq!(json_response.len() as u64, limit);
             }
         }
