@@ -266,10 +266,8 @@ impl Encode for H256 {
 
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        if value.len() != 32 {
-            return Err(DatabaseError::Decode);
-        }
-        Ok(Self::from_slice(value))
+        let arr: [u8; 32] = value.try_into().map_err(|_| DatabaseError::Decode)?;
+        Ok(Self::from(arr))
     }
 }
 
@@ -495,13 +493,13 @@ impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
         let bytes = FromBase58::from_base58(base58_string)
             .map_err(|e| format!("Failed to decode from base58 {:?}", e))?;
-        if bytes.len() != 32 {
-            return Err(format!(
+        let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            format!(
                 "Invalid H256 length: expected 32 bytes, got {}",
                 bytes.len()
-            ));
-        }
-        Ok(Self::from_slice(bytes.as_slice()))
+            )
+        })?;
+        Ok(Self::from(arr))
     }
 
     fn empty() -> Self {

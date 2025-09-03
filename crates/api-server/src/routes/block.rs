@@ -156,11 +156,13 @@ impl FromStr for BlockParam {
                     return Ok(Self::BlockHeight(block_height));
                 }
                 match s.from_base58() {
-                    Ok(v) if v.len() == 32 => Ok(Self::Hash(H256::from_slice(v.as_slice()))),
-                    Ok(v) => Err(format!(
-                        "Invalid block tag parameter: expected 32 bytes, got {}",
-                        v.len()
-                    )),
+                    Ok(v) => match v.as_slice().try_into() {
+                        Ok(arr) => Ok(Self::Hash(H256::from(arr))),
+                        Err(_) => Err(format!(
+                            "Invalid block tag parameter: expected 32 bytes, got {}",
+                            v.len()
+                        )),
+                    },
                     Err(_) => Err("Invalid block tag parameter".to_string()),
                 }
             }
