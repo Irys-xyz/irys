@@ -584,7 +584,7 @@ impl StorageModule {
         }
         drop(pending);
 
-        // fsync this write batch BEFORE commiting the interval state
+        // fsync this write batch BEFORE committing the interval state
         // as fsync can error on us if the underlying storage has issues
         for (_, submodule) in self.submodules.iter() {
             let file = submodule.file.lock().unwrap();
