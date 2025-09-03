@@ -1086,7 +1086,10 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         .in_current_span()
         .await?
     } else {
-        BTreeMap::new()
+        ledger_expiry::LedgerExpiryBalanceDiff {
+            miner_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: BTreeMap::new(),
+        }
     };
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(

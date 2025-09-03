@@ -64,6 +64,8 @@ pub enum TransactionPacket {
     TermFeeReward(BalanceIncrement),
     /// Ingress proof reward payment to providers who submitted valid proofs (balance increment).
     IngressProofReward(BalanceIncrement),
+    /// Permanent fee refund to users whose transactions were not promoted before ledger expiry (balance increment).
+    PermFeeRefund(BalanceIncrement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -91,6 +93,7 @@ impl TransactionPacket {
             },
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
+            Self::PermFeeRefund(inc) => Some(inc.target),
         }
     }
 }
@@ -115,6 +118,8 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_TERM_FEE_REWARD").0);
     pub static INGRESS_PROOF_REWARD: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD").0);
+    pub static PERM_FEE_REFUND: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND").0);
 }
 
 impl ShadowTransaction {
@@ -181,6 +186,7 @@ impl TransactionPacket {
             Self::Unpledge(_) => (*UNPLEDGE).into(),
             Self::TermFeeReward(_) => (*TERM_FEE_REWARD).into(),
             Self::IngressProofReward(_) => (*INGRESS_PROOF_REWARD).into(),
+            Self::PermFeeRefund(_) => (*PERM_FEE_REFUND).into(),
         }
     }
 }
@@ -194,6 +200,7 @@ pub const PLEDGE_ID: u8 = 0x05;
 pub const UNPLEDGE_ID: u8 = 0x06;
 pub const TERM_FEE_REWARD_ID: u8 = 0x07;
 pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
+pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -262,6 +269,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[INGRESS_PROOF_REWARD_ID])?;
                 inner.serialize(writer)
             }
+            Self::PermFeeRefund(inner) => {
+                writer.write_all(&[PERM_FEE_REFUND_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -282,6 +293,9 @@ impl BorshDeserialize for TransactionPacket {
             }
             INGRESS_PROOF_REWARD_ID => {
                 Self::IngressProofReward(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            PERM_FEE_REFUND_ID => {
+                Self::PermFeeRefund(BalanceIncrement::deserialize_reader(reader)?)
             }
             _ => {
                 return Err(borsh::io::Error::new(
@@ -543,5 +557,41 @@ mod tests {
         tx.serialize(&mut buf).unwrap();
         let decoded = ShadowTransaction::decode(&mut &buf[..]).unwrap();
         assert_eq!(decoded, tx, "decoding mismatch");
+    }
+
+    /// Check that `PermFeeRefund` packets roundtrip correctly through borsh
+    /// serialization and deserialization.
+    #[test]
+    fn perm_fee_refund_roundtrip() {
+        let tx = ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(BalanceIncrement {
+            amount: U256::from(500000_u64),
+            target: Address::repeat_byte(0x33),
+            irys_ref: FixedBytes::<32>::from_slice(&[0xbb; 32]),
+        }));
+        let mut buf = Vec::new();
+        tx.serialize(&mut buf).unwrap();
+        // Version (01) + Discriminant (09) + Amount (32 bytes) + Target (20 bytes) + IrysRef (32 bytes)
+        let expected = hex!(
+            "01" "09"
+            "000000000000000000000000000000000000000000000000000000000007a120"
+            "3333333333333333333333333333333333333333"
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(buf, expected, "encoding mismatch");
+        let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, tx, "decoding mismatch");
+    }
+
+    /// Verify that `PermFeeRefund` has the correct topic
+    #[test]
+    fn perm_fee_refund_topic() {
+        let tx = ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(BalanceIncrement {
+            amount: U256::from(1000_u64),
+            target: Address::repeat_byte(0x44),
+            irys_ref: FixedBytes::<32>::from_slice(&[0xcc; 32]),
+        }));
+        let topic = tx.topic();
+        let expected_topic = FixedBytes::<32>::from(keccak256("SHADOW_TX_PERM_FEE_REFUND"));
+        assert_eq!(topic, expected_topic, "topic mismatch");
     }
 }

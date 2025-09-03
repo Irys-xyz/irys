@@ -4,7 +4,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, RollingHash, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use actix::prelude::*;
 use alloy_consensus::{
@@ -32,12 +32,13 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
     TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
+use ledger_expiry::LedgerExpiryBalanceDiff;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -469,7 +470,7 @@ pub trait BlockProdStrategy {
         publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
-        expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>,
+        ledger_expiry_balance_diff: LedgerExpiryBalanceDiff,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -488,7 +489,7 @@ pub trait BlockProdStrategy {
             submit_txs,
             publish_txs,
             initial_treasury_balance,
-            &expired_ledger_fees,
+            &ledger_expiry_balance_diff,
         );
 
         let mut shadow_txs = Vec::new();
@@ -926,7 +927,7 @@ pub trait BlockProdStrategy {
         Vec<CommitmentTransaction>,
         Vec<DataTransactionHeader>,
         PublishLedgerWithTxs,
-        BTreeMap<Address, (U256, RollingHash)>,
+        LedgerExpiryBalanceDiff,
     )> {
         let config = &self.inner().config;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1020,7 +1021,10 @@ pub trait BlockProdStrategy {
             };
             // IMPORTANT: Commitment txs get billed on regular blocks
             commitment_txs_to_bill = mempool_txs.commitment_tx;
-            aggregated_miner_fees = BTreeMap::new();
+            aggregated_miner_fees = LedgerExpiryBalanceDiff {
+                miner_balance_increment: BTreeMap::new(),
+                user_perm_fee_refunds: BTreeMap::new(),
+            };
         };
         let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
             vec![system_transaction_ledger]
@@ -1099,7 +1103,7 @@ pub trait BlockProdStrategy {
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
-    ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
+    ) -> eyre::Result<LedgerExpiryBalanceDiff> {
         ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
             block_height,
