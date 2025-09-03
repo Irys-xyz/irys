@@ -75,14 +75,21 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     // tests should check total number of json objects returned are equal to the number requested.
     // Ideally should also check that the expected fields of those objects are present.
-    for limit in 0..2 {
-        for height in 0..2 {
+    let migrated_blocks = 2;
+    for limit in 0..migrated_blocks {
+        for height in 0..migrated_blocks {
             let mut response = block_index_endpoint_request(&address, height, limit).await;
             assert_eq!(response.status(), 200);
             assert_eq!(response.content_type(), ContentType::json().to_string());
             let json_response: Vec<BlockIndexItem> =
                 response.json().await.expect("valid BlockIndexItem");
-            assert_eq!(json_response.len() as u64, limit);
+            if limit == 0 {
+                // check the returned items, when default limit is 0 or the limit is ommitted
+                assert_eq!(json_response.len() as u64, migrated_blocks);
+            } else {
+                // check the number of itms returned matches the limit
+                assert_eq!(json_response.len() as u64, limit);
+            }
         }
     }
 
