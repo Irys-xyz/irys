@@ -1,4 +1,5 @@
 mod data_tx_pricing;
+mod invalid_perm_fee_refund;
 
 use std::sync::Arc;
 

@@ -673,33 +673,15 @@ fn aggregate_balance_diff(
 
         // process refunds of perm fee if the tx was not promoted
         {
-            tracing::debug!(
-                "Checking tx {} for perm fee refund: promoted_height={:?}, perm_fee={:?}",
-                data_tx.id,
-                data_tx.promoted_height,
-                data_tx.perm_fee
-            );
-
             if data_tx.promoted_height.is_none() {
                 // Only process refund if perm_fee exists (should always be present for unpromoted txs)
-                if let Some(perm_fee) = data_tx.perm_fee {
-                    tracing::debug!(
-                        "Issuing perm fee refund for unpromoted tx {}: {} wei to {}",
-                        data_tx.id,
-                        perm_fee,
-                        data_tx.signer
-                    );
-
-                    // Add refund to the vector (already sorted by tx_id due to transaction sorting)
-                    balance_diff
-                        .user_perm_fee_refunds
-                        .push((data_tx.id, perm_fee, data_tx.signer));
-                } else {
-                    tracing::warn!(
-                        "Unpromoted transaction {} has no perm_fee to refund",
-                        data_tx.id
-                    );
-                }
+                let perm_fee = data_tx
+                    .perm_fee
+                    .ok_or_eyre("unpromoted tx should have the prem fee present")?;
+                // Add refund to the vector (already sorted by tx_id due to transaction sorting)
+                balance_diff
+                    .user_perm_fee_refunds
+                    .push((data_tx.id, perm_fee, data_tx.signer));
             } else {
                 tracing::debug!(
                     "Tx {} was promoted at height {:?}, no refund needed",
