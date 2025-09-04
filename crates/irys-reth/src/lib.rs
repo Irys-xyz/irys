@@ -568,9 +568,10 @@ mod tests {
         let amount = U256::from(7000000000000000000_u64);
         let shadow_tx = compose_shadow_tx(
             1,
-            &ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount,
-            })),
+            &ShadowTransaction::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement { amount }),
+                alloy_primitives::FixedBytes::ZERO,
+            ),
             0, // Block rewards must have 0 priority fee
         );
         let shadow_tx = sign_tx(shadow_tx, &ctx.block_producer_a).await;
@@ -795,11 +796,14 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create and submit a shadow transaction trying to decrement balance of non-existent account
-        let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-            amount: U256::ONE,
-            target: nonexistent_address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let shadow_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: U256::ONE,
+                target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_tx_hashes = vec![*shadow_tx.hash()];
@@ -850,11 +854,14 @@ mod tests {
 
         // Create a shadow tx that tries to decrement more than the balance
         let decrement_amount = funded_balance + U256::ONE;
-        let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-            amount: decrement_amount,
-            target: ctx.normal_signer.address(),
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let shadow_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: decrement_amount,
+                target: ctx.normal_signer.address(),
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let shadow_tx_hashes = vec![*shadow_tx.hash()];
@@ -1510,11 +1517,14 @@ mod tests {
 
         // Create pledge transaction with a smaller amount to ensure it's less than initial balance
         let pledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
-        let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
-            amount: pledge_amount,
-            target: target_address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let pledge_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: pledge_amount,
+                target: target_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.normal_signer, DEFAULT_PRIORITY_FEE).await?;
         let pledge_tx_hash = *pledge_tx.hash();
 
@@ -1554,13 +1564,16 @@ mod tests {
 
         // Now create unpledge transaction
         let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
-        let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
-                amount: unpledge_amount,
-                target: target_address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-        ));
+        let unpledge_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
+                BalanceIncrement {
+                    amount: unpledge_amount,
+                    target: target_address,
+                    irys_ref: alloy_primitives::FixedBytes::ZERO,
+                },
+            )),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
@@ -1683,13 +1696,16 @@ mod tests {
 
         // Create unpledge transaction for non-existent account
         let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 IRYS
-        let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
-                amount: unpledge_amount,
-                target: nonexistent_address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-        ));
+        let unpledge_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
+                BalanceIncrement {
+                    amount: unpledge_amount,
+                    target: nonexistent_address,
+                    irys_ref: alloy_primitives::FixedBytes::ZERO,
+                },
+            )),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
@@ -1754,11 +1770,14 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create pledge transaction for non-existent account
-        let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
-            amount: U256::ONE,
-            target: nonexistent_address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let pledge_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: U256::ONE,
+                target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let pledge_tx =
             sign_shadow_tx(pledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let pledge_tx_hash = *pledge_tx.hash();
@@ -1806,10 +1825,12 @@ mod tests {
 
         // Fund the target account first to ensure it can pay priority fees
         let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
-        let fund_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+        let fund_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
-            }));
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
 
@@ -1866,10 +1887,12 @@ mod tests {
 
         // Fund the target account first to ensure it can pay priority fees
         let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
-        let fund_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+        let fund_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
-            }));
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
 
@@ -2093,10 +2116,12 @@ mod tests {
 
         // Fund the target account first
         let funding_amount = U256::from(1_000_000_000_000_u128); // 1000 Gwei
-        let fund_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+        let fund_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
-            }));
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
 
@@ -2657,12 +2682,15 @@ pub mod test_utils {
             for shadow_tx in shadow_txs_raw {
                 // Use the shadow tx directly since metadata fields are removed
                 let updated_shadow_tx = match &shadow_tx {
-                    ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet.clone()),
+                    ShadowTransaction::V1 {
+                        packet,
+                        solution_hash,
+                    } => ShadowTransaction::new_v1(packet.clone(), *solution_hash),
                 };
 
                 // Block rewards must have 0 priority fee, others can use default
                 let priority_fee = match &shadow_tx {
-                    ShadowTransaction::V1 { packet } => match packet {
+                    ShadowTransaction::V1 { packet, .. } => match packet {
                         TransactionPacket::BlockReward(_) => 0,
                         _ => DEFAULT_PRIORITY_FEE,
                     },
@@ -2681,60 +2709,74 @@ pub mod test_utils {
 
     /// Compose a shadow tx for unstaking.
     pub fn unstake(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Unstake(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(shadow_tx::BalanceIncrement {
-                amount: U256::ONE,
-                target: address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-        ))
+        ShadowTransaction::new_v1(
+            TransactionPacket::Unstake(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
+                shadow_tx::BalanceIncrement {
+                    amount: U256::ONE,
+                    target: address,
+                    irys_ref: alloy_primitives::FixedBytes::ZERO,
+                },
+            )),
+            alloy_primitives::FixedBytes::ZERO,
+        )
     }
 
     /// Compose a shadow tx for block reward.
     pub fn block_reward() -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-            shadow_tx::BlockRewardIncrement { amount: U256::ONE },
-        ))
+        ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(shadow_tx::BlockRewardIncrement { amount: U256::ONE }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
     }
 
     /// Compose a shadow tx for staking.
     pub fn stake(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Stake(shadow_tx::BalanceDecrement {
-            amount: U256::ONE,
-            target: address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }))
-    }
-
-    /// Compose a shadow tx for storage fees.
-    pub fn storage_fees(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-            shadow_tx::BalanceDecrement {
-                amount: U256::ONE,
-                target: address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            },
-        ))
-    }
-
-    /// Compose a shadow tx for pledge.
-    pub fn pledge(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Pledge(shadow_tx::BalanceDecrement {
-            amount: U256::ONE,
-            target: address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }))
-    }
-
-    /// Compose a shadow tx for unpledge.
-    pub fn unpledge(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(shadow_tx::BalanceIncrement {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Stake(shadow_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
-        ))
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for storage fees.
+    pub fn storage_fees(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::StorageFees(shadow_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for pledge.
+    pub fn pledge(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Pledge(shadow_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unpledge.
+    pub fn unpledge(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
+                shadow_tx::BalanceIncrement {
+                    amount: U256::ONE,
+                    target: address,
+                    irys_ref: alloy_primitives::FixedBytes::ZERO,
+                },
+            )),
+            alloy_primitives::FixedBytes::ZERO,
+        )
     }
 
     /// Assert that a log topic is present in block execution receipts at least `desired_repetitions` times.
