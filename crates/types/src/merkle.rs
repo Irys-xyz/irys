@@ -212,6 +212,11 @@ pub fn validate_path(
     // Proof nodes (including leaf nodes) always contain their right bound
     let right_bound = leaf_proof.offset() as u128;
 
+    // Ensure the provided target_offset lies within the computed [left_bound, right_bound]
+    if !(left_bound..=right_bound).contains(&target_offset) {
+        return Err(eyre!("Invalid target_offset: out of bounds"));
+    }
+
     Ok(ValidatePathResult {
         leaf_hash: leaf_proof.data_hash,
         left_bound,
