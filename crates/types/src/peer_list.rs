@@ -484,4 +484,38 @@ mod tests {
         assert_eq!(consumed, 7);
         assert_eq!(decoded_address, original_address);
     }
+
+    #[test]
+    fn peer_list_item_compact_remainder_empty() {
+        let item = PeerListItem::default();
+        let mut buf = bytes::BytesMut::with_capacity(64);
+        item.to_compact(&mut buf);
+        let (_decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
+        assert!(
+            remainder.is_empty(),
+            "expected no remainder after decoding full buffer"
+        );
+    }
+
+    #[test]
+    fn peer_list_item_from_compact_missing_is_online() {
+        let item = PeerListItem::default();
+        let mut buf = bytes::BytesMut::with_capacity(64);
+        item.to_compact(&mut buf);
+        // Remove the optional is_online byte
+        assert!(buf.len() >= 1);
+        buf.truncate(buf.len() - 1);
+
+        let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
+        assert!(
+            remainder.is_empty(),
+            "expected no remainder after decoding without is_online byte"
+        );
+
+        assert_eq!(decoded.reputation_score, item.reputation_score);
+        assert_eq!(decoded.response_time, item.response_time);
+        assert_eq!(decoded.address, item.address);
+        assert_eq!(decoded.last_seen, item.last_seen);
+        assert_eq!(decoded.is_online, false);
+    }
 }
