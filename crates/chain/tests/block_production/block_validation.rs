@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
-use irys_types::{NodeConfig, U256, H256};
+use irys_types::{NodeConfig, H256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
