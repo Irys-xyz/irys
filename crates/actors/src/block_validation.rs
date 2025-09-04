@@ -39,6 +39,7 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
+use reth::revm::primitives::FixedBytes;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
@@ -1029,7 +1030,7 @@ pub async fn shadow_transactions_are_valid(
     .await?;
 
     // 4. Validate they match
-    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter())
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
 }
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
@@ -1096,6 +1097,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &block.reward_address,
         &block.reward_amount,
         &prev_block,
+        &block.solution_hash,
         &config.consensus,
         &commitment_txs,
         &data_txs,
@@ -1195,6 +1197,7 @@ async fn extract_publish_ledger_with_txs(
 fn validate_shadow_transactions_match(
     actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
     expected: impl Iterator<Item = ShadowTransaction>,
+    block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
     // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
@@ -1205,6 +1208,25 @@ fn validate_shadow_transactions_match(
             eyre::bail!("actual and expected shadow txs lens differ");
         };
         let actual = actual?;
+
+        // Validate solution hash for all V1 transactions
+        if let ShadowTransaction::V1 {
+            packet: _,
+            solution_hash,
+        } = &actual
+        {
+            // Verify solution hash matches the block
+            let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
+            if *solution_hash != expected_hash {
+                eyre::bail!(
+                    "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
+                    idx,
+                    block_header.solution_hash,
+                    solution_hash
+                );
+            }
+        }
+
         ensure!(
             actual == expected,
             "Shadow transaction mismatch at idx {}. expected {:?}, got {:?}",
