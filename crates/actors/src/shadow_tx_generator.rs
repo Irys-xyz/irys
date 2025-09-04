@@ -61,9 +61,23 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a mut PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_diff: &'a LedgerExpiryBalanceDiff,
-    ) -> Self {
+    ) -> Result<Self> {
         // Sort publish ledger transactions by id for deterministic processing
         publish_ledger.txs.sort();
+
+        // Validate that no transaction in publish ledger has a refund
+        // (promoted transactions should not get perm_fee refunds)
+        for tx in &publish_ledger.txs {
+            for (refund_tx_id, _, _) in &ledger_expiry_balance_diff.user_perm_fee_refunds {
+                if tx.id == *refund_tx_id {
+                    return Err(eyre!(
+                        "Transaction {} is in publish ledger but also has a perm_fee refund scheduled. \
+                        Promoted transactions should not receive refunds.",
+                        tx.id
+                    ));
+                }
+            }
+        }
 
         tracing::debug!(
             "ShadowTxGenerator initialized with {} miner fee increments and {} user refund addresses",
@@ -71,7 +85,7 @@ impl<'a> ShadowTxGenerator<'a> {
             ledger_expiry_balance_diff.user_perm_fee_refunds.len()
         );
 
-        Self {
+        Ok(Self {
             block_height,
             reward_address,
             reward_amount,
@@ -86,7 +100,7 @@ impl<'a> ShadowTxGenerator<'a> {
             index: 0,
             current_publish_iter: None,
             current_expired_ledger_iter: None,
-        }
+        })
     }
 
     /// Get the current treasury balance
@@ -764,7 +778,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &empty_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -876,7 +891,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &empty_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -920,11 +936,11 @@ mod tests {
                 )),
                 transaction_fee: 0,
             },
-            // Storage fee for the submit transaction
+            // Storage fee for the submit transaction (treasury amount only)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
                     BalanceDecrement {
-                        amount: submit_tx.total_cost().into(),
+                        amount: term_charges.term_fee_treasury.into(),
                         target: submit_tx.signer,
                         irys_ref: submit_tx.id.into(),
                     },
@@ -951,7 +967,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &empty_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -1066,11 +1083,11 @@ mod tests {
                 )),
                 transaction_fee: 0,
             },
-            // Storage fee for the publish transaction
+            // Storage fee for the publish transaction (treasury amount + perm_fee)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
                     BalanceDecrement {
-                        amount: publish_tx.total_cost().into(),
+                        amount: (term_charges.term_fee_treasury + perm_fee).into(),
                         target: publish_tx.signer,
                         irys_ref: publish_tx.id.into(),
                     },
@@ -1128,7 +1145,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &empty_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -1216,7 +1234,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &expired_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -1310,7 +1329,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &expired_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -1419,7 +1439,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &expired_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator
@@ -1447,7 +1468,7 @@ mod tests {
         // Empty expired fees
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         };
 
         let mut publish_ledger = PublishLedgerWithTxs {
@@ -1476,7 +1497,8 @@ mod tests {
             &mut publish_ledger,
             initial_treasury,
             &expired_fees,
-        );
+        )
+        .expect("Should create generator");
 
         // Compare actual with expected
         generator

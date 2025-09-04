@@ -490,7 +490,7 @@ pub trait BlockProdStrategy {
             publish_txs,
             initial_treasury_balance,
             &ledger_expiry_balance_diff,
-        );
+        )?;
 
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {

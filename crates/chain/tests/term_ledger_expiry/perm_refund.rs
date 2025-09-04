@@ -107,8 +107,7 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     info!("Mining to expiry height {}", target_expiry_height);
 
     let current_height = node.get_canonical_chain_height().await;
-    let epochs_to_mine =
-        (target_expiry_height - current_height).div_ceil(BLOCKS_PER_EPOCH);
+    let epochs_to_mine = (target_expiry_height - current_height).div_ceil(BLOCKS_PER_EPOCH);
 
     for _ in 0..epochs_to_mine {
         let (_, height) = node.mine_until_next_epoch().await?;
@@ -129,13 +128,12 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         .into_iter()
         .filter(|tx| tx.input().len() >= 4)
         .filter_map(|tx| {
-            let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref())
-                .ok()?;
+            let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref()).ok()?;
             let packet = shadow_tx.as_v1()?;
             match packet {
-                                    TransactionPacket::PermFeeRefund(refund) => Some(refund.clone()),
-                                    _ => None,
-                                }
+                TransactionPacket::PermFeeRefund(refund) => Some(refund.clone()),
+                _ => None,
+            }
         })
         .collect();
 
