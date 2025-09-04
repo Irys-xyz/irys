@@ -77,6 +77,8 @@ pub enum PreValidationError {
     MerkleProofInvalid(String),
     #[error("Oracle price invalid")]
     OraclePriceInvalid,
+    #[error("Unable to update cache for scheduled validation at block_hash: {0}")]
+    UpdateCacheForScheduledValidationError(H256),
     #[error("PoA capacity chunk mismatch entropy_first={entropy_first:?} poa_first={poa_first:?}")]
     PoACapacityChunkMismatch {
         entropy_first: Option<u8>,

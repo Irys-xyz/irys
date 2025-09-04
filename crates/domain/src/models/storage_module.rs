@@ -492,6 +492,13 @@ impl StorageModule {
     }
 
     fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
+        // TODO: rework this function
+        // 1.) use batches for fsync, instead of the all the pending writes (reduces impact of write errors)
+        // 2.) pending writes are per-sm, we should delegate flushing to the StorageSubmodule
+        // doing this removes having to locate the correct submodule again in `write_chunk_internal`,
+        // and lets us increase throughput - we can spawn blocking tasks in parallel for each submodule (as each is it's own IO domain/drive)
+
+        let then = Instant::now();
         let threshold = if force {
             0
         } else {
@@ -507,13 +514,14 @@ impl StorageModule {
             let pending_writes = self
                 .submodules
                 .iter()
-                .flat_map(|(interval, _)| {
+                .flat_map(|(interval, _submodule)| {
                     let submodule_writes: Vec<_> = pending
                         .iter()
                         .filter(|(offset, _)| interval.contains_point(**offset))
                         .map(|(offset, state)| (*offset, state.clone()))
                         .collect();
 
+                    // each submodule is it's own "IO domain", so we don't process pending writes for one if it's queue is too small
                     if submodule_writes.len() as u64 >= threshold {
                         submodule_writes
                     } else {
@@ -526,21 +534,75 @@ impl StorageModule {
             pending_writes
         };
 
-        // Only acquire write lock if we have work to do
-        if !write_batch.is_empty() {
-            let mut pending = arc.write().unwrap();
-
-            for (chunk_offset, (bytes, chunk_type)) in write_batch {
-                // self.intervals are updated by write_chunk_internal()
-                self.write_chunk_internal(chunk_offset, bytes, chunk_type)?;
-                pending.remove(&chunk_offset); // Clean up written chunks
-            }
-
-            // Save the updated intervals
-            if self.write_intervals_to_submodules().is_err() {
-                error!("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign");
-            }
+        if write_batch.is_empty() {
+            return Ok(());
         }
+
+        let mut intervals = self
+            .intervals
+            .write()
+            .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+
+        // write every offset to the intervals file as Interrupted
+        // we sync the correct intervals state once the entire batch is written
+        for (chunk_offset, _) in write_batch.iter() {
+            Self::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                *chunk_offset,
+                ChunkType::Interrupted,
+            );
+        }
+
+        drop(intervals);
+
+        self.write_intervals_to_submodules()
+            .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
+
+        let len = write_batch.len();
+
+        let mut pending = arc.write().unwrap();
+        for (chunk_offset, (bytes, chunk_type)) in write_batch {
+            // self.intervals are updated by write_chunk_internal()
+            match self.write_chunk_internal(chunk_offset, bytes, chunk_type) {
+                Ok(_) => {}
+                Err(e) => {
+                    // persist state
+
+                    // make sure fsync succeeds
+                    for (_, submodule) in self.submodules.iter() {
+                        let file = submodule.file.lock().unwrap();
+                        file.sync_all()
+                            .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+                    }
+
+                    // we don't remove the failed write from pending - we can retry it
+                    self.write_intervals_to_submodules()?;
+                    return Err(e);
+                }
+            }
+            pending.remove(&chunk_offset); // Clean up written chunks
+        }
+        drop(pending);
+
+        // fsync this write batch BEFORE committing the interval state
+        // as fsync can error on us if the underlying storage has issues
+        for (_, submodule) in self.submodules.iter() {
+            let file = submodule.file.lock().unwrap();
+            // Ensure data is flushed to disk prior to drop
+            file.sync_all()
+                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+        }
+
+        // persist the state from all the write calls
+        // save the updated intervals
+        self.write_intervals_to_submodules()
+            .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
+
+        debug!(
+            "sync_pending_chunks took {:.3}s for {} chunks",
+            &then.elapsed().as_secs_f64(),
+            &len
+        );
 
         Ok(())
     }
@@ -1129,7 +1191,9 @@ impl StorageModule {
     }
 
     /// Writes chunk data to physical storage and updates state tracking
-    ///
+    ///    DO NOT USE THIS FUNCTION STANDALONE
+    ///    READ `sync_pending_chunks_inner`
+    ///    notable hazards: fsync is NOT called, and the interval files are NOT updated by this function
     /// Process:
     /// 1. Locates correct submodule for chunk offset
     /// 2. Sets the chunk status to Interrupted before writing
@@ -1149,24 +1213,6 @@ impl StorageModule {
 
         // Get the correct submodule reference based on chunk_offset
         let (interval, submodule) = self.get_submodule_for_offset(chunk_offset)?;
-
-        // Set the chunk status to Interrupted before writing
-        {
-            let mut intervals = self
-                .intervals
-                .write()
-                .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
-
-            Self::cut_then_insert_interval_if_touching(
-                &mut intervals,
-                chunk_offset,
-                ChunkType::Interrupted,
-            );
-        }
-
-        // Write the intervals file to persist the Interrupted status
-        self.write_intervals_to_submodules()
-            .map_err(|e| eyre::eyre!("Failed to write intervals file before chunk write: {}", e))?;
 
         let start_time = Instant::now();
 
@@ -1191,11 +1237,7 @@ impl StorageModule {
                     bytes_written
                 ));
             }
-
-            // Ensure data is flushed to disk prior to drop
-            file.sync_all()
-                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
-
+            // note: we don't fsync here for performance reasons
             Ok(())
         })();
 
