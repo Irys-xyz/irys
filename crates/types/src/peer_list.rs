@@ -503,7 +503,7 @@ mod tests {
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
         // Remove the optional is_online byte
-        assert!(buf.len() >= 1);
+        assert!(!buf.is_empty());
         buf.truncate(buf.len() - 1);
 
         let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
@@ -516,6 +516,6 @@ mod tests {
         assert_eq!(decoded.response_time, item.response_time);
         assert_eq!(decoded.address, item.address);
         assert_eq!(decoded.last_seen, item.last_seen);
-        assert_eq!(decoded.is_online, false);
+        assert!(!decoded.is_online);
     }
 }
