@@ -65,6 +65,20 @@ impl<'a> ShadowTxGenerator<'a> {
         // Sort publish ledger transactions by id for deterministic processing
         publish_ledger.txs.sort();
 
+        tracing::info!(
+            "ShadowTxGenerator initialized with {} miner fee increments and {} user refund addresses",
+            ledger_expiry_balance_diff.miner_balance_increment.len(),
+            ledger_expiry_balance_diff.user_perm_fee_refunds.len()
+        );
+        
+        for (user, refunds) in ledger_expiry_balance_diff.user_perm_fee_refunds.iter() {
+            tracing::info!(
+                "User {} has {} perm fee refunds pending",
+                user,
+                refunds.len()
+            );
+        }
+
         Self {
             block_height,
             reward_address,
@@ -325,17 +339,25 @@ impl ShadowTxGenerator<'_> {
         tx: &DataTransactionHeader,
         term_charges: &TermFeeCharges,
     ) -> Result<ShadowMetadata> {
-        // Create shadow transaction for total cost deduction
-        let total_cost = tx.total_cost();
+        // Calculate the amount to be deducted and sent to treasury
+        // This includes:
+        // - term_fee_treasury (95% of term_fee) 
+        // - perm_fee (if present, for permanent storage)
+        // The block producer reward (5% of term_fee) is paid separately via transaction_fee
+        let treasury_amount = term_charges
+            .term_fee_treasury
+            .saturating_add(tx.perm_fee.unwrap_or(U256::zero()));
+        
         Ok(ShadowMetadata {
             shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
                 BalanceDecrement {
-                    amount: Uint::from_le_bytes(total_cost.to_le_bytes()),
+                    amount: Uint::from_le_bytes(treasury_amount.to_le_bytes()),
                     target: tx.signer,
                     irys_ref: tx.id.into(),
                 },
             )),
-            // Block producer gets their reward via transaction_fee
+            // Block producer gets their reward (5% of term_fee) via transaction_fee
+            // This becomes a priority fee in the EVM layer
             transaction_fee: term_charges
                 .block_producer_reward
                 .try_into()
@@ -509,7 +531,16 @@ impl ShadowTxGenerator<'_> {
         }
 
         // Then process user refunds for non-promoted transactions
+        tracing::info!(
+            "Processing {} user perm fee refunds",
+            balance_diff.user_perm_fee_refunds.len()
+        );
         for (user_address, refund_list) in balance_diff.user_perm_fee_refunds.iter() {
+            tracing::info!(
+                "Creating PermFeeRefund shadow txs for user {}: {} refunds",
+                user_address,
+                refund_list.len()
+            );
             for (tx_id, refund_amount) in refund_list.iter() {
                 shadow_txs.push(ShadowMetadata {
                     shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(

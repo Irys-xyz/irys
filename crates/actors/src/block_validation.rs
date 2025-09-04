@@ -1082,6 +1082,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
             block_index,
             service_senders.mempool.clone(),
             db.clone(),
+            true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally
         )
         .in_current_span()
         .await?

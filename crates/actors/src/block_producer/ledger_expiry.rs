@@ -93,6 +93,7 @@ pub async fn calculate_expired_ledger_fees(
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
     mempool_sender: UnboundedSender<MempoolServiceMessage>,
     db: DatabaseProvider,
+    expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDiff> {
     // Step 1: Collect expired partitions
     let expired_slots =
@@ -230,7 +231,12 @@ pub async fn calculate_expired_ledger_fees(
             .len()
     );
 
-    let fees = aggregate_balance_diff(transactions, &tx_to_miners, config, true)?;
+    let fees = aggregate_balance_diff(
+        transactions,
+        &tx_to_miners,
+        config,
+        expect_txs_to_be_promoted,
+    )?;
 
     let total_fees = fees
         .miner_balance_increment
@@ -658,17 +664,38 @@ fn aggregate_balance_diff(
 
         // process refunds of perm fee if the tx was not promoted
         {
+            tracing::debug!(
+                "Checking tx {} for perm fee refund: promoted_height={:?}, perm_fee={:?}",
+                data_tx.id,
+                data_tx.promoted_height,
+                data_tx.perm_fee
+            );
+            
             if data_tx.promoted_height.is_none() {
                 let perm_fee = data_tx
                     .perm_fee
-                    .expect("if a tx was promoted it must have perm fee");
+                    .expect("unpromoted tx should have perm fee to refund");
+                
+                tracing::info!(
+                    "Issuing perm fee refund for unpromoted tx {}: {} wei to {}",
+                    data_tx.id,
+                    perm_fee,
+                    data_tx.signer
+                );
+                
                 balance_diff
                     .user_perm_fee_refunds
                     .entry(data_tx.signer)
                     .and_modify(|refund_vec| {
                         refund_vec.push((data_tx.id, perm_fee));
                     })
-                    .or_default();
+                    .or_insert_with(|| vec![(data_tx.id, perm_fee)]);
+            } else {
+                tracing::debug!(
+                    "Tx {} was promoted at height {:?}, no refund needed",
+                    data_tx.id,
+                    data_tx.promoted_height
+                );
             }
         }
     }

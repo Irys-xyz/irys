@@ -1112,6 +1112,7 @@ pub trait BlockProdStrategy {
             Arc::clone(&self.inner().block_index),
             self.inner().service_senders.mempool.clone(),
             self.inner().db.clone(),
+            true, // we expect the txs to be promoted otherwise return perm fee
         )
         .in_current_span()
         .await
