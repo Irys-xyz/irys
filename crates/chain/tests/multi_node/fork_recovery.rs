@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
-use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};
+use irys_types::{DataLedger, DataTransaction, IrysTransactionCommon, NodeConfig, H256, U256};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -909,17 +909,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     )?;
     let block_producer_reward = term_charges.block_producer_reward;
 
-    // With the double-counting fix, the shadow tx only deducts treasury_amount from the user
-    let treasury_amount =
-        term_charges.term_fee_treasury + peer_b_b2_submit_tx.header.perm_fee.unwrap();
+    let peer_b_total_fee =
+        peer_b_b2_submit_tx.header.term_fee + peer_b_b2_submit_tx.header.perm_fee.unwrap();
 
-    // Balance calculation:
-    // - User pays treasury_amount (95% term_fee + perm_fee) via shadow tx
-    // - User receives block_reward for mining
-    // - User receives block_producer_reward (5% term_fee) as priority fee
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
-        signer_b_genesis_balance + b_block2.reward_amount - treasury_amount + block_producer_reward,
+        signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee
+            + block_producer_reward,
         "Address: {:?}",
         b_signer.address()
     );
@@ -952,7 +948,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block3.evm_block_hash),
         signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
-            - treasury_amount
+            - peer_b_total_fee
             + block_producer_reward
             + publish_rewards,
         "Address: {:?}",
@@ -1192,19 +1188,18 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             &node_c.node_ctx.config.consensus,
         )?;
         let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
-        let peer_c_treasury_amount = peer_c_term_charges.term_fee_treasury + perm_fee;
 
-        // With double-counting fix, users only pay treasury_amount via shadow tx
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
             signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
-                - treasury_amount
+                - peer_b_total_fee
                 + block_producer_reward
                 + publish_rewards, // Include the publish rewards from b_block3
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash),
-            signer_c_genesis_balance + c_block4.reward_amount - peer_c_treasury_amount
+            signer_c_genesis_balance + c_block4.reward_amount
+                - peer_c_b2_submit_tx.header.total_cost()
                 + peer_c_block_producer_reward
                 + peer_c_publish_rewards,
         );

@@ -71,8 +71,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             };
 
             // Create an invalid refund - refunding a promoted transaction
-            let mut user_perm_fee_refunds = vec![];
-            user_perm_fee_refunds.push(self.invalid_refund);
+            let user_perm_fee_refunds = vec![self.invalid_refund];
 
             Ok((
                 vec![data_ledger],
@@ -186,8 +185,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDiff,
         )> {
-            let mut user_perm_fee_refunds = vec![];
-            user_perm_fee_refunds.push(self.invalid_refund);
+            let user_perm_fee_refunds = vec![self.invalid_refund];
 
             Ok((
                 vec![],

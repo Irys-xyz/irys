@@ -128,8 +128,6 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     // The balance should decrease by the total cost plus block producer reward
     let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
 
-    // Note: Block producer reward is now handled as a priority fee in the shadow tx,
-    // not double-deducted from the user's balance. The user only pays the total_cost.
     let actual_spent = TEST_USER_BALANCE_IRYS - signer_balance;
 
     assert_eq!(
@@ -441,8 +439,6 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // 1. The total storage cost (term_fee + perm_fee if any)
     // 2. The gas costs for the EVM transaction
     // 3. The transfer amount
-    // Note: Block producer reward (5% of term_fee) is now handled as a priority fee
-    // in the shadow tx, not double-deducted from the user's balance
     let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
 
@@ -677,8 +673,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
         .get_data_price(irys_types::DataLedger::Publish, data_bytes.len() as u64)
         .await?;
 
-    // With the double-counting fix, users only pay total_cost (perm_fee + term_fee)
-    // The block producer reward is handled as a priority fee, not deducted from user balance
+    // Calculate block producer reward using the same logic as shadow_tx_generator
     let total_cost = price_info.perm_fee + price_info.term_fee;
     let exact_required_balance = total_cost;
     temp_node.stop().await;
