@@ -60,7 +60,7 @@
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_service::MempoolServiceMessage;
 use crate::shadow_tx_generator::RollingHash;
-use eyre::OptionExt as _;
+use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
@@ -114,7 +114,7 @@ pub async fn calculate_expired_ledger_fees(
         );
         return Ok(LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         });
     }
 
@@ -126,7 +126,7 @@ pub async fn calculate_expired_ledger_fees(
             // If there wasn't, there aren't any fees to distribute
             return Ok(LedgerExpiryBalanceDiff {
                 miner_balance_increment: BTreeMap::new(),
-                user_perm_fee_refunds: BTreeMap::new(),
+                user_perm_fee_refunds: Vec::new(),
             });
         }
     };
@@ -609,10 +609,19 @@ async fn process_middle_blocks(
     Ok(tx_to_miners)
 }
 
+/// Represents balance changes resulting from ledger expiry at epoch boundaries.
+///
+/// This struct tracks two types of balance adjustments:
+/// - Miner rewards for storing expired data (term fees distributed to storage providers)
+/// - User refunds for permanent fees when transactions were not promoted to permanent storage
 pub struct LedgerExpiryBalanceDiff {
+    /// Rewards for miners who stored the expired data, mapped by miner address.
+    /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
     pub miner_balance_increment: BTreeMap<Address, (U256, RollingHash)>,
-    // for txs that were not promoted
-    pub user_perm_fee_refunds: BTreeMap<Address, Vec<(IrysTransactionId, U256)>>,
+
+    /// Refunds of permanent fees for users whose transactions were not promoted.
+    /// Sorted by transaction ID. Each tuple contains (transaction_id, refund_amount, user_address).
+    pub user_perm_fee_refunds: Vec<(IrysTransactionId, U256, Address)>,
 }
 
 /// Calculates and aggregates fees for each miner
@@ -624,14 +633,14 @@ fn aggregate_balance_diff(
 ) -> eyre::Result<LedgerExpiryBalanceDiff> {
     let mut balance_diff = LedgerExpiryBalanceDiff {
         miner_balance_increment: BTreeMap::new(),
-        user_perm_fee_refunds: BTreeMap::new(),
+        user_perm_fee_refunds: Vec::new(),
     };
-    transactions.sort();
+    transactions.sort(); // This ensures refunds will be sorted by tx_id
 
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners
             .get(&data_tx.id)
-            .expect("guaranteed to have the miner list");
+            .ok_or_else(|| eyre!("Missing miner list for transaction {}", data_tx.id))?;
 
         // process miner balance increments for storing the term tx
         {
@@ -672,24 +681,25 @@ fn aggregate_balance_diff(
             );
 
             if data_tx.promoted_height.is_none() {
-                let perm_fee = data_tx
-                    .perm_fee
-                    .expect("unpromoted tx should have perm fee to refund");
+                // Only process refund if perm_fee exists (should always be present for unpromoted txs)
+                if let Some(perm_fee) = data_tx.perm_fee {
+                    tracing::debug!(
+                        "Issuing perm fee refund for unpromoted tx {}: {} wei to {}",
+                        data_tx.id,
+                        perm_fee,
+                        data_tx.signer
+                    );
 
-                tracing::info!(
-                    "Issuing perm fee refund for unpromoted tx {}: {} wei to {}",
-                    data_tx.id,
-                    perm_fee,
-                    data_tx.signer
-                );
-
-                balance_diff
-                    .user_perm_fee_refunds
-                    .entry(data_tx.signer)
-                    .and_modify(|refund_vec| {
-                        refund_vec.push((data_tx.id, perm_fee));
-                    })
-                    .or_insert_with(|| vec![(data_tx.id, perm_fee)]);
+                    // Add refund to the vector (already sorted by tx_id due to transaction sorting)
+                    balance_diff
+                        .user_perm_fee_refunds
+                        .push((data_tx.id, perm_fee, data_tx.signer));
+                } else {
+                    tracing::warn!(
+                        "Unpromoted transaction {} has no perm_fee to refund",
+                        data_tx.id
+                    );
+                }
             } else {
                 tracing::debug!(
                     "Tx {} was promoted at height {:?}, no refund needed",

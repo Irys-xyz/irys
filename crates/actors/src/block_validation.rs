@@ -1089,7 +1089,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     } else {
         ledger_expiry::LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         }
     };
 

@@ -80,7 +80,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                 },
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 },
             ))
         }
@@ -183,7 +183,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                 },
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 },
             ))
         }
@@ -286,7 +286,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                 },
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 },
             ))
         }
@@ -400,7 +400,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                 },
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 },
             ))
         }
@@ -628,7 +628,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                 },
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 },
             ))
         }
@@ -817,7 +817,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                 },
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 },
             ))
         }

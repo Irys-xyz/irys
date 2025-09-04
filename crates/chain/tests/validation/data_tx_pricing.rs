@@ -69,7 +69,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 }, // No Publish ledger txs
                 LedgerExpiryBalanceDiff {
                     miner_balance_increment: std::collections::BTreeMap::new(),
-                    user_perm_fee_refunds: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
                 }, // No expired ledger fees
             ))
         }

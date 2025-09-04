@@ -1023,7 +1023,7 @@ pub trait BlockProdStrategy {
             commitment_txs_to_bill = mempool_txs.commitment_tx;
             aggregated_miner_fees = LedgerExpiryBalanceDiff {
                 miner_balance_increment: BTreeMap::new(),
-                user_perm_fee_refunds: BTreeMap::new(),
+                user_perm_fee_refunds: Vec::new(),
             };
         };
         let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {

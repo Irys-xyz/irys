@@ -65,19 +65,11 @@ impl<'a> ShadowTxGenerator<'a> {
         // Sort publish ledger transactions by id for deterministic processing
         publish_ledger.txs.sort();
 
-        tracing::info!(
+        tracing::debug!(
             "ShadowTxGenerator initialized with {} miner fee increments and {} user refund addresses",
             ledger_expiry_balance_diff.miner_balance_increment.len(),
             ledger_expiry_balance_diff.user_perm_fee_refunds.len()
         );
-
-        for (user, refunds) in ledger_expiry_balance_diff.user_perm_fee_refunds.iter() {
-            tracing::info!(
-                "User {} has {} perm fee refunds pending",
-                user,
-                refunds.len()
-            );
-        }
 
         Self {
             block_height,
@@ -100,6 +92,18 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Get the current treasury balance
     pub fn treasury_balance(&self) -> U256 {
         self.treasury_balance
+    }
+
+    /// Update treasury balance for expired ledger fee payments
+    fn deduct_from_treasury_for_payout(&mut self, amount: U256) -> Result<()> {
+        self.treasury_balance = self.treasury_balance.checked_sub(amount).ok_or_else(|| {
+            eyre!(
+                "Treasury balance underflow: cannot pay {} from balance {}",
+                amount,
+                self.treasury_balance
+            )
+        })?;
+        Ok(())
     }
 }
 
@@ -432,10 +436,7 @@ impl ShadowTxGenerator<'_> {
             }
             irys_primitives::CommitmentType::Unstake
             | irys_primitives::CommitmentType::Unpledge { .. } => {
-                self.treasury_balance =
-                    self.treasury_balance.checked_sub(tx.value).ok_or_else(|| {
-                        eyre!("Treasury balance underflow when releasing commitment value")
-                    })?;
+                self.deduct_from_treasury_for_payout(tx.value)?;
             }
         }
 
@@ -476,7 +477,7 @@ impl ShadowTxGenerator<'_> {
         // Yield shadow txs and update treasury balance
         if let Some(ref mut iter) = self.current_expired_ledger_iter {
             if let Some(result) = iter.next() {
-                // Update treasury balance with checked arithmetic
+                // Update treasury balance for miner rewards and user refunds
                 if let Ok(ref metadata) = result {
                     if let ShadowTransaction::V1 {
                         packet:
@@ -485,16 +486,9 @@ impl ShadowTxGenerator<'_> {
                         ..
                     } = &metadata.shadow_tx
                     {
-                        // Decrement treasury for both miner rewards and user refunds
-                        self.treasury_balance = self
-                            .treasury_balance
-                            .checked_sub(U256::from(increment.amount))
-                            .ok_or_else(|| {
-                                eyre!("Treasury balance underflow when paying expired ledger fees")
-                            })?;
+                        self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                     }
                 }
-                // result is already Result<ShadowMetadata, _>, wrap in Some
                 return Ok(Some(result?));
             }
         }
@@ -530,29 +524,22 @@ impl ShadowTxGenerator<'_> {
             });
         }
 
-        // Then process user refunds for non-promoted transactions
-        tracing::info!(
+        // Then process user refunds for non-promoted transactions (already sorted by tx_id)
+        tracing::debug!(
             "Processing {} user perm fee refunds",
             balance_diff.user_perm_fee_refunds.len()
         );
-        for (user_address, refund_list) in balance_diff.user_perm_fee_refunds.iter() {
-            tracing::info!(
-                "Creating PermFeeRefund shadow txs for user {}: {} refunds",
-                user_address,
-                refund_list.len()
-            );
-            for (tx_id, refund_amount) in refund_list.iter() {
-                shadow_txs.push(ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
-                        BalanceIncrement {
-                            amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
-                            target: *user_address,
-                            irys_ref: (*tx_id).into(), // Use the tx_id as the reference
-                        },
-                    )),
-                    transaction_fee: 0, // No block producer reward for refunds
-                });
-            }
+        for (tx_id, refund_amount, user_address) in balance_diff.user_perm_fee_refunds.iter() {
+            shadow_txs.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
+                    BalanceIncrement {
+                        amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
+                        target: *user_address,
+                        irys_ref: (*tx_id).into(),
+                    },
+                )),
+                transaction_fee: 0, // No block producer reward for refunds
+            });
         }
 
         Ok(shadow_txs)
@@ -764,7 +751,7 @@ mod tests {
 
         let empty_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         };
         let generator = ShadowTxGenerator::new(
             &block_height,
@@ -876,7 +863,7 @@ mod tests {
 
         let empty_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         };
         let generator = ShadowTxGenerator::new(
             &block_height,
@@ -951,7 +938,7 @@ mod tests {
 
         let empty_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         };
         let mut generator = ShadowTxGenerator::new(
             &block_height,
@@ -1128,7 +1115,7 @@ mod tests {
 
         let empty_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         };
         let generator = ShadowTxGenerator::new(
             &block_height,
@@ -1183,7 +1170,7 @@ mod tests {
 
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment,
-            user_perm_fee_refunds: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
         };
 
         let mut publish_ledger = PublishLedgerWithTxs {
@@ -1267,11 +1254,13 @@ mod tests {
         let refund3 = U256::from(300);
         let total_refunds = refund1 + refund2 + refund3;
 
-        let mut user_perm_fee_refunds = BTreeMap::new();
-        // User1 has two refunds
-        user_perm_fee_refunds.insert(user1, vec![(tx1_id, refund1), (tx2_id, refund2)]);
-        // User2 has one refund
-        user_perm_fee_refunds.insert(user2, vec![(tx3_id, refund3)]);
+        // Create refunds sorted by tx_id
+        let mut user_perm_fee_refunds = vec![
+            (tx1_id, refund1, user1), // User1's first refund
+            (tx2_id, refund2, user1), // User1's second refund
+            (tx3_id, refund3, user2), // User2's refund
+        ];
+        user_perm_fee_refunds.sort_by_key(|(tx_id, _, _)| *tx_id);
 
         let expired_fees = LedgerExpiryBalanceDiff {
             miner_balance_increment: BTreeMap::new(),
@@ -1296,20 +1285,18 @@ mod tests {
             },
         ];
 
-        // Add user refunds in sorted order (BTreeMap guarantees address order)
-        for (user, refund_list) in expired_fees.user_perm_fee_refunds.iter() {
-            for (tx_id, refund_amount) in refund_list.iter() {
-                expected_shadow_txs.push(ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
-                        BalanceIncrement {
-                            amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
-                            target: *user,
-                            irys_ref: (*tx_id).into(),
-                        },
-                    )),
-                    transaction_fee: 0,
-                });
-            }
+        // Add user refunds in sorted order (already sorted by tx_id)
+        for (tx_id, refund_amount, user) in expired_fees.user_perm_fee_refunds.iter() {
+            expected_shadow_txs.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
+                    BalanceIncrement {
+                        amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
+                        target: *user,
+                        irys_ref: (*tx_id).into(),
+                    },
+                )),
+                transaction_fee: 0,
+            });
         }
 
         let mut generator = ShadowTxGenerator::new(
@@ -1366,8 +1353,7 @@ mod tests {
         let tx1_id = H256::from([40_u8; 32]);
         let refund1 = U256::from(800);
 
-        let mut user_perm_fee_refunds = BTreeMap::new();
-        user_perm_fee_refunds.insert(user1, vec![(tx1_id, refund1)]);
+        let user_perm_fee_refunds = vec![(tx1_id, refund1, user1)];
 
         let total_payouts = miner1_reward + miner2_reward + refund1;
 
@@ -1409,19 +1395,17 @@ mod tests {
         }
 
         // Then add user refunds
-        for (user, refund_list) in expired_fees.user_perm_fee_refunds.iter() {
-            for (tx_id, refund_amount) in refund_list.iter() {
-                expected_shadow_txs.push(ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
-                        BalanceIncrement {
-                            amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
-                            target: *user,
-                            irys_ref: (*tx_id).into(),
-                        },
-                    )),
-                    transaction_fee: 0,
-                });
-            }
+        for (tx_id, refund_amount, user) in expired_fees.user_perm_fee_refunds.iter() {
+            expected_shadow_txs.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
+                    BalanceIncrement {
+                        amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
+                        target: *user,
+                        irys_ref: (*tx_id).into(),
+                    },
+                )),
+                transaction_fee: 0,
+            });
         }
 
         let mut generator = ShadowTxGenerator::new(
