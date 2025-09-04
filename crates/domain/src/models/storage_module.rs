@@ -956,7 +956,8 @@ impl StorageModule {
         let start_offsets = self.collect_start_offsets(chunk.data_root)?;
 
         if start_offsets.0.is_empty() {
-            return Err(eyre::eyre!("Chunks data_root not found in storage module"));
+            debug!("Chunks data_root not found in storage module");
+            return Ok(Vec::new());
         }
 
         let intervals = self.intervals.read().unwrap();
