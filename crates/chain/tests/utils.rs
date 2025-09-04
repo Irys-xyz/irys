@@ -981,21 +981,21 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn mine_until_next_epoch(&self) -> eyre::Result<(usize, u64)> {
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
         let current_height = self.get_canonical_chain_height().await;
-        
+
         // Calculate how many blocks we need to mine to reach the next epoch
         let blocks_until_next_epoch = num_blocks_in_epoch - (current_height % num_blocks_in_epoch);
-        
+
         info!(
             "Mining {} blocks to reach next epoch (current height: {}, epoch size: {})",
             blocks_until_next_epoch, current_height, num_blocks_in_epoch
         );
-        
+
         // Mine blocks until we reach the next epoch boundary
         for i in 0..blocks_until_next_epoch {
             self.mine_block().await?;
             info!("Mined block {} of {}", i + 1, blocks_until_next_epoch);
         }
-        
+
         let final_height = self.get_canonical_chain_height().await;
         Ok((blocks_until_next_epoch as usize, final_height))
     }

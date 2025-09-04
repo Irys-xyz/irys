@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use alloy_genesis::GenesisAccount;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{irys::IrysSigner, DataLedger, IrysTransactionCommon, NodeConfig, U256};
+use irys_types::{irys::IrysSigner, DataLedger, IrysTransactionCommon as _, NodeConfig, U256};
 use reth::rpc::types::TransactionTrait as _;
 use tracing::{debug, info};
 
@@ -108,7 +108,7 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
 
     let current_height = node.get_canonical_chain_height().await;
     let epochs_to_mine =
-        (target_expiry_height - current_height + BLOCKS_PER_EPOCH - 1) / BLOCKS_PER_EPOCH;
+        (target_expiry_height - current_height).div_ceil(BLOCKS_PER_EPOCH);
 
     for _ in 0..epochs_to_mine {
         let (_, height) = node.mine_until_next_epoch().await?;
@@ -129,14 +129,13 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         .into_iter()
         .filter(|tx| tx.input().len() >= 4)
         .filter_map(|tx| {
-            ShadowTransaction::decode(&mut tx.input().as_ref())
-                .ok()
-                .and_then(|shadow_tx| {
-                    shadow_tx.as_v1().and_then(|packet| match packet {
-                        TransactionPacket::PermFeeRefund(refund) => Some(refund.clone()),
-                        _ => None,
-                    })
-                })
+            let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref())
+                .ok()?;
+            let packet = shadow_tx.as_v1()?;
+            match packet {
+                                    TransactionPacket::PermFeeRefund(refund) => Some(refund.clone()),
+                                    _ => None,
+                                }
         })
         .collect();
 
@@ -145,13 +144,13 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         .iter()
         .filter(|r| r.target == user1_address)
         .map(|r| U256::from_le_bytes(r.amount.to_le_bytes()))
-        .fold(U256::from(0), |acc, amount| acc.saturating_add(amount));
+        .fold(U256::from(0), irys_types::U256::saturating_add);
 
     let user2_refund_amount = refunds
         .iter()
         .filter(|r| r.target == user2_address)
         .map(|r| U256::from_le_bytes(r.amount.to_le_bytes()))
-        .fold(U256::from(0), |acc, amount| acc.saturating_add(amount));
+        .fold(U256::from(0), irys_types::U256::saturating_add);
 
     // Verify refunds: unpromoted tx gets refund, promoted tx does not
     assert_eq!(
@@ -190,8 +189,7 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         user2_final, user2_expected,
         "User2 balance should not include refund"
     );
-
-    info!("✅ Test passed: Unpromoted tx received refund, promoted tx did not");
+    info!("Test passed: Unpromoted tx received refund, promoted tx did not");
 
     Ok(())
 }

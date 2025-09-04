@@ -670,19 +670,19 @@ fn aggregate_balance_diff(
                 data_tx.promoted_height,
                 data_tx.perm_fee
             );
-            
+
             if data_tx.promoted_height.is_none() {
                 let perm_fee = data_tx
                     .perm_fee
                     .expect("unpromoted tx should have perm fee to refund");
-                
+
                 tracing::info!(
                     "Issuing perm fee refund for unpromoted tx {}: {} wei to {}",
                     data_tx.id,
                     perm_fee,
                     data_tx.signer
                 );
-                
+
                 balance_diff
                     .user_perm_fee_refunds
                     .entry(data_tx.signer)

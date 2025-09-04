@@ -70,7 +70,7 @@ impl<'a> ShadowTxGenerator<'a> {
             ledger_expiry_balance_diff.miner_balance_increment.len(),
             ledger_expiry_balance_diff.user_perm_fee_refunds.len()
         );
-        
+
         for (user, refunds) in ledger_expiry_balance_diff.user_perm_fee_refunds.iter() {
             tracing::info!(
                 "User {} has {} perm fee refunds pending",
@@ -341,13 +341,13 @@ impl ShadowTxGenerator<'_> {
     ) -> Result<ShadowMetadata> {
         // Calculate the amount to be deducted and sent to treasury
         // This includes:
-        // - term_fee_treasury (95% of term_fee) 
+        // - term_fee_treasury (95% of term_fee)
         // - perm_fee (if present, for permanent storage)
         // The block producer reward (5% of term_fee) is paid separately via transaction_fee
         let treasury_amount = term_charges
             .term_fee_treasury
             .saturating_add(tx.perm_fee.unwrap_or(U256::zero()));
-        
+
         Ok(ShadowMetadata {
             shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
                 BalanceDecrement {
