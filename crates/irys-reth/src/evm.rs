@@ -1641,7 +1641,7 @@ where
 
             // Mark as touched but don't change balance (no-op transfer)
             account.status = AccountStatus::Touched;
-            
+
             tracing::trace!(
                 address = %target,
                 fee = %total_fee,

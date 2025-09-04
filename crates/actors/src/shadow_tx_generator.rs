@@ -36,17 +36,83 @@ pub struct ShadowTxGenerator<'a> {
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
     submit_txs: &'a [DataTransactionHeader],
-    publish_ledger: &'a mut PublishLedgerWithTxs,
-    ledger_expiry_balance_diff: &'a LedgerExpiryBalanceDiff,
 
     // Iterator state
     treasury_balance: U256,
     phase: Phase,
     index: usize,
-    // Current publish ledger iterator (if processing publish ledger)
-    current_publish_iter: Option<std::vec::IntoIter<Result<ShadowMetadata>>>,
-    // Current expired ledger fees iterator (if processing expired ledger fees)
-    current_expired_ledger_iter: Option<std::vec::IntoIter<Result<ShadowMetadata>>>,
+    // Current publish ledger iterator
+    current_publish_iter: std::vec::IntoIter<Result<ShadowMetadata>>,
+    // Current expired ledger fees iterator
+    current_expired_ledger_iter: std::vec::IntoIter<Result<ShadowMetadata>>,
+}
+
+impl Iterator for ShadowTxGenerator<'_> {
+    type Item = Result<ShadowMetadata>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.phase {
+                Phase::Header => {
+                    self.phase = Phase::Commitments;
+                    self.index = 0;
+                    // Block reward has no treasury impact
+                    return Some(Ok(ShadowMetadata {
+                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
+                            BlockRewardIncrement {
+                                amount: (*self.reward_amount).into(),
+                            },
+                        )),
+                        transaction_fee: 0,
+                    }));
+                }
+
+                Phase::Commitments => {
+                    // Check if we have more commitments to process
+                    if self.index < self.commitment_txs.len() {
+                        let result = self.try_process_commitment_at_index(self.index);
+                        self.index += 1;
+                        return Some(result);
+                    }
+                    // Move to next phase
+                    self.phase = Phase::SubmitLedger;
+                    self.index = 0;
+                }
+
+                Phase::SubmitLedger => {
+                    // Check if we have more submit transactions to process
+                    if self.index < self.submit_txs.len() {
+                        let result = self.try_process_submit_at_index(self.index);
+                        self.index += 1;
+                        return Some(result);
+                    }
+                    // Move to next phase
+                    self.phase = Phase::ExpiredLedgerFees;
+                    self.index = 0;
+                }
+
+                Phase::ExpiredLedgerFees => {
+                    // Process expired ledger fees with treasury updates
+                    if let Some(result) = self.try_process_expired_ledger().transpose() {
+                        return Some(result);
+                    }
+                    // Move to next phase
+                    self.phase = Phase::PublishLedger;
+                }
+
+                Phase::PublishLedger => {
+                    // Process publish ledger with treasury updates
+                    if let Some(result) = self.try_process_publish_ledger().transpose() {
+                        return Some(result);
+                    }
+                    // Move to done
+                    self.phase = Phase::Done;
+                }
+
+                Phase::Done => return None,
+            }
+        }
+    }
 }
 
 impl<'a> ShadowTxGenerator<'a> {
@@ -85,6 +151,35 @@ impl<'a> ShadowTxGenerator<'a> {
             ledger_expiry_balance_diff.user_perm_fee_refunds.len()
         );
 
+        // Initialize expired ledger iterator with all fee rewards and refunds
+        let expired_ledger_txs = if !ledger_expiry_balance_diff
+            .miner_balance_increment
+            .is_empty()
+            || !ledger_expiry_balance_diff.user_perm_fee_refunds.is_empty()
+        {
+            Self::create_expired_ledger_shadow_txs(ledger_expiry_balance_diff)?
+        } else {
+            Vec::new()
+        };
+        let current_expired_ledger_iter = expired_ledger_txs
+            .into_iter()
+            .map(Ok)
+            .collect::<Vec<_>>()
+            .into_iter();
+
+        // Initialize publish ledger iterator with aggregated ingress proof rewards
+        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(publish_ledger, config)?;
+        let publish_ledger_txs = if !aggregated_rewards.is_empty() {
+            Self::create_publish_shadow_txs(aggregated_rewards)?
+        } else {
+            Vec::new()
+        };
+        let current_publish_iter = publish_ledger_txs
+            .into_iter()
+            .map(Ok)
+            .collect::<Vec<_>>()
+            .into_iter();
+
         Ok(Self {
             block_height,
             reward_address,
@@ -93,114 +188,68 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
-            publish_ledger,
-            ledger_expiry_balance_diff,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
-            current_publish_iter: None,
-            current_expired_ledger_iter: None,
+            current_publish_iter,
+            current_expired_ledger_iter,
         })
     }
 
-    /// Get the current treasury balance
-    pub fn treasury_balance(&self) -> U256 {
-        self.treasury_balance
-    }
+    // Static helper methods for initialization
+    fn create_expired_ledger_shadow_txs(
+        balance_diff: &LedgerExpiryBalanceDiff,
+    ) -> Result<Vec<ShadowMetadata>> {
+        let mut shadow_txs = Vec::new();
 
-    /// Update treasury balance for expired ledger fee payments
-    fn deduct_from_treasury_for_payout(&mut self, amount: U256) -> Result<()> {
-        self.treasury_balance = self.treasury_balance.checked_sub(amount).ok_or_else(|| {
-            eyre!(
-                "Treasury balance underflow: cannot pay {} from balance {}",
-                amount,
-                self.treasury_balance
-            )
-        })?;
-        Ok(())
-    }
-}
+        // First process miner rewards for storing the expired data
+        for (address, (amount, rolling_hash)) in balance_diff.miner_balance_increment.iter() {
+            // Convert the rolling hash to FixedBytes<32> for irys_ref
+            let hash_bytes = rolling_hash.to_bytes();
+            let h256 = irys_types::H256::from(hash_bytes);
+            let irys_ref = h256.into();
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Phase {
-    Header,
-    Commitments,
-    SubmitLedger,
-    ExpiredLedgerFees,
-    PublishLedger,
-    Done,
-}
-
-impl Iterator for ShadowTxGenerator<'_> {
-    type Item = Result<ShadowMetadata>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.phase {
-                Phase::Header => {
-                    self.phase = Phase::Commitments;
-                    // Block reward has no treasury impact
-                    return Some(Ok(ShadowMetadata {
-                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                            BlockRewardIncrement {
-                                amount: (*self.reward_amount).into(),
-                            },
-                        )),
-                        transaction_fee: 0,
-                    }));
-                }
-
-                Phase::Commitments => {
-                    if let Some(result) = self.try_process_commitments().transpose() {
-                        return Some(result);
-                    }
-                    // Continue to next iteration if phase completed
-                }
-
-                Phase::SubmitLedger => {
-                    if let Some(result) = self.try_process_submit_ledger().transpose() {
-                        return Some(result);
-                    }
-                    // Continue to next iteration if phase completed
-                }
-
-                Phase::ExpiredLedgerFees => {
-                    if let Some(result) = self.try_process_expired_ledger_fees().transpose() {
-                        return Some(result);
-                    }
-                    // Continue to next iteration if phase completed
-                }
-
-                Phase::PublishLedger => {
-                    if let Some(result) = self.try_process_publish_ledger().transpose() {
-                        return Some(result);
-                    }
-                    // Continue to next iteration if phase completed
-                }
-
-                Phase::Done => return None,
-            }
+            shadow_txs.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
+                    BalanceIncrement {
+                        amount: Uint::from_le_bytes(amount.to_le_bytes()),
+                        target: *address,
+                        irys_ref,
+                    },
+                )),
+                transaction_fee: 0, // No block producer reward for term fee rewards
+            });
         }
-    }
-}
 
-impl ShadowTxGenerator<'_> {
-    /// Accumulates all rewards from ingress proofs into a map
-    ///
-    /// We accumulate the ingress rewards per miner address,
-    /// meaning, that a single miner will only have a single ingress proof shadow tx
-    /// for n ingress proofs. This is to save up space on the evm block.
-    ///
-    /// Rolling hash is a deterministic hash used by summing up all the tx ids that were a
-    /// part of computing the total ingress reward.
-    /// This rolling hash is later used as `irys_ref` variable for the shadow tx.
-    fn accumulate_ingress_rewards(&self) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
-        // BTreeMap to aggregate rewards by provider address and rolling hash (sorted by address)
+        // Then process user refunds for non-promoted transactions (already sorted by tx_id)
+        tracing::debug!(
+            "Processing {} user perm fee refunds",
+            balance_diff.user_perm_fee_refunds.len()
+        );
+        for (tx_id, refund_amount, user_address) in balance_diff.user_perm_fee_refunds.iter() {
+            shadow_txs.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
+                    BalanceIncrement {
+                        amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
+                        target: *user_address,
+                        irys_ref: (*tx_id).into(),
+                    },
+                )),
+                transaction_fee: 0, // No block producer reward for refunds
+            });
+        }
+
+        Ok(shadow_txs)
+    }
+
+    fn accumulate_ingress_rewards_for_init(
+        publish_ledger: &PublishLedgerWithTxs,
+        config: &ConsensusConfig,
+    ) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
 
         // Get ingress proofs if available
-        let proofs = self
-            .publish_ledger
+        let proofs = publish_ledger
             .proofs
             .as_ref()
             .map(|p| &p.0[..])
@@ -212,19 +261,18 @@ impl ShadowTxGenerator<'_> {
         }
 
         // Process all transactions (MUST BE SORTED)
-        for (index, tx) in self.publish_ledger.txs.iter().enumerate() {
+        for (index, tx) in publish_ledger.txs.iter().enumerate() {
             // CRITICAL: All publish ledger txs MUST have perm_fee
             let perm_fee = tx
                 .perm_fee
                 .ok_or_else(|| eyre::eyre!("publish ledger tx missing perm_fee {}", tx.id))?;
 
             // Calculate fee distribution using PublishFeeCharges
-            // PublishFeeCharges::new will return an error if perm_fee is insufficient
-            let publish_charges = PublishFeeCharges::new(perm_fee, tx.term_fee, self.config)?;
+            let publish_charges = PublishFeeCharges::new(perm_fee, tx.term_fee, config)?;
 
-            // Get all the ingress proofs for the transaction (assumes these are already validated and present)
-            let start_index = index * self.config.number_of_ingress_proofs_total as usize;
-            let end_index = start_index + self.config.number_of_ingress_proofs_total as usize;
+            // Get all the ingress proofs for the transaction
+            let start_index = index * config.number_of_ingress_proofs_total as usize;
+            let end_index = start_index + config.number_of_ingress_proofs_total as usize;
             let ingress_proofs = &proofs[start_index..end_index];
 
             // Get fee charges for all ingress proofs
@@ -242,6 +290,52 @@ impl ShadowTxGenerator<'_> {
         }
 
         Ok(rewards_map)
+    }
+
+    fn create_publish_shadow_txs(
+        aggregated_rewards: BTreeMap<Address, (RewardAmount, RollingHash)>,
+    ) -> Result<Vec<ShadowMetadata>> {
+        let mut shadow_txs = Vec::new();
+
+        for (address, (reward_amount, rolling_hash)) in aggregated_rewards {
+            // Convert rolling hash to irys_ref
+            let hash_bytes = rolling_hash.to_bytes();
+            let h256 = irys_types::H256::from(hash_bytes);
+            let irys_ref = h256.into();
+
+            // Extract the inner U256 from RewardAmount
+            let total_amount = reward_amount.into_inner();
+
+            shadow_txs.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
+                    BalanceIncrement {
+                        amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
+                        target: address,
+                        irys_ref,
+                    },
+                )),
+                transaction_fee: 0,
+            });
+        }
+
+        Ok(shadow_txs)
+    }
+
+    /// Get the current treasury balance
+    pub fn treasury_balance(&self) -> U256 {
+        self.treasury_balance
+    }
+
+    /// Update treasury balance for expired ledger fee payments
+    fn deduct_from_treasury_for_payout(&mut self, amount: U256) -> Result<()> {
+        self.treasury_balance = self.treasury_balance.checked_sub(amount).ok_or_else(|| {
+            eyre!(
+                "Treasury balance underflow: cannot pay {} from balance {}",
+                amount,
+                self.treasury_balance
+            )
+        })?;
+        Ok(())
     }
 
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
@@ -319,37 +413,6 @@ impl ShadowTxGenerator<'_> {
     }
 
     /// Creates shadow transactions from aggregated rewards
-    fn create_publish_shadow_txs(
-        &self,
-        rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)>,
-    ) -> Result<Vec<ShadowMetadata>> {
-        // BTreeMap already maintains sorted order by address
-        let shadow_txs: Vec<ShadowMetadata> = rewards_map
-            .into_iter()
-            .map(|(address, (reward_amount, rolling_hash))| {
-                // Convert the rolling hash to FixedBytes<32> for irys_ref
-                let hash_bytes = rolling_hash.to_bytes();
-                let h256 = irys_types::H256::from(hash_bytes);
-                let irys_ref = h256.into();
-
-                // Extract the inner U256 from RewardAmount
-                let total_amount = reward_amount.into_inner();
-
-                ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
-                        BalanceIncrement {
-                            amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
-                            target: address,
-                            irys_ref,
-                        },
-                    )),
-                    transaction_fee: 0, // No block producer reward for ingress proofs
-                }
-            })
-            .collect();
-
-        Ok(shadow_txs)
-    }
 
     /// Creates a shadow transaction for a submit ledger transaction
     fn create_submit_shadow_tx(
@@ -383,17 +446,10 @@ impl ShadowTxGenerator<'_> {
         })
     }
 
-    /// Process a single submit ledger transaction with clean error handling
+    /// Process a submit ledger transaction at a specific index
     #[tracing::instrument(skip_all, err)]
-    fn try_process_submit_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
-        if self.index >= self.submit_txs.len() {
-            self.phase = Phase::ExpiredLedgerFees;
-            self.index = 0;
-            return Ok(None);
-        }
-
-        let tx = &self.submit_txs[self.index];
-        self.index += 1;
+    fn try_process_submit_at_index(&mut self, index: usize) -> Result<ShadowMetadata> {
+        let tx = &self.submit_txs[index];
 
         // Construct term fee charges
         let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
@@ -420,20 +476,13 @@ impl ShadowTxGenerator<'_> {
                 .ok_or_else(|| eyre!("Treasury balance overflow when adding perm fee treasury"))?;
         }
 
-        Ok(Some(shadow_metadata))
+        Ok(shadow_metadata)
     }
 
-    /// Process commitments phase with clean error handling
+    /// Process a commitment transaction at a specific index
     #[tracing::instrument(skip_all, err)]
-    fn try_process_commitments(&mut self) -> Result<Option<ShadowMetadata>> {
-        if self.index >= self.commitment_txs.len() {
-            self.phase = Phase::SubmitLedger;
-            self.index = 0;
-            return Ok(None);
-        }
-
-        let tx = &self.commitment_txs[self.index];
-        self.index += 1;
+    fn try_process_commitment_at_index(&mut self, index: usize) -> Result<ShadowMetadata> {
+        let tx = &self.commitment_txs[index];
 
         // Process commitment transaction
         let shadow_metadata = self.process_commitment_transaction(tx)?;
@@ -454,142 +503,63 @@ impl ShadowTxGenerator<'_> {
             }
         }
 
-        Ok(Some(shadow_metadata))
+        Ok(shadow_metadata)
     }
 
-    /// Process expired ledger fees phase with clean error handling
+    /// Process expired ledger fees - handles treasury updates and validation
     #[tracing::instrument(skip_all, err)]
-    fn try_process_expired_ledger_fees(&mut self) -> Result<Option<ShadowMetadata>> {
-        // If already processing expired ledger fees, continue with existing iterator
-        if let Some(ref mut iter) = self.current_expired_ledger_iter {
-            if let Some(result) = iter.next() {
-                // Update treasury balance for miner rewards and user refunds
-                if let Ok(ref metadata) = result {
-                    if let ShadowTransaction::V1 {
-                        packet:
-                            TransactionPacket::TermFeeReward(increment)
-                            | TransactionPacket::PermFeeRefund(increment),
+    fn try_process_expired_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
+        self.current_expired_ledger_iter
+            .next()
+            .map(|result| {
+                // Propagate any errors from the iterator
+                let metadata = result?;
+
+                // Validate this is the correct shadow tx type and update treasury
+                match &metadata.shadow_tx {
+                    ShadowTransaction::V1 {
+                        packet: TransactionPacket::TermFeeReward(increment),
                         ..
-                    } = &metadata.shadow_tx
-                    {
+                    } => {
+                        // Deduct miner reward from treasury
                         self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                     }
+                    ShadowTransaction::V1 {
+                        packet: TransactionPacket::PermFeeRefund(increment),
+                        ..
+                    } => {
+                        // Deduct user refund from treasury
+                        self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                    }
+                    _ => {
+                        return Err(eyre!(
+                            "Unexpected shadow transaction type in expired ledger phase: {:?}",
+                            metadata.shadow_tx
+                        ));
+                    }
                 }
-                return Ok(Some(result?));
-            }
-            // Iterator exhausted, move to next phase
-            self.phase = Phase::PublishLedger;
-            return Ok(None);
-        }
 
-        // First time in this phase - check if there's any work to do
-        let has_miner_rewards = !self
-            .ledger_expiry_balance_diff
-            .miner_balance_increment
-            .is_empty();
-        let has_user_refunds = !self
-            .ledger_expiry_balance_diff
-            .user_perm_fee_refunds
-            .is_empty();
-
-        if !has_miner_rewards && !has_user_refunds {
-            // No expired ledger fees to process, skip to PublishLedger
-            self.phase = Phase::PublishLedger;
-            return Ok(None);
-        }
-
-        // Initialize iterator with TermFeeReward and refund transactions
-        let shadow_txs = self.create_expired_ledger_shadow_txs(self.ledger_expiry_balance_diff)?;
-        let mut iter = shadow_txs
-            .into_iter()
-            .map(Ok)
-            .collect::<Vec<_>>()
-            .into_iter();
-
-        // Get the first item to return immediately
-        if let Some(result) = iter.next() {
-            // Update treasury balance for the first item
-            if let Ok(ref metadata) = result {
-                if let ShadowTransaction::V1 {
-                    packet:
-                        TransactionPacket::TermFeeReward(increment)
-                        | TransactionPacket::PermFeeRefund(increment),
-                    ..
-                } = &metadata.shadow_tx
-                {
-                    self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
-                }
-            }
-            // Store iterator for remaining items
-            self.current_expired_ledger_iter = Some(iter);
-            return Ok(Some(result?));
-        }
-
-        // Empty iterator (shouldn't happen given checks above, but handle gracefully)
-        self.phase = Phase::PublishLedger;
-        Ok(None)
+                Ok(metadata)
+            })
+            .transpose()
     }
 
-    /// Creates shadow transactions for expired ledger fee rewards and refunds
-    fn create_expired_ledger_shadow_txs(
-        &self,
-        balance_diff: &LedgerExpiryBalanceDiff,
-    ) -> Result<Vec<ShadowMetadata>> {
-        let mut shadow_txs = Vec::new();
-
-        // First process miner rewards for storing the expired data
-        for (address, (amount, rolling_hash)) in balance_diff.miner_balance_increment.iter() {
-            // Convert the rolling hash to FixedBytes<32> for irys_ref
-            let hash_bytes = rolling_hash.to_bytes();
-            let h256 = irys_types::H256::from(hash_bytes);
-            let irys_ref = h256.into();
-
-            shadow_txs.push(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
-                    BalanceIncrement {
-                        amount: Uint::from_le_bytes(amount.to_le_bytes()),
-                        target: *address,
-                        irys_ref,
-                    },
-                )),
-                transaction_fee: 0, // No block producer reward for term fee rewards
-            });
-        }
-
-        // Then process user refunds for non-promoted transactions (already sorted by tx_id)
-        tracing::debug!(
-            "Processing {} user perm fee refunds",
-            balance_diff.user_perm_fee_refunds.len()
-        );
-        for (tx_id, refund_amount, user_address) in balance_diff.user_perm_fee_refunds.iter() {
-            shadow_txs.push(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
-                    BalanceIncrement {
-                        amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
-                        target: *user_address,
-                        irys_ref: (*tx_id).into(),
-                    },
-                )),
-                transaction_fee: 0, // No block producer reward for refunds
-            });
-        }
-
-        Ok(shadow_txs)
-    }
-
-    /// Process publish ledger phase with clean error handling
+    /// Process publish ledger - handles treasury updates and validation
     #[tracing::instrument(skip_all, err)]
     fn try_process_publish_ledger(&mut self) -> Result<Option<ShadowMetadata>> {
-        // If already processing publish ledger, continue with existing iterator
-        if let Some(ref mut iter) = self.current_publish_iter {
-            if let Some(result) = iter.next() {
-                // Update treasury balance with checked arithmetic
-                if let Ok(ref metadata) = result {
-                    if let ShadowTransaction::V1 {
+        self.current_publish_iter
+            .next()
+            .map(|result| {
+                // Propagate any errors from the iterator
+                let metadata = result?;
+
+                // Validate this is the correct shadow tx type and update treasury
+                match &metadata.shadow_tx {
+                    ShadowTransaction::V1 {
                         packet: TransactionPacket::IngressProofReward(increment),
                         ..
-                    } = &metadata.shadow_tx
-                    {
+                    } => {
+                        // Deduct ingress proof reward from treasury
                         self.treasury_balance = self
                             .treasury_balance
                             .checked_sub(U256::from(increment.amount))
@@ -597,57 +567,28 @@ impl ShadowTxGenerator<'_> {
                                 eyre!("Treasury balance underflow when paying ingress proof reward")
                             })?;
                     }
+                    _ => {
+                        return Err(eyre!(
+                            "Unexpected shadow transaction type in publish ledger phase: {:?}",
+                            metadata.shadow_tx
+                        ));
+                    }
                 }
-                return Ok(Some(result?));
-            }
-            // Iterator exhausted, move to Done
-            self.phase = Phase::Done;
-            return Ok(None);
-        }
 
-        // First time in this phase - accumulate all rewards from ingress proofs
-        let aggregated_rewards = self.accumulate_ingress_rewards()?;
-
-        if aggregated_rewards.is_empty() {
-            // No rewards to process, skip to Done
-            self.phase = Phase::Done;
-            return Ok(None);
-        }
-
-        // Initialize iterator with all shadow txs
-        let shadow_txs = self.create_publish_shadow_txs(aggregated_rewards)?;
-        let mut iter = shadow_txs
-            .into_iter()
-            .map(Ok)
-            .collect::<Vec<_>>()
-            .into_iter();
-
-        // Get the first item to return immediately
-        if let Some(result) = iter.next() {
-            // Update treasury balance for the first item
-            if let Ok(ref metadata) = result {
-                if let ShadowTransaction::V1 {
-                    packet: TransactionPacket::IngressProofReward(increment),
-                    ..
-                } = &metadata.shadow_tx
-                {
-                    self.treasury_balance = self
-                        .treasury_balance
-                        .checked_sub(U256::from(increment.amount))
-                        .ok_or_else(|| {
-                            eyre!("Treasury balance underflow when paying ingress proof reward")
-                        })?;
-                }
-            }
-            // Store iterator for remaining items
-            self.current_publish_iter = Some(iter);
-            return Ok(Some(result?));
-        }
-
-        // Empty iterator (shouldn't happen given checks above, but handle gracefully)
-        self.phase = Phase::Done;
-        Ok(None)
+                Ok(metadata)
+            })
+            .transpose()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Phase {
+    Header,
+    Commitments,
+    SubmitLedger,
+    ExpiredLedgerFees,
+    PublishLedger,
+    Done,
 }
 
 /// Newtype for reward amounts to prevent mixing with other U256 values
