@@ -149,7 +149,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
             tracing::warn!("Failed to get block reward address balance: {}", err);
             ZERO_BALANCE
         });
-    
+
     // Calculate block producer reward from term_fee (5% of term_fee goes to block producer as priority fee)
     let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
         tx.header.term_fee,
@@ -157,7 +157,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     )?;
     let block_producer_reward =
         U256::from_le_bytes(term_charges.block_producer_reward.to_le_bytes());
-    
+
     // The block reward recipient gets the block reward plus the block producer reward from storage tx
     let expected_block_reward_balance = ZERO_BALANCE
         + U256::from_le_bytes(irys_block.reward_amount.to_le_bytes())
@@ -715,9 +715,11 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
 
     // Verify the transaction was accepted and cost is exactly the balance
     assert_eq!(
-        tx.header.total_cost(), exact_required_balance,
+        tx.header.total_cost(),
+        exact_required_balance,
         "Total cost ({}) should be exactly equal to the balance provided ({})",
-        tx.header.total_cost(), exact_required_balance
+        tx.header.total_cost(),
+        exact_required_balance
     );
 
     // Mine a block - should contain block reward and storage fee transactions

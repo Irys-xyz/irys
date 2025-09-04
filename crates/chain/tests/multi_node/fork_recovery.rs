@@ -902,21 +902,24 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // check balances in block b2
     // Only 1 Submit tx from node B should be in block b2
-    // The transaction fee includes term_fee + perm_fee
-    let peer_b_total_fee =
-        peer_b_b2_submit_tx.header.term_fee + peer_b_b2_submit_tx.header.perm_fee.unwrap();
-
-    // Calculate block producer reward (5% of term_fee) that b_signer receives as the miner
+    // Calculate fee components
     let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
         peer_b_b2_submit_tx.header.term_fee,
         &node_b.node_ctx.config.consensus,
     )?;
     let block_producer_reward = term_charges.block_producer_reward;
 
+    // With the double-counting fix, the shadow tx only deducts treasury_amount from the user
+    let treasury_amount =
+        term_charges.term_fee_treasury + peer_b_b2_submit_tx.header.perm_fee.unwrap();
+
+    // Balance calculation:
+    // - User pays treasury_amount (95% term_fee + perm_fee) via shadow tx
+    // - User receives block_reward for mining
+    // - User receives block_producer_reward (5% term_fee) as priority fee
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
-        signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee
-            + block_producer_reward,
+        signer_b_genesis_balance + b_block2.reward_amount - treasury_amount + block_producer_reward,
         "Address: {:?}",
         b_signer.address()
     );
@@ -949,7 +952,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block3.evm_block_hash),
         signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
-            - peer_b_total_fee
+            - treasury_amount
             + block_producer_reward
             + publish_rewards,
         "Address: {:?}",
@@ -966,7 +969,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     //  Node A is now at block height 2
     //  Node B is now at block height 3
     //  Node C remains at block height 1
-    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - peer_b_total_fee + block_producer_reward + publish_rewards
+    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - treasury_amount + block_producer_reward + publish_rewards
     //  Signer C balance remains at genesis balance
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
@@ -1170,16 +1173,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             signer_c_genesis_balance,
         );
         // assert final balances
-        // Calculate peer C's total fee (for the tx that was included in c_block4)
-        let peer_c_total_fee =
-            peer_c_b2_submit_tx.header.term_fee + peer_c_b2_submit_tx.header.perm_fee.unwrap();
-
-        // Calculate block producer reward for peer C's transaction (c_signer receives this as miner of c_block4)
-        let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
-            peer_c_b2_submit_tx.header.term_fee,
-            &node_c.node_ctx.config.consensus,
-        )?;
-        let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
+        // Calculate fee components for peer C's transaction
 
         // Calculate publish fee rewards for peer C's transaction if it has perm_fee
         let perm_fee = peer_c_b2_submit_tx.header.perm_fee.unwrap();
@@ -1192,16 +1186,25 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         // c_signer gets the ingress proof reward as they posted the chunk
         let peer_c_publish_rewards = peer_c_publish_charges.ingress_proof_reward;
 
+        // Calculate block producer reward for peer C's transaction
+        let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+            peer_c_b2_submit_tx.header.term_fee,
+            &node_c.node_ctx.config.consensus,
+        )?;
+        let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
+        let peer_c_treasury_amount = peer_c_term_charges.term_fee_treasury + perm_fee;
+
+        // With double-counting fix, users only pay treasury_amount via shadow tx
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
             signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
-                - peer_b_total_fee
+                - treasury_amount
                 + block_producer_reward
                 + publish_rewards, // Include the publish rewards from b_block3
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash),
-            signer_c_genesis_balance + c_block4.reward_amount - peer_c_total_fee
+            signer_c_genesis_balance + c_block4.reward_amount - peer_c_treasury_amount
                 + peer_c_block_producer_reward
                 + peer_c_publish_rewards,
         );
