@@ -91,7 +91,7 @@ pub async fn run_node(
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
-    unwind_to(&node_config, chainspec.clone(), latest_block).await?;
+    let _ = unwind_to(&node_config, chainspec.clone(), latest_block).await;
 
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
