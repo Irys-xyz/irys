@@ -2440,7 +2440,7 @@ mod tests {
         let (service_sender, service_receiver) = PeerNetworkSender::new_with_receiver();
         // Create service with our mocks
         let service = PeerNetworkService::new_with_custom_api_client(
-            db.clone(),
+            db,
             &config,
             mock_api_client,
             reth_actor,

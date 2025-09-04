@@ -9,12 +9,11 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
 use irys_domain::ScoreDecreaseReason;
-use irys_types::GossipCacheKey::Block;
 use irys_types::{
     build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
     RethPeerInfo, VersionRequest,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
@@ -387,8 +386,6 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .block_migration_depth = 4;
-
-    let account1 = testing_config_genesis.signer();
 
     // Genesis doesn't have any trusted peers
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
