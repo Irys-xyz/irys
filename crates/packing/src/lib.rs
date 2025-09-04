@@ -190,8 +190,15 @@ pub fn capacity_pack_range_with_data_cuda_c(
 #[derive(PartialEq)]
 pub enum PackingType {
     CPU,
-    #[cfg(feature = "nvidia")]
+    #[expect(
+        dead_code,
+        reason = "variant may be unused without the 'nvidia' feature"
+    )]
     CUDA,
+    #[expect(
+        dead_code,
+        reason = "variant reserved; may be unused until support is added"
+    )]
     AMD,
 }
 
