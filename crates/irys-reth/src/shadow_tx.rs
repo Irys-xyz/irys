@@ -19,6 +19,7 @@ use std::sync::LazyLock;
 
 /// Version constants for ShadowTransaction
 pub const SHADOW_TX_VERSION_V1: u8 = 1;
+pub const SHADOW_TX_VERSION_V2: u8 = 2;
 
 /// Current version of ShadowTransaction
 pub const CURRENT_SHADOW_TX_VERSION: u8 = SHADOW_TX_VERSION_V1;
@@ -43,6 +44,13 @@ pub enum ShadowTransaction {
     V1 {
         /// The actual shadow transaction packet.
         packet: TransactionPacket,
+    },
+    /// Version 2 shadow transaction format with solution hash support
+    V2 {
+        /// The actual shadow transaction packet.
+        packet: TransactionPacket,
+        /// Solution hash for validation
+        solution_hash: FixedBytes<32>,
     },
 }
 
@@ -129,6 +137,7 @@ impl ShadowTransaction {
     pub fn version(&self) -> u8 {
         match self {
             Self::V1 { .. } => SHADOW_TX_VERSION_V1,
+            Self::V2 { .. } => SHADOW_TX_VERSION_V2,
         }
     }
 
@@ -137,6 +146,7 @@ impl ShadowTransaction {
     pub fn as_v1(&self) -> Option<&TransactionPacket> {
         match self {
             Self::V1 { packet, .. } => Some(packet),
+            Self::V2 { .. } => None,
         }
     }
 
@@ -145,6 +155,7 @@ impl ShadowTransaction {
     pub fn topic(&self) -> FixedBytes<32> {
         match self {
             Self::V1 { packet, .. } => packet.topic(),
+            Self::V2 { packet, .. } => packet.topic(),
         }
     }
 
@@ -206,6 +217,15 @@ impl BorshSerialize for ShadowTransaction {
                 writer.write_all(&[SHADOW_TX_VERSION_V1])?;
                 packet.serialize(writer)
             }
+            Self::V2 {
+                packet,
+                solution_hash,
+            } => {
+                writer.write_all(&[SHADOW_TX_VERSION_V2])?;
+                packet.serialize(writer)?;
+                writer.write_all(solution_hash.as_slice())?;
+                Ok(())
+            }
         }
     }
 }
@@ -218,6 +238,16 @@ impl BorshDeserialize for ShadowTransaction {
             SHADOW_TX_VERSION_V1 => {
                 let packet = TransactionPacket::deserialize_reader(reader)?;
                 Ok(Self::V1 { packet })
+            }
+            SHADOW_TX_VERSION_V2 => {
+                let packet = TransactionPacket::deserialize_reader(reader)?;
+                let mut hash_buf = [0_u8; 32];
+                reader.read_exact(&mut hash_buf)?;
+                let solution_hash = FixedBytes::<32>::from_slice(&hash_buf);
+                Ok(Self::V2 {
+                    packet,
+                    solution_hash,
+                })
             }
             _ => Err(borsh::io::Error::new(
                 borsh::io::ErrorKind::InvalidData,
@@ -466,24 +496,52 @@ impl BorshDeserialize for BalanceIncrement {
     // manual Borsh impls below
     arbitrary::Arbitrary,
 )]
+
 pub struct BlockRewardIncrement {
     /// Amount to increment to the beneficiary account.
     pub amount: U256,
+    /// Solution hash of the block being rewarded (V2 only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solution_hash: Option<FixedBytes<32>>,
 }
 
 impl BorshSerialize for BlockRewardIncrement {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         writer.write_all(&self.amount.to_be_bytes::<32>())?;
+        // For Tx V2, include solution_hash
+        if let Some(hash) = &self.solution_hash {
+            writer.write_all(&[1_u8])?; // Flag indicating solution_hash is present
+            writer.write_all(hash.as_slice())?;
+        } else {
+            writer.write_all(&[0_u8])?; // Flag indicating no solution_hash
+        }
         Ok(())
     }
 }
-
 impl BorshDeserialize for BlockRewardIncrement {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        // Read amount (32 bytes, big-endian)
         let mut amount_buf = [0_u8; 32];
         reader.read_exact(&mut amount_buf)?;
         let amount = U256::from_be_bytes(amount_buf);
-        Ok(Self { amount })
+
+        // Read solution_hash presence flag
+        let mut has_solution_hash = [0_u8; 1];
+        reader.read_exact(&mut has_solution_hash)?;
+
+        let solution_hash = match has_solution_hash[0] {
+            1 => {
+                let mut hash_buf = [0_u8; 32];
+                reader.read_exact(&mut hash_buf)?;
+                Some(FixedBytes::<32>::from_slice(&hash_buf))
+            }
+            _ => None,
+        };
+
+        Ok(Self {
+            amount,
+            solution_hash,
+        })
     }
 }
 
@@ -498,6 +556,7 @@ mod tests {
     fn block_reward_roundtrip() {
         let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
             amount: U256::from(123_u64),
+            solution_hash: None,
         }));
         let mut buf = Vec::new();
         tx.serialize(&mut buf).unwrap();
@@ -538,6 +597,7 @@ mod tests {
     fn decode_prefixed_roundtrip() {
         let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
             amount: U256::from(1_u64),
+            solution_hash: None,
         }));
         let mut buf = Vec::from(IRYS_SHADOW_EXEC.as_slice());
         tx.serialize(&mut buf).unwrap();

@@ -191,12 +191,16 @@ where
         // Get the target address from the shadow transaction
         let fee_payer_address = match &shadow_tx {
             ShadowTransaction::V1 { packet } => packet.fee_payer_address(),
+            ShadowTransaction::V2 { packet, .. } => packet.fee_payer_address(),
         };
 
         // Check if this is a block reward transaction
         let is_block_reward = matches!(
             &shadow_tx,
             ShadowTransaction::V1 {
+                packet: shadow_tx::TransactionPacket::BlockReward(_),
+                ..
+            } | ShadowTransaction::V2 {
                 packet: shadow_tx::TransactionPacket::BlockReward(_),
                 ..
             }
@@ -328,7 +332,8 @@ where
         let topic = shadow_tx.topic();
 
         match shadow_tx {
-            shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
+            shadow_tx::ShadowTransaction::V1 { packet, .. }
+            | shadow_tx::ShadowTransaction::V2 { packet, .. } => match packet {
                 shadow_tx::TransactionPacket::Unstake(either_inc_dec)
                 | shadow_tx::TransactionPacket::Unpledge(either_inc_dec) => match either_inc_dec {
                     shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(balance_increment) => {
@@ -1306,12 +1311,16 @@ where
         // Get the target address from the shadow transaction
         let fee_payer_address = match &shadow_tx {
             ShadowTransaction::V1 { packet } => packet.fee_payer_address(),
+            ShadowTransaction::V2 { packet, .. } => packet.fee_payer_address(),
         };
 
         // Check if this is a block reward transaction
         let is_block_reward = matches!(
             &shadow_tx,
             ShadowTransaction::V1 {
+                packet: shadow_tx::TransactionPacket::BlockReward(_),
+                ..
+            } | ShadowTransaction::V2 {
                 packet: shadow_tx::TransactionPacket::BlockReward(_),
                 ..
             }
@@ -1668,7 +1677,8 @@ where
         let topic = shadow_tx.topic();
 
         match shadow_tx {
-            shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
+            shadow_tx::ShadowTransaction::V1 { packet, .. }
+            | shadow_tx::ShadowTransaction::V2 { packet, .. } => match packet {
                 shadow_tx::TransactionPacket::Unstake(either_inc_dec)
                 | shadow_tx::TransactionPacket::Unpledge(either_inc_dec) => match either_inc_dec {
                     shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(balance_increment) => {

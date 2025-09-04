@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon as _, U256,
+    IrysBlockHeader, IrysTransactionCommon as _, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -29,6 +29,7 @@ pub struct ShadowTxGenerator<'a> {
     pub reward_address: &'a Address,
     pub reward_amount: &'a U256,
     pub parent_block: &'a IrysBlockHeader,
+    pub solution_hash: &'a H256,
     pub config: &'a ConsensusConfig,
 
     // Transaction slices
@@ -53,6 +54,7 @@ impl<'a> ShadowTxGenerator<'a> {
         reward_address: &'a Address,
         reward_amount: &'a U256,
         parent_block: &'a IrysBlockHeader,
+        solution_hash: &'a H256,
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
@@ -68,6 +70,7 @@ impl<'a> ShadowTxGenerator<'a> {
             reward_address,
             reward_amount,
             parent_block,
+            solution_hash,
             config,
             commitment_txs,
             submit_txs,
@@ -110,6 +113,7 @@ impl Iterator for ShadowTxGenerator<'_> {
                         shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
                             BlockRewardIncrement {
                                 amount: (*self.reward_amount).into(),
+                                solution_hash: Some((*self.solution_hash).into()),
                             },
                         )),
                         transaction_fee: 0,
@@ -677,22 +681,27 @@ mod tests {
             proofs: None,
         };
 
+        let solution_hash = H256::zero();
+
         // Create expected shadow transactions
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![ShadowMetadata {
             shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
                 BlockRewardIncrement {
                     amount: reward_amount.into(),
+                    solution_hash: Some(solution_hash.into()),
                 },
             )),
             transaction_fee: 0,
         }];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &[],
@@ -750,6 +759,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
                     BlockRewardIncrement {
                         amount: reward_amount.into(),
+                        solution_hash: Some(H256::zero().into()),
                     },
                 )),
                 transaction_fee: 0,
@@ -797,11 +807,13 @@ mod tests {
         ];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &commitments,
             &[],
@@ -848,6 +860,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
                     BlockRewardIncrement {
                         amount: reward_amount.into(),
+                        solution_hash: Some(H256::zero().into()),
                     },
                 )),
                 transaction_fee: 0,
@@ -869,11 +882,13 @@ mod tests {
         ];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &submit_txs,
@@ -991,6 +1006,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
                     BlockRewardIncrement {
                         amount: reward_amount.into(),
+                        solution_hash: Some(H256::zero().into()),
                     },
                 )),
                 transaction_fee: 0,
@@ -1043,11 +1059,13 @@ mod tests {
         ];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &submit_txs,

@@ -570,6 +570,7 @@ mod tests {
             1,
             &ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount,
+                solution_hash: None,
             })),
             0, // Block rewards must have 0 priority fee
         );
@@ -1809,6 +1810,7 @@ mod tests {
         let fund_tx =
             ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
+                solution_hash: None,
             }));
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
@@ -1869,6 +1871,7 @@ mod tests {
         let fund_tx =
             ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
+                solution_hash: None,
             }));
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
@@ -2096,6 +2099,7 @@ mod tests {
         let fund_tx =
             ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
+                solution_hash: None,
             }));
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
@@ -2658,14 +2662,23 @@ pub mod test_utils {
                 // Use the shadow tx directly since metadata fields are removed
                 let updated_shadow_tx = match &shadow_tx {
                     ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet.clone()),
+                    ShadowTransaction::V2 {
+                        packet,
+                        solution_hash,
+                    } => ShadowTransaction::V2 {
+                        packet: packet.clone(),
+                        solution_hash: *solution_hash,
+                    },
                 };
 
                 // Block rewards must have 0 priority fee, others can use default
                 let priority_fee = match &shadow_tx {
-                    ShadowTransaction::V1 { packet } => match packet {
-                        TransactionPacket::BlockReward(_) => 0,
-                        _ => DEFAULT_PRIORITY_FEE,
-                    },
+                    ShadowTransaction::V1 { packet } | ShadowTransaction::V2 { packet, .. } => {
+                        match packet {
+                            TransactionPacket::BlockReward(_) => 0,
+                            _ => DEFAULT_PRIORITY_FEE,
+                        }
+                    }
                 };
 
                 let shadow_tx = sign_shadow_tx(updated_shadow_tx, signer, priority_fee).await?;
@@ -2693,7 +2706,10 @@ pub mod test_utils {
     /// Compose a shadow tx for block reward.
     pub fn block_reward() -> ShadowTransaction {
         ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-            shadow_tx::BlockRewardIncrement { amount: U256::ONE },
+            shadow_tx::BlockRewardIncrement {
+                amount: U256::ONE,
+                solution_hash: None,
+            },
         ))
     }
 
