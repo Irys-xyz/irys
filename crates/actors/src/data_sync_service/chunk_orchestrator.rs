@@ -152,6 +152,7 @@ impl ChunkOrchestrator {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn dispatch_chunk_requests(&mut self) {
         if self.should_throttle_requests() {
             debug!("Throttling chunk requests due to storage throughput");
@@ -239,6 +240,10 @@ impl ChunkOrchestrator {
     fn find_best_peer(&self, excluding: Option<Address>) -> Option<Address> {
         let peers = self.active_sync_peers.read().ok()?;
 
+        if self.current_peers.len() > 0 {
+            debug!("current_peers: {:#?}", self.current_peers);
+        }
+
         let mut candidates: Vec<&PeerBandwidthManager> = self
             .current_peers
             .iter()
@@ -272,6 +277,7 @@ impl ChunkOrchestrator {
             .map(|peer_manager| peer_manager.miner_address)
     }
 
+    #[tracing::instrument(skip_all)]
     fn dispatch_chunk_request(&mut self, chunk_offset: PartitionChunkOffset, peer_addr: Address) {
         let request = match self.chunk_requests.get_mut(&chunk_offset) {
             Some(req) => req,

@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -86,10 +86,11 @@ impl DataSyncServiceInner {
             last_peer_list_check: Instant::now(),
             peer_list_check_interval: Duration::from_secs(1),
         };
-        data_sync.initialize_peers_and_orchestrators();
+        data_sync.synchronize_peers_and_orchestrators();
         data_sync
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
@@ -121,6 +122,7 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn tick(&mut self) -> eyre::Result<()> {
         for orchestrator in self.chunk_orchestrators.values_mut() {
             orchestrator.tick()?;
@@ -135,7 +137,7 @@ impl DataSyncServiceInner {
         // the DataSyncService to let it know of peer changes. Until then we poll/synchronize with
         // the PeerList on a fixed interval
         if Instant::now() - self.last_peer_list_check > self.peer_list_check_interval {
-            self.sync_peer_partition_assignments();
+            self.synchronize_peers_and_orchestrators();
             self.last_peer_list_check = Instant::now();
         }
 
@@ -194,13 +196,13 @@ impl DataSyncServiceInner {
                     peer_manager.set_max_concurrency(current_max + increase);
                 }
             } else {
-                debug!(
-                "Not increasing concurrency for peer {} max_concurrency {} (concurrent utilization: {:.1}%, health: {:.2})",
-                peer_addr,
-                current_max,
-                utilization_ratio * 100.0,
-                health_score
-            );
+                // debug!(
+                //     "Not increasing concurrency for peer {} max_concurrency {} (concurrent utilization: {:.1}%, health: {:.2})",
+                //     peer_addr,
+                //     current_max,
+                //     utilization_ratio * 100.0,
+                //     health_score
+                // );
             }
         }
     }
@@ -289,7 +291,7 @@ impl DataSyncServiceInner {
         };
     }
 
-    fn initialize_peers_and_orchestrators(&mut self) {
+    fn synchronize_peers_and_orchestrators(&mut self) {
         self.sync_peer_partition_assignments();
         self.create_chunk_orchestrators();
         self.update_orchestrator_peers();
@@ -336,6 +338,7 @@ impl DataSyncServiceInner {
 
     /// Updates the active_peers list and ensures there are PeerBandwidthManagers for
     /// any peers assigned to store the same slot data.
+    #[tracing::instrument(skip_all)]
     fn ensure_bandwidth_managers_for_peers(&mut self, ledger_id: u32, slot_index: usize) {
         // Get the slot assignments for all partition hashes in this slot
         let epoch_snapshot = self.block_tree.read().canonical_epoch_snapshot();
@@ -367,6 +370,10 @@ impl DataSyncServiceInner {
             // Finally let the peer bandwidth manager for this peer store a reference to this partition assignment
             // so we can filter the active_peer_bandwidth_managers list for peers assigned to this ledger/slot in the future
             if !entry.partition_assignments.contains(&pa) {
+                debug!(
+                    "Ading partition assignment: {:#?} to Peer: {}",
+                    pa, entry.miner_address
+                );
                 entry.partition_assignments.push(pa);
             }
             // active_peers dropped here
@@ -519,24 +526,27 @@ impl DataSyncService {
         let service_senders = service_senders.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let handle = runtime_handle.spawn(async move {
-            let data_sync_service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                inner: DataSyncServiceInner::new(
-                    block_tree,
-                    storage_modules,
-                    peer_list,
-                    chunk_fetcher_factory,
-                    service_senders,
-                    config,
-                ),
-            };
-            data_sync_service
-                .start()
-                .await
-                .expect("DataSync Service encountered an irrecoverable error")
-        });
+        let handle = runtime_handle.spawn(
+            async move {
+                let data_sync_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner: DataSyncServiceInner::new(
+                        block_tree,
+                        storage_modules,
+                        peer_list,
+                        chunk_fetcher_factory,
+                        service_senders,
+                        config,
+                    ),
+                };
+                data_sync_service
+                    .start()
+                    .await
+                    .expect("DataSync Service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         TokioServiceHandle {
             name: "data_sync_service".to_string(),
