@@ -288,13 +288,13 @@ impl Compact for PeerListItem {
             0
         };
 
-        let total_consumed = 8;
+        let mut total_consumed = 8;
+        let mut is_online = false;
 
-        let is_online = if buf.len() > total_consumed {
-            buf[total_consumed] == 1
-        } else {
-            false
-        };
+        if buf.len() > total_consumed {
+            is_online = buf[total_consumed] == 1;
+            total_consumed += 1;
+        }
 
         (
             Self {
