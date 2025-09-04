@@ -646,20 +646,74 @@ where
         let evm = self.inner.evm_mut();
         let db = evm.db_mut();
 
-        // Deduct fee from target
-        let target_account = Self::deduct_fee_from_target(db, target, total_fee, tx_hash)?;
-        let target_state = Self::create_account_state(target_account, AccountStatus::Touched);
+        // Special case: if target and beneficiary are the same, this is a no-op
+        // (you can't pay yourself and gain money)
+        if target == beneficiary {
+            // Load the account once
+            let target_state = db
+                .load_cache_account(target)
+                .map_err(|_| create_internal_error("Could not load target account"))?;
 
-        // Add fee to beneficiary
-        let (beneficiary_account, is_new) =
-            Self::add_fee_to_beneficiary(db, beneficiary, total_fee)?;
-        let mut status = AccountStatus::Touched;
-        if is_new {
-            status |= AccountStatus::Created;
+            // Validate account exists
+            let Some(existing) = target_state.account.as_ref() else {
+                tracing::warn!(
+                    target = %target,
+                    "Target account does not exist, cannot process priority fee"
+                );
+                return Err(create_invalid_tx_error(
+                    *tx_hash,
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_fee),
+                        balance: Box::new(U256::ZERO),
+                    },
+                ));
+            };
+
+            let account = existing.clone();
+
+            // Validate sufficient balance (even though it's a no-op, we still validate)
+            if account.info.balance < total_fee {
+                tracing::warn!(
+                    target = %target,
+                    balance = %account.info.balance,
+                    required_fee = %total_fee,
+                    "Target has insufficient balance for priority fee"
+                );
+                return Err(create_invalid_tx_error(
+                    *tx_hash,
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_fee),
+                        balance: Box::new(account.info.balance),
+                    },
+                ));
+            }
+
+            tracing::trace!(
+                address = %target,
+                fee = %total_fee,
+                "Priority fee payer and beneficiary are the same address, no-op transfer"
+            );
+
+            // Return the same account state for both (unchanged balance)
+            let account_state = Self::create_account_state(account, AccountStatus::Touched);
+            Ok((account_state.clone(), account_state))
+        } else {
+            // Normal case: different addresses
+            // Deduct fee from target
+            let target_account = Self::deduct_fee_from_target(db, target, total_fee, tx_hash)?;
+            let target_state = Self::create_account_state(target_account, AccountStatus::Touched);
+
+            // Add fee to beneficiary
+            let (beneficiary_account, is_new) =
+                Self::add_fee_to_beneficiary(db, beneficiary, total_fee)?;
+            let mut status = AccountStatus::Touched;
+            if is_new {
+                status |= AccountStatus::Created;
+            }
+            let beneficiary_state = Self::create_account_state(beneficiary_account, status);
+
+            Ok((target_state, beneficiary_state))
         }
-        let beneficiary_state = Self::create_account_state(beneficiary_account, status);
-
-        Ok((target_state, beneficiary_state))
     }
 
     /// Deducts the fee from the target account after validating sufficient balance.
@@ -1519,15 +1573,22 @@ where
         let (target_state, beneficiary_state) =
             self.prepare_fee_transfer(target, beneficiary, total_fee, tx_hash)?;
 
-        let bef = self.load_account(beneficiary)?.unwrap();
+        // Only do balance change assertions if target != beneficiary
+        // When they're the same, it's a no-op and balance won't change
+        if target != beneficiary {
+            let bef = self.load_account(beneficiary)?.unwrap();
 
-        self.commit_account_change(fee_payer_address.unwrap(), target_state);
-        self.commit_account_change(beneficiary, beneficiary_state.clone());
+            self.commit_account_change(fee_payer_address.unwrap(), target_state);
+            self.commit_account_change(beneficiary, beneficiary_state.clone());
 
-        let aft = self.load_account(beneficiary)?.unwrap();
+            let aft = self.load_account(beneficiary)?.unwrap();
 
-        assert_ne!(bef, aft);
-        assert_eq!(beneficiary_state, aft);
+            assert_ne!(bef, aft);
+            assert_eq!(beneficiary_state, aft);
+        } else {
+            // Same address - just commit the single account state
+            self.commit_account_change(target, target_state);
+        }
 
         Ok(())
     }
@@ -1542,20 +1603,70 @@ where
         total_fee: U256,
         tx_hash: &FixedBytes<32>,
     ) -> Result<(Account, Account), <Self as Evm>::Error> {
-        // Deduct fee from target
-        let mut target_state = self.deduct_fee_from_target(target, total_fee, tx_hash)?;
-        target_state.status = AccountStatus::Touched;
+        // Special case: if target and beneficiary are the same, this is a no-op
+        // (you can't pay yourself and gain money)
+        if target == beneficiary {
+            // Load the account once
+            let account_state = self.load_account(target)?;
+            let Some(mut account) = account_state else {
+                tracing::warn!(
+                    target = %target,
+                    "Target account does not exist, cannot process priority fee"
+                );
+                return Err(Self::create_invalid_tx_error(
+                    *tx_hash,
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_fee),
+                        balance: Box::new(U256::ZERO),
+                    },
+                ));
+            };
 
-        // Add fee to beneficiary
-        let (mut beneficiary_account, is_new) =
-            self.add_fee_to_beneficiary(beneficiary, total_fee)?;
-        let mut status = AccountStatus::Touched;
-        if is_new {
-            status |= AccountStatus::Created;
+            // Validate sufficient balance (even though it's a no-op, we still validate)
+            if account.info.balance < total_fee {
+                tracing::warn!(
+                    target = %target,
+                    balance = %account.info.balance,
+                    required_fee = %total_fee,
+                    "Target has insufficient balance for priority fee"
+                );
+                return Err(Self::create_invalid_tx_error(
+                    *tx_hash,
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_fee),
+                        balance: Box::new(account.info.balance),
+                    },
+                ));
+            }
+
+            // Mark as touched but don't change balance (no-op transfer)
+            account.status = AccountStatus::Touched;
+            
+            tracing::trace!(
+                address = %target,
+                fee = %total_fee,
+                "Priority fee payer and beneficiary are the same address, no-op transfer"
+            );
+
+            // Return the same account for both target and beneficiary
+            Ok((account.clone(), account))
+        } else {
+            // Normal case: different addresses
+            // Deduct fee from target
+            let mut target_state = self.deduct_fee_from_target(target, total_fee, tx_hash)?;
+            target_state.status = AccountStatus::Touched;
+
+            // Add fee to beneficiary
+            let (mut beneficiary_account, is_new) =
+                self.add_fee_to_beneficiary(beneficiary, total_fee)?;
+            let mut status = AccountStatus::Touched;
+            if is_new {
+                status |= AccountStatus::Created;
+            }
+            beneficiary_account.status = status;
+
+            Ok((target_state, beneficiary_account))
         }
-        beneficiary_account.status = status;
-
-        Ok((target_state, beneficiary_account))
     }
 
     /// Deducts the fee from the target account after validating sufficient balance.
