@@ -35,7 +35,7 @@ use irys_database::{
 };
 use irys_domain::{
     get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
-    EmaSnapshot,
+    EmaSnapshot, EpochSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -2028,13 +2028,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment_with_signer(
         &self,
         signer: &IrysSigner,
-        anchor: H256,
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
 
         let pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
-            anchor,
+            self.get_anchor().await.expect("anchor should be provided"),
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
@@ -2073,6 +2072,25 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
         let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
+        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        info!("Generated stake_tx.id: {}", stake_tx.id);
+
+        // Submit stake commitment via public API
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        self.post_commitment_tx_request(&api_uri, &stake_tx)
+            .await
+            .expect("posted commitment tx");
+
+        Ok(stake_tx)
+    }
+
+    pub async fn post_stake_commitment_with_signer(
+        &self,
+        signer: &IrysSigner,
+    ) -> eyre::Result<CommitmentTransaction> {
+        let config = &self.node_ctx.config.consensus;
+        let anchor = self.get_anchor().await?;
+        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
@@ -2244,6 +2262,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_tree_guard
             .read()
             .get_ema_snapshot(block_hash)
+    }
+
+    pub fn get_canonical_epoch_snapshot(&self) -> Arc<EpochSnapshot> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
     }
 
     /// Mine blocks until a condition is met
