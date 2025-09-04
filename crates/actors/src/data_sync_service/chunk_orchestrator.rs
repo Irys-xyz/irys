@@ -35,14 +35,21 @@ pub struct ChunkRequest {
     pub request_state: ChunkRequestState,
 }
 
+/// Orchestrates efficient chunk downloading for a StorageModule's assigned data partition.
+///
+/// Key responsibilities:
+/// - Rate-limits chunk requests based on local StorageModules' disk write throughput
+/// - Queues and dispatches chunk requests across available peers
+/// - Optimizes concurrency using peer health scores from PeerBandwidthManagers
+/// - Tracks performance metrics for observability
 #[derive(Debug)]
 pub struct ChunkOrchestrator {
     pub chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
     pub current_peers: Vec<Address>,
     block_tree: BlockTreeReadGuard,
     storage_module: Arc<StorageModule>,
-    recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // To support better observability in the future
-    // Keep a reference to the active_sync_peers in DataSyncService where it is maintained
+    recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // Performance tracking for observability
+    // Shared reference to peer bandwidth managers maintained by DataSyncService
     active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
     slot_index: usize,
@@ -50,7 +57,6 @@ pub struct ChunkOrchestrator {
     chunk_fetcher: Arc<dyn ChunkFetcher>,
     config: NodeConfig,
 }
-
 impl ChunkOrchestrator {
     pub fn new(
         storage_module: Arc<StorageModule>,
@@ -265,6 +271,7 @@ impl ChunkOrchestrator {
             .first()
             .map(|peer_manager| peer_manager.miner_address)
     }
+
     fn dispatch_chunk_request(&mut self, chunk_offset: PartitionChunkOffset, peer_addr: Address) {
         let request = match self.chunk_requests.get_mut(&chunk_offset) {
             Some(req) => req,
@@ -317,13 +324,13 @@ impl ChunkOrchestrator {
                 Ok(chunk) => DataSyncServiceMessage::ChunkCompleted {
                     storage_module_id,
                     chunk_offset,
-                    peer_addr,
+                    peer_address: peer_addr,
                     chunk,
                 },
                 Err(ChunkFetchError::Timeout) => DataSyncServiceMessage::ChunkTimedOut {
                     storage_module_id,
                     chunk_offset,
-                    peer_addr,
+                    peer_address: peer_addr,
                 },
                 Err(_) => DataSyncServiceMessage::ChunkFailed {
                     storage_module_id,
