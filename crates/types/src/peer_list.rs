@@ -193,9 +193,9 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     };
 
     let consumed = match tag {
-        0 => 7,  // 4 bytes header + 1 byte tag + 4 bytes IPv4 + 2 bytes port
-        1 => 19, // 4 bytes header + 1 byte tag + 16 bytes IPv6 + 2 bytes port
-        _ => 1,  // 4 bytes header + 1 byte tag
+        0 => 7,  // 1 byte tag + 4 bytes IPv4 + 2 bytes port
+        1 => 19, // 1 byte tag + 16 bytes IPv6 + 2 bytes port
+        _ => 1,  // unknown tag: we only consumed the tag byte
     };
     (address, consumed)
 }
@@ -231,6 +231,8 @@ impl Compact for PeerListItem {
         buf.put_u64(self.last_seen);
         size += 8;
 
+        // Always write the is_online flag (1 byte). Decoding is backward-compatible and will
+        // default to false if this byte is missing
         buf.put_u8(if self.is_online { 1 } else { 0 });
         size += 1;
 
@@ -281,7 +283,9 @@ impl Compact for PeerListItem {
             execution: reth_peer_info,
         };
 
-        // Read last_seen if available
+        // Read last_seen (8 bytes) if available. We do not advance the buf slice here;
+        // instead we track how many bytes we will consume from this tail section via
+        // total_consumed, and advance the returned remainder accordingly.
         let last_seen = if buf.len() >= 8 {
             u64::from_be_bytes(buf[0..8].try_into().unwrap())
         } else {
@@ -304,6 +308,7 @@ impl Compact for PeerListItem {
                 last_seen,
                 is_online,
             },
+            // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
         )
     }
