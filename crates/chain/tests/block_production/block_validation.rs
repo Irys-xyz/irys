@@ -12,8 +12,9 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     use crate::utils::solution_context;
     use irys_actors::{
-        async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
-        BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+        async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDiff,
+        reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy,
+        BlockProducerInner, ProductionStrategy,
     };
     use irys_domain::EmaSnapshot;
     use irys_types::{
@@ -52,13 +53,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            expired_ledger_fees: LedgerExpiryBalanceDiff,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(
