@@ -2,7 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult};
+use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
@@ -15,7 +15,7 @@ use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
@@ -82,7 +82,7 @@ impl GossipClient {
         peer: &(Address, PeerListItem),
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
-    ) -> GossipResult<bool> {
+    ) -> GossipResult<GossipResponse<bool>> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
 
         let res = self.send_data_internal(url, &requested_data, false).await;
@@ -97,7 +97,7 @@ impl GossipClient {
         peer: &(Address, PeerListItem),
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
-    ) -> GossipResult<Option<GossipData>> {
+    ) -> GossipResult<GossipResponse<Option<GossipData>>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
 
         let res = self.send_data_internal(url, &requested_data, false).await;
@@ -130,7 +130,11 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
+    async fn send_data(
+        &self,
+        peer: &PeerListItem,
+        data: &GossipData,
+    ) -> GossipResult<GossipResponse<()>> {
         Self::check_if_peer_is_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
@@ -196,7 +200,7 @@ impl GossipClient {
         url: String,
         data: &T,
         empty_response_allowed: bool,
-    ) -> GossipResult<R>
+    ) -> GossipResult<GossipResponse<R>>
     where
         T: Serialize + ?Sized,
         for<'de> R: Deserialize<'de>,
@@ -275,7 +279,7 @@ impl GossipClient {
 
     fn handle_score<T>(
         peer_list: &PeerList,
-        result: &GossipResult<T>,
+        result: &GossipResult<GossipResponse<T>>,
         peer_miner_address: &Address,
     ) {
         match &result {
@@ -406,13 +410,29 @@ impl GossipClient {
             .pull_data_and_update_the_score(peer, data_request, peer_list)
             .await
         {
-            Ok(Some(data)) => {
-                let header = Self::block(data)?;
-                Ok((peer.0, header))
-            }
-            Ok(None) => Err(PeerNetworkError::FailedToRequestData(
-                "Peer did not have the requested block".to_string(),
-            )),
+            Ok(response) => match response {
+                GossipResponse::Accepted(maybe_data) => match maybe_data {
+                    Some(data) => {
+                        let header = Self::block(data)?;
+                        Ok((peer.0, header))
+                    }
+                    None => Err(PeerNetworkError::FailedToRequestData(
+                        "Peer did not have the requested block".to_string(),
+                    )),
+                },
+                GossipResponse::Rejected(reason) => {
+                    warn!("Peer {} rejected the request: {:?}", peer.0, reason);
+                    match reason {
+                        RejectionReason::HandshakeRequired => {
+                            peer_list.initiate_handshake(peer.1.address.api, true)
+                        }
+                    }
+                    Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {} rejected the request: {:?}",
+                        peer.0, reason
+                    )))
+                }
+            },
             Err(err) => match err {
                 GossipError::PeerNetwork(e) => Err(e),
                 other => Err(PeerNetworkError::FailedToRequestData(other.to_string())),
@@ -478,23 +498,41 @@ impl GossipClient {
                     .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
                     .await
                 {
-                    Ok(Some(data)) => {
-                        info!(
-                            "Successfully requested {:?} from peer {}",
-                            data_request, address
-                        );
-                        match map_data(data) {
-                            Ok(data) => return Ok((*address, data)),
-                            Err(err) => {
-                                warn!("Failed to map data from peer {}: {}", address, err);
+                    Ok(response) => {
+                        match response {
+                            GossipResponse::Accepted(maybe_data) => match maybe_data {
+                                Some(data) => match map_data(data) {
+                                    Ok(data) => return Ok((*address, data)),
+                                    Err(err) => {
+                                        warn!("Failed to map data from peer {}: {}", address, err);
+                                        continue;
+                                    }
+                                },
+                                None => {
+                                    // Peer doesn't have this block, try another peer
+                                    debug!("Peer {} doesn't have {:?}", address, data_request);
+                                    continue;
+                                }
+                            },
+                            GossipResponse::Rejected(reason) => {
+                                warn!(
+                                    "Peer {} reject the request: {:?}: {:?}",
+                                    address, data_request, reason
+                                );
+                                match reason {
+                                    RejectionReason::HandshakeRequired => {
+                                        peer_list.initiate_handshake(peer.1.address.api, true);
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {} requires a handshake",
+                                                address
+                                            )),
+                                        ));
+                                    }
+                                }
                                 continue;
                             }
-                        };
-                    }
-                    Ok(None) => {
-                        // Peer doesn't have this block, try another peer
-                        debug!("Peer {} doesn't have {:?}", address, data_request);
-                        continue;
+                        }
                     }
                     Err(err) => {
                         last_error = Some(err);
@@ -515,7 +553,7 @@ impl GossipClient {
         }
 
         Err(PeerNetworkError::FailedToRequestData(format!(
-            "Failed to fetch {:?} after trying 5 peers: {:?}",
+            "Failed to pull {:?} after trying 5 peers: {:?}",
             data_request, last_error
         )))
     }
