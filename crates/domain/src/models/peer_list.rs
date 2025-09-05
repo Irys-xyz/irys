@@ -261,6 +261,29 @@ impl PeerList {
         peers
     }
 
+    pub fn all_peers_sorted_by_score(&self) -> Vec<(Address, PeerListItem)> {
+        let guard = self.read();
+
+        // Create a chained iterator that combines both peer sources
+        let persistent_peers = guard
+            .persistent_peers_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let purgatory_peers = guard
+            .unstaked_peer_purgatory
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let all_peers = persistent_peers.chain(purgatory_peers);
+        let mut peers: Vec<(Address, PeerListItem)> = all_peers.collect();
+
+        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
+        peers.reverse();
+
+        peers
+    }
+
     pub fn inactive_peers(&self) -> Vec<(Address, PeerListItem)> {
         let guard = self.read();
         let mut inactive = Vec::new();
