@@ -110,6 +110,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     reth_service_actor: Option<Addr<RethServiceActor>>,
+    is_update_whitelist_task_running: Arc<AtomicBool>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -190,6 +191,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
             reth_service_actor,
+            is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -215,6 +217,8 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             return;
         }
 
+        // Check if we have any new whitelist updates
+        self.spawn_stake_and_pledge_update_task();
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let start_sync_from_height = self.block_index.read().latest_height();
@@ -322,6 +326,30 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             );
             Ok(())
         }
+    }
+
+    fn spawn_stake_and_pledge_update_task(&self) {
+        let stake_and_pledge_whitelist_running_flag = self.is_update_whitelist_task_running.clone();
+        let is_task_already_running =
+            stake_and_pledge_whitelist_running_flag.load(Ordering::Relaxed);
+        if is_task_already_running {
+            debug!("Stake and pledge whitelist update task is already running, skipping new task spawn");
+            return;
+        } else {
+            stake_and_pledge_whitelist_running_flag.store(true, Ordering::Relaxed);
+        }
+        let handler = self.gossip_data_handler.clone();
+        tokio::spawn(async move {
+            match handler.pull_and_process_stake_and_pledge_whitelist().await {
+                Ok(()) => {
+                    info!("Successfully updated stake and pledge whitelist",);
+                }
+                Err(e) => {
+                    error!("Failed to update stake and pledge whitelist: {:?}", e);
+                }
+            }
+            stake_and_pledge_whitelist_running_flag.store(false, Ordering::Relaxed);
+        });
     }
 
     /// Request parent block from network - moved from OrphanBlockProcessingService
@@ -468,6 +496,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
             } => {
                 debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
                 let inner = self.inner.clone();
+                // Check for whitelist updates after every block validation
+                self.inner.spawn_stake_and_pledge_update_task();
                 tokio::spawn(async move {
                     let result = inner.process_orphaned_ancestors(block_hash).await;
                     if let Some(sender) = response {
