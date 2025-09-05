@@ -232,9 +232,9 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
 
         tokio::spawn(
             async move {
-                self.gossip_data_handler
+                gossip_data_handler
                     .gossip_client
-                    .hydrate_peers_online_status(&self.peer_list)
+                    .hydrate_peers_online_status(&peer_list)
                     .await;
 
                 if let Err(err) = block_pool

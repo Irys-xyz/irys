@@ -4,7 +4,7 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader, PeerScore,
+    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader,
 };
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
