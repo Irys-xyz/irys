@@ -402,6 +402,7 @@ pub trait BlockProdStrategy {
                 &mut publish_txs,
                 block_reward,
                 current_timestamp,
+                solution.solution_hash,
                 expired_ledger_fees,
             )
             .await?;
@@ -469,6 +470,7 @@ pub trait BlockProdStrategy {
         publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
+        solution_hash: H256,
         expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
@@ -483,6 +485,7 @@ pub trait BlockProdStrategy {
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
+            &solution_hash,
             &self.inner().config.consensus,
             commitment_txs_to_bill,
             submit_txs,

@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon as _, U256,
+    IrysBlockHeader, IrysTransactionCommon as _, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -29,6 +29,7 @@ pub struct ShadowTxGenerator<'a> {
     pub reward_address: &'a Address,
     pub reward_amount: &'a U256,
     pub parent_block: &'a IrysBlockHeader,
+    pub solution_hash: &'a H256,
     pub config: &'a ConsensusConfig,
 
     // Transaction slices
@@ -53,6 +54,7 @@ impl<'a> ShadowTxGenerator<'a> {
         reward_address: &'a Address,
         reward_amount: &'a U256,
         parent_block: &'a IrysBlockHeader,
+        solution_hash: &'a H256,
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
@@ -68,6 +70,7 @@ impl<'a> ShadowTxGenerator<'a> {
             reward_address,
             reward_amount,
             parent_block,
+            solution_hash,
             config,
             commitment_txs,
             submit_txs,
@@ -107,11 +110,12 @@ impl Iterator for ShadowTxGenerator<'_> {
                     self.phase = Phase::Commitments;
                     // Block reward has no treasury impact
                     return Some(Ok(ShadowMetadata {
-                        shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                            BlockRewardIncrement {
+                        shadow_tx: ShadowTransaction::new_v1(
+                            TransactionPacket::BlockReward(BlockRewardIncrement {
                                 amount: (*self.reward_amount).into(),
-                            },
-                        )),
+                            }),
+                            (*self.solution_hash).into(),
+                        ),
                         transaction_fee: 0,
                     }));
                 }
@@ -255,30 +259,42 @@ impl ShadowTxGenerator<'_> {
 
         match tx.commitment_type {
             irys_primitives::CommitmentType::Stake => Ok(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-                    amount: total_cost,
-                    target: tx.signer,
-                    irys_ref: tx.id.into(),
-                })),
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Stake(BalanceDecrement {
+                        amount: total_cost,
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
                 transaction_fee,
             }),
             irys_primitives::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
-                    amount: total_cost,
-                    target: tx.signer,
-                    irys_ref: tx.id.into(),
-                })),
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Pledge(BalanceDecrement {
+                        amount: total_cost,
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
                 transaction_fee,
             }),
             irys_primitives::CommitmentType::Unpledge { .. } => {
                 create_increment_or_decrement("unpledge").map(|result| ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(result)),
+                    shadow_tx: ShadowTransaction::new_v1(
+                        TransactionPacket::Unpledge(result),
+                        (*self.solution_hash).into(),
+                    ),
                     transaction_fee,
                 })
             }
             irys_primitives::CommitmentType::Unstake => create_increment_or_decrement("unstake")
                 .map(|result| ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unstake(result)),
+                    shadow_tx: ShadowTransaction::new_v1(
+                        TransactionPacket::Unstake(result),
+                        (*self.solution_hash).into(),
+                    ),
                     transaction_fee,
                 }),
         }
@@ -302,13 +318,14 @@ impl ShadowTxGenerator<'_> {
                 let total_amount = reward_amount.into_inner();
 
                 ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
-                        BalanceIncrement {
+                    shadow_tx: ShadowTransaction::new_v1(
+                        TransactionPacket::IngressProofReward(BalanceIncrement {
                             amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
                             target: address,
                             irys_ref,
-                        },
-                    )),
+                        }),
+                        (*self.solution_hash).into(),
+                    ),
                     transaction_fee: 0, // No block producer reward for ingress proofs
                 }
             })
@@ -326,13 +343,14 @@ impl ShadowTxGenerator<'_> {
         // Create shadow transaction for total cost deduction
         let total_cost = tx.total_cost();
         Ok(ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-                BalanceDecrement {
+            shadow_tx: ShadowTransaction::new_v1(
+                TransactionPacket::StorageFees(BalanceDecrement {
                     amount: Uint::from_le_bytes(total_cost.to_le_bytes()),
                     target: tx.signer,
                     irys_ref: tx.id.into(),
-                },
-            )),
+                }),
+                (*self.solution_hash).into(),
+            ),
             // Block producer gets their reward via transaction_fee
             transaction_fee: term_charges
                 .block_producer_reward
@@ -468,13 +486,14 @@ impl ShadowTxGenerator<'_> {
                 let irys_ref = h256.into();
 
                 ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
-                        BalanceIncrement {
+                    shadow_tx: ShadowTransaction::new_v1(
+                        TransactionPacket::TermFeeReward(BalanceIncrement {
                             amount: Uint::from_le_bytes(amount.to_le_bytes()),
                             target: *address,
                             irys_ref,
-                        },
-                    )),
+                        }),
+                        (*self.solution_hash).into(),
+                    ),
                     transaction_fee: 0, // No block producer reward for term fee rewards
                 }
             })
@@ -677,22 +696,27 @@ mod tests {
             proofs: None,
         };
 
+        let solution_hash = H256::zero();
+
         // Create expected shadow transactions
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                BlockRewardIncrement {
+            shadow_tx: ShadowTransaction::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement {
                     amount: reward_amount.into(),
-                },
-            )),
+                }),
+                solution_hash.into(),
+            ),
             transaction_fee: 0,
         }];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &[],
@@ -747,61 +771,76 @@ mod tests {
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![
             // Block reward
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                    BlockRewardIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
                         amount: reward_amount.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
             // Stake
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-                    amount: U256::from(101000).into(), // 100000 + 1000 fee
-                    target: commitments[0].signer,
-                    irys_ref: commitments[0].id.into(),
-                })),
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Stake(BalanceDecrement {
+                        amount: U256::from(101000).into(), // 100000 + 1000 fee
+                        target: commitments[0].signer,
+                        irys_ref: commitments[0].id.into(),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 1000,
             },
             // Pledge
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
-                    amount: U256::from(202000).into(), // 200000 + 2000 fee
-                    target: commitments[1].signer,
-                    irys_ref: commitments[1].id.into(),
-                })),
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Pledge(BalanceDecrement {
+                        amount: U256::from(202000).into(), // 200000 + 2000 fee
+                        target: commitments[1].signer,
+                        irys_ref: commitments[1].id.into(),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 2000,
             },
             // Unstake (150000 - 500 fee = 149500 increment)
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unstake(
-                    EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
-                        amount: U256::from(149500).into(), // 150000 - 500 fee
-                        target: commitments[2].signer,
-                        irys_ref: commitments[2].id.into(),
-                    }),
-                )),
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Unstake(EitherIncrementOrDecrement::BalanceIncrement(
+                        BalanceIncrement {
+                            amount: U256::from(149500).into(), // 150000 - 500 fee
+                            target: commitments[2].signer,
+                            irys_ref: commitments[2].id.into(),
+                        },
+                    )),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 500,
             },
             // Unpledge (180000 - 1500 fee = 178500 increment)
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-                    EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
-                        amount: U256::from(178500).into(), // 180000 - 1500 fee
-                        target: commitments[3].signer,
-                        irys_ref: commitments[3].id.into(),
-                    }),
-                )),
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Unpledge(EitherIncrementOrDecrement::BalanceIncrement(
+                        BalanceIncrement {
+                            amount: U256::from(178500).into(), // 180000 - 1500 fee
+                            target: commitments[3].signer,
+                            irys_ref: commitments[3].id.into(),
+                        },
+                    )),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 1500,
             },
         ];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &commitments,
             &[],
@@ -845,22 +884,24 @@ mod tests {
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![
             // Block reward
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                    BlockRewardIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
                         amount: reward_amount.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
             // Storage fee for the submit transaction
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-                    BalanceDecrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::StorageFees(BalanceDecrement {
                         amount: submit_tx.total_cost().into(),
                         target: submit_tx.signer,
                         irys_ref: submit_tx.id.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: term_charges
                     .block_producer_reward
                     .try_into()
@@ -869,11 +910,13 @@ mod tests {
         ];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &submit_txs,
@@ -988,22 +1031,24 @@ mod tests {
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![
             // Block reward
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                    BlockRewardIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
                         amount: reward_amount.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
             // Storage fee for the publish transaction
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-                    BalanceDecrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::StorageFees(BalanceDecrement {
                         amount: publish_tx.total_cost().into(),
                         target: publish_tx.signer,
                         irys_ref: publish_tx.id.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: term_charges
                     .block_producer_reward
                     .try_into()
@@ -1011,43 +1056,48 @@ mod tests {
             },
             // Ingress proof rewards (aggregated by signer, sorted by address)
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
-                    BalanceIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IngressProofReward(BalanceIncrement {
                         amount: signer_rewards[0].1.into(),
                         target: signer_rewards[0].0,
                         irys_ref: H256::from(publish_tx.id.0).into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
-                    BalanceIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IngressProofReward(BalanceIncrement {
                         amount: signer_rewards[1].1.into(),
                         target: signer_rewards[1].0,
                         irys_ref: H256::from(publish_tx.id.0).into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::IngressProofReward(
-                    BalanceIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IngressProofReward(BalanceIncrement {
                         amount: signer_rewards[2].1.into(),
                         target: signer_rewards[2].0,
                         irys_ref: H256::from(publish_tx.id.0).into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
         ];
 
         let empty_fees = BTreeMap::new();
+        let solution_hash = H256::zero();
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &submit_txs,
