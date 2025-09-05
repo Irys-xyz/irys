@@ -412,8 +412,6 @@ impl<'a> ShadowTxGenerator<'a> {
         }
     }
 
-    /// Creates shadow transactions from aggregated rewards
-
     /// Creates a shadow transaction for a submit ledger transaction
     fn create_submit_shadow_tx(
         &self,
