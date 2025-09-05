@@ -144,6 +144,10 @@ impl PeerList {
         guard.persistent_peers_cache.clone()
     }
 
+    pub fn temporary_peers(&self) -> LruCache<Address, PeerListItem> {
+        self.read().unstaked_peer_purgatory.clone()
+    }
+
     pub fn contains_api_address(&self, api_address: &SocketAddr) -> bool {
         self.read()
             .api_addr_to_mining_addr_map
@@ -374,6 +378,13 @@ impl PeerList {
         let guard = self.read();
         guard.trusted_peers_api_addresses.contains(api_address)
     }
+
+    /// Initiate a handshake with a peer by its API address. If force is set to true, the networking
+    /// service will attempt to handshake even if the previous handshake was successful.
+    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+        let guard = self.read();
+        guard.initiate_handshake(api_address, force);
+    }
 }
 
 impl PeerListDataInner {
@@ -450,6 +461,15 @@ impl PeerListDataInner {
             {
                 error!("Failed to send peer updated message: {:?}", e);
             }
+        }
+    }
+
+    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+        if let Err(send_error) = self
+            .peer_network_service_sender
+            .initiate_handshake(api_address, force)
+        {
+            error!("Failed to send a force announce message: {:?}", send_error);
         }
     }
 
