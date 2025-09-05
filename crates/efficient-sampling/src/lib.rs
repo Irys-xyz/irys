@@ -169,7 +169,7 @@ pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
 }
 
 pub fn num_recall_ranges_in_partition(config: &ConsensusConfig) -> u64 {
-    config.num_chunks_in_partition / config.num_chunks_in_recall_range
+    config.num_chunks_in_partition.div_ceil(config.num_chunks_in_recall_range)
 }
 
 //==============================================================================
