@@ -8,9 +8,10 @@ use actix_web::test::{call_service, read_body, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
+use irys_domain::ScoreDecreaseReason;
 use irys_types::{
-    build_user_agent, irys::IrysSigner, NodeConfig, PeerAddress, PeerResponse, RethPeerInfo,
-    VersionRequest,
+    build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
+    RethPeerInfo, VersionRequest,
 };
 use tracing::{debug, error};
 
@@ -348,5 +349,243 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     );
 
     node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
+    // TODO: this test should:
+    //  1. Peer 1 launched. Peer 1 doesn't have trusted peers.
+    //  2. Peer 2 launched. Peer 2 has Peer 1 as trusted peer.
+    //  3. Peer 2 should handshake with Peer 1.
+    //  4. Peer 1 should add Peer 2 to its peer list as a temp peer
+    //  5. Peer 2 should add Peer 1 to its peer list as a trusted peer
+    //  6. Peer 2 goes offline or does something like that so Peer 1 removes it from the temp
+    //     peer list.
+    //  7. Peer 2 comes back online and handshakes with Peer 1 again.
+    //  8. Peer 1 should add Peer 2 back to its peer list as a temp peer
+    //  9. Stop Peer 1 - this will wipe out temp peers
+    //  10. Restart Peer 1 - it should have no peers anymore
+    //  11. If Peer 2 makes a request to the gossip endpoint of Peer 1, Peer 1 should return a
+    //      response telling Peer 2 that Peer 1 doesn't know Peer 2 and it should re-attempt the
+    //      handshake.
+    //  12. Peer 2 should handshake with Peer 1 again.
+    //  13. Peer 1 should add Peer 2 back to its peer list as a temp peer
+    //  14. Both peers should stop. Congratulations, you've just tested peer discovery!
+
+    let max_seconds = 20;
+
+    let mut testing_config_genesis = NodeConfig::testing();
+    testing_config_genesis
+        .consensus
+        .get_mut()
+        .mempool
+        .anchor_expiry_depth = 20;
+
+    testing_config_genesis
+        .consensus
+        .get_mut()
+        .block_migration_depth = 4;
+
+    // Genesis doesn't have any trusted peers
+    let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
+        .start_and_wait_for_packing("GENESIS", max_seconds)
+        .await;
+    assert_eq!(
+        ctx_genesis_node
+            .node_ctx
+            .peer_list
+            .persistable_peers()
+            .len(),
+        0
+    );
+    assert_eq!(
+        ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
+        0
+    );
+
+    // Peer 1 has genesis as trusted peer
+    let ctx_peer1_node = ctx_genesis_node.testing_peer();
+    let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
+        .start_with_name("PEER1")
+        .await;
+
+    // Check that we've added genesis as a trusted peer
+    assert_eq!(
+        ctx_peer1_node.node_ctx.peer_list.persistable_peers().len(),
+        1
+    );
+    assert_eq!(ctx_peer1_node.node_ctx.peer_list.temporary_peers().len(), 0);
+
+    // Wait for peer1 to handshake with genesis
+    let mut elapsed = 0;
+    while ctx_genesis_node
+        .node_ctx
+        .peer_list
+        .temporary_peers()
+        .is_empty()
+        && elapsed < max_seconds
+    {
+        debug!("Waiting for PEER1 to handshake with GENESIS... {}", elapsed);
+        elapsed += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    assert_eq!(
+        ctx_genesis_node
+            .node_ctx
+            .peer_list
+            .persistable_peers()
+            .len(),
+        0
+    );
+    // Genesis now should have peer1 as a temp peer
+    assert_eq!(
+        ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
+        1
+    );
+
+    // Stop peer1 node
+    let stopped_peer_1 = ctx_peer1_node.stop().await;
+    debug!("PEER1 stopped");
+
+    // Decreasing peer1 score just to speed up the pruning process
+    ctx_genesis_node.node_ctx.peer_list.decrease_peer_score(
+        &stopped_peer_1.cfg.miner_address(),
+        ScoreDecreaseReason::Offline,
+    );
+
+    // Wait for genesis to remove peer1 from its temp peer list
+    elapsed = 0;
+    while !ctx_genesis_node
+        .node_ctx
+        .peer_list
+        .temporary_peers()
+        .is_empty()
+        && elapsed < max_seconds
+    {
+        debug!(
+            "Waiting for GENESIS to remove PEER1 from temp peer list... {}",
+            elapsed
+        );
+        elapsed += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // Check that the genesis has pruned peer1 from its temp peer list
+    assert_eq!(
+        ctx_genesis_node
+            .node_ctx
+            .peer_list
+            .persistable_peers()
+            .len(),
+        0
+    );
+    assert_eq!(
+        ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
+        0
+    );
+
+    let ctx_peer1_node = stopped_peer_1.start_with_name("PEER1").await;
+    debug!("PEER1 restarted");
+
+    // Wait for peer1 to handshake with genesis again
+    elapsed = 0;
+    while ctx_genesis_node
+        .node_ctx
+        .peer_list
+        .temporary_peers()
+        .is_empty()
+        && elapsed < max_seconds
+    {
+        debug!(
+            "Waiting for PEER1 to handshake with GENESIS again... {}",
+            elapsed
+        );
+        elapsed += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert_eq!(
+        ctx_genesis_node
+            .node_ctx
+            .peer_list
+            .persistable_peers()
+            .len(),
+        0
+    );
+    // Genesis now should have peer1 as a temp peer again
+    assert_eq!(
+        ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
+        1
+    );
+
+    let stopped_genesis = ctx_genesis_node.stop().await;
+    debug!("GENESIS stopped");
+
+    // Restart genesis
+    let ctx_genesis_node = stopped_genesis
+        .start_and_wait_for_packing("GENESIS", max_seconds)
+        .await;
+    debug!("GENESIS restarted");
+
+    // Check that genesis has no peers
+    assert_eq!(
+        ctx_genesis_node
+            .node_ctx
+            .peer_list
+            .persistable_peers()
+            .len(),
+        0
+    );
+    assert_eq!(
+        ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
+        0
+    );
+
+    // We shouldn't be able to get a block
+    let res = ctx_peer1_node
+        .node_ctx
+        .service_senders
+        .peer_network
+        .request_block_to_be_gossiped_from_network(BlockHash::repeat_byte(1), false, 1)
+        .await;
+    match res {
+        Ok(()) => panic!("Expected error when requesting block from GENESIS"),
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(message.contains("Peer requires a handshake"));
+        }
+    }
+
+    // Wait for peer1 to handshake with genesis when it gets a failed block request
+    elapsed = 0;
+    while ctx_genesis_node
+        .node_ctx
+        .peer_list
+        .temporary_peers()
+        .is_empty()
+        && elapsed < max_seconds
+    {
+        debug!(
+            "Waiting for PEER1 to handshake with GENESIS again... {}",
+            elapsed
+        );
+        elapsed += 1;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert_eq!(
+        ctx_genesis_node
+            .node_ctx
+            .peer_list
+            .persistable_peers()
+            .len(),
+        0
+    );
+    // Genesis now should have peer1 as a temp peer again
+    assert_eq!(
+        ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
+        1
+    );
+
+    tokio::join!(ctx_genesis_node.stop(), ctx_peer1_node.stop());
     Ok(())
 }

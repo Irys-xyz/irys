@@ -14,6 +14,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq, Hash)]
 pub struct PeerScore(u16);
 
+pub const DATA_REQUEST_RETRIES: u8 = 5;
+
 impl PeerScore {
     pub const MIN: u16 = 0;
     pub const MAX: u16 = 100;
@@ -309,14 +311,25 @@ impl Compact for PeerListItem {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub struct HandshakeMessage {
+    /// API address of the peer to handshake with
+    pub api_address: SocketAddr,
+    /// If true, tries to handshake even if the peer is already known and the last handshake
+    /// was successful
+    pub force: bool,
+}
+
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub enum PeerNetworkServiceMessage {
+    Handshake(HandshakeMessage),
     AnnounceYourselfToPeer(PeerListItem),
     RequestDataFromNetwork {
         data_request: GossipDataRequest,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
+        retries: u8,
     },
 }
 
@@ -385,16 +398,27 @@ impl PeerNetworkSender {
         self.send(message)
     }
 
+    pub fn initiate_handshake(
+        &self,
+        api_address: SocketAddr,
+        force: bool,
+    ) -> Result<(), SendError<PeerNetworkServiceMessage>> {
+        let message = PeerNetworkServiceMessage::Handshake(HandshakeMessage { api_address, force });
+        self.send(message)
+    }
+
     pub async fn request_block_to_be_gossiped_from_network(
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
+        retries: u8,
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
             data_request: GossipDataRequest::Block(block_hash),
             use_trusted_peers_only,
             response: sender,
+            retries,
         };
         self.send(message)?;
 
@@ -416,6 +440,7 @@ impl PeerNetworkSender {
             data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
             use_trusted_peers_only,
             response: sender,
+            retries: DATA_REQUEST_RETRIES,
         };
         self.send(message)?;
 
@@ -437,6 +462,7 @@ impl PeerNetworkSender {
             data_request: GossipDataRequest::Chunk(chunk_path_hash),
             use_trusted_peers_only,
             response: sender,
+            retries: DATA_REQUEST_RETRIES,
         };
         self.send(message)?;
 
