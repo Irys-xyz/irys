@@ -483,11 +483,24 @@ impl GossipClient {
             return Err(PeerNetworkError::NoPeersAvailable);
         }
 
-        // Try up to 5 iterations over the peer list to get the block
+        // Try up to max_retries rounds across peers; only retry peers on transient errors.
         let mut last_error = None;
 
-        for attempt in 1..=5 {
-            for peer in &peers {
+        // Track peers eligible for retry across rounds (transient failures only)
+        let mut retryable_peers = peers.clone();
+
+        // How many retry attempts to make per peer
+        let max_retries = 5;
+
+        for attempt in 1..=max_retries {
+            // If no peers remain to try, stop early
+            if retryable_peers.is_empty() {
+                break;
+            }
+
+            // Iterate over a snapshot to allow mutation of retryable_peers
+            let current_round = retryable_peers.clone();
+            for peer in &current_round {
                 let address = &peer.0;
                 debug!(
                     "Attempting to fetch {:?} from peer {} (attempt {}/5)",
@@ -505,11 +518,13 @@ impl GossipClient {
                                     Ok(data) => return Ok((*address, data)),
                                     Err(err) => {
                                         warn!("Failed to map data from peer {}: {}", address, err);
+                                        // Not retriable: remove peer from future rounds
+                                        retryable_peers.retain(|p| p.0 != *address);
                                         continue;
                                     }
                                 },
                                 None => {
-                                    // Peer doesn't have this block, try another peer
+                                    // Peer doesn't have this data; keep for future rounds to allow re-gossip
                                     debug!("Peer {} doesn't have {:?}", address, data_request);
                                     continue;
                                 }
@@ -530,6 +545,8 @@ impl GossipClient {
                                         ));
                                     }
                                 }
+                                // Do not retry the same peer on rejection; remove from future rounds
+                                retryable_peers.retain(|p| p.0 != *address);
                                 continue;
                             }
                         }
@@ -544,7 +561,7 @@ impl GossipClient {
                             last_error.as_ref().unwrap()
                         );
 
-                        // Move on to the next peer
+                        // Transient failure: keep peer for next round
                         continue;
                     }
                 }

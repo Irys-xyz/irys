@@ -988,12 +988,21 @@ where
                 // Try up to 5 iterations over the peer list to get the block
                 let mut last_error = None;
 
+                // Cycle through peers per attempt; keep only peers that failed transiently
+                let mut retryable_peers = peers.clone();
+
                 for attempt in 1..=retries {
-                    for peer in &peers {
+                    if retryable_peers.is_empty() {
+                        break;
+                    }
+
+                    // Snapshot current round to allow mutation of retryable_peers
+                    let current_round = retryable_peers.clone();
+                    for peer in &current_round {
                         let address = &peer.0;
                         debug!(
-                            "Attempting to fetch {:?} from peer {} (attempt {}/5)",
-                            data_request, address, attempt
+                            "Attempting to fetch {:?} from peer {} (attempt {}/{})",
+                            data_request, address, attempt, retries
                         );
 
                         match gossip_client
@@ -1012,10 +1021,9 @@ where
                                                 "Successfully requested {:?} from peer {}",
                                                 data_request, address
                                             );
-
                                             return Ok(());
                                         } else {
-                                            // Peer doesn't have this block, try another peer
+                                            // Definitive: peer doesn't have the data; keep for future rounds
                                             debug!(
                                                 "Peer {} doesn't have {:?}",
                                                 address, data_request
@@ -1046,6 +1054,8 @@ where
                                                     )?;
                                             }
                                         };
+                                        // Do not retry same peer on rejection; remove from future rounds
+                                        retryable_peers.retain(|p| p.0 != *address);
                                         continue;
                                     }
                                 }
@@ -1053,14 +1063,15 @@ where
                             Err(err) => {
                                 last_error = Some(err);
                                 warn!(
-                                    "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
+                                    "Failed to fetch {:?} from peer {} (attempt {}/{}): {}",
                                     data_request,
                                     address,
                                     attempt,
+                                    retries,
                                     last_error.as_ref().unwrap()
                                 );
 
-                                // Move on to the next peer
+                                // Transient failure: keep peer for next round
                                 continue;
                             }
                         }
