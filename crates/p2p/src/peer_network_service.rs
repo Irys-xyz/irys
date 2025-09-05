@@ -970,7 +970,7 @@ where
                     .ok_or(PeerListServiceError::DatabaseNotConnected)?;
 
                 let mut peers = if use_trusted_peers_only {
-                    peer_list.trusted_peers()
+                    peer_list.online_trusted_peers()
                 } else {
                     // Get the top 10 most active peers
                     peer_list.top_active_peers(Some(10), None)

@@ -118,6 +118,15 @@ impl PeerList {
         inner.decrease_peer_score(mining_addr, reason);
     }
 
+    pub fn set_is_online(&self, mining_addr: &Address, is_online: bool) {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        if let Some(peer) = inner.persistent_peers_cache.get_mut(mining_addr) {
+            peer.is_online = is_online;
+        } else if let Some(peer) = inner.unstaked_peer_purgatory.get_mut(mining_addr) {
+            peer.is_online = is_online;
+        }
+    }
+
     /// Get a peer from any cache (persistent or purgatory)
     pub fn get_peer(&self, mining_addr: &Address) -> Option<PeerListItem> {
         let inner = self.read();
@@ -182,7 +191,7 @@ impl PeerList {
         }
     }
 
-    pub fn trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn all_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
         let guard = self.read();
 
         let mut peers: Vec<(Address, PeerListItem)> = Vec::new();
@@ -213,6 +222,12 @@ impl PeerList {
         peers.reverse();
 
         peers
+    }
+
+    pub fn online_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+        let mut trusted_peers = self.all_trusted_peers();
+        trusted_peers.retain(|(_miner_address, peer)| peer.is_online);
+        trusted_peers
     }
 
     pub fn trusted_peer_addresses(&self) -> HashSet<SocketAddr> {
@@ -257,6 +272,29 @@ impl PeerList {
         if let Some(truncate) = limit {
             peers.truncate(truncate);
         }
+
+        peers
+    }
+
+    pub fn all_peers_sorted_by_score(&self) -> Vec<(Address, PeerListItem)> {
+        let guard = self.read();
+
+        // Create a chained iterator that combines both peer sources
+        let persistent_peers = guard
+            .persistent_peers_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let purgatory_peers = guard
+            .unstaked_peer_purgatory
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let all_peers = persistent_peers.chain(purgatory_peers);
+        let mut peers: Vec<(Address, PeerListItem)> = all_peers.collect();
+
+        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
+        peers.reverse();
 
         peers
     }
@@ -936,7 +974,7 @@ mod tests {
                 .trusted_peers_api_addresses
                 .insert(unstaked_peer.address.api);
         }
-        let trusted_peers = peer_list.trusted_peers();
+        let trusted_peers = peer_list.all_trusted_peers();
         let trusted_contains_staked = trusted_peers.iter().any(|(addr, _)| addr == &staked_addr);
         let trusted_contains_unstaked =
             trusted_peers.iter().any(|(addr, _)| addr == &unstaked_addr);
