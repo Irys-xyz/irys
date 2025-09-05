@@ -144,8 +144,6 @@ where
         let tx_id = tx.id;
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
-        self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
 
         if already_seen {
             debug!(
@@ -181,6 +179,9 @@ where
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Transaction sent to mempool");
+                // Only record as seen after successful validation
+                self.cache
+                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
                 Ok(())
             }
             Err(error) => {
@@ -203,17 +204,14 @@ where
 
         let proof = proof_request.data;
         let source_miner_address = proof_request.miner_address;
+        let proof_hash = proof.proof;
 
-        let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof.proof)?;
-        self.cache.record_seen(
-            source_miner_address,
-            GossipCacheKey::IngressProof(proof.proof),
-        )?;
+        let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof_hash)?;
 
         if already_seen {
             debug!(
                 "Node {}: Ingress Proof {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address, proof.proof
+                self.gossip_client.mining_address, proof_hash
             );
             return Ok(());
         }
@@ -228,6 +226,11 @@ where
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Ingress Proof sent to mempool");
+                // Only record as seen after successful validation
+                self.cache.record_seen(
+                    source_miner_address,
+                    GossipCacheKey::IngressProof(proof_hash),
+                )?;
                 Ok(())
             }
             Err(error) => {
@@ -252,8 +255,6 @@ where
         let tx_id = tx.id;
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
-        self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
 
         if already_seen {
             debug!(
@@ -289,6 +290,9 @@ where
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Commitment Transaction sent to mempool");
+                // Only record as seen after successful validation
+                self.cache
+                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
                 Ok(())
             }
             Err(error) => {
@@ -638,7 +642,18 @@ where
     ) -> GossipResult<()> {
         let source_miner_address = execution_payload_request.miner_address;
         let evm_block = execution_payload_request.data;
-        let sealed_block = evm_block.seal_slow();
+
+        // Basic validation: ensure the block can be sealed (structure validation)
+        let sealed_block = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            evm_block.seal_slow()
+        })) {
+            Ok(sealed) => sealed,
+            Err(_) => {
+                return Err(GossipError::InvalidData(
+                    InvalidDataError::ExecutionPayloadInvalidStructure,
+                ));
+            }
+        };
 
         let evm_block_hash = sealed_block.hash();
         let payload_already_seen_before = self
@@ -649,12 +664,6 @@ where
             .is_waiting_for_payload(&evm_block_hash)
             .await;
 
-        // Record payload as seen from the source peer
-        self.cache.record_seen(
-            source_miner_address,
-            GossipCacheKey::ExecutionPayload(evm_block_hash),
-        )?;
-
         if payload_already_seen_before && !expecting_payload {
             debug!(
                 "Node {}: Execution payload for EVM block {:?} already seen, and no service requested it to be fetched again, skipping",
@@ -664,9 +673,24 @@ where
             return Ok(());
         }
 
+        // Additional validation: verify block structure is valid
+        let header = sealed_block.header();
+        if header.number == 0 && !header.parent_hash.is_zero() {
+            return Err(GossipError::InvalidData(
+                InvalidDataError::ExecutionPayloadInvalidStructure,
+            ));
+        }
+
         self.execution_payload_cache
             .add_payload_to_cache(sealed_block)
             .await;
+
+        // Only record as seen after validation and successful cache addition
+        self.cache.record_seen(
+            source_miner_address,
+            GossipCacheKey::ExecutionPayload(evm_block_hash),
+        )?;
+
         debug!(
             "Node {}: Execution payload for EVM block {:?} have been added to the cache",
             self.gossip_client.mining_address, evm_block_hash
