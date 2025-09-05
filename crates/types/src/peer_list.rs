@@ -195,9 +195,9 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     };
 
     let consumed = match tag {
-        0 => 7,  // 4 bytes header + 1 byte tag + 4 bytes IPv4 + 2 bytes port
-        1 => 19, // 4 bytes header + 1 byte tag + 16 bytes IPv6 + 2 bytes port
-        _ => 1,  // 4 bytes header + 1 byte tag
+        0 => 7,  // 1 byte tag + 4 bytes IPv4 + 2 bytes port
+        1 => 19, // 1 byte tag + 16 bytes IPv6 + 2 bytes port
+        _ => 1,  // unknown tag: we only consumed the tag byte
     };
     (address, consumed)
 }
@@ -233,6 +233,8 @@ impl Compact for PeerListItem {
         buf.put_u64(self.last_seen);
         size += 8;
 
+        // Always write the is_online flag (1 byte). Decoding is backward-compatible and will
+        // default to false if this byte is missing
         buf.put_u8(if self.is_online { 1 } else { 0 });
         size += 1;
 
@@ -240,16 +242,35 @@ impl Compact for PeerListItem {
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        // Compact layout (in order):
+        // - u16 reputation_score (2 bytes, BE)
+        // - u16 response_time (2 bytes, BE)
+        // - SocketAddr gossip (tagged: 1 byte + IPv4(4)+port(2)=7 or IPv6(16)+port(2)=19)
+        // - SocketAddr api (same as above)
+        // - RethPeerInfo (variable size; see its Compact impl)
+        // - u64 last_seen (8 bytes, BE)
+        // - optional u8 is_online (1 byte). Decoder tolerates it being absent and defaults to false.
+        //
+        // Decoding strategy:
+        // - For the fixed-size prefix (score, response_time) we advance the buf slice in-place.
+        // - For variable-size sections we call helpers that return the remaining slice.
+        // - For the tail (last_seen [+ optional is_online]) we read without immediately advancing,
+        //   track a local total_consumed, and compute the correct remainder to return.
         let mut buf = buf;
+
+        // If we don't even have the fixed-size prefix (4 bytes), fall back to defaults and no remainder.
         if buf.len() < 4 {
             return (Self::default(), &[]);
         }
 
+        // Decode the fixed-size prefix and advance the buffer.
         let reputation_score = PeerScore(u16::from_be_bytes(buf[0..2].try_into().unwrap()));
         buf.advance(2);
         let response_time = u16::from_be_bytes(buf[0..2].try_into().unwrap());
         buf.advance(2);
 
+        // If the buffer ends here, the addresses and all subsequent fields are missing.
+        // Return sensible defaults and an empty remainder (we consumed the entire provided buffer).
         if buf.is_empty() {
             return (
                 Self {
@@ -273,9 +294,7 @@ impl Compact for PeerListItem {
         let (api_address, consumed) = decode_address(buf);
         buf.advance(consumed);
 
-        // let (reth_peering_tcp, consumed) = decode_address(&buf[total_consumed..]);
         let (reth_peer_info, buf) = RethPeerInfo::from_compact(buf, buf.len());
-        // total_consumed += consumed;
 
         let address = PeerAddress {
             gossip: gossip_address,
@@ -283,20 +302,22 @@ impl Compact for PeerListItem {
             execution: reth_peer_info,
         };
 
-        // Read last_seen if available
+        // Read last_seen (8 bytes) if available. We do not advance the buf slice here;
+        // instead we track how many bytes we will consume from this tail section via
+        // total_consumed, and advance the returned remainder accordingly.
         let last_seen = if buf.len() >= 8 {
             u64::from_be_bytes(buf[0..8].try_into().unwrap())
         } else {
             0
         };
 
-        let total_consumed = 8;
+        let mut total_consumed = 8;
+        let mut is_online = false;
 
-        let is_online = if buf.len() > total_consumed {
-            buf[total_consumed] == 1
-        } else {
-            false
-        };
+        if buf.len() > total_consumed {
+            is_online = buf[total_consumed] == 1;
+            total_consumed += 1;
+        }
 
         (
             Self {
@@ -306,6 +327,7 @@ impl Compact for PeerListItem {
                 last_seen,
                 is_online,
             },
+            // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
         )
     }
@@ -509,5 +531,39 @@ mod tests {
         let (decoded_address, consumed) = decode_address(&buf[..]);
         assert_eq!(consumed, 7);
         assert_eq!(decoded_address, original_address);
+    }
+
+    #[test]
+    fn peer_list_item_compact_remainder_empty() {
+        let item = PeerListItem::default();
+        let mut buf = bytes::BytesMut::with_capacity(64);
+        item.to_compact(&mut buf);
+        let (_decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
+        assert!(
+            remainder.is_empty(),
+            "expected no remainder after decoding full buffer"
+        );
+    }
+
+    #[test]
+    fn peer_list_item_from_compact_missing_is_online() {
+        let item = PeerListItem::default();
+        let mut buf = bytes::BytesMut::with_capacity(64);
+        item.to_compact(&mut buf);
+        // Remove the optional is_online byte
+        assert!(!buf.is_empty());
+        buf.truncate(buf.len() - 1);
+
+        let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
+        assert!(
+            remainder.is_empty(),
+            "expected no remainder after decoding without is_online byte"
+        );
+
+        assert_eq!(decoded.reputation_score, item.reputation_score);
+        assert_eq!(decoded.response_time, item.response_time);
+        assert_eq!(decoded.address, item.address);
+        assert_eq!(decoded.last_seen, item.last_seen);
+        assert!(!decoded.is_online);
     }
 }
