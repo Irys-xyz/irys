@@ -1,5 +1,6 @@
 use chrono::{SecondsFormat, Utc};
 use color_eyre::eyre;
+use rand::{Rng as _, SeedableRng as _};
 use std::panic;
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
 pub use tempfile;
@@ -30,14 +31,7 @@ pub fn initialize_tracing() {
 /// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
 /// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.
 pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
-    // tracing-subscriber is so the tracing log macros (i.e info!) work
-    // TODO: expose tracing configuration
-    let _ = SubscriberBuilder::default()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_span_events(fmt::format::FmtSpan::NONE)
-        .finish()
-        .try_init();
-
+    initialize_tracing();
     temporary_directory(name, keep)
 }
 
@@ -102,4 +96,20 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
     }));
 
     Ok(())
+}
+
+// simple "generator" that produces an iterator of deterministically random chunk bytes
+// this is used to create & verify large txs without having to write them to an intermediary
+pub fn chunk_bytes_gen(
+    count: u64,
+    chunk_size: usize,
+    seed: u64,
+) -> impl Iterator<Item = eyre::Result<Vec<u8> /* ChunkBytes */>> {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    (0..count).map(move |i| {
+        debug!("generated chunk {}", &i);
+        let mut chunk_bytes = vec![0; chunk_size];
+        rng.fill(&mut chunk_bytes[..]);
+        Ok(chunk_bytes)
+    })
 }
