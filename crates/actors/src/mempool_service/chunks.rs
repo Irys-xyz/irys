@@ -28,7 +28,7 @@ impl Inner {
     ) -> Result<(), ChunkIngressError> {
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
-        let max_chunks_per_item = self.config.consensus.mempool.max_chunks_per_item;
+        let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
 
         info!("Processing chunk");
 
@@ -100,9 +100,9 @@ impl Inner {
                     return Err(ChunkIngressError::PreHeaderOversizedBytes);
                 }
                 let preheader_data_path_max_bytes =
-                    self.config.consensus.mempool.max_preheader_data_path_bytes;
+                    self.config.mempool.max_preheader_data_path_bytes;
                 let preheader_chunks_per_item_cap =
-                    self.config.consensus.mempool.max_preheader_chunks_per_item;
+                    self.config.mempool.max_preheader_chunks_per_item;
                 if chunk.data_path.0.len() > preheader_data_path_max_bytes {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",

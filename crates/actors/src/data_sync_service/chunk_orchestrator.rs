@@ -195,30 +195,33 @@ impl ChunkOrchestrator {
             .get_storage_module_ledger_range()
             .expect("storage module should be assigned to a ledger");
 
-        // See if it is higher than th max_chunk_offset of the ledger
-        let canonical = self.block_tree.read().get_canonical_chain();
-        let head_block = canonical.0.last().unwrap();
-        let block_hash = head_block.block_hash;
-        let binding = self.block_tree.read();
-        let data_ledger = binding
-            .get_block(&block_hash)
-            .expect("Block to be in block tree")
-            .data_ledgers
-            .iter()
-            .find(|dl| dl.ledger_id == self.ledger_id)
-            .expect("should be able to look up data_ledger by id");
+        // Fetch the current tip's data ledger max_chunk_offset in a single read scope
+        let max_chunk_offset: u64 = {
+            let tree = self.block_tree.read();
+            let (canonical, _) = tree.get_canonical_chain();
+            let head_block = canonical
+                .last()
+                .expect("canonical chain must have at least one block");
+            let block = tree
+                .get_block(&head_block.block_hash)
+                .expect("Block to be in block tree");
+            let data_ledger = block
+                .data_ledgers
+                .iter()
+                .find(|dl| dl.ledger_id == self.ledger_id)
+                .expect("should be able to look up data_ledger by id");
+            data_ledger.max_chunk_offset
+        };
 
         // is the max chunk offset before the start of this storage module (can happen at head of chain)
-        if ledger_range.start() > data_ledger.max_chunk_offset.into() {
+        if ledger_range.start() > max_chunk_offset.into() {
             // The maximum chunk offset for this partition to sync is zero, meaning don't attempt to sync anything
             return PartitionChunkOffset::from(0);
         }
 
-        if ledger_range.end() > data_ledger.max_chunk_offset.into() {
+        if ledger_range.end() > max_chunk_offset.into() {
             // If it is convert the max_chunk_offset from ledger_relative (u64) to partition relative
-            let part_relative: u64 = data_ledger
-                .max_chunk_offset
-                .saturating_sub(ledger_range.start().into());
+            let part_relative: u64 = max_chunk_offset.saturating_sub(ledger_range.start().into());
             PartitionChunkOffset::from(part_relative as u32)
         } else {
             // Otherwise just return the maximum PartitionChunkOffset

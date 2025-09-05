@@ -26,7 +26,7 @@
 /// - 5% of term_fee for each ingress-proof provided. These rewards are included in the transaction's `perm_fee` field along with the base permanent storage cost.
 /// - perm_fee total value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 use crate::ingress::IngressProof;
-use crate::storage_pricing::{mul_div, BPS_SCALE};
+use crate::storage_pricing::{mul_div, PRECISION_SCALE};
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
@@ -64,7 +64,7 @@ impl TermFeeCharges {
         let block_producer_reward = mul_div(
             term_fee,
             config.immediate_tx_inclusion_reward_percent.amount,
-            BPS_SCALE,
+            PRECISION_SCALE,
         )?;
 
         // The rest of the fee goes to the treasury
@@ -93,6 +93,18 @@ impl TermFeeCharges {
         ensure!(
             !miners.is_empty(),
             "Cannot distribute fees to empty miners list"
+        );
+
+        // Check for duplicate addresses
+        let unique_count = miners
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        ensure!(
+            unique_count == miners.len(),
+            "Duplicate mining addresses not allowed in fee distribution: found {} unique addresses in list of {}",
+            unique_count,
+            miners.len()
         );
 
         // When the partition expires we distribute the remainder of the term_fee
@@ -149,7 +161,7 @@ impl PublishFeeCharges {
         let per_ingress_reward = mul_div(
             term_fee,
             config.immediate_tx_inclusion_reward_percent.amount,
-            BPS_SCALE,
+            PRECISION_SCALE,
         )
         .unwrap_or(U256::from(0));
 
@@ -356,6 +368,27 @@ mod tests {
         // Should fail with empty miners
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty miners"));
+    }
+
+    #[test]
+    fn test_term_fee_distribution_rejects_duplicates() {
+        let config = ConsensusConfig::testing();
+        let term_fee = U256::from(1000);
+        let charges = TermFeeCharges::new(term_fee, &config).unwrap();
+
+        // Create miners list with duplicates
+        let addr1 = Address::random();
+        let addr2 = Address::random();
+        let miners_with_duplicates = vec![addr1, addr2, addr1]; // addr1 appears twice
+
+        let result = charges.distribution_on_expiry(&miners_with_duplicates);
+
+        // Should fail due to duplicates
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate mining addresses not allowed"));
     }
 
     #[test]

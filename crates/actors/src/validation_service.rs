@@ -124,7 +124,7 @@ impl ValidationService {
                     reorg_rx,
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
-                            .num_threads(config.consensus.vdf.parallel_verification_thread_limit)
+                            .num_threads(config.vdf.parallel_verification_thread_limit)
                             .build()
                             .expect("to be able to build vdf validation pool"),
                         block_index_guard,
@@ -339,7 +339,7 @@ impl ValidationServiceInner {
 
         // Spawn VDF validation task unless skipping
         // Early guard: validate seeds against parent before heavy VDF work
-        let vdf_reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
+        let vdf_reset_frequency = self.config.vdf.reset_frequency as u64;
         {
             let binding = self.block_tree_guard.read();
             let previous_block = binding
@@ -364,7 +364,7 @@ impl ValidationServiceInner {
                 vdf_steps_are_valid(
                     &this_inner.pool,
                     &vdf_info,
-                    &this_inner.config.consensus.vdf,
+                    &this_inner.config.vdf,
                     &this_inner.vdf_state,
                     cancel,
                 )

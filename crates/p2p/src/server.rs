@@ -2,6 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::types::{GossipResponse, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
@@ -98,7 +99,7 @@ where
             return HttpResponse::InternalServerError().finish();
         }
 
-        HttpResponse::Ok().finish()
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     fn check_peer(
@@ -123,8 +124,10 @@ where
             }
             Ok(peer)
         } else {
-            warn!("Miner address {} is not allowed", miner_address);
-            Err(HttpResponse::Forbidden().finish())
+            warn!("Miner address {} is not in the peer list", miner_address);
+            Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::HandshakeRequired,
+            )))
         }
     }
 
@@ -184,7 +187,7 @@ where
             "Node {:?}: Started handling block and returned ok response to the peer",
             this_node_id
         );
-        HttpResponse::Ok().finish()
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     async fn handle_execution_payload(
@@ -221,7 +224,7 @@ where
         }
 
         debug!("Gossip execution payload handled");
-        HttpResponse::Ok().finish()
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     async fn handle_transaction(
@@ -253,7 +256,7 @@ where
         }
 
         debug!("Gossip data handled");
-        HttpResponse::Ok().finish()
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     async fn handle_commitment_tx(
@@ -289,7 +292,7 @@ where
         }
 
         debug!("Gossip data handled");
-        HttpResponse::Ok().finish()
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     async fn handle_ingress_proof(
@@ -325,7 +328,7 @@ where
         }
 
         debug!("Gossip data handled");
-        HttpResponse::Ok().finish()
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     #[expect(
@@ -397,7 +400,7 @@ where
             )
             .await
         {
-            Ok(has_data) => HttpResponse::Ok().json(has_data),
+            Ok(has_data) => HttpResponse::Ok().json(GossipResponse::Accepted(has_data)),
             Err(GossipError::RateLimited) => {
                 debug!("Rate limited data request from peer");
                 HttpResponse::TooManyRequests().finish()
@@ -432,7 +435,7 @@ where
             .handle_get_data_sync(data_request.0)
             .await
         {
-            Ok(maybe_data) => HttpResponse::Ok().json(maybe_data),
+            Ok(maybe_data) => HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data)),
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
                 HttpResponse::InternalServerError().finish()
