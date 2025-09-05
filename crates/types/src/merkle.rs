@@ -212,6 +212,11 @@ pub fn validate_path(
     // Proof nodes (including leaf nodes) always contain their right bound
     let right_bound = leaf_proof.offset() as u128;
 
+    // Ensure the provided target_offset lies within the computed [left_bound, right_bound]
+    if !(left_bound..=right_bound).contains(&target_offset) {
+        return Err(eyre!("Invalid target_offset: out of bounds"));
+    }
+
     Ok(ValidatePathResult {
         leaf_hash: leaf_proof.data_hash,
         left_bound,
@@ -677,6 +682,113 @@ mod tests {
         assert_eq!(
             &err_text,
             "Invalid proof buffer: length 31 is less than the minimum required length 64"
+        );
+    }
+
+    #[test]
+    fn validate_path_accepts_in_bounds_edges() {
+        // Build a simple two-leaf tree: left size = 5 bytes, right size = 7 bytes
+        // So the branch pivot is 5, and the right leaf's right_bound is 12.
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeave {
+                data_root: H256([9_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeave {
+                data_root: H256([8_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+        let root = generate_data_root(leaves).expect("expected root");
+        let root_id = root.id;
+        let proofs = resolve_proofs(root, None).expect("expected proofs");
+        assert_eq!(proofs.len(), 2, "expected one proof per leaf");
+
+        // Classify the two leaf proofs by their leaf offsets (min = left, max = right)
+        let leaf_infos: Vec<(&Proof, usize)> = proofs
+            .iter()
+            .map(|p| {
+                let lp = get_leaf_proof(&Base64(p.proof.clone())).expect("expected LeafProof");
+                (p, lp.offset())
+            })
+            .collect();
+        assert_eq!(leaf_infos.len(), 2, "expected one proof per leaf");
+        let (left_proof, left_offset, right_proof, right_offset) =
+            if leaf_infos[0].1 <= leaf_infos[1].1 {
+                (
+                    leaf_infos[0].0,
+                    leaf_infos[0].1,
+                    leaf_infos[1].0,
+                    leaf_infos[1].1,
+                )
+            } else {
+                (
+                    leaf_infos[1].0,
+                    leaf_infos[1].1,
+                    leaf_infos[0].0,
+                    leaf_infos[0].1,
+                )
+            };
+
+        // Validate left leaf with an in-bounds target (e.g. 0)
+        let left_encoded = Base64(left_proof.proof.clone());
+        let left_result =
+            validate_path(root_id, &left_encoded, 0).expect("left leaf should validate at 0");
+        assert_eq!(left_result.left_bound, 0);
+        assert_eq!(left_result.right_bound, left_offset as u128);
+
+        // Validate right leaf at both inclusive bounds: left_offset and right_offset
+        let right_encoded = Base64(right_proof.proof.clone());
+
+        let at_left_edge = validate_path(root_id, &right_encoded, left_offset as u128)
+            .expect("right leaf at left_offset");
+        assert_eq!(at_left_edge.left_bound, left_offset as u128);
+        assert_eq!(at_left_edge.right_bound, right_offset as u128);
+
+        let at_right_edge = validate_path(root_id, &right_encoded, right_offset as u128)
+            .expect("right leaf at right_bound");
+        assert_eq!(at_right_edge.left_bound, left_offset as u128);
+        assert_eq!(at_right_edge.right_bound, right_offset as u128);
+    }
+
+    #[test]
+    fn validate_path_rejects_above_right_bound() {
+        // Same two-leaf setup as previous test
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeave {
+                data_root: H256([7_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeave {
+                data_root: H256([6_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+        let root = generate_data_root(leaves).expect("expected root");
+        let root_id = root.id;
+        let proofs = resolve_proofs(root, None).expect("expected proofs");
+
+        // Pick the right (max offset) leaf proof and compute an out-of-bounds target (right_bound + 1)
+        let (right_proof, right_bound) = proofs
+            .iter()
+            .map(|p| {
+                let lp = get_leaf_proof(&Base64(p.proof.clone())).expect("LeafProof");
+                (p, lp.offset())
+            })
+            .max_by_key(|(_, off)| *off)
+            .expect("expected right proof");
+        let encoded = Base64(right_proof.proof.clone());
+        let oob_target = (right_bound as u128) + 1;
+
+        let err = validate_path(root_id, &encoded, oob_target)
+            .expect_err("target above right_bound must be rejected")
+            .to_string();
+        assert!(
+            err.contains("Invalid target_offset: out of bounds"),
+            "expected 'Invalid target_offset: out of bounds', got: {}",
+            err
         );
     }
 }
