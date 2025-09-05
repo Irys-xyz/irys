@@ -566,6 +566,7 @@ impl PeerListDataInner {
                 true
             } else if handshake_cooldown_expired {
                 debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
+                address_updater(self, mining_addr, peer_address);
                 true
             } else {
                 debug!("Peer address is the same, no update needed");

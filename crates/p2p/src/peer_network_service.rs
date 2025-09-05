@@ -10,6 +10,7 @@ use irys_types::{
     PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
     PeerResponse, RejectedResponse, RethPeerInfo, VersionRequest,
 };
+use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -19,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /*
 Global singletons for handshake flow control and safety
@@ -123,7 +125,7 @@ where
     peer_list: PeerList,
 
     currently_running_announcements: HashSet<SocketAddr>,
-    successful_announcements: HashMap<SocketAddr, AnnounceFinished>,
+    successful_announcements: Cache<SocketAddr, AnnounceFinished>,
     failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
 
     // This is related to networking - requesting data from the network and joining the network
@@ -187,7 +189,9 @@ where
             db,
             peer_list: peer_list_data,
             currently_running_announcements: HashSet::new(),
-            successful_announcements: HashMap::new(),
+            successful_announcements: Cache::builder()
+                .time_to_live(SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL)
+                .build(),
             failed_announcements: HashMap::new(),
             gossip_client: GossipClient::new(
                 Duration::from_secs(5),
