@@ -253,8 +253,15 @@ impl GossipClient {
             Ok(_) => {
                 // Successful send, increase score for data request
                 peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
+                peer_list.set_is_online(peer_miner_address, true);
             }
-            Err(_) => {
+            Err(err) => {
+                match err {
+                    GossipError::Network(_message) => {
+                        peer_list.set_is_online(peer_miner_address, false);
+                    }
+                    _ => {}
+                }
                 // Failed to send, decrease score
                 peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
             }
@@ -435,7 +442,7 @@ impl GossipClient {
         map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
     ) -> Result<(Address, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
-            peer_list.trusted_peers()
+            peer_list.all_trusted_peers()
         } else {
             // Get the top 10 most active peers
             peer_list.top_active_peers(Some(10), None)
@@ -523,6 +530,26 @@ impl GossipClient {
             "Failed to pull {:?} after trying 5 peers: {:?}",
             data_request, last_error
         )))
+    }
+
+    pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
+        debug!("Hydrating peers online status");
+        let peers = peer_list.all_peers_sorted_by_score();
+        for peer in peers {
+            match self.check_health(peer.1.address.clone()).await {
+                Ok(is_healthy) => {
+                    debug!("Peer {} is healthy: {}", peer.0, is_healthy);
+                    peer_list.set_is_online(&peer.0, is_healthy);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to check the health of peer {}: {}, setting offline status",
+                        peer.0, err
+                    );
+                    peer_list.set_is_online(&peer.0, false);
+                }
+            }
+        }
     }
 }
 
