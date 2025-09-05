@@ -800,7 +800,7 @@ mod tests {
     /// Test deserialize with incomplete V1 transaction fails
     #[test]
     fn deserialize_incomplete_v1_transaction_fails() {
-        let buf = vec![SHADOW_TX_VERSION_V1]; // version only
+        let buf = [SHADOW_TX_VERSION_V1]; // version only
 
         let result = ShadowTransaction::deserialize_reader(&mut &buf[..]);
         assert!(result.is_err(), "should fail with incomplete transaction");
