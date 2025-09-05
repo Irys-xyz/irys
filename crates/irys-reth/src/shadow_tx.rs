@@ -781,9 +781,6 @@ mod tests {
         assert_eq!(decoded, tx);
     }
 
-
-
-
     /// Test deserialize with truncated solution hash fails
     #[test]
     fn deserialize_truncated_solution_hash_fails() {
