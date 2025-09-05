@@ -51,7 +51,6 @@ mod constants {
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
-    shadow_tx_receipts: Vec<Receipt>,
     inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
 }
 
@@ -99,22 +98,6 @@ where
         .map(Option::unwrap_or_default)
     }
 
-    /// Executes a transaction with custom commit logic for shadow transactions.
-    ///
-    /// This method handles both regular Ethereum transactions and Irys shadow transactions.
-    /// Shadow transactions are special protocol-level operations that modify account balances
-    /// according to consensus rules (staking, rewards, fees, etc.).
-    ///
-    /// # Shadow Transaction Processing
-    /// Shadow transactions undergo additional validation:
-    /// 1. Parent block hash must match current chain state
-    /// 2. Block height must match current block number
-    /// 3. Balance operations must respect account constraints
-    ///
-    /// # Note
-    /// When executing shadow transactions, reth may give a warning: "State root task returned incorrect state root"
-    /// This is because we require direct access to the db to execute shadow txs, preventing parallel state root
-    /// computations. This does not affect the correctness of the block.
     fn execute_transaction_with_commit_condition(
         &mut self,
         tx: impl ExecutableTx<Self>,
@@ -122,18 +105,12 @@ where
             &ExecutionResult<<Self::Evm as Evm>::HaltReason>,
         ) -> reth_evm::block::CommitChanges,
     ) -> Result<Option<u64>, BlockExecutionError> {
-        // All shadow transaction processing is now handled by the IrysEvm
         self.inner
             .execute_transaction_with_commit_condition(tx, on_result_f)
     }
 
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
-        let (evm, mut block_res) = self.inner.finish()?;
-        // Combine shadow receipts with regular transaction receipts
-        let total_receipts = [self.shadow_tx_receipts, block_res.receipts].concat();
-        block_res.receipts = total_receipts;
-
-        Ok((evm, block_res))
+        self.inner.finish()
     }
 
     fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
@@ -253,7 +230,6 @@ where
         let receipt_builder = self.inner.receipt_builder();
         IrysBlockExecutor {
             inner: EthBlockExecutor::new(evm, ctx, self.inner.spec(), receipt_builder),
-            shadow_tx_receipts: vec![],
         }
     }
 }
@@ -380,6 +356,22 @@ use core::{
 type ShadowTransactionResult2<HaltReason> =
     Result<(Account, ExecutionResult<HaltReason>, bool), ExecutionResult<HaltReason>>;
 
+/// Executes a transaction with custom commit logic for shadow transactions.
+///
+/// This method handles both regular Ethereum transactions and Irys shadow transactions.
+/// Shadow transactions are special protocol-level operations that modify account balances
+/// according to consensus rules (staking, rewards, fees, etc.).
+///
+/// # Shadow Transaction Processing
+/// Shadow transactions undergo additional validation:
+/// 1. Parent block hash must match current chain state
+/// 2. Block height must match current block number
+/// 3. Balance operations must respect account constraints
+///
+/// # Note
+/// When executing shadow transactions, reth may give a warning: "State root task returned incorrect state root"
+/// This is because we require direct access to the db to execute shadow txs, preventing parallel state root
+/// computations. This does not affect the correctness of the block.
 #[expect(missing_debug_implementations)]
 pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     inner: RevmEvm<

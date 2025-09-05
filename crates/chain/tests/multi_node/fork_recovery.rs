@@ -965,7 +965,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     //  Node A is now at block height 2
     //  Node B is now at block height 3
     //  Node C remains at block height 1
-    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - treasury_amount + block_producer_reward + publish_rewards
+    //  Signer B balance is now equal to signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount - peer_b_total_fee + block_producer_reward + publish_rewards
     //  Signer C balance remains at genesis balance
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
     //  Node C mempool now has proof for tx peer_b_b2_submit_tx
