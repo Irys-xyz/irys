@@ -439,7 +439,7 @@ impl GossipClient {
         map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
     ) -> Result<(Address, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
-            peer_list.all_trusted_peers()
+            peer_list.online_trusted_peers()
         } else {
             // Get the top 10 most active peers
             peer_list.top_active_peers(Some(10), None)

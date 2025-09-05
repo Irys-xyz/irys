@@ -629,7 +629,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     debug!("Sync task: Syncing started");
 
     if is_trusted_mode {
-        let trusted_peers = peer_list.all_trusted_peers();
+        let trusted_peers = peer_list.online_trusted_peers();
         if trusted_peers.is_empty() {
             return if is_a_genesis_node {
                 sync_state.mark_processed(sync_state.sync_target_height());
@@ -1138,7 +1138,7 @@ async fn get_block_index(
     );
     let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         debug!("Fetching block index from trusted peers");
-        peer_list.all_trusted_peers()
+        peer_list.online_trusted_peers()
     } else {
         debug!("Fetching block index from top active peers");
         peer_list.top_active_peers(Some(5), None)
