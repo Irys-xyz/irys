@@ -273,9 +273,7 @@ impl Compact for PeerListItem {
         let (api_address, consumed) = decode_address(buf);
         buf.advance(consumed);
 
-        // let (reth_peering_tcp, consumed) = decode_address(&buf[total_consumed..]);
         let (reth_peer_info, buf) = RethPeerInfo::from_compact(buf, buf.len());
-        // total_consumed += consumed;
 
         let address = PeerAddress {
             gossip: gossip_address,
