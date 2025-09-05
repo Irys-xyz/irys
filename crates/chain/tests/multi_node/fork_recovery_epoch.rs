@@ -1,7 +1,10 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::*;
 use irys_types::NodeConfig;
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::debug;
 
 #[actix_web::test]
@@ -141,31 +144,48 @@ async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
 
     assert_eq!(genesis_hash, peer2_hash);
 
-    // Verify the genesis epoch state that it has peer2s pledge and not peer1s
-    let epoch_snapshot = genesis_node
-        .node_ctx
-        .block_tree_guard
-        .read()
-        .canonical_epoch_snapshot();
-
+    // Wait until the epoch commitment state reflects the reorg effects:
+    // - peer2's pledge is present
+    // - peer1's pledge is absent
     {
-        let cs = &epoch_snapshot.commitment_state;
+        let start = Instant::now();
+        let timeout = Duration::from_secs(seconds_to_wait as u64);
 
-        // Verify Peer2's pledge is in the commitment state now
-        assert!(cs
-            .pledge_commitments
-            .get(&peer2_signer.address())
-            .unwrap()
-            .iter()
-            .any(|cse| cse.id == pledge2.id));
+        loop {
+            let epoch_snapshot = genesis_node
+                .node_ctx
+                .block_tree_guard
+                .read()
+                .canonical_epoch_snapshot();
 
-        // Verify peer1's pledge has been removed (note the !cs)
-        assert!(!cs
-            .pledge_commitments
-            .get(&peer1_signer.address())
-            .unwrap()
-            .iter()
-            .any(|cse| cse.id == pledge1.id));
+            let cs = &epoch_snapshot.commitment_state;
+
+            let peer2_has_pledge = cs
+                .pledge_commitments
+                .get(&peer2_signer.address())
+                .map(|v| v.iter().any(|cse| cse.id == pledge2.id))
+                .unwrap_or(false);
+
+            let peer1_has_pledge = cs
+                .pledge_commitments
+                .get(&peer1_signer.address())
+                .map(|v| v.iter().any(|cse| cse.id == pledge1.id))
+                .unwrap_or(false);
+
+            if peer2_has_pledge && !peer1_has_pledge {
+                break;
+            }
+
+            if start.elapsed() > timeout {
+                panic!(
+                    "Timeout waiting for epoch commitment state after reorg: peer2_has_pledge={}, peer1_has_pledge={}",
+                    peer2_has_pledge, peer1_has_pledge
+                );
+            }
+
+            // Sleep briefly and retry
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         // TODO:
         // Verify that packing is started on peer2 for whatever partition_hash was assigned to pledge2
@@ -173,7 +193,7 @@ async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
         // Verify that packing is stopped on peer1 for whatever partition_hash was assigned to pledge1
         // Verify that a Miner is stopped on peer1 for whatever partition_hash was assigned to pledge1
         //
-    } // Make clippy happy about dropping cs
+    }
 
     // Wind down test
     genesis_node.stop().await;
