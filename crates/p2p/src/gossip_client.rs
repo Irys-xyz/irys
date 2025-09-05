@@ -256,11 +256,8 @@ impl GossipClient {
                 peer_list.set_is_online(peer_miner_address, true);
             }
             Err(err) => {
-                match err {
-                    GossipError::Network(_message) => {
-                        peer_list.set_is_online(peer_miner_address, false);
-                    }
-                    _ => {}
+                if let GossipError::Network(_message) = err {
+                    peer_list.set_is_online(peer_miner_address, false);
                 }
                 // Failed to send, decrease score
                 peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
@@ -536,7 +533,7 @@ impl GossipClient {
         debug!("Hydrating peers online status");
         let peers = peer_list.all_peers_sorted_by_score();
         for peer in peers {
-            match self.check_health(peer.1.address.clone()).await {
+            match self.check_health(peer.1.address).await {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
                     peer_list.set_is_online(&peer.0, is_healthy);
