@@ -1,4 +1,5 @@
-use crate::{gossip_client::GossipClientError, GossipClient};
+use crate::types::{GossipResponse, RejectionReason};
+use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
 use actix::prelude::*;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
@@ -248,10 +249,24 @@ where
                     .into_actor(self),
                 );
             }
+            PeerNetworkServiceMessage::Handshake(handshake) => {
+                ctx.spawn(
+                    async move {
+                        let _res = address
+                            .send(NewPotentialPeer {
+                                api_address: handshake.api_address,
+                                force_announce: handshake.force,
+                            })
+                            .await;
+                    }
+                    .into_actor(self),
+                );
+            }
             PeerNetworkServiceMessage::RequestDataFromNetwork {
                 data_request,
                 use_trusted_peers_only,
                 response,
+                retries,
             } => {
                 debug!("Requesting {:?} from network", &data_request);
                 ctx.spawn(
@@ -260,6 +275,7 @@ where
                             .send(RequestDataFromTheNetwork {
                                 data_request,
                                 use_trusted_peers_only,
+                                retries,
                             })
                             .await
                         {
@@ -924,6 +940,7 @@ where
 struct RequestDataFromTheNetwork {
     data_request: GossipDataRequest,
     use_trusted_peers_only: bool,
+    retries: u8,
 }
 
 impl<A, R> Handler<RequestDataFromTheNetwork> for PeerNetworkService<A, R>
@@ -936,6 +953,7 @@ where
     fn handle(&mut self, msg: RequestDataFromTheNetwork, ctx: &mut Self::Context) -> Self::Result {
         let data_request = msg.data_request;
         let use_trusted_peers_only = msg.use_trusted_peers_only;
+        let retries = msg.retries;
         let gossip_client = self.gossip_client.clone();
         let self_addr = ctx.address();
 
@@ -966,7 +984,7 @@ where
                 // Try up to 5 iterations over the peer list to get the block
                 let mut last_error = None;
 
-                for attempt in 1..=5 {
+                for attempt in 1..=retries {
                     for peer in &peers {
                         let address = &peer.0;
                         debug!(
@@ -982,18 +1000,51 @@ where
                             )
                             .await
                         {
-                            Ok(true) => {
-                                info!(
-                                    "Successfully requested {:?} from peer {}",
-                                    data_request, address
-                                );
+                            Ok(response) => {
+                                match response {
+                                    GossipResponse::Accepted(data) => {
+                                        if data {
+                                            info!(
+                                                "Successfully requested {:?} from peer {}",
+                                                data_request, address
+                                            );
 
-                                return Ok(());
-                            }
-                            Ok(false) => {
-                                // Peer doesn't have this block, try another peer
-                                debug!("Peer {} doesn't have {:?}", address, data_request);
-                                continue;
+                                            return Ok(());
+                                        } else {
+                                            // Peer doesn't have this block, try another peer
+                                            debug!(
+                                                "Peer {} doesn't have {:?}",
+                                                address, data_request
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    GossipResponse::Rejected(reason) => {
+                                        warn!(
+                                            "Peer {} rejected data request {:?}: {:?}",
+                                            address, data_request, reason
+                                        );
+                                        match reason {
+                                            RejectionReason::HandshakeRequired => {
+                                                last_error = Some(GossipError::PeerNetwork(
+                                                    PeerNetworkError::FailedToRequestData(
+                                                        "Peer requires a handshake".to_string(),
+                                                    ),
+                                                ));
+                                                // Peer needs a handshake, send a NewPotentialPeer message
+                                                self_addr
+                                                    .send(NewPotentialPeer::force_announce(
+                                                        peer.1.address.api,
+                                                    ))
+                                                    .await
+                                                    .map_err(
+                                                        PeerListServiceError::InternalSendError,
+                                                    )?;
+                                            }
+                                        };
+                                        continue;
+                                    }
+                                }
                             }
                             Err(err) => {
                                 last_error = Some(err);
@@ -2367,6 +2418,83 @@ mod tests {
         assert!(
             stored_addrs.contains(&unstaked_mining_addr),
             "Unstaked peer should now be in the database"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn should_be_able_to_handshake_if_removed_from_purgatory() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config = NodeConfig::testing().into();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
+                .expect("can't open temp dir"),
+        ));
+
+        // Create a mock reth service actor
+        let mock_reth_actor = MockRethServiceActor::new();
+        let reth_actor = mock_reth_actor.start();
+
+        // Use our custom mock client
+        let mock_api_client = CountingMockClient::default();
+
+        let (service_sender, service_receiver) = PeerNetworkSender::new_with_receiver();
+        // Create service with our mocks
+        let service = PeerNetworkService::new_with_custom_api_client(
+            db,
+            &config,
+            mock_api_client,
+            reth_actor,
+            service_receiver,
+            service_sender,
+        );
+
+        // Create first peer (staked)
+        let (mining_addr, peer) = create_test_peer(
+            "0x1111111111111111111111111111111111111111",
+            8080,
+            true,
+            None,
+        );
+
+        // ========== That's where the peer test really starts ==========
+        // When this is called, the peer service will try to announce itself to the peer.
+        // In this test, we need to check the other peer added us to the purgatory
+        service
+            .peer_list
+            .add_or_update_peer(mining_addr, peer.clone(), false);
+
+        // Verify staked peer is in the purgatory
+        let temp_peers = service.peer_list.temporary_peers();
+        assert!(
+            temp_peers.contains(&mining_addr),
+            "The peer should be in temporary peers"
+        );
+
+        let persistent_peers = service.peer_list.persistable_peers();
+        assert!(
+            !persistent_peers.contains_key(&mining_addr),
+            "The peer should not be in persistable peers"
+        );
+
+        // Decreasing the score should kick the peer out of purgatory
+        service
+            .peer_list
+            .decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData);
+
+        let temp_peers_after = service.peer_list.temporary_peers();
+        assert!(
+            !temp_peers_after.contains(&mining_addr),
+            "The peer should no longer be in temporary peers"
+        );
+
+        // Add peer again
+        service
+            .peer_list
+            .add_or_update_peer(mining_addr, peer, false);
+        let temp_peers_final = service.peer_list.temporary_peers();
+        assert!(
+            temp_peers_final.contains(&mining_addr),
+            "The peer should no longer be in temporary peers after re-adding"
         );
     }
 }

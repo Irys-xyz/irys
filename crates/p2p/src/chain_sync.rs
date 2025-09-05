@@ -1274,6 +1274,7 @@ mod tests {
         use super::*;
         use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
+        use crate::types::GossipResponse;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
@@ -1303,7 +1304,7 @@ mod tests {
             let sync_state_clone = sync_state.clone();
             fake_gossip_server.set_on_pull_data_request(move |data_request| {
                 match data_request {
-                    GossipDataRequest::ExecutionPayload(_) => None,
+                    GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
                     GossipDataRequest::Block(block_hash) => {
                         info!("Fake server pull data request: {block_hash:?}");
                         let mut block_requests = block_requests.lock().unwrap();
@@ -1312,15 +1313,15 @@ mod tests {
 
                         // Simulating one false response so the block gets requested again
                         if requests_len == 0 {
-                            None
+                            GossipResponse::Accepted(None)
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
-                            Some(GossipData::Block(Arc::new(
+                            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
                                 IrysBlockHeader::new_mock_header(),
-                            )))
+                            ))))
                         }
                     }
-                    GossipDataRequest::Chunk(_) => None,
+                    GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
                 }
             });
             let fake_gossip_address = fake_gossip_server.spawn();
@@ -1555,6 +1556,7 @@ mod tests {
         use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
         use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+        use crate::types::GossipResponse;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::Result as EyreResult;
@@ -1584,9 +1586,9 @@ mod tests {
                 GossipDataRequest::Block(_hash) => {
                     let mut c = s1_calls_clone.lock().unwrap();
                     *c += 1;
-                    None
+                    GossipResponse::Accepted(None)
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
 
             let s2_calls_clone = s2_calls.clone();
@@ -1594,11 +1596,11 @@ mod tests {
                 GossipDataRequest::Block(_hash) => {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
-                    Some(GossipData::Block(Arc::new(
+                    GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
                         IrysBlockHeader::new_mock_header(),
-                    )))
+                    ))))
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
 
             let addr1 = server1.spawn();
@@ -1715,17 +1717,17 @@ mod tests {
             server1.set_on_pull_data_request(move |req| match req {
                 GossipDataRequest::Block(_hash) => {
                     *s1_calls_clone.lock().unwrap() += 1;
-                    None
+                    GossipResponse::Accepted(None)
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
                 GossipDataRequest::Block(_hash) => {
                     *s2_calls_clone.lock().unwrap() += 1;
-                    None
+                    GossipResponse::Accepted(None)
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
 
             let addr1: SocketAddr = server1.spawn();
