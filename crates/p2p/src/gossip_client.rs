@@ -566,7 +566,11 @@ impl GossipClient {
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // don't add a delay after the final attempt
+            if attempt != max_retries {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
 
         Err(PeerNetworkError::FailedToRequestData(format!(

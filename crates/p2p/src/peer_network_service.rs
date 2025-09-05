@@ -1076,7 +1076,10 @@ where
                             }
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+
+                    if attempt != retries {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
 
                 Err(PeerListServiceError::FailedToRequestData(format!(
