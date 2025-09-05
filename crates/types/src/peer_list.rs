@@ -240,16 +240,35 @@ impl Compact for PeerListItem {
     }
 
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        // Compact layout (in order):
+        // - u16 reputation_score (2 bytes, BE)
+        // - u16 response_time (2 bytes, BE)
+        // - SocketAddr gossip (tagged: 1 byte + IPv4(4)+port(2)=7 or IPv6(16)+port(2)=19)
+        // - SocketAddr api (same as above)
+        // - RethPeerInfo (variable size; see its Compact impl)
+        // - u64 last_seen (8 bytes, BE)
+        // - optional u8 is_online (1 byte). Decoder tolerates it being absent and defaults to false.
+        //
+        // Decoding strategy:
+        // - For the fixed-size prefix (score, response_time) we advance the buf slice in-place.
+        // - For variable-size sections we call helpers that return the remaining slice.
+        // - For the tail (last_seen [+ optional is_online]) we read without immediately advancing,
+        //   track a local total_consumed, and compute the correct remainder to return.
         let mut buf = buf;
+
+        // If we don't even have the fixed-size prefix (4 bytes), fall back to defaults and no remainder.
         if buf.len() < 4 {
             return (Self::default(), &[]);
         }
 
+        // Decode the fixed-size prefix and advance the buffer.
         let reputation_score = PeerScore(u16::from_be_bytes(buf[0..2].try_into().unwrap()));
         buf.advance(2);
         let response_time = u16::from_be_bytes(buf[0..2].try_into().unwrap());
         buf.advance(2);
 
+        // If the buffer ends here, the addresses and all subsequent fields are missing.
+        // Return sensible defaults and an empty remainder (we consumed the entire provided buffer).
         if buf.is_empty() {
             return (
                 Self {
