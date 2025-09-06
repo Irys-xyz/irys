@@ -160,7 +160,7 @@ where
         let source_miner_address = gossip_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::BadRequest()
-                .reason("Failed to get request source")
+                .reason("Failed to get a request source")
                 .finish();
         };
 
@@ -360,7 +360,16 @@ where
         };
 
         match server.peer_list.peer_by_gossip_address(peer_addr) {
-            Some(_info) => HttpResponse::Ok().json(GossipResponse::Accepted(true)),
+            Some(_info) => {
+                let sync_state = &server.data_handler.sync_state;
+                let is_gossip_enabled = sync_state.is_gossip_reception_enabled()
+                    && sync_state.is_gossip_broadcast_enabled();
+                if !is_gossip_enabled {
+                    HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
+                } else {
+                    HttpResponse::Ok().json(GossipResponse::rejected_gossip_disabled())
+                }
+            }
             None => HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::HandshakeRequired,
             )),

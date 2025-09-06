@@ -136,7 +136,9 @@ impl GossipClient {
                     RejectionReason::HandshakeRequired => {
                         peer_list.initiate_handshake(peer.api, true);
                     }
-                    RejectionReason::GossipDisabled => {}
+                    RejectionReason::GossipDisabled => {
+                        return Ok(false);
+                    }
                 };
                 Ok(true)
             }
@@ -415,7 +417,9 @@ impl GossipClient {
                         RejectionReason::HandshakeRequired => {
                             peer_list.initiate_handshake(peer.1.address.api, true)
                         }
-                        RejectionReason::GossipDisabled => {}
+                        RejectionReason::GossipDisabled => {
+                            peer_list.set_is_online(&peer.0, false);
+                        }
                     }
                     Err(PeerNetworkError::FailedToRequestData(format!(
                         "Peer {:?} rejected the request: {:?}",
@@ -523,6 +527,7 @@ impl GossipClient {
                                         ));
                                     }
                                     RejectionReason::GossipDisabled => {
+                                        peer_list.set_is_online(&peer.0, false);
                                         last_error = Some(GossipError::from(
                                             PeerNetworkError::FailedToRequestData(format!(
                                                 "Peer {:?} has gossip disabled",
