@@ -163,7 +163,8 @@ pub enum GossipResponse<T> {
 impl GossipResponse<()> {
     pub fn rejected_gossip_disabled() -> Self {
         Self::Rejected(RejectionReason::GossipDisabled)
-    }}
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum RejectionReason {
