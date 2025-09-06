@@ -163,4 +163,5 @@ pub enum GossipResponse<T> {
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum RejectionReason {
     HandshakeRequired,
+    GossipDisabled,
 }

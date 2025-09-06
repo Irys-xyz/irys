@@ -105,7 +105,11 @@ impl GossipClient {
         res
     }
 
-    pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
+    pub async fn check_health(
+        &self,
+        peer: PeerAddress,
+        peer_list: &PeerList,
+    ) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
         let peer_addr = peer.gossip.to_string();
 
@@ -120,9 +124,23 @@ impl GossipClient {
             return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
         }
 
-        response.json().await.map_err(|error| {
+        let response: GossipResponse<bool> = response.json().await.map_err(|error| {
             GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
-        })
+        })?;
+
+        match response {
+            GossipResponse::Accepted(val) => Ok(val),
+            GossipResponse::Rejected(reason) => {
+                warn!("Health check rejected with reason: {:?}", reason);
+                match reason {
+                    RejectionReason::HandshakeRequired => {
+                        peer_list.initiate_handshake(peer.api, true);
+                    }
+                    RejectionReason::GossipDisabled => {}
+                };
+                Ok(true)
+            }
+        }
     }
 
     /// Send data to a peer
@@ -392,14 +410,15 @@ impl GossipClient {
                     )),
                 },
                 GossipResponse::Rejected(reason) => {
-                    warn!("Peer {} rejected the request: {:?}", peer.0, reason);
+                    warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
                     match reason {
                         RejectionReason::HandshakeRequired => {
                             peer_list.initiate_handshake(peer.1.address.api, true)
                         }
+                        RejectionReason::GossipDisabled => {}
                     }
                     Err(PeerNetworkError::FailedToRequestData(format!(
-                        "Peer {} rejected the request: {:?}",
+                        "Peer {:?} rejected the request: {:?}",
                         peer.0, reason
                     )))
                 }
@@ -475,7 +494,10 @@ impl GossipClient {
                                 Some(data) => match map_data(data) {
                                     Ok(data) => return Ok((*address, data)),
                                     Err(err) => {
-                                        warn!("Failed to map data from peer {}: {}", address, err);
+                                        warn!(
+                                            "Failed to map data from peer {:?}: {:?}",
+                                            address, err
+                                        );
                                         continue;
                                     }
                                 },
@@ -495,7 +517,15 @@ impl GossipClient {
                                         peer_list.initiate_handshake(peer.1.address.api, true);
                                         last_error = Some(GossipError::from(
                                             PeerNetworkError::FailedToRequestData(format!(
-                                                "Peer {} requires a handshake",
+                                                "Peer {:?} requires a handshake",
+                                                address
+                                            )),
+                                        ));
+                                    }
+                                    RejectionReason::GossipDisabled => {
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {:?} has gossip disabled",
                                                 address
                                             )),
                                         ));
@@ -533,7 +563,7 @@ impl GossipClient {
         debug!("Hydrating peers online status");
         let peers = peer_list.all_peers_sorted_by_score();
         for peer in peers {
-            match self.check_health(peer.1.address).await {
+            match self.check_health(peer.1.address, peer_list).await {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
                     peer_list.set_is_online(&peer.0, is_healthy);
@@ -664,8 +694,9 @@ mod tests {
             let fixture = TestFixture::new();
             let unreachable_port = get_free_port();
             let peer = create_peer_address("127.0.0.1", unreachable_port);
+            let mock_list = PeerList::mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -686,8 +717,9 @@ mod tests {
             let fixture = TestFixture::with_timeout(Duration::from_millis(1));
             // Use a non-routable IP address
             let peer = create_peer_address("192.0.2.1", 8080);
+            let mock_list = PeerList::mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -707,8 +739,9 @@ mod tests {
             let server = MockHttpServer::new_with_response(status_code, "", "text/plain");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -744,8 +777,9 @@ mod tests {
                 MockHttpServer::new_with_response(200, "invalid json {", "application/json");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -773,8 +807,9 @@ mod tests {
             );
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             assert!(matches!(

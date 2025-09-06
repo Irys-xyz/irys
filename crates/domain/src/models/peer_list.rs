@@ -94,6 +94,17 @@ impl PeerList {
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
 
+    #[cfg(test)]
+    pub fn mock() -> Result<Self, PeerNetworkError> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let inner = PeerListDataInner::new(
+            vec![],
+            PeerNetworkSender(sender),
+            &Config::new(irys_types::NodeConfig::testing()),
+        )?;
+        Ok(Self(Arc::new(RwLock::new(inner))))
+    }
+
     pub fn from_peers(
         peers: Vec<(Address, PeerListItem)>,
         peer_network: PeerNetworkSender,
