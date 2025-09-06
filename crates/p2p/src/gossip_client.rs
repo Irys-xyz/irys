@@ -694,7 +694,7 @@ mod tests {
             let fixture = TestFixture::new();
             let unreachable_port = get_free_port();
             let peer = create_peer_address("127.0.0.1", unreachable_port);
-            let mock_list = PeerList::mock().expect("to create peer list mock");
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
             let result = fixture.client.check_health(peer, &mock_list).await;
 
@@ -717,7 +717,7 @@ mod tests {
             let fixture = TestFixture::with_timeout(Duration::from_millis(1));
             // Use a non-routable IP address
             let peer = create_peer_address("192.0.2.1", 8080);
-            let mock_list = PeerList::mock().expect("to create peer list mock");
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
             let result = fixture.client.check_health(peer, &mock_list).await;
 
@@ -739,7 +739,7 @@ mod tests {
             let server = MockHttpServer::new_with_response(status_code, "", "text/plain");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
-            let mock_list = PeerList::mock().expect("to create peer list mock");
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
             let result = fixture.client.check_health(peer, &mock_list).await;
 
@@ -777,7 +777,7 @@ mod tests {
                 MockHttpServer::new_with_response(200, "invalid json {", "application/json");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
-            let mock_list = PeerList::mock().expect("to create peer list mock");
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
             let result = fixture.client.check_health(peer, &mock_list).await;
 
@@ -807,7 +807,7 @@ mod tests {
             );
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
-            let mock_list = PeerList::mock().expect("to create peer list mock");
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
             let result = fixture.client.check_health(peer, &mock_list).await;
 
