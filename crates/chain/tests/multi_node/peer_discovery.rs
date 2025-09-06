@@ -488,9 +488,23 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
         0
     );
+    assert!(!ctx_genesis_node.node_ctx.sync_state.is_syncing());
+    assert!(ctx_genesis_node
+        .node_ctx
+        .sync_state
+        .is_gossip_broadcast_enabled());
+    assert!(ctx_genesis_node
+        .node_ctx
+        .sync_state
+        .is_gossip_reception_enabled());
+    info!(
+        "GENESIS sync state: {:?}",
+        ctx_genesis_node.node_ctx.sync_state
+    );
 
+    info!("Restarting PEER1 node");
     let ctx_peer1_node = stopped_peer_1.start_with_name("PEER1").await;
-    debug!("PEER1 restarted");
+    info!("PEER1 restarted");
 
     // Wait for peer1 to handshake with genesis again
     elapsed = 0;

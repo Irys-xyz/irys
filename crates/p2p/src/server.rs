@@ -364,9 +364,10 @@ where
                 let sync_state = &server.data_handler.sync_state;
                 let is_gossip_enabled = sync_state.is_gossip_reception_enabled()
                     && sync_state.is_gossip_broadcast_enabled();
-                if !is_gossip_enabled {
+                if is_gossip_enabled {
                     HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
                 } else {
+                    debug!("Rejecting health check from peer {peer_addr:?}: gossip is disabled");
                     HttpResponse::Ok().json(GossipResponse::rejected_gossip_disabled())
                 }
             }
