@@ -155,7 +155,6 @@ impl GossipClient {
         peer: &PeerListItem,
         data: &GossipData,
     ) -> GossipResult<GossipResponse<()>> {
-        Self::check_if_peer_is_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
@@ -200,13 +199,6 @@ impl GossipClient {
                 .await
             }
         }
-    }
-
-    fn check_if_peer_is_online(peer: &PeerListItem) -> GossipResult<()> {
-        if !peer.is_online {
-            return Err(GossipError::InvalidPeer("Peer is offline".into()));
-        }
-        Ok(())
     }
 
     async fn send_data_internal<T, R>(
