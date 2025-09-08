@@ -26,7 +26,6 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
 use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
-use rand::prelude::SliceRandom as _;
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -236,18 +235,15 @@ impl P2PService {
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
 
-        // Get all active peers except the source
-        let mut peers = peer_list.top_active_peers(None, None);
-
-        debug!(
-            "Node {:?}: Peers selected for broadcast: {:?}",
-            self.client.mining_address, peers
-        );
-
-        peers.shuffle(&mut rand::thread_rng());
+        // Get all peers sorted by score, so we broadcast to the best ones first, but try to
+        // reach to all peers eventually.
+        // TODO: we need to make an algorithm that doesn't try to reach all peers every time,
+        //  but rather a random subset of them. We should take n top peers, and add some
+        //  randomly selected peers from the rest of the list.
+        let mut peers = peer_list.all_peers_sorted_by_score();
 
         while !peers.is_empty() {
-            // Remove peers that seen the data since the last iteration
+            // Remove peers that have seen the data since the last iteration
             let peers_that_seen_data = self.cache.peers_that_have_seen(&key)?;
             peers.retain(|(peer_miner_address, _peer)| {
                 !peers_that_seen_data.contains(peer_miner_address)

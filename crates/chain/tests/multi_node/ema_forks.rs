@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 use std::sync::Arc;
+use tracing::warn;
 
 // Test verifies that EMA (Exponential Moving Average) price snapshots diverge correctly across chain forks.
 // Setup:
@@ -49,6 +50,7 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
         .await?;
 
+    warn!("Disabling gossip to create independent forks");
     node_1.gossip_disable();
     node_2.gossip_disable();
 

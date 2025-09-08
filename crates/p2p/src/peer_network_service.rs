@@ -348,7 +348,7 @@ where
         ctx.run_interval(FLUSH_INTERVAL, |act, _ctx| match act.flush() {
             Ok(()) => {}
             Err(e) => {
-                error!("Failed to flush peer list to database: {:?}", e);
+                error!("Failed to flush the peer list to the database: {:?}", e);
             }
         });
 
@@ -360,8 +360,9 @@ where
                 // Clone the peer address to use in the async block
                 let peer_address = peer.address;
                 let client = act.gossip_client.clone();
+                let peer_list = act.peer_list.clone();
                 // Create the future that does the health check
-                let fut = async move { client.check_health(peer_address).await }
+                let fut = async move { client.check_health(peer_address, &peer_list).await }
                     .into_actor(act)
                     .map(move |result, act, _ctx| match result {
                         Ok(true) => {
@@ -970,7 +971,7 @@ where
                     .ok_or(PeerListServiceError::DatabaseNotConnected)?;
 
                 let mut peers = if use_trusted_peers_only {
-                    peer_list.trusted_peers()
+                    peer_list.online_trusted_peers()
                 } else {
                     // Get the top 10 most active peers
                     peer_list.top_active_peers(Some(10), None)
@@ -1045,6 +1046,14 @@ where
                                                         PeerListServiceError::InternalSendError,
                                                     )?;
                                             }
+                                            RejectionReason::GossipDisabled => {
+                                                last_error = Some(GossipError::PeerNetwork(
+                                                    PeerNetworkError::FailedToRequestData(format!(
+                                                        "Peer {:?} has gossip disabled",
+                                                        address
+                                                    )),
+                                                ));
+                                            }
                                         };
                                         continue;
                                     }
@@ -1053,7 +1062,7 @@ where
                             Err(err) => {
                                 last_error = Some(err);
                                 warn!(
-                                    "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
+                                    "Failed to fetch {:?} from peer {:?} (attempt {}/5): {:?}",
                                     data_request,
                                     address,
                                     attempt,

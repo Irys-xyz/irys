@@ -83,7 +83,9 @@ where
                 "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
                 node_id, chunk_hash
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let gossip_request = unpacked_chunk_json.0;
         let source_miner_address = gossip_request.miner_address;
@@ -108,8 +110,9 @@ where
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
-            debug!("Failed to get peer address from gossip post request");
-            return Err(HttpResponse::BadRequest().finish());
+            let msg = "Failed to get peer address from gossip POST request";
+            debug!(msg);
+            return Err(HttpResponse::BadRequest().reason(msg).finish());
         };
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
@@ -120,7 +123,9 @@ where
                     peer_address.ip(),
                     peer.address.gossip.ip()
                 );
-                return Err(HttpResponse::Forbidden().finish());
+                return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                    RejectionReason::HandshakeRequired,
+                )));
             }
             Ok(peer)
         } else {
@@ -147,12 +152,16 @@ where
                 "Node {}: Gossip reception is disabled, ignoring block header {:?}",
                 node_id, block_hash
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let gossip_request = irys_block_header_json.0;
         let source_miner_address = gossip_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest().finish();
+            return HttpResponse::BadRequest()
+                .reason("Failed to get a request source")
+                .finish();
         };
 
         let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
@@ -202,7 +211,9 @@ where
                 "Node {}: Gossip reception is disabled, ignoring the execution payload for block {:?}",
                 node_id, evm_block_hash
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let evm_block_request = irys_execution_payload_json.0;
         let source_miner_address = evm_block_request.miner_address;
@@ -239,7 +250,9 @@ where
                 "Node {}: Gossip reception is disabled, ignoring transaction {:?}",
                 node_id, tx_id
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let gossip_request = irys_transaction_header_json.0;
         let source_miner_address = gossip_request.miner_address;
@@ -271,7 +284,9 @@ where
                 "Node {}: Gossip reception is disabled, ignoring the commitment transaction {:?}",
                 node_id, tx_id
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let gossip_request = commitment_tx_json.0;
         let source_miner_address = gossip_request.miner_address;
@@ -307,7 +322,9 @@ where
                 "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
                 node_id, data_root
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let gossip_request = proof_json.0;
         let source_miner_address = gossip_request.miner_address;
@@ -337,12 +354,26 @@ where
     )]
     async fn handle_health_check(server: Data<Self>, req: actix_web::HttpRequest) -> HttpResponse {
         let Some(peer_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest().finish();
+            return HttpResponse::BadRequest()
+                .reason("Failed to get the source address from the request")
+                .finish();
         };
 
         match server.peer_list.peer_by_gossip_address(peer_addr) {
-            Some(_info) => HttpResponse::Ok().json(true),
-            None => HttpResponse::NotFound().finish(),
+            Some(_info) => {
+                let sync_state = &server.data_handler.sync_state;
+                let is_gossip_enabled = sync_state.is_gossip_reception_enabled()
+                    && sync_state.is_gossip_broadcast_enabled();
+                if is_gossip_enabled {
+                    HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
+                } else {
+                    debug!("Rejecting health check from peer {peer_addr:?}: gossip is disabled");
+                    HttpResponse::Ok().json(GossipResponse::rejected_gossip_disabled())
+                }
+            }
+            None => HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::HandshakeRequired,
+            )),
         }
     }
 
@@ -384,7 +415,9 @@ where
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
                 node_id, request_id
             );
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address) {
             Ok(peer_address) => peer_address,
@@ -422,7 +455,7 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
-            return HttpResponse::Forbidden().finish();
+            return HttpResponse::Ok().json(RejectionReason::GossipDisabled);
         }
         if let Err(error_response) =
             Self::check_peer(&server.peer_list, &req, data_request.miner_address)
