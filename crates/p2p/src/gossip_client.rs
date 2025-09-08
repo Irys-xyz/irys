@@ -3,11 +3,12 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
+use crate::GossipCache;
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, BlockHash, GossipData, GossipDataRequest, GossipRequest, IrysBlockHeader, PeerAddress,
-    PeerListItem, PeerNetworkError,
+    Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
+    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -283,6 +284,8 @@ impl GossipClient {
         peer: (&Address, &PeerListItem),
         data: Arc<GossipData>,
         peer_list: &PeerList,
+        cache: Arc<GossipCache>,
+        gossip_cache_key: GossipCacheKey,
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();
@@ -298,7 +301,9 @@ impl GossipClient {
                 )
                 .await
             {
-                error!("Error sending data to peer: {}", e);
+                error!("Error sending data to peer: {:?}", e);
+            } else if let Err(err) = cache.record_seen(peer_miner_address, gossip_cache_key) {
+                error!("Error recording seen data in cache: {:?}", err);
             }
         });
     }

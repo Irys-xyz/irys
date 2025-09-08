@@ -94,6 +94,7 @@ where
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
+        server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server.data_handler.handle_chunk(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -168,6 +169,7 @@ where
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
+        server.peer_list.set_is_online(&source_miner_address, true);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
 
@@ -223,6 +225,7 @@ where
         {
             return error_response;
         };
+        server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server
             .data_handler
@@ -261,6 +264,7 @@ where
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
+        server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -295,6 +299,7 @@ where
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
+        server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server
             .data_handler
@@ -333,6 +338,7 @@ where
             Ok(peer_address) => peer_address,
             Err(error_response) => return error_response,
         };
+        server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server
             .data_handler
