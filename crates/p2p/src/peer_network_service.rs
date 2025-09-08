@@ -961,6 +961,10 @@ where
         let retries = msg.retries;
         let gossip_client = self.gossip_client.clone();
         let self_addr = ctx.address();
+        // Capture config values to avoid borrowing self across async move
+        let top_active_window = self.config.node_config.p2p_pull.top_active_window;
+        let sample_size = self.config.node_config.p2p_pull.sample_size;
+        let max_attempts = self.config.node_config.p2p_pull.max_attempts;
 
         Box::pin(
             async move {
@@ -974,13 +978,13 @@ where
                     peer_list.online_trusted_peers()
                 } else {
                     // Get the top 10 most active peers
-                    peer_list.top_active_peers(Some(10), None)
+                    peer_list.top_active_peers(Some(top_active_window), None)
                 };
 
                 // Shuffle peers to randomize the selection
                 peers.shuffle(&mut rand::thread_rng());
-                // Take random 5
-                peers.truncate(5);
+                // Take random sample
+                peers.truncate(sample_size);
 
                 if peers.is_empty() {
                     return Err(PeerListServiceError::NoPeersAvailable);
@@ -993,8 +997,8 @@ where
                     for peer in &peers {
                         let address = &peer.0;
                         debug!(
-                            "Attempting to fetch {:?} from peer {} (attempt {}/5)",
-                            data_request, address, attempt
+                            "Attempting to fetch {:?} from peer {} (attempt {}/{})",
+                            data_request, address, attempt, max_attempts
                         );
 
                         match gossip_client
