@@ -5,10 +5,18 @@ use actix_web::{
     HttpResponse,
 };
 use irys_domain::get_canonical_chain;
-use irys_types::NodeInfo;
+use irys_types::{NodeInfo, H256};
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
-    let block_index_height = state.block_index.read().latest_height();
+    let (block_index_height, block_index_hash) = {
+        let state = state.block_index.read();
+        (
+            state.latest_height(),
+            state
+                .get_latest_item()
+                .map_or(H256::zero(), |i| i.block_hash),
+        )
+    };
 
     let (chain, blocks) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
     let latest = chain.last().unwrap();
@@ -20,7 +28,8 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         height: latest.height,
         block_hash: latest.block_hash,
         block_index_height,
-        blocks: blocks as u64,
+        block_index_hash,
+        pending_blocks: blocks as u64,
         is_syncing: state.sync_state.is_syncing(),
         current_sync_height: state.sync_state.sync_target_height(),
     };

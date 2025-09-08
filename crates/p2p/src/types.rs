@@ -128,6 +128,8 @@ pub enum InvalidDataError {
     InvalidBlockSignature,
     #[error("Execution payload hash mismatch")]
     ExecutionPayloadHashMismatch,
+    #[error("Invalid execution payload structure")]
+    ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
 }
@@ -160,7 +162,14 @@ pub enum GossipResponse<T> {
     Rejected(RejectionReason),
 }
 
+impl GossipResponse<()> {
+    pub fn rejected_gossip_disabled() -> Self {
+        Self::Rejected(RejectionReason::GossipDisabled)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum RejectionReason {
     HandshakeRequired,
+    GossipDisabled,
 }

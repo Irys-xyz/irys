@@ -13,7 +13,7 @@ use irys_types::{
     build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
     RethPeerInfo, VersionRequest,
 };
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
@@ -387,10 +387,12 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .get_mut()
         .block_migration_depth = 4;
 
+    info!("Starting GENESIS node");
     // Genesis doesn't have any trusted peers
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
+    info!("GENESIS node started and packing");
     assert_eq!(
         ctx_genesis_node
             .node_ctx
@@ -406,9 +408,11 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
 
     // Peer 1 has genesis as trusted peer
     let ctx_peer1_node = ctx_genesis_node.testing_peer();
+    info!("Starting PEER1 node");
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
         .await;
+    info!("PEER1 node started");
 
     // Check that we've added genesis as a trusted peer
     assert_eq!(
@@ -426,7 +430,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .is_empty()
         && elapsed < max_seconds
     {
-        debug!("Waiting for PEER1 to handshake with GENESIS... {}", elapsed);
+        info!("Waiting for PEER1 to handshake with GENESIS... {}", elapsed);
         elapsed += 1;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -447,7 +451,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
 
     // Stop peer1 node
     let stopped_peer_1 = ctx_peer1_node.stop().await;
-    debug!("PEER1 stopped");
+    info!("PEER1 stopped");
 
     // Decreasing peer1 score just to speed up the pruning process
     ctx_genesis_node.node_ctx.peer_list.decrease_peer_score(
@@ -464,7 +468,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .is_empty()
         && elapsed < max_seconds
     {
-        debug!(
+        info!(
             "Waiting for GENESIS to remove PEER1 from temp peer list... {}",
             elapsed
         );
@@ -484,9 +488,23 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         ctx_genesis_node.node_ctx.peer_list.temporary_peers().len(),
         0
     );
+    assert!(!ctx_genesis_node.node_ctx.sync_state.is_syncing());
+    assert!(ctx_genesis_node
+        .node_ctx
+        .sync_state
+        .is_gossip_broadcast_enabled());
+    assert!(ctx_genesis_node
+        .node_ctx
+        .sync_state
+        .is_gossip_reception_enabled());
+    info!(
+        "GENESIS sync state: {:?}",
+        ctx_genesis_node.node_ctx.sync_state
+    );
 
+    info!("Restarting PEER1 node");
     let ctx_peer1_node = stopped_peer_1.start_with_name("PEER1").await;
-    debug!("PEER1 restarted");
+    info!("PEER1 restarted");
 
     // Wait for peer1 to handshake with genesis again
     elapsed = 0;
@@ -497,7 +515,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .is_empty()
         && elapsed < max_seconds
     {
-        debug!(
+        info!(
             "Waiting for PEER1 to handshake with GENESIS again... {}",
             elapsed
         );
@@ -519,13 +537,13 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     );
 
     let stopped_genesis = ctx_genesis_node.stop().await;
-    debug!("GENESIS stopped");
+    info!("GENESIS stopped");
 
     // Restart genesis
     let ctx_genesis_node = stopped_genesis
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
-    debug!("GENESIS restarted");
+    info!("GENESIS restarted");
 
     // Check that genesis has no peers
     assert_eq!(
@@ -565,7 +583,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .is_empty()
         && elapsed < max_seconds
     {
-        debug!(
+        info!(
             "Waiting for PEER1 to handshake with GENESIS again... {}",
             elapsed
         );
