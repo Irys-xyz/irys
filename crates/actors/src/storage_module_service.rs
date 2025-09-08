@@ -22,10 +22,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
-use tracing::{debug, error, warn, Span};
+use tracing::{debug, error, warn, Instrument, Span};
 
 use crate::{
-    packing::PackingRequest, services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
+    chunk_migration_service::process_ledger_transactions, packing::PackingRequest,
+    services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
 };
 
 // Messages that the StorageModuleService service supports
@@ -107,29 +108,31 @@ impl StorageModuleServiceInner {
 
         // Read the current storage modules once, outside the loop
         let current_modules = self.storage_modules.read().unwrap();
-        let mut updated_modules: Vec<Arc<StorageModule>> = Vec::new();
+        let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();
+        let mut packing_modules: Vec<Arc<StorageModule>> = Vec::new();
 
         debug!("StorageModuleInfos:\n{:#?}", storage_module_infos);
 
         for sm_info in storage_module_infos.iter() {
-            // Get the existing StorageModule
-            // TODO: this fix works and we don't know why :)
+            // Get the existing StorageModule from our state with the same storage module id
             let existing = current_modules
                 .iter()
                 .find(|sm| sm.id == sm_info.id)
                 .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &current_modules, &storage_module_infos));
 
-            // Did this storage module get assigned a new partition_hash ?
+            // Did this storage module from our state get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
                 existing.assign_partition(sm_info.partition_assignment.unwrap(), update_height);
-                // Record this storage module as updated
-                updated_modules.push(existing.clone());
+
+                // Record this storage module as needing packing, the protocol will always assign a new partition_hash
+                // to capacity for 1 epoch so we can schedule this formerly unassigned storage module for packing
+                packing_modules.push(existing.clone());
 
                 // Skip any further validations for now
                 continue;
             }
 
-            // Get the path for this module
+            // Get the path for this module - this is the only place the storage module id can be used as an index
             let path = &self.submodules_config.submodule_paths[sm_info.id];
 
             // Validate the path
@@ -155,8 +158,11 @@ impl StorageModuleServiceInner {
                 return Err(eyre::eyre!("Submodule paths don't match"));
             }
 
-            // Validate the module against on-disk packing parameters
+            // Validate the in memory storage module against on-disk packing parameters
             if let Some(info_pa) = sm_info.partition_assignment {
+                // Validate the existing storage module info as it exists in our local state
+                // vs. the existing packing params on disk to make sure everything is in sync
+                // before updating the partition assignment
                 match self.validate_packing_params(existing, path, sm_info.id) {
                     Ok(()) => {}
                     Err(err) => panic!("{}", err),
@@ -164,31 +170,47 @@ impl StorageModuleServiceInner {
 
                 // Check to see if there's been a change in the ledger assignment for the partition_has
                 // moved from Capacity->LedgerSlot or LedgerSlot->Capacity
-                if info_pa.ledger_id != existing.partition_assignment().unwrap().ledger_id
-                    || info_pa.slot_index != existing.partition_assignment().unwrap().slot_index
+                let existing_pa = existing.partition_assignment().unwrap();
+                if info_pa.ledger_id != existing_pa.ledger_id
+                    || info_pa.slot_index != existing_pa.slot_index
                 {
+                    let ledger_before = existing_pa.ledger_id;
+
                     // Update the storage modules partition assignment (and packing params toml)
                     // to match ledger/capacity reassignment
                     existing.assign_partition(info_pa, update_height);
 
-                    // Record this storage module as updated
-                    updated_modules.push(existing.clone());
+                    if ledger_before.is_some() && info_pa.ledger_id.is_none() {
+                        // This storage module is expiring from LedgerSlot->Capacity
+                        packing_modules.push(existing.clone());
+                    } else if ledger_before.is_none() && info_pa.ledger_id.is_some() {
+                        // This storage module is assigned Capacity->LedgerSlot
+                        assigned_modules.push(existing.clone());
+                    }
                 }
             }
         }
 
-        // For each updated module, start packing and mining
-        for updated_sm in updated_modules {
-            // Message packing actor
-            if let Ok(interval) = updated_sm.reset() {
+        // For each module requiring packing, start packing and mining
+        for packing_sm in packing_modules {
+            // Reset packing params and indexes on the storage module
+            if let Ok(interval) = packing_sm.reset() {
+                // Message packing actor to fill up fresh entropy chunks on the drive
                 self.actor_addresses.packing.do_send(PackingRequest {
-                    storage_module: updated_sm.clone(),
+                    storage_module: packing_sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
             }
         }
 
-        // Once the storage module partition assignments are updated we can a
+        // For each storage module assigned to a data ledger, we need to update the data_root indexes
+        // that may overlap the assigned slot so that it can index chunks
+        for assigned_sm in assigned_modules {
+            // Rebuild indexes
+            process_ledger_transactions
+        }
+
+        // Only once the storage module partition assignments are updated we can a
         // safely update the data_sync_service for any necessary data synchronization
         if let Err(e) = self
             .service_senders
@@ -303,22 +325,25 @@ impl StorageModuleService {
         let actor_addresses = actor_addresses.clone();
         let config = config.clone();
 
-        let handle = runtime_handle.spawn(async move {
-            let pending_storage_module_service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                inner: StorageModuleServiceInner::new(
-                    storage_modules,
-                    actor_addresses,
-                    service_senders,
-                    config,
-                ),
-            };
-            pending_storage_module_service
-                .start()
-                .await
-                .expect("StorageModule Service encountered an irrecoverable error")
-        });
+        let handle = runtime_handle.spawn(
+            async move {
+                let pending_storage_module_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner: StorageModuleServiceInner::new(
+                        storage_modules,
+                        actor_addresses,
+                        service_senders,
+                        config,
+                    ),
+                };
+                pending_storage_module_service
+                    .start()
+                    .await
+                    .expect("StorageModule Service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         TokioServiceHandle {
             name: "storage_module_service".to_string(),

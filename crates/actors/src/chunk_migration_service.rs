@@ -86,9 +86,9 @@ impl Handler<BlockMigrationMessage> for ChunkMigrationService {
     type Result = ResponseFuture<eyre::Result<()>>;
 
     #[instrument(skip_all, fields(
-    height = %block.height, // instrument seems to be just wrapping the Boxed future
-    hash = %block.block_hash
-))]
+        height = %block.height, // instrument seems to be just wrapping the Boxed future
+        hash = %block.block_hash
+    ))]
     fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Early return if not initialized
         if self.block_index.is_none() || self.db.is_none() {
@@ -107,6 +107,12 @@ impl Handler<BlockMigrationMessage> for ChunkMigrationService {
 
         // Extract transactions for each ledger
         let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
+        // TODO: This all_tx this was a hack to ship testnet, when there are multiple ledgers
+        // there will probably need to be something more robust. This was done because all the
+        // tx headers wer available at the call site so it made sense to pass them with the
+        // message instead of having every recipient have to re-query the db for them. But
+        // there is probably a better structure for this than a flat list. A map keyed by
+        // ledger ID for example.
         let submit_txs = all_txs[..submit_tx_count].to_vec();
         let publish_txs = all_txs[submit_tx_count..].to_vec();
         let block_height = block.height;
@@ -154,7 +160,7 @@ impl Handler<Stop> for ChunkMigrationService {
     }
 }
 
-fn process_ledger_transactions(
+pub fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
     txs: &[DataTransactionHeader],
@@ -299,7 +305,7 @@ fn get_tx_path_pairs(
 }
 
 fn update_storage_module_indexes(
-    proof: &[u8],
+    tx_path_proof: &[u8],
     data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
@@ -311,7 +317,7 @@ fn update_storage_module_indexes(
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range, data_size)
+            .index_transaction_data(tx_path_proof.to_vec(), data_root, tx_chunk_range, data_size)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",

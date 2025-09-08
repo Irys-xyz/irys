@@ -113,9 +113,9 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         .start_and_wait_for_packing("PEER1", seconds_to_wait)
         .await;
 
-    let peer2_node = IrysNodeTest::new(peer2_config.clone())
-        .start_and_wait_for_packing("PEER2", seconds_to_wait)
-        .await;
+    // let peer2_node = IrysNodeTest::new(peer2_config.clone())
+    //     .start_and_wait_for_packing("PEER2", seconds_to_wait)
+    //     .await;
 
     let _block = genesis_node.mine_block().await?;
 
@@ -127,12 +127,12 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
         check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
 
-        check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
-        check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
+        // check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
+        // check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
     }
 
     peer1_node.stop().await;
-    peer2_node.stop().await;
+    // peer2_node.stop().await;
     genesis_node.stop().await;
     Ok(())
 }

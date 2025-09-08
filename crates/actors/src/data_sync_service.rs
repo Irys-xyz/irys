@@ -230,12 +230,25 @@ impl DataSyncServiceInner {
 
         // Do not write directly to the storage module, indexes need to be set up
         // the parent data_tx with the data_root may not have arrived yet...
-        // self.storage_modules
-        //     .read()
-        //     .unwrap()
-        //     .get(storage_module_id)
-        //     .unwrap()
-        //     .write_data_chunk(&unpacked_chunk)?;
+        let sm = self
+            .storage_modules
+            .read()
+            .unwrap()
+            .get(storage_module_id)
+            .unwrap()
+            .clone();
+
+        let so = sm.collect_start_offsets(unpacked_chunk.data_root);
+        let pa = sm.partition_assignment().unwrap();
+
+        if let Ok(so) = so {
+            debug!(
+                "start_offsets: Ledger:{:?} index: {:?}  {:?} {}",
+                pa.ledger_id, pa.slot_index, so, chunk.partition_offset
+            );
+            let x = 5;
+        }
+
         //
         // Instead, send the unpacked chunk to the mempool and let the it do it's thing.
         self.service_senders
