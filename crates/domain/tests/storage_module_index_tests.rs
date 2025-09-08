@@ -163,12 +163,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     let data_root = tx_headers[0].data_root;
     let data_size = tx_headers[0].data_size;
-    let _ = storage_modules[0].index_transaction_data(
-        tx_path.clone(),
-        data_root,
-        tx_ledger_range,
-        data_size,
-    );
+    let _ =
+        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
 
     // Get the submodule reference
     let submodule = storage_modules[0]
@@ -199,12 +195,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_root = tx_headers[1].data_root;
     let data_size = tx_headers[1].data_size;
     assert_eq!(data_size, bytes_in_tx);
-    let _ = storage_modules[0].index_transaction_data(
-        tx_path.clone(),
-        data_root,
-        tx_ledger_range,
-        data_size,
-    );
+    let _ =
+        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
 
     // Get the both submodule references
     let submodule = storage_modules[0]
@@ -247,12 +239,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         bytes_in_tx,
         config.consensus.chunk_size,
     );
-    let _ = storage_modules[0].index_transaction_data(
-        tx_path.clone(),
-        data_root,
-        tx_ledger_range,
-        data_size,
-    );
+    let _ =
+        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
 
     let submodule3 = storage_modules[0]
         .get_submodule(tx_partition_range.end())
@@ -299,18 +287,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
     // Update both storage modules with the tx data
-    let _ = storage_modules[0].index_transaction_data(
-        tx_path.clone(),
-        data_root,
-        tx_ledger_range,
-        data_size,
-    );
-    let _ = storage_modules[1].index_transaction_data(
-        tx_path.clone(),
-        data_root,
-        tx_ledger_range,
-        data_size,
-    );
+    let _ =
+        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
+    let _ =
+        storage_modules[1].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
 
     // The first submodule of the second StorageModule/Partition
     let submodule4 = storage_modules[1]
@@ -356,12 +336,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
 
-    let _ = storage_modules[1].index_transaction_data(
-        tx_path.clone(),
-        data_root,
-        tx_ledger_range,
-        data_size,
-    );
+    let _ =
+        storage_modules[1].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
 
     let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
     verify_tx_path_in_submodule(submodule4, tx_path, tx_path_hash);

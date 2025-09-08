@@ -311,7 +311,7 @@ fn update_storage_module_indexes(
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(proof.to_vec(), data_root, tx_chunk_range, data_size)
+            .index_transaction_data(&proof.to_vec(), data_root, tx_chunk_range, data_size)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",

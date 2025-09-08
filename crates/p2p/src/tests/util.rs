@@ -595,28 +595,6 @@ impl GossipServiceTestFixture {
 
         peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
     }
-
-    /// # Panics
-    /// Can panic
-    pub(crate) async fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
-        let peer = PeerListItem {
-            address: PeerAddress {
-                gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
-                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.api_port),
-                execution: other.execution,
-            },
-            reputation_score: score,
-            is_online: true,
-            ..PeerListItem::default()
-        };
-        let peer_list_guard = self
-            .peer_list
-            .send(GetPeerListGuard)
-            .await
-            .expect("Failed to get peer list guard")
-            .expect("Failed to get peer list guard");
-        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
-    }
 }
 
 fn random_free_port() -> u16 {
