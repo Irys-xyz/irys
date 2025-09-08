@@ -24,7 +24,7 @@ pub enum BlockStatus {
 
 impl BlockStatus {
     pub fn is_processed(&self) -> bool {
-        matches!(self, Self::Finalized | Self::ProcessedButCanBeReorganized)
+        matches!(self, Self::Finalized | Self::ProcessedButCanBeReorganized | Self::PartOfAPrunedFork)
     }
 
     pub fn is_a_part_of_pruned_fork(&self) -> bool {
