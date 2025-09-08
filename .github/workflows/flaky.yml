@@ -1,0 +1,48 @@
+name: Flaky Test Detection
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Daily at 4 AM UTC
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  RUNS: 30
+
+jobs:
+  flaky-tests:
+    runs-on: ubuntu-latest
+    runs-on: [self-hosted, test-runner]
+    timeout-minutes: 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install cargo-flaky
+        run: cargo install cargo-flaky
+      
+      - name: Create results directory
+        run: mkdir -p flaky-test-results
+      
+      - name: Run flaky test detection
+        run: |
+          cargo flaky -i ${{env.RUNS}} 2>&1 | tee flaky-test-results/flaky-test-output.txt
+        continue-on-error: true  # Don't fail the workflow if flaky tests are found
+      
+      - name: Generate summary report
+        if: always()
+        run: |
+          echo "# Flaky Test Detection Report" > flaky-test-results/summary.md
+          echo "**Date:** $(date)" >> flaky-test-results/summary.md
+          echo "**Commit:** ${{ github.sha }}" >> flaky-test-results/summary.md
+          echo "" >> flaky-test-results/summary.md
+          echo "## Results" >> flaky-test-results/summary.md
+          echo '```' >> flaky-test-results/summary.md
+          tail -n ${{env.RUNS}} flaky-test-results/flaky-test-output.txt >> flaky-test-results/summary.md
+          echo '```' >> flaky-test-results/summary.md
+      
+      - name: Upload flaky test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: flaky-test-results-${{ github.run_number }}
+          path: flaky-test-results/
+          retention-days: 10
