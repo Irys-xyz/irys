@@ -228,12 +228,22 @@ impl DataSyncServiceInner {
             consensus.chain_id,
         );
 
-        self.storage_modules
-            .read()
-            .unwrap()
-            .get(storage_module_id)
-            .unwrap()
-            .write_data_chunk(&unpacked_chunk)?;
+        // Do not write directly to the storage module, indexes need to be set up
+        // the parent data_tx with the data_root may not have arrived yet...
+        // self.storage_modules
+        //     .read()
+        //     .unwrap()
+        //     .get(storage_module_id)
+        //     .unwrap()
+        //     .write_data_chunk(&unpacked_chunk)?;
+        //
+        // Instead, send the unpacked chunk to the mempool and let the it do it's thing.
+        self.service_senders
+            .mempool
+            .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
+                unpacked_chunk,
+            ))
+            .expect("to send MempoolServiceMessage");
 
         Ok(())
     }
@@ -244,9 +254,17 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: Address,
     ) -> eyre::Result<()> {
-        debug!("chunk failed: {} peer:{}", chunk_offset, peer_addr);
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
+
+            let pa = orchestrator
+                .storage_module
+                .partition_assignment()
+                .expect("A partition assignment present");
+            debug!(
+                "chunk failed: ledger:{:?}, slot_index:{:?} chunk_offset:{} peer:{}",
+                pa.ledger_id, pa.slot_index, chunk_offset, peer_addr
+            );
         }
         Ok(())
     }
