@@ -3,11 +3,12 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
+use crate::GossipCache;
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, BlockHash, GossipData, GossipDataRequest, GossipRequest, IrysBlockHeader, PeerAddress,
-    PeerListItem, PeerNetworkError,
+    Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
+    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -85,7 +86,7 @@ impl GossipClient {
     ) -> GossipResult<GossipResponse<bool>> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
 
-        let res = self.send_data_internal(url, &requested_data, false).await;
+        let res = self.send_data_internal(url, &requested_data).await;
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
@@ -100,12 +101,16 @@ impl GossipClient {
     ) -> GossipResult<GossipResponse<Option<GossipData>>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
 
-        let res = self.send_data_internal(url, &requested_data, false).await;
+        let res = self.send_data_internal(url, &requested_data).await;
         Self::handle_score(peer_list, &res, &peer.0);
         res
     }
 
-    pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
+    pub async fn check_health(
+        &self,
+        peer: PeerAddress,
+        peer_list: &PeerList,
+    ) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
         let peer_addr = peer.gossip.to_string();
 
@@ -120,9 +125,25 @@ impl GossipClient {
             return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
         }
 
-        response.json().await.map_err(|error| {
+        let response: GossipResponse<bool> = response.json().await.map_err(|error| {
             GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
-        })
+        })?;
+
+        match response {
+            GossipResponse::Accepted(val) => Ok(val),
+            GossipResponse::Rejected(reason) => {
+                warn!("Health check rejected with reason: {:?}", reason);
+                match reason {
+                    RejectionReason::HandshakeRequired => {
+                        peer_list.initiate_handshake(peer.api, true);
+                    }
+                    RejectionReason::GossipDisabled => {
+                        return Ok(false);
+                    }
+                };
+                Ok(true)
+            }
+        }
     }
 
     /// Send data to a peer
@@ -135,13 +156,11 @@ impl GossipClient {
         peer: &PeerListItem,
         data: &GossipData,
     ) -> GossipResult<GossipResponse<()>> {
-        Self::check_if_peer_is_online(peer)?;
         match data {
             GossipData::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
-                    true,
                 )
                 .await
             }
@@ -149,7 +168,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
-                    true,
                 )
                 .await
             }
@@ -157,7 +175,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/commitment_tx", peer.address.gossip),
                     commitment_tx,
-                    true,
                 )
                 .await
             }
@@ -165,7 +182,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
-                    true,
                 )
                 .await
             }
@@ -173,7 +189,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/execution_payload", peer.address.gossip),
                     &execution_payload,
-                    true,
                 )
                 .await
             }
@@ -181,25 +196,16 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/ingress_proof", peer.address.gossip),
                     &ingress_proof,
-                    true,
                 )
                 .await
             }
         }
     }
 
-    fn check_if_peer_is_online(peer: &PeerListItem) -> GossipResult<()> {
-        if !peer.is_online {
-            return Err(GossipError::InvalidPeer("Peer is offline".into()));
-        }
-        Ok(())
-    }
-
     async fn send_data_internal<T, R>(
         &self,
         url: String,
         data: &T,
-        empty_response_allowed: bool,
     ) -> GossipResult<GossipResponse<R>>
     where
         T: Serialize + ?Sized,
@@ -230,17 +236,7 @@ impl GossipClient {
                 })?;
 
                 if text.trim().is_empty() {
-                    return if empty_response_allowed {
-                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
-                        Ok(serde_json::from_str("null").map_err(|e| {
-                            GossipError::Network(format!(
-                                "Failed to parse an empty JSON response from {}: {}",
-                                url, e
-                            ))
-                        })?)
-                    } else {
-                        Err(GossipError::Network(format!("Empty response from {}", url)))
-                    };
+                    return Err(GossipError::Network(format!("Empty response from {}", url)));
                 }
 
                 let body = serde_json::from_str(&text).map_err(|e| {
@@ -253,22 +249,6 @@ impl GossipClient {
             }
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
-                // It seems like heavy_fork_recovery_epoch_test expects 403 error to be
-                //  handled like this; I can't figure out a reason why, but it doesn't pass
-                //  if we actually return an error if this happens
-                if error_text.trim().is_empty() {
-                    return if empty_response_allowed {
-                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
-                        Ok(serde_json::from_str("null").map_err(|e| {
-                            GossipError::Network(format!(
-                                "Failed to parse an empty JSON response from {}: {}",
-                                url, e
-                            ))
-                        })?)
-                    } else {
-                        Err(GossipError::Network(format!("Empty response from {}", url)))
-                    };
-                }
                 Err(GossipError::Network(format!(
                     "API request failed with status: {} - {}",
                     status, error_text
@@ -286,8 +266,12 @@ impl GossipClient {
             Ok(_) => {
                 // Successful send, increase score for data request
                 peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
+                peer_list.set_is_online(peer_miner_address, true);
             }
-            Err(_) => {
+            Err(err) => {
+                if let GossipError::Network(_message) = err {
+                    peer_list.set_is_online(peer_miner_address, false);
+                }
                 // Failed to send, decrease score
                 peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
             }
@@ -300,6 +284,8 @@ impl GossipClient {
         peer: (&Address, &PeerListItem),
         data: Arc<GossipData>,
         peer_list: &PeerList,
+        cache: Arc<GossipCache>,
+        gossip_cache_key: GossipCacheKey,
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();
@@ -315,7 +301,9 @@ impl GossipClient {
                 )
                 .await
             {
-                error!("Error sending data to peer: {}", e);
+                error!("Error sending data to peer: {:?}", e);
+            } else if let Err(err) = cache.record_seen(peer_miner_address, gossip_cache_key) {
+                error!("Error recording seen data in cache: {:?}", err);
             }
         });
     }
@@ -421,14 +409,17 @@ impl GossipClient {
                     )),
                 },
                 GossipResponse::Rejected(reason) => {
-                    warn!("Peer {} rejected the request: {:?}", peer.0, reason);
+                    warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
                     match reason {
                         RejectionReason::HandshakeRequired => {
                             peer_list.initiate_handshake(peer.1.address.api, true)
                         }
+                        RejectionReason::GossipDisabled => {
+                            peer_list.set_is_online(&peer.0, false);
+                        }
                     }
                     Err(PeerNetworkError::FailedToRequestData(format!(
-                        "Peer {} rejected the request: {:?}",
+                        "Peer {:?} rejected the request: {:?}",
                         peer.0, reason
                     )))
                 }
@@ -468,7 +459,7 @@ impl GossipClient {
         map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
     ) -> Result<(Address, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
-            peer_list.trusted_peers()
+            peer_list.online_trusted_peers()
         } else {
             // Get the top 10 most active peers
             peer_list.top_active_peers(Some(10), None)
@@ -504,7 +495,10 @@ impl GossipClient {
                                 Some(data) => match map_data(data) {
                                     Ok(data) => return Ok((*address, data)),
                                     Err(err) => {
-                                        warn!("Failed to map data from peer {}: {}", address, err);
+                                        warn!(
+                                            "Failed to map data from peer {:?}: {:?}",
+                                            address, err
+                                        );
                                         continue;
                                     }
                                 },
@@ -524,7 +518,16 @@ impl GossipClient {
                                         peer_list.initiate_handshake(peer.1.address.api, true);
                                         last_error = Some(GossipError::from(
                                             PeerNetworkError::FailedToRequestData(format!(
-                                                "Peer {} requires a handshake",
+                                                "Peer {:?} requires a handshake",
+                                                address
+                                            )),
+                                        ));
+                                    }
+                                    RejectionReason::GossipDisabled => {
+                                        peer_list.set_is_online(&peer.0, false);
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {:?} has gossip disabled",
                                                 address
                                             )),
                                         ));
@@ -556,6 +559,26 @@ impl GossipClient {
             "Failed to pull {:?} after trying 5 peers: {:?}",
             data_request, last_error
         )))
+    }
+
+    pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
+        debug!("Hydrating peers online status");
+        let peers = peer_list.all_peers_sorted_by_score();
+        for peer in peers {
+            match self.check_health(peer.1.address, peer_list).await {
+                Ok(is_healthy) => {
+                    debug!("Peer {} is healthy: {}", peer.0, is_healthy);
+                    peer_list.set_is_online(&peer.0, is_healthy);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to check the health of peer {}: {}, setting offline status",
+                        peer.0, err
+                    );
+                    peer_list.set_is_online(&peer.0, false);
+                }
+            }
+        }
     }
 }
 
@@ -673,8 +696,9 @@ mod tests {
             let fixture = TestFixture::new();
             let unreachable_port = get_free_port();
             let peer = create_peer_address("127.0.0.1", unreachable_port);
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -695,8 +719,9 @@ mod tests {
             let fixture = TestFixture::with_timeout(Duration::from_millis(1));
             // Use a non-routable IP address
             let peer = create_peer_address("192.0.2.1", 8080);
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -716,8 +741,9 @@ mod tests {
             let server = MockHttpServer::new_with_response(status_code, "", "text/plain");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -753,8 +779,9 @@ mod tests {
                 MockHttpServer::new_with_response(200, "invalid json {", "application/json");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -782,8 +809,9 @@ mod tests {
             );
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             assert!(matches!(

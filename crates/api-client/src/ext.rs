@@ -72,22 +72,9 @@ impl ApiClientExt for IrysApiClient {
     }
 
     async fn upload_chunks(&self, peer: SocketAddr, tx: &DataTransaction) -> eyre::Result<()> {
-        // TODO: find a better version
-        let data = match &tx.data {
-            Some(d) => d,
-            None => eyre::bail!("missing required tx data"),
-        };
-
-        for (idx, chunk) in tx.chunks.iter().enumerate() {
-            let unpacked_chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
-                data_size: tx.header.data_size,
-                data_path: Base64(tx.proofs[idx].proof.clone()),
-                bytes: Base64(data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(idx as u32),
-            };
+        for chunk in tx.data_chunks()? {
             let _response = self
-                .make_request::<(), _>(peer, Method::POST, "/chunk", Some(&unpacked_chunk))
+                .make_request::<(), _>(peer, Method::POST, "/chunk", Some(&chunk))
                 .await?;
         }
 

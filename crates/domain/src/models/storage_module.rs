@@ -887,13 +887,13 @@ impl StorageModule {
     /// Returns error if chunk range doesn't overlap with storage module range.
     pub fn index_transaction_data(
         &self,
-        tx_path: TxPath,
+        tx_path: &TxPath,
         data_root: DataRoot,
         chunk_range: LedgerChunkRange,
         data_size: u64,
     ) -> eyre::Result<()> {
         let storage_range = self.get_storage_module_ledger_range()?;
-        let tx_path_hash = H256::from(hash_sha256(&tx_path).unwrap());
+        let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
 
         let overlap = storage_range
             .intersection(&chunk_range)
@@ -1620,10 +1620,10 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_testing_utils::{chunk_bytes_gen, utils::setup_tracing_and_temp_dir};
     use irys_types::{
-        ledger_chunk_offset_ii, partition_chunk_offset_ii, ConsensusConfig, NodeConfig,
-        StorageSyncConfig, TxChunkOffset, H256,
+        irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii, ConsensusConfig,
+        NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, H256,
     };
     use nodit::interval::ii;
 
@@ -2083,7 +2083,7 @@ mod tests {
         storage_module.pack_with_zeros();
 
         let _ = storage_module.index_transaction_data(
-            tx_path,
+            &tx_path,
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             data_size,
@@ -2334,6 +2334,97 @@ mod tests {
         // Verify all chunks are now Uninitialized
         let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(uninitialized, [partition_chunk_offset_ii!(0, 10)]);
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[test]
+    // note: this requires you to change the submodule database args to set the growth and shrink step to 1 and 2 respectively to produce accurate results
+    // IT ALSO KEEPS THE TEST DIR
+    fn mdbx_metadata_size_test() -> eyre::Result<()> {
+        std::env::set_var("RUST_LOG", "info");
+        let tmp_dir = setup_tracing_and_temp_dir(Some("data_path_test"), true);
+
+        let base_path = tmp_dir.path().to_path_buf();
+        let chunk_size = 1;
+
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 10_000,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base_path.clone(),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1000,
+            },
+            ..NodeConfig::testing()
+        };
+        let config = Config::new(node_config);
+
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![(
+                partition_chunk_offset_ii!(0, config.consensus.num_chunks_in_partition - 1),
+                "hdd0".into(),
+            )],
+        }];
+
+        // Create a StorageModule with the specified submodules and config
+        let storage_module_info = &infos[0];
+        let storage_module = StorageModule::new(storage_module_info, &config)?;
+
+        storage_module.pack_with_zeros();
+
+        // create & write 100_000 chunks worth of txs
+        // randomly select the size in chunks for the tx
+        // assume we have 100 txs/block
+        // so we have log2(100) = 6.6 (so 7)
+        // 7 32B segments + 1 64B leaf (leaf & note)
+        let tx_path = [1; (7 * 32) + 64].to_vec();
+        let mut chunks_left = config.consensus.num_chunks_in_partition as u32;
+        let mut rng = SimpleRNG::new(42);
+
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let mut seed = 0;
+        while chunks_left > 0 {
+            let chunk_count = rng.next_range(chunks_left).max(1);
+            info!("writing {chunk_count} chunks.. ({chunks_left} left)");
+            let tx = signer.create_transaction_from_iter(
+                chunk_bytes_gen(chunk_count as u64, chunk_size as usize, seed),
+                H256::zero(),
+                true,
+            )?;
+
+            let _ = storage_module.index_transaction_data(
+                &tx_path,
+                tx.header.data_root,
+                LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+                tx.header.data_size,
+            );
+
+            for chunk in tx.data_chunks()? {
+                storage_module.write_data_chunk(&chunk)?;
+            }
+
+            seed += 1;
+            chunks_left = chunks_left.saturating_sub(chunk_count);
+        }
+
+        let db_path = base_path
+            .join(
+                storage_module
+                    .submodules
+                    .first_key_value()
+                    .unwrap()
+                    .1
+                    .path
+                    .clone(),
+            )
+            .join("db");
+        info!("DB PATH {:?}", &db_path.canonicalize()?);
 
         Ok(())
     }

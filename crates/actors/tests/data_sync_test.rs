@@ -594,10 +594,10 @@ impl TestSetup {
         }
 
         // Assign the transactions data_root to the storage module
-        let tx_path = Default::default();
+        let tx_path = vec![];
         storage_module
             .index_transaction_data(
-                tx_path,
+                &tx_path,
                 data_tx.header.data_root,
                 LedgerChunkRange(ledger_chunk_offset_ie!(0, num_chunks as u64)),
                 data_tx.header.data_size,

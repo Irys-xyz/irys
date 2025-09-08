@@ -514,7 +514,7 @@ mod tests {
         let data_size = chunk_size * chunk_count;
 
         let _ = storage_module.index_transaction_data(
-            tx_path.to_vec(),
+            &tx_path.to_vec(),
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
             data_size,

@@ -41,6 +41,7 @@ use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
+use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::VersionRequest;
@@ -57,7 +58,6 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
-use rand::{Rng as _, SeedableRng as _};
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
@@ -2338,22 +2338,6 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
         chunk_bytes_gen(count, chunk_size, seed)
     }
-}
-
-// simple "generator" that produces an iterator of deterministically random chunk bytes
-// this is used to create & verify large txs without having to write them to an intermediary
-pub fn chunk_bytes_gen(
-    count: u64,
-    chunk_size: usize,
-    seed: u64,
-) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    (0..count).map(move |i| {
-        debug!("generated chunk {}", &i);
-        let mut chunk_bytes = vec![0; chunk_size];
-        rng.fill(&mut chunk_bytes[..]);
-        Ok(chunk_bytes)
-    })
 }
 
 /// Construct a SolutionContext using a provided PoA chunk for the current step.
