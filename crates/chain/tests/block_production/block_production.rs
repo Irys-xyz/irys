@@ -1592,16 +1592,156 @@ async fn test_parent_block_rebuild() -> eyre::Result<()> {
     );
 
     // Verify the block was built on the correct parent
-    // The rebuild logic ensures we always build on the best canonical block
-
     let final_height = node.get_canonical_chain_height().await;
     info!("Final chain height: {}", final_height);
     assert_eq!(final_height, initial_height + 1);
 
-    // Note: In production, monitor logs for "REBUILD:" prefix to track actual rebuilds
-    // High frequency of rebuilds indicates network instability
-
     node.stop().await;
+
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+async fn heavy_block_prod_will_restart_block_build_loop_if_desired_parent_block_changes(
+) -> eyre::Result<()> {
+    // Strategy that adds delay during block production to allow peer to mine
+    struct DelayedBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub peer_mined_further: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<H256>>>,
+        pub awaiting_block_from_peer: tokio::sync::mpsc::Sender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for DelayedBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+        async fn is_parent_still_best(&self, parent_hash: &H256) -> (bool, H256) {
+            // notify the test we're waiting for peer 2 block
+            self.awaiting_block_from_peer.send(()).await.unwrap();
+            // only proceed once we know that peer 2 mined a new block
+            let mut receiver = self.peer_mined_further.lock().await;
+            let peer_block = receiver.recv().await.unwrap();
+            drop(receiver);
+
+            // assert that the desired parent block has changed
+            let res = self.prod.is_parent_still_best(parent_hash).await;
+
+            assert!(!res.0, "expect best parent block to have changed");
+            assert_eq!(
+                res.1, peer_block,
+                "expect the best parent block to be set to the peer_block"
+            );
+
+            res
+        }
+    }
+    let num_blocks_in_epoch = 2;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    // Start the genesis node (peer 1)
+    let peer1_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("PEER1", 10)
+        .await;
+
+    // Start peer 2
+    let peer2_node = peer1_node
+        .testing_peer_with_assignments(&peer_signer)
+        .await?;
+
+    // Mine a few initial blocks to establish the chain
+    for _ in 0..2 {
+        let block = peer2_node.mine_block().await?;
+        info!(
+            "Initial block {} mined at height {}",
+            block.block_hash, block.height
+        );
+        peer1_node.wait_until_height(block.height, 10).await?;
+        peer2_node.wait_until_height(block.height, 10).await?;
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let (awaiting_tx, mut awaiting_rx) = tokio::sync::mpsc::channel(1);
+    // Create the delayed strategy for peer 1
+    let delayed_strategy = Arc::new(DelayedBlockProdStrategy {
+        prod: ProductionStrategy {
+            inner: peer1_node.node_ctx.block_producer_inner.clone(),
+        },
+        peer_mined_further: Arc::new(tokio::sync::Mutex::new(rx)),
+        awaiting_block_from_peer: awaiting_tx,
+    });
+
+    // Start peer 1's block production in a separate task
+    let peer1_handle = {
+        let strategy = delayed_strategy.clone();
+        let node_ctx = peer1_node.node_ctx.clone();
+        tokio::spawn(async move {
+            info!("Peer1: Starting block production with DelayedStrategy");
+
+            // Generate a solution and produce block
+            let solution = solution_context(&node_ctx)
+                .await
+                .expect("Failed to get solution context");
+
+            // This will have a delay during production, allowing peer2 to mine
+            let result = strategy
+                .fully_produce_new_block(solution)
+                .await
+                .expect("Failed to produce block");
+
+            info!("Peer1: Block production completed");
+            result
+        })
+    };
+
+    // Give peer1 time to start and enter the delay
+    awaiting_rx.recv().await.unwrap();
+
+    // Now have peer 2 mine a block while peer1 is delayed
+    info!("Peer2: Mining a block while peer1 is in production delay");
+    let peer2_block = peer2_node.mine_block().await?;
+    info!(
+        "Peer2: Mined block {} at height {}",
+        peer2_block.block_hash, peer2_block.height
+    );
+
+    // Wait for peer2's block to be propagated and validated
+    peer2_node.wait_until_height(peer2_block.height, 10).await?;
+    peer1_node.wait_until_height(peer2_block.height, 10).await?;
+
+    // Wait for peer1 to complete
+    tx.send(peer2_block.block_hash).await.unwrap();
+    let (peer1_block, _eth_block) = peer1_handle
+        .await
+        .expect("Peer1 task panicked")
+        .expect("block to be properly mined");
+
+    // Verify the result
+    info!(
+        "Peer1 produced block: {} at height {}",
+        peer1_block.block_hash, peer1_block.height
+    );
+
+    // Assert that peer1's block was built on peer2's block
+    assert_eq!(
+        peer1_block.previous_block_hash, peer2_block.block_hash,
+        "Peer1's block should have been rebuilt on peer2's block"
+    );
+
+    // Both blocks should be at the same height (competing blocks)
+    assert_eq!(
+        peer1_block.height, peer2_block.height,
+        "Both blocks should be at the same height"
+    );
+
+    info!("SUCCESS: Block rebuild logic worked correctly!");
+    info!("Peer1 rebuilt its block on peer2's block after detecting parent change");
+
+    // Cleanup
+    peer1_node.stop().await;
+    peer2_node.stop().await;
 
     Ok(())
 }

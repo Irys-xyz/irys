@@ -343,7 +343,7 @@ pub trait BlockProdStrategy {
 
     /// Checks if the given parent block is still the best canonical block.
     /// Returns (is_still_best, current_best_hash)
-    fn is_parent_still_best(&self, parent_hash: &H256) -> (bool, H256) {
+    async fn is_parent_still_best(&self, parent_hash: &H256) -> (bool, H256) {
         let tree = self.inner().block_tree_guard.read();
         let (_max_difficulty, current_best) = tree.get_max_cumulative_difficulty_block();
         let is_still_best = current_best == *parent_hash;
@@ -483,7 +483,7 @@ pub trait BlockProdStrategy {
         // Check if we need to rebuild on a new parent
         while let Some((ref block, _, _)) = result {
             let parent_hash = &block.previous_block_hash;
-            let (is_still_best, _current_best) = self.is_parent_still_best(parent_hash);
+            let (is_still_best, _current_best) = self.is_parent_still_best(parent_hash).await;
 
             if is_still_best {
                 // Parent is still the best, we can proceed
