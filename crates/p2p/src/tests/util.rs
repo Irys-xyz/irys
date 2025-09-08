@@ -1,4 +1,5 @@
 use crate::peer_network_service::{GetPeerListGuard, PeerNetworkService};
+use crate::types::GossipResponse;
 use crate::{
     BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
@@ -594,28 +595,6 @@ impl GossipServiceTestFixture {
 
         peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
     }
-
-    /// # Panics
-    /// Can panic
-    pub(crate) async fn add_peer_with_reputation(&self, other: &Self, score: PeerScore) {
-        let peer = PeerListItem {
-            address: PeerAddress {
-                gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.gossip_port),
-                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), other.api_port),
-                execution: other.execution,
-            },
-            reputation_score: score,
-            is_online: true,
-            ..PeerListItem::default()
-        };
-        let peer_list_guard = self
-            .peer_list
-            .send(GetPeerListGuard)
-            .await
-            .expect("Failed to get peer list guard")
-            .expect("Failed to get peer list guard");
-        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
-    }
 }
 
 fn random_free_port() -> u16 {
@@ -665,36 +644,42 @@ pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
 }
 
 struct FakeGossipDataHandler {
-    on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
-    on_pull_data_request: Box<dyn Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync>,
+    on_block_data_request: Box<dyn Fn(BlockHash) -> GossipResponse<bool> + Send + Sync>,
+    on_pull_data_request:
+        Box<dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync>,
 }
 
 impl FakeGossipDataHandler {
     fn new() -> Self {
         Self {
-            on_block_data_request: Box::new(|_| false),
-            on_pull_data_request: Box::new(|_| None),
+            on_block_data_request: Box::new(|_| GossipResponse::Accepted(false)),
+            on_pull_data_request: Box::new(|_| GossipResponse::Accepted(None)),
         }
     }
 
-    fn call_on_block_data_request(&self, block_hash: BlockHash) -> bool {
+    fn call_on_block_data_request(&self, block_hash: BlockHash) -> GossipResponse<bool> {
         (self.on_block_data_request)(block_hash)
     }
 
-    fn call_on_pull_data_request(&self, data_request: GossipDataRequest) -> Option<GossipData> {
+    fn call_on_pull_data_request(
+        &self,
+        data_request: GossipDataRequest,
+    ) -> GossipResponse<Option<GossipData>> {
         (self.on_pull_data_request)(data_request)
     }
 
     fn set_on_block_data_request(
         &mut self,
-        on_block_data_request: Box<dyn Fn(BlockHash) -> bool + Send + Sync>,
+        on_block_data_request: Box<dyn Fn(BlockHash) -> GossipResponse<bool> + Send + Sync>,
     ) {
         self.on_block_data_request = on_block_data_request;
     }
 
     fn set_on_pull_data_request(
         &mut self,
-        on_pull_data_request: Box<dyn Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync>,
+        on_pull_data_request: Box<
+            dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync,
+        >,
     ) {
         self.on_pull_data_request = on_pull_data_request;
     }
@@ -726,7 +711,7 @@ impl FakeGossipServer {
 
     pub(crate) fn set_on_block_data_request(
         &self,
-        on_block_data_request: impl Fn(BlockHash) -> bool + Send + Sync + 'static,
+        on_block_data_request: impl Fn(BlockHash) -> GossipResponse<bool> + Send + Sync + 'static,
     ) {
         self.handler
             .write()
@@ -736,7 +721,10 @@ impl FakeGossipServer {
 
     pub(crate) fn set_on_pull_data_request(
         &self,
-        on_pull_data_request: impl Fn(GossipDataRequest) -> Option<GossipData> + Send + Sync + 'static,
+        on_pull_data_request: impl Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.handler
             .write()
@@ -786,7 +774,7 @@ async fn handle_get_data(
             GossipDataRequest::Block(block_hash) => {
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
-                    "Block data request for hash {:?}, response: {}",
+                    "Block data request for hash {:?}, response: {:?}",
                     block_hash, res
                 );
                 HttpResponse::Ok()

@@ -13,6 +13,7 @@ pub mod difficulty_adjustment_config;
 pub mod gossip;
 pub mod ingress;
 pub mod irys;
+pub mod ledger_expiry;
 mod merkle;
 pub mod partition;
 pub mod peer_list;

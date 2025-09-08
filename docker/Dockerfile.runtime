@@ -1,0 +1,13 @@
+FROM ubuntu:24.04
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ufw curl iputils-ping iproute2 ca-certificates libgmp10 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Expect /app/irys to be provided via bind mount
+COPY ./entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]

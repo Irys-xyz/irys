@@ -1,4 +1,5 @@
-mode = "Genesis" #changeme
+node_mode = "Genesis" #changeme
+sync_mode = "Trusted"
 base_directory = "/app/data"
 mining_key = "53142d3c5a4a3f49715490456c26df7926d45586179d19afce68d799c08ea8c6" #changeme
 reward_address = "0x10605A299777D44BE5373D120d5479f07860325d" #changeme

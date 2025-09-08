@@ -41,6 +41,7 @@ use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
+use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::VersionRequest;
@@ -57,7 +58,6 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
-use rand::{Rng as _, SeedableRng as _};
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
@@ -116,20 +116,20 @@ pub async fn capacity_chunk_solution(
         // Calculate last step checkpoints for current_step - 1
         let mut hasher = Sha256::new();
         let mut salt = irys_types::U256::from(step_number_to_salt_number(
-            &config.consensus.vdf,
+            &config.vdf,
             current_step.saturating_sub(1),
         ));
         let mut seed = steps[0];
 
         let mut checkpoints: Vec<H256> =
-            vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
 
         vdf_sha(
             &mut hasher,
             &mut salt,
             &mut seed,
-            config.consensus.vdf.num_checkpoints_in_vdf_step,
-            config.consensus.vdf.num_iterations_per_checkpoint(),
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
         );
 
@@ -237,18 +237,18 @@ pub async fn capacity_chunk_solution(
             {
                 let mut h = Sha256::new();
                 let mut s = irys_types::U256::from(step_number_to_salt_number(
-                    &config.consensus.vdf,
+                    &config.vdf,
                     current_step.saturating_sub(1),
                 ));
                 let mut sd = steps[0];
                 let mut cps: Vec<H256> =
-                    vec![H256::default(); config.consensus.vdf.num_checkpoints_in_vdf_step];
+                    vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
                 vdf_sha(
                     &mut h,
                     &mut s,
                     &mut sd,
-                    config.consensus.vdf.num_checkpoints_in_vdf_step,
-                    config.consensus.vdf.num_iterations_per_checkpoint(),
+                    config.vdf.num_checkpoints_in_vdf_step,
+                    config.vdf.num_iterations_per_checkpoint(),
                     &mut cps,
                 );
                 H256List(cps)
@@ -2291,7 +2291,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         end_height: u64,
     ) -> eyre::Result<Vec<IrysBlockHeader>> {
         let blocks = self.get_blocks(start_height, end_height).await?;
-        let reset_frequency = self.node_ctx.config.consensus.vdf.reset_frequency;
+        let reset_frequency = self.node_ctx.config.vdf.reset_frequency;
 
         Ok(blocks
             .into_iter()
@@ -2340,22 +2340,6 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-// simple "generator" that produces an iterator of deterministically random chunk bytes
-// this is used to create & verify large txs without having to write them to an intermediary
-pub fn chunk_bytes_gen(
-    count: u64,
-    chunk_size: usize,
-    seed: u64,
-) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    (0..count).map(move |i| {
-        debug!("generated chunk {}", &i);
-        let mut chunk_bytes = vec![0; chunk_size];
-        rng.fill(&mut chunk_bytes[..]);
-        Ok(chunk_bytes)
-    })
-}
-
 /// Construct a SolutionContext using a provided PoA chunk for the current step.
 /// Computes solution_hash = sha256(poa_chunk || offset_le || vdf_output) and returns immediately
 /// with a consistent cryptographic link, without attempting to satisfy difficulty or iterate offsets.
@@ -2392,23 +2376,17 @@ pub async fn solution_context_with_poa_chunk(
 
     // Compute checkpoints for (step-1)
     let mut hasher = Sha256::new();
-    let mut salt = irys_types::U256::from(step_number_to_salt_number(
-        &node_ctx.config.consensus.vdf,
-        step - 1,
-    ));
+    let mut salt =
+        irys_types::U256::from(step_number_to_salt_number(&node_ctx.config.vdf, step - 1));
     let mut seed = steps[0];
     let mut checkpoints: Vec<H256> =
-        vec![H256::default(); node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step];
+        vec![H256::default(); node_ctx.config.vdf.num_checkpoints_in_vdf_step];
     vdf_sha(
         &mut hasher,
         &mut salt,
         &mut seed,
-        node_ctx.config.consensus.vdf.num_checkpoints_in_vdf_step,
-        node_ctx
-            .config
-            .consensus
-            .vdf
-            .num_iterations_per_checkpoint(),
+        node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+        node_ctx.config.vdf.num_iterations_per_checkpoint(),
         &mut checkpoints,
     );
 

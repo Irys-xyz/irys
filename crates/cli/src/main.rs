@@ -1,7 +1,7 @@
 use clap::{command, Parser, Subcommand};
 use irys_chain::utils::load_config;
 use irys_config::chain::chainspec::IrysChainSpecBuilder;
-use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
+use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
 use irys_types::{Config, NodeConfig};
@@ -59,7 +59,7 @@ async fn main() -> eyre::Result<()> {
 
     match args.command {
         Commands::DumpState { .. } => {
-            dump_state(cli_init_db()?, "./".into())?;
+            dump_state(cli_init_reth_db(DatabaseEnvKind::RO)?, "./".into())?;
             Ok(())
         }
         Commands::InitState { state_path } => {
@@ -68,13 +68,36 @@ async fn main() -> eyre::Result<()> {
             init_state(node_config, chain_spec.into(), state_path).await
         }
         Commands::RollbackBlocks { count } => {
-            let block_index = irys_domain::BlockIndex::new(&node_config).await?;
-            let items = &block_index.items[0..block_index
-                .items
-                .len()
-                .saturating_sub(count.try_into().unwrap())];
+            let db = cli_init_irys_db(DatabaseEnvKind::RW)?;
 
-            info!("Old len: {}, new {} ", block_index.items.len(), items.len());
+            let block_index = irys_domain::BlockIndex::new(&node_config).await?;
+
+            let (retained, removed) = &block_index.items.split_at(
+                block_index
+                    .items
+                    .len()
+                    .saturating_sub(count.try_into().unwrap()),
+            );
+
+            info!(
+                "Old len: {}, new {} - retaining <{}, removing {} -> {} ",
+                block_index.items.len(),
+                retained.len(),
+                retained.len(),
+                retained.len(),
+                retained.len() + removed.len()
+            );
+
+            // remove every block in `removed` from the database
+            let rw_tx = db.tx_mut()?;
+            use irys_database::reth_db::transaction::DbTxMut as _;
+            for itm in removed.iter() {
+                let hdr = rw_tx
+                    .get::<irys_database::tables::IrysBlockHeaders>(itm.block_hash)?
+                    .unwrap();
+                info!("Removing {}@{}", &hdr.block_hash, &hdr.height);
+                rw_tx.delete::<irys_database::tables::IrysBlockHeaders>(itm.block_hash, None)?;
+            }
 
             std::fs::copy(
                 block_index.block_index_file.clone(),
@@ -87,16 +110,20 @@ async fn main() -> eyre::Result<()> {
                 .open(block_index.block_index_file)
                 .await?;
             // TODO: update this so it a.) removes other data from the DB, and 2.) removes entries more efficiently (we know the size of each entry ahead of time)
-            for item in items.iter() {
+            for item in retained.iter() {
                 f.write_all(&item.to_bytes()).await?
             }
             f.sync_all().await?;
+
+            use irys_database::reth_db::transaction::DbTx as _;
+            rw_tx.commit()?;
+
             Ok(())
         }
     }
 }
 
-pub fn cli_init_db() -> eyre::Result<Arc<DatabaseEnv>> {
+pub fn cli_init_reth_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
     // load the config
     let config = std::env::var("CONFIG")
         .unwrap_or_else(|_| "config.toml".to_owned())
@@ -117,7 +144,37 @@ pub fn cli_init_db() -> eyre::Result<Arc<DatabaseEnv>> {
 
     let reth_db = Arc::new(DatabaseEnv::open(
         &db_path,
-        DatabaseEnvKind::RO,
+        access,
+        irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+            .with_log_level(None)
+            .with_exclusive(Some(false)),
+    )?);
+
+    Ok(reth_db)
+}
+
+pub fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
+    // load the config
+    let config = std::env::var("CONFIG")
+        .unwrap_or_else(|_| "config.toml".to_owned())
+        .parse::<PathBuf>()
+        .expect("file path to be valid");
+    let config = std::fs::read_to_string(config)
+        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                ?err,
+                "config file not provided, defaulting to testnet config"
+            );
+            NodeConfig::testnet()
+        });
+
+    // open the Irys database
+    let db_path = config.irys_consensus_data_dir();
+
+    let reth_db = Arc::new(DatabaseEnv::open(
+        &db_path,
+        access,
         irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
             .with_log_level(None)
             .with_exclusive(Some(false)),
