@@ -964,7 +964,6 @@ where
         // Capture config values to avoid borrowing self across async move
         let top_active_window = self.config.node_config.p2p_pull.top_active_window;
         let sample_size = self.config.node_config.p2p_pull.sample_size;
-        let max_attempts = self.config.node_config.p2p_pull.max_attempts;
 
         Box::pin(
             async move {
