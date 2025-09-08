@@ -486,7 +486,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     assert!(res.is_err());
     assert!(matches!(
         res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
+        Err(BlockPoolError::ForkedBlock(_))
     ));
 }
 
@@ -657,7 +657,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     assert!(matches!(
         res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
+        Err(BlockPoolError::ForkedBlock(_))
     ));
 }
 
