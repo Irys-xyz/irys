@@ -128,6 +128,8 @@ pub enum InvalidDataError {
     InvalidBlockSignature,
     #[error("Execution payload hash mismatch")]
     ExecutionPayloadHashMismatch,
+    #[error("Invalid execution payload structure")]
+    ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
 }
