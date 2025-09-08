@@ -1094,7 +1094,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-            _solution_hash: H256,
+            solution_hash: H256,
             expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
@@ -1112,7 +1112,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
                     data_txs_with_proofs,
                     reward_amount,
                     timestamp_ms,
-                    H256::zero(),
+                    solution_hash,
                     expired_ledger_fees,
                 )
                 .await
