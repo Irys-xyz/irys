@@ -34,8 +34,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
-    EmaSnapshot, EpochSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -43,7 +43,6 @@ use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::VersionRequest;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
@@ -54,6 +53,7 @@ use irys_types::{
     DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
@@ -676,6 +676,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Failed waiting for chunk to arrive. Waited {} seconds",
             seconds,
         ))
+    }
+
+    pub fn get_storage_module_intervals(
+        &self,
+        ledger: DataLedger,
+        slot_index: usize,
+        chunk_type: ChunkType,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let sms = self.node_ctx.storage_modules_guard.read();
+        for sm in sms.iter() {
+            let Some(pa) = sm.partition_assignment() else {
+                continue;
+            };
+            if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
+                return sm.get_intervals(chunk_type);
+            }
+        }
+        Vec::new()
     }
 
     /// check number of chunks in the CachedChunks table
