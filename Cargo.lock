@@ -5251,6 +5251,7 @@ dependencies = [
  "chrono",
  "color-eyre",
  "libc",
+ "rand 0.8.5",
  "tempfile",
  "tracing",
  "tracing-error",

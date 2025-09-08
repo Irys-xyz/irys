@@ -94,6 +94,16 @@ impl PeerList {
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
 
+    pub fn test_mock() -> Result<Self, PeerNetworkError> {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let inner = PeerListDataInner::new(
+            vec![],
+            PeerNetworkSender::new(sender),
+            &Config::new(irys_types::NodeConfig::testing()),
+        )?;
+        Ok(Self(Arc::new(RwLock::new(inner))))
+    }
+
     pub fn from_peers(
         peers: Vec<(Address, PeerListItem)>,
         peer_network: PeerNetworkSender,
@@ -116,6 +126,15 @@ impl PeerList {
     pub fn decrease_peer_score(&self, mining_addr: &Address, reason: ScoreDecreaseReason) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         inner.decrease_peer_score(mining_addr, reason);
+    }
+
+    pub fn set_is_online(&self, mining_addr: &Address, is_online: bool) {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        if let Some(peer) = inner.persistent_peers_cache.get_mut(mining_addr) {
+            peer.is_online = is_online;
+        } else if let Some(peer) = inner.unstaked_peer_purgatory.get_mut(mining_addr) {
+            peer.is_online = is_online;
+        }
     }
 
     /// Get a peer from any cache (persistent or purgatory)
@@ -142,6 +161,10 @@ impl PeerList {
     pub fn persistable_peers(&self) -> HashMap<Address, PeerListItem> {
         let guard = self.read();
         guard.persistent_peers_cache.clone()
+    }
+
+    pub fn temporary_peers(&self) -> LruCache<Address, PeerListItem> {
+        self.read().unstaked_peer_purgatory.clone()
     }
 
     pub fn contains_api_address(&self, api_address: &SocketAddr) -> bool {
@@ -178,7 +201,7 @@ impl PeerList {
         }
     }
 
-    pub fn trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn all_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
         let guard = self.read();
 
         let mut peers: Vec<(Address, PeerListItem)> = Vec::new();
@@ -209,6 +232,12 @@ impl PeerList {
         peers.reverse();
 
         peers
+    }
+
+    pub fn online_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+        let mut trusted_peers = self.all_trusted_peers();
+        trusted_peers.retain(|(_miner_address, peer)| peer.is_online);
+        trusted_peers
     }
 
     pub fn trusted_peer_addresses(&self) -> HashSet<SocketAddr> {
@@ -253,6 +282,29 @@ impl PeerList {
         if let Some(truncate) = limit {
             peers.truncate(truncate);
         }
+
+        peers
+    }
+
+    pub fn all_peers_sorted_by_score(&self) -> Vec<(Address, PeerListItem)> {
+        let guard = self.read();
+
+        // Create a chained iterator that combines both peer sources
+        let persistent_peers = guard
+            .persistent_peers_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let purgatory_peers = guard
+            .unstaked_peer_purgatory
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let all_peers = persistent_peers.chain(purgatory_peers);
+        let mut peers: Vec<(Address, PeerListItem)> = all_peers.collect();
+
+        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
+        peers.reverse();
 
         peers
     }
@@ -374,6 +426,13 @@ impl PeerList {
         let guard = self.read();
         guard.trusted_peers_api_addresses.contains(api_address)
     }
+
+    /// Initiate a handshake with a peer by its API address. If force is set to true, the networking
+    /// service will attempt to handshake even if the previous handshake was successful.
+    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+        let guard = self.read();
+        guard.initiate_handshake(api_address, force);
+    }
 }
 
 impl PeerListDataInner {
@@ -450,6 +509,15 @@ impl PeerListDataInner {
             {
                 error!("Failed to send peer updated message: {:?}", e);
             }
+        }
+    }
+
+    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+        if let Err(send_error) = self
+            .peer_network_service_sender
+            .initiate_handshake(api_address, force)
+        {
+            error!("Failed to send a force announce message: {:?}", send_error);
         }
     }
 
@@ -546,6 +614,7 @@ impl PeerListDataInner {
                 true
             } else if handshake_cooldown_expired {
                 debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
+                address_updater(self, mining_addr, peer_address);
                 true
             } else {
                 debug!("Peer address is the same, no update needed");
@@ -915,7 +984,7 @@ mod tests {
                 .trusted_peers_api_addresses
                 .insert(unstaked_peer.address.api);
         }
-        let trusted_peers = peer_list.trusted_peers();
+        let trusted_peers = peer_list.all_trusted_peers();
         let trusted_contains_staked = trusted_peers.iter().any(|(addr, _)| addr == &staked_addr);
         let trusted_contains_unstaked =
             trusted_peers.iter().any(|(addr, _)| addr == &unstaked_addr);

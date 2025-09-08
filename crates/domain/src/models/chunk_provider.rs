@@ -178,7 +178,7 @@ mod tests {
         // Create a tx_root (and paths) from the tx
         let (_tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&vec![tx.header.clone()]);
 
-        let tx_path = proofs[0].proof.clone();
+        let tx_path = &proofs[0].proof;
 
         // let data_root = H256::zero();
         let data_root = tx.header.data_root;

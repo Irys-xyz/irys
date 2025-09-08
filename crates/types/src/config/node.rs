@@ -95,6 +95,14 @@ pub struct NodeConfig {
     /// P2P handshake parameters
     #[serde(default)]
     pub p2p_handshake: P2PHandshakeConfig,
+
+    /// Gossip/broadcast parameters
+    #[serde(default)]
+    pub p2p_gossip: P2PGossipConfig,
+
+    /// P2P pull/request parameters
+    #[serde(default)]
+    pub p2p_pull: P2PPullConfig,
 }
 
 /// # Node Operation Mode
@@ -303,6 +311,47 @@ impl Default for P2PHandshakeConfig {
             backoff_cap_secs: 60,
             blocklist_ttl_secs: 600,
             server_peer_list_cap: 25,
+        }
+    }
+}
+
+/// P2P gossip/broadcast configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P2PGossipConfig {
+    /// Maximum peers to target per broadcast step
+    pub broadcast_batch_size: usize,
+    /// Interval between broadcast steps in milliseconds
+    pub broadcast_batch_throttle_interval: u64,
+}
+
+impl Default for P2PGossipConfig {
+    fn default() -> Self {
+        Self {
+            broadcast_batch_size: 5,
+            broadcast_batch_throttle_interval: 1_000,
+        }
+    }
+}
+
+/// P2P pull/request configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P2PPullConfig {
+    /// How many top active peers to consider before random sampling
+    pub top_active_window: usize,
+    /// Number of peers to randomly sample (truncate) per pull attempt batch
+    pub sample_size: usize,
+    /// Maximum number of attempts to iterate over the sampled set
+    pub max_attempts: u32,
+}
+
+impl Default for P2PPullConfig {
+    fn default() -> Self {
+        Self {
+            top_active_window: 10,
+            sample_size: 5,
+            max_attempts: 5,
         }
     }
 }
@@ -519,6 +568,8 @@ impl NodeConfig {
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
+            p2p_gossip: P2PGossipConfig::default(),
+            p2p_pull: P2PPullConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
         }
@@ -642,6 +693,8 @@ impl NodeConfig {
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
+            p2p_gossip: P2PGossipConfig::default(),
+            p2p_pull: P2PPullConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,

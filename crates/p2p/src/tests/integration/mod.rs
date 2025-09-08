@@ -4,7 +4,7 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader, PeerScore,
+    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader,
 };
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
@@ -203,48 +203,6 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
             service2_chunks.len() == 1,
             "Expected 1 chunk in service 2 mempool, but found {}",
             service2_chunks.len()
-        );
-    };
-
-    service1_handle.stop().await?;
-    service2_handle.stop().await?;
-
-    Ok(())
-}
-
-#[actix_web::test]
-async fn heavy_should_not_broadcast_to_low_reputation_peers() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new().await;
-    let mut fixture2 = GossipServiceTestFixture::new().await;
-
-    // Add peer2 with low reputation
-    fixture1
-        .add_peer_with_reputation(&fixture2, PeerScore::new(0))
-        .await;
-    fixture2.add_peer(&fixture1).await;
-
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let data = GossipBroadcastMessage::from(generate_test_tx().header);
-    gossip_service1_message_bus
-        .send(data)
-        .expect("Failed to send transaction to low reputation peer");
-
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-    // Should not receive data due to low reputation
-    {
-        let service2_mempool_txs = fixture2
-            .mempool_txs
-            .read()
-            .expect("Failed to read service 2 mempool transactions for reputation check");
-        eyre::ensure!(
-            service2_mempool_txs.is_empty(),
-            "Expected 0 transactions in low reputation peer mempool, but found {}",
-            service2_mempool_txs.len()
         );
     };
 

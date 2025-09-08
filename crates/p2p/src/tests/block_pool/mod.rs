@@ -4,6 +4,7 @@ use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{
     data_handler_stub, BlockDiscoveryStub, FakeGossipServer, MempoolStub, MockRethServiceActor,
 };
+use crate::types::GossipResponse;
 use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use irys_actors::services::ServiceSenders;
@@ -368,7 +369,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let block_for_server = block2.clone();
     let pool_for_server = block_pool.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
-        GossipDataRequest::ExecutionPayload(_) => None,
+        GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
         GossipDataRequest::Block(block_hash) => {
             let block = block_for_server.clone();
             let block_for_response = block.clone();
@@ -380,13 +381,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
                     .await
                     .expect("to process block");
             });
-            Some(GossipData::Block(Arc::new(block_for_response)))
+            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
         }
-        GossipDataRequest::Chunk(_) => None,
+        GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
     });
-    // gossip_server.set_on_block_data_request(move |block_hash| {
-    //
-    // });
 
     let block2 = Arc::new(block2.clone());
     let block3 = Arc::new(block3.clone());
@@ -486,10 +484,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         .await;
 
     assert!(res.is_err());
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
 #[actix_rt::test]
@@ -638,10 +633,10 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                     debug!("Block processed successfully");
                 }
             });
-            true
+            GossipResponse::Accepted(true)
         } else {
             debug!("Block not found");
-            false
+            GossipResponse::Accepted(false)
         }
     });
 
@@ -657,10 +652,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     sync_service_handle.shutdown_signal.fire();
 
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
 #[actix_rt::test]

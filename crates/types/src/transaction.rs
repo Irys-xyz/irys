@@ -3,6 +3,7 @@ pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
+use crate::{TxChunkOffset, UnpackedChunk};
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
@@ -192,6 +193,26 @@ pub struct DataTransaction {
 impl DataTransaction {
     pub fn signature_hash(&self) -> [u8; 32] {
         self.header.signature_hash()
+    }
+
+    pub fn data_chunks(&self) -> eyre::Result<Vec<UnpackedChunk>> {
+        // TODO: find a better version
+        let data = match &self.data {
+            Some(d) => d,
+            None => eyre::bail!("missing required tx data"),
+        };
+        let mut chunks = Vec::with_capacity(self.chunks.len());
+        for (idx, chunk) in self.chunks.iter().enumerate() {
+            let unpacked_chunk = UnpackedChunk {
+                data_root: self.header.data_root,
+                data_size: self.header.data_size,
+                data_path: Base64(self.proofs[idx].proof.clone()),
+                bytes: Base64(data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
+                tx_offset: TxChunkOffset::from(idx as u32),
+            };
+            chunks.push(unpacked_chunk);
+        }
+        Ok(chunks)
     }
 }
 
