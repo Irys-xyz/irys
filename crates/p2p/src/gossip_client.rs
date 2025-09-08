@@ -8,7 +8,7 @@ use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
-    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
+    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -474,16 +474,13 @@ impl GossipClient {
             return Err(PeerNetworkError::NoPeersAvailable);
         }
 
-        // Try up to max_retries rounds across peers; only retry peers on transient errors.
+        // Try up to DATA_REQUEST_RETRIES rounds across peers; only retry peers on transient errors.
         let mut last_error = None;
 
         // Track peers eligible for retry across rounds (transient failures only)
         let mut retryable_peers = peers.clone();
 
-        // How many retry attempts to make per peer
-        let max_retries = 5;
-
-        for attempt in 1..=max_retries {
+        for attempt in 1..=DATA_REQUEST_RETRIES {
             // If no peers remain to try, stop early
             if retryable_peers.is_empty() {
                 break;
@@ -568,7 +565,7 @@ impl GossipClient {
             }
 
             // don't add a delay after the final attempt
-            if attempt != max_retries {
+            if attempt != DATA_REQUEST_RETRIES {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
