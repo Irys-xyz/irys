@@ -114,7 +114,11 @@ impl BlockValidationTask {
     }
 
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
+    pub(crate) async fn execute_vdf(
+        self,
+        cancel: Arc<AtomicU8>,
+        vdf_notify: Arc<tokio::sync::Notify>,
+    ) -> VdfValidationResult {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
         let skip_validation = self.skip_vdf_validation;
@@ -124,9 +128,11 @@ impl BlockValidationTask {
         let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
             async move {
-                inner
+                let result = inner
                     .ensure_vdf_is_valid(&block, cancel2, skip_validation)
-                    .await
+                    .await;
+                vdf_notify.notify_one(); // Signal completion
+                result
             }
             .in_current_span(),
         )

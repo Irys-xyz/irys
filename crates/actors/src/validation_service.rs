@@ -11,7 +11,9 @@
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
 use crate::{
-    block_tree_service::ReorgEvent, block_validation::is_seed_data_valid, services::ServiceSenders,
+    block_tree_service::{BlockStateUpdated, ReorgEvent},
+    block_validation::is_seed_data_valid,
+    services::ServiceSenders,
 };
 use active_validations::ActiveValidations;
 use block_validation_task::BlockValidationTask;
@@ -31,8 +33,8 @@ use std::{
     },
 };
 use tokio::{
-    sync::{broadcast, mpsc::UnboundedReceiver},
-    time::{interval, Duration},
+    sync::{broadcast, mpsc::UnboundedReceiver, Notify},
+    time::Duration,
 };
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -64,6 +66,10 @@ pub struct ValidationService {
     msg_rx: UnboundedReceiver<ValidationServiceMessage>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
+    /// Block state update event receiver
+    block_state_rx: broadcast::Receiver<BlockStateUpdated>,
+    /// VDF task completion notifier
+    vdf_notify: Arc<Notify>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -90,6 +96,8 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) execution_payload_provider: ExecutionPayloadCache,
     /// Toggle to enable/disable validation message processing
     pub validation_enabled: Arc<AtomicBool>,
+    /// VDF task completion notifier
+    pub(crate) vdf_notify: Arc<Notify>,
 }
 
 impl ValidationService {
@@ -113,8 +121,10 @@ impl ValidationService {
         let config = config.clone();
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
+        let block_state_rx = service_senders.subscribe_block_state_updates();
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
+        let vdf_notify = Arc::new(Notify::new());
 
         let handle = runtime_handle.spawn(
             async move {
@@ -122,6 +132,8 @@ impl ValidationService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
+                    block_state_rx,
+                    vdf_notify: vdf_notify.clone(),
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.vdf.parallel_verification_thread_limit)
@@ -136,6 +148,7 @@ impl ValidationService {
                         db,
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
+                        vdf_notify,
                     }),
                 };
 
@@ -164,11 +177,6 @@ impl ValidationService {
 
         let mut active_validations =
             pin!(ActiveValidations::new(self.inner.block_tree_guard.clone()));
-
-        // todo: add a notification system to the block tree service that'd
-        // allow us to subscribe to each block status being updated. That could
-        // act as a trigger point for re-evaluation. Rather than relying on a timer.
-        let mut validation_timer = interval(Duration::from_millis(100));
 
         loop {
             if !self.inner.validation_enabled.load(Ordering::Relaxed) {
@@ -199,6 +207,9 @@ impl ValidationService {
 
                             // push this task to the VDF pending queue
                             active_validations.vdf_pending_queue.push(task.block.block_hash, std::cmp::Reverse(task));
+
+                            // Immediately process VDF tasks when new ones are added
+                            active_validations.process_completed_vdf().await;
                         }
                         None => {
                             // Channel closed
@@ -208,21 +219,23 @@ impl ValidationService {
                     }
                 }
 
-                // Process active validations every 100ms (only if not empty)
-                _ = validation_timer.tick(), if !active_validations.is_empty()   => {
-
-                    // Poll the VDF task & Process any completed validations (non-blocking)
-                    let vdf_tasks_completed =  active_validations.process_completed_vdf().await;
-
-                    let tasks_completed = active_validations.process_completed_concurrent().await;
-
-                    if vdf_tasks_completed || tasks_completed {
-                        // we may have unblocked one or more blocks from sending the validation message
-                        validation_timer.reset();
-                    }
-                    // If no active validations and channel closed, exit
-                    if active_validations.is_empty() && self.msg_rx.is_closed() {
-                        break;
+                // Handle block state update events
+                result = self.block_state_rx.recv() => {
+                    match handle_broadcast_recv(result) {
+                        Ok(Some(_event)) => {
+                            // When a block state changes, check if any validations can proceed
+                            // This is especially important for child blocks waiting for parent validation
+                            if !active_validations.is_empty() {
+                        tracing::error!("block state change begin");
+                                // Poll the VDF task & Process any completed validations (non-blocking)
+                                active_validations.process_completed_vdf().await;
+                                active_validations.process_completed_concurrent().await;
+                        tracing::error!("block state change end");
+                            }
+                        }
+                        // lagged, skipping messages
+                        Ok(None) => { },
+                        Err(_) => break,
                     }
                 }
 
@@ -233,6 +246,17 @@ impl ValidationService {
                         // lagged, skipping messages
                         Ok(None) => { },
                         Err(_) => break,
+                    }
+                }
+
+                // Process VDF task completions when notified
+                _ = self.vdf_notify.notified() => {
+                    if !active_validations.is_empty() {
+                        tracing::error!("vdf notify begin");
+                        // Poll the VDF task & Process any completed validations (non-blocking)
+                        active_validations.process_completed_vdf().await;
+                        active_validations.process_completed_concurrent().await;
+                        tracing::error!("vdf notify end");
                     }
                 }
             }

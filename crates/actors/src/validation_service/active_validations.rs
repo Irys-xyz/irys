@@ -301,7 +301,10 @@ impl ActiveValidations {
                 fut: pending_task
                     .0
                     .clone()
-                    .execute_vdf(Arc::clone(&cancel))
+                    .execute_vdf(
+                        Arc::clone(&cancel),
+                        Arc::clone(&pending_task.0.service_inner.vdf_notify),
+                    )
                     .boxed(),
                 cancel,
             }
@@ -372,6 +375,7 @@ impl ActiveValidations {
             Some(task) => task,
             None => return false, // Nothing to do
         };
+        tracing::error!("vdf task is some");
 
         // process the provided task
         // either 1.) a previously produced task, 2.) a previously produced task that is getting cancelled, or 3.) a new task
@@ -380,11 +384,13 @@ impl ActiveValidations {
 
         if let Some(result) = poll_res {
             // handle the result of the VDF validation task
+            tracing::error!("vdf task completed");
             self.handle_vdf_validation_result(&task, result);
             true
         } else {
             // task hasn't completed
             self.vdf_task = Some(task);
+            tracing::error!("vdf task not completed");
             false
         }
     }
