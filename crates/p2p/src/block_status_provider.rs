@@ -16,14 +16,19 @@ pub enum BlockStatus {
     /// The block is still in the tree. It might or might not
     /// be in the block index.
     ProcessedButCanBeReorganized,
-
     /// The block is in the index, but the tree has already pruned it.
     Finalized,
+    /// The block is part of a fork that has been pruned from the main chain.
+    PartOfAPrunedFork,
 }
 
 impl BlockStatus {
     pub fn is_processed(&self) -> bool {
         matches!(self, Self::Finalized | Self::ProcessedButCanBeReorganized)
+    }
+
+    pub fn is_a_part_of_pruned_fork(&self) -> bool {
+        matches!(self, Self::PartOfAPrunedFork)
     }
 }
 
@@ -78,8 +83,7 @@ impl BlockStatusProvider {
                 // Block is in the block index, it has been migrated
                 return BlockStatus::Finalized;
             } else {
-                // TODO: this should be an explicit STOP, as we can't process a fork block that has a migrated height
-                return BlockStatus::Finalized;
+                return BlockStatus::PartOfAPrunedFork;
             }
         }
 
