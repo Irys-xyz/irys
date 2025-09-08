@@ -1,8 +1,11 @@
+use std::time::Duration;
+
 // use assert_matches::assert_matches;
 use irys_chain::IrysNodeCtx;
-use irys_domain::EpochSnapshot;
+use irys_domain::{ChunkType, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, Address, NodeConfig};
+use irys_types::{irys::IrysSigner, Address, DataLedger, NodeConfig};
+use tracing::debug;
 // use tracing::debug;
 
 use crate::utils::IrysNodeTest;
@@ -22,7 +25,7 @@ use crate::utils::IrysNodeTest;
 async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
-        "debug,engine=off,irys_vdf::vdf=off,storage::db::mdbx=off",
+        "debug,engine=off,irys_vdf::vdf=off,storage::db::mdbx=off;hyper=off",
     );
     initialize_tracing();
 
@@ -38,6 +41,7 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
             consensus.epoch.num_blocks_in_epoch = 4;
             consensus.number_of_ingress_proofs_total = 1;
             consensus.block_migration_depth = 1;
+            consensus.epoch.submit_ledger_epoch_length = 1000;
         })
         .with_genesis_peer_discovery_timeout(1000);
 
@@ -115,10 +119,57 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
 
     let _block = genesis_node.mine_block().await?;
 
+    for _ in 0..120 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
+        check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
+
+        check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
+        check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
+
+        check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
+        check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
+    }
+
     peer1_node.stop().await;
     peer2_node.stop().await;
     genesis_node.stop().await;
     Ok(())
+}
+
+fn check_submodule_chunks(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    name: &str,
+    ledger: DataLedger,
+    slot_index: usize,
+) {
+    let data_intervals = node.get_storage_module_intervals(ledger, slot_index, ChunkType::Data);
+    let packed_intervals =
+        node.get_storage_module_intervals(ledger, slot_index, ChunkType::Entropy);
+
+    // Extract the offsets
+    let mut data_chunks = Vec::new();
+    for int in data_intervals {
+        let start: u32 = int.start().into();
+        let end: u32 = int.end().into();
+        for offset in start..=end {
+            data_chunks.push(offset);
+        }
+    }
+
+    let mut packed_chunks = Vec::new();
+    for int in packed_intervals {
+        let start: u32 = int.start().into();
+        let end: u32 = int.end().into();
+        for offset in start..=end {
+            packed_chunks.push(offset);
+        }
+    }
+
+    debug!(
+        "\n{}: {:?}:{}\n data offsets: {:?}\n pack offsets: {:?}\n",
+        name, ledger, slot_index, data_chunks, packed_chunks
+    );
 }
 
 fn validate_partition_assignments(
