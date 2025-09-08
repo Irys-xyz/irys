@@ -119,6 +119,8 @@ pub struct StorageModule {
     pub partition_assignment: RwLock<Option<PartitionAssignment>>,
     /// In-memory chunk buffer awaiting disk write
     pending_writes: Arc<RwLock<ChunkMap>>,
+    /// Tracks the wall clock time of the last pending write
+    last_pending_write: RwLock<Instant>,
     /// Tracks the storage state of each chunk across all submodules
     intervals: Arc<RwLock<StorageIntervals>>,
     /// Physical storage locations indexed by chunk ranges
@@ -383,6 +385,7 @@ impl StorageModule {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             pending_writes: Arc::new(RwLock::new(ChunkMap::new())),
+            last_pending_write: RwLock::new(Instant::now()),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
@@ -418,6 +421,10 @@ impl StorageModule {
     pub fn partition_assignment(&self) -> Option<PartitionAssignment> {
         let pa = self.partition_assignment.read().unwrap();
         *pa
+    }
+
+    pub fn last_pending_write(&self) -> Instant {
+        self.last_pending_write.read().unwrap().clone()
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
@@ -726,6 +733,14 @@ impl StorageModule {
         global_intervals
     }
 
+    pub fn get_chunk_type(&self, chunk_offset: &PartitionChunkOffset) -> Option<ChunkType> {
+        self.intervals
+            .read()
+            .unwrap()
+            .get_at_point(*chunk_offset)
+            .copied()
+    }
+
     /// Reads chunks from the specified range and returns their data and storage state
     ///
     /// Takes a range [start, end) of partition-relative offsets (end exclusive).
@@ -836,22 +851,43 @@ impl StorageModule {
             .read()
             .expect("to be able to read pending writes data");
 
-        // If chunk_type is uninitialized, we need to filter out any offsets with pending writes
-        if chunk_type == ChunkType::Uninitialized {
-            // Remove any offsets from set that have pending writes of any type
-            for (offset, _) in pending.iter() {
-                // Create a point interval for the offset and remove it from the set
-                let point_interval = ii(*offset, *offset);
-                let _ = set.cut(point_interval);
+        match chunk_type {
+            ChunkType::Entropy => {
+                // First, add any pending entropy chunks to the set
+                pending
+                    .iter()
+                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
+                    .for_each(|(offset, _)| {
+                        let interval = partition_chunk_offset_ii!(*offset, *offset);
+                        let _ = set.insert_merge_touching_or_overlapping(interval);
+                    });
+
+                // Then, remove any entropy offsets that have pending data chunks
+                pending
+                    .iter()
+                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Data)
+                    .for_each(|(offset, _)| {
+                        let point_interval = ii(*offset, *offset);
+                        let _ = set.cut(point_interval);
+                    });
             }
-        } else {
-            // Add chunks from pending_writes with matching chunk_type
-            for (offset, (_bytes, pending_chunk_type)) in pending.iter() {
-                if *pending_chunk_type == chunk_type {
-                    // Create a proper interval for a single chunk & insert it
-                    let interval = partition_chunk_offset_ii!(*offset, *offset);
-                    let _ = set.insert_merge_touching_or_overlapping(interval);
+            ChunkType::Data => {
+                pending
+                    .iter()
+                    .filter(|(_, (_, pending_chunk_type))| *pending_chunk_type == ChunkType::Data)
+                    .for_each(|(offset, _)| {
+                        let interval = partition_chunk_offset_ii!(*offset, *offset);
+                        let _ = set.insert_merge_touching_or_overlapping(interval);
+                    });
+            }
+            ChunkType::Uninitialized => {
+                for (offset, _) in pending.iter() {
+                    let point_interval = ii(*offset, *offset);
+                    let _ = set.cut(point_interval);
                 }
+            }
+            ChunkType::Interrupted => {
+                // Do nothing
             }
         }
 
@@ -870,6 +906,7 @@ impl StorageModule {
     ) {
         let mut pending = self.pending_writes.write().unwrap();
         pending.insert(chunk_offset, (bytes, chunk_type));
+        *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
     }
 
@@ -1031,7 +1068,10 @@ impl StorageModule {
                         data_path.clone(),
                         partition_offset,
                     )?;
+
+                    *self.last_pending_write.write().unwrap() = Instant::now();
                 }
+
                 _ => continue,
             }
         }

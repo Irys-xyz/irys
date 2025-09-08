@@ -19,6 +19,7 @@ use reth::tasks::shutdown::Shutdown;
 use std::{
     path::Path,
     sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
 use tracing::{debug, error, warn, Span};
@@ -81,6 +82,18 @@ impl StorageModuleServiceInner {
                 storage_module_infos,
                 update_height,
             } => self.handle_partition_assignments_update(storage_module_infos, update_height),
+        }
+    }
+
+    fn tick(&self) {
+        // Check to see if any of the storage modules are ready to be flushed to disk
+        let storage_modules = self.storage_modules.read().unwrap();
+        for sm in storage_modules.iter() {
+            if Instant::now() - sm.last_pending_write() > Duration::from_secs(5) {
+                if let Err(e) = sm.force_sync_pending_chunks() {
+                    error!("Couldn't flush pending chunks: {}", e);
+                }
+            }
         }
     }
 
@@ -317,6 +330,9 @@ impl StorageModuleService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting StorageModule Service");
 
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.tick().await; // Skip first immediate tick
+
         loop {
             tokio::select! {
                 biased;
@@ -337,6 +353,10 @@ impl StorageModuleService {
                             break;
                         }
                     }
+                }
+                // Handle ticks of the internval
+                _ = interval.tick() => {
+                     self.inner.tick();
                 }
             }
         }
