@@ -756,7 +756,7 @@ pub trait BlockProdStrategy {
             .and_then(|pa| pa.ledger_id);
 
         // Create PoA data using the trait method
-        let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
+        let (poa, poa_chunk_hash) = self.create_poa_data(solution, ledger_id)?;
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
@@ -851,7 +851,7 @@ pub trait BlockProdStrategy {
             ],
             evm_block_hash,
             vdf_limiter_info: VDFLimiterInfo::new(
-                &solution,
+                solution,
                 prev_block_header,
                 steps,
                 &self.inner().config,
