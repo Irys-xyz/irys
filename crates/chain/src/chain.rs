@@ -79,7 +79,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::mpsc::{self};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
@@ -1146,6 +1146,7 @@ impl IrysNode {
             gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
             reth_service_actor.clone(),
+            service_senders.vdf_mining.clone(),
         );
 
         // set up IrysNodeCtx
@@ -1578,6 +1579,7 @@ impl IrysNode {
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
         reth_service_addr: Addr<RethServiceActor>,
+        vdf_mining_state_sender: Sender<bool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
 
@@ -1589,6 +1591,7 @@ impl IrysNode {
             block_pool,
             gossip_data_handler,
             Some(reth_service_addr),
+            vdf_mining_state_sender,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);
