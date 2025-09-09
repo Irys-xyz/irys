@@ -52,7 +52,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
-            _solution_hash: H256,
+            solution_hash: H256,
             expired_ledger_fees: std::collections::BTreeMap<
                 irys_types::Address,
                 (
@@ -70,7 +70,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     data_txs_with_proofs,
                     reward_amount,
                     self.invalid_timestamp,
-                    H256::zero(),
+                    solution_hash,
                     expired_ledger_fees,
                 )
                 .await
