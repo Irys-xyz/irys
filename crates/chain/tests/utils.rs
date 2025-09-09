@@ -73,7 +73,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
-use tracing::{debug, debug_span, error, info, instrument};
+use tracing::{debug, debug_span, error, error_span, info, instrument};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -336,7 +336,7 @@ impl IrysNodeTest<()> {
 
     fn get_span(&self) -> tracing::Span {
         match &self.name {
-            Some(name) => debug_span!("NODE", name = %name),
+            Some(name) => error_span!("NODE", name = %name),
             None => tracing::Span::none(),
         }
     }
@@ -355,7 +355,7 @@ impl IrysNodeTest<()> {
         log_name: &str,
         seconds_to_wait: usize,
     ) -> IrysNodeTest<IrysNodeCtx> {
-        let span = debug_span!("NODE", name = %log_name);
+        let span = error_span!("NODE", name = %log_name);
         let _enter = span.enter();
         let node = self.start().await;
         node.wait_for_packing(seconds_to_wait).await;
