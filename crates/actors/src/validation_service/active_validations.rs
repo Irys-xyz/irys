@@ -116,8 +116,7 @@ pub(crate) struct ActiveValidations {
     pub(crate) concurrent_queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>>,
 
     /// Map from block hash to the concurrent task handles
-    pub(crate) concurrent_tasks:
-        std::collections::HashMap<BlockHash, tokio::task::JoinHandle<()>>,
+    pub(crate) concurrent_tasks: std::collections::HashMap<BlockHash, tokio::task::JoinHandle<()>>,
     pub(crate) block_tree_guard: BlockTreeReadGuard,
 }
 
@@ -286,7 +285,10 @@ impl ActiveValidations {
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                     ) {
-                        error!("Failed to cancel VDF task for block {}: {}", &task.block_hash, e)
+                        error!(
+                            "Failed to cancel VDF task for block {}: {}",
+                            &task.block_hash, e
+                        )
                     }
                 }
                 task
@@ -346,7 +348,7 @@ impl ActiveValidations {
                 let concurrent_notify = Arc::clone(&task.0.service_inner.concurrent_notify);
                 let block = task.0.block.clone();
                 let handle = tokio::spawn(task.0.execute_concurrent(concurrent_notify));
-                
+
                 // add to active concurrent validations (this also adds to the concurrent queue)
                 self.push_concurrent_task(block, handle)
             }
@@ -368,16 +370,23 @@ impl ActiveValidations {
                     .send_validation_result(ValidationResult::Invalid);
             }
             VdfValidationResult::Cancelled => {
-                debug!("VDF task {} was cancelled - removing from queue", &task.block_hash);
+                debug!(
+                    "VDF task {} was cancelled - removing from queue",
+                    &task.block_hash
+                );
                 // Remove the cancelled task from the pending queue and get the notify handle
-                if let Some((_removed_hash, removed_task)) = self.vdf_pending_queue.remove(&task.block_hash) {
+                if let Some((_removed_hash, removed_task)) =
+                    self.vdf_pending_queue.remove(&task.block_hash)
+                {
                     // Trigger immediate reprocessing of the queue to start the next task
                     // This is critical because after cancellation, no other event may occur
                     // to trigger processing of the high-priority block that caused the preemption
                     removed_task.0.service_inner.vdf_notify.notify_one();
                 } else {
-                    error!("Failed to remove cancelled block {} from pending queue - block not found!", 
-                           &task.block_hash);
+                    error!(
+                        "Failed to remove cancelled block {} from pending queue - block not found!",
+                        &task.block_hash
+                    );
                 }
             }
         };
@@ -913,7 +922,7 @@ mod tests {
 
         // Give tasks a chance to run
         tokio::task::yield_now().await;
-        
+
         // Process completed validations
         active_validations.process_completed_concurrent().await;
 

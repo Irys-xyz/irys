@@ -330,8 +330,11 @@ impl ValidationServiceInner {
         let retries_per_second = 20;
         loop {
             if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
-                warn!("VDF validation cancelled while waiting for step {} (current: {})", 
-                      desired_step_number, self.vdf_state.read().global_step);
+                warn!(
+                    "VDF validation cancelled while waiting for step {} (current: {})",
+                    desired_step_number,
+                    self.vdf_state.read().global_step
+                );
                 bail!("Cancelled");
             }
             let read = self.vdf_state.read().global_step;

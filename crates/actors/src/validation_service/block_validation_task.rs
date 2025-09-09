@@ -111,7 +111,7 @@ impl BlockValidationTask {
 
         // Notify the block tree service
         self.send_validation_result(validation_result);
-        
+
         // Notify that concurrent task has completed
         concurrent_notify.notify_one();
     }
@@ -162,9 +162,12 @@ impl BlockValidationTask {
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
-        
+
         // Subscribe to block state updates
-        let mut block_state_rx = self.service_inner.service_senders.subscribe_block_state_updates();
+        let mut block_state_rx = self
+            .service_inner
+            .service_senders
+            .subscribe_block_state_updates();
 
         loop {
             // 1. Check cancellation condition first
@@ -174,7 +177,7 @@ impl BlockValidationTask {
                 if let Some(tip_block) = block_tree.get_block(&tip_hash) {
                     let height_diff = tip_block.height.saturating_sub(self.block.height);
                     warn!("Cancelling validation: block {} at height {} is {} blocks behind tip (threshold: {})",
-                          self.block.block_hash, self.block.height, height_diff, 
+                          self.block.block_hash, self.block.height, height_diff,
                           self.service_inner.config.consensus.block_tree_depth);
                 }
                 return ParentValidationResult::Cancelled;
@@ -184,8 +187,10 @@ impl BlockValidationTask {
             match self.get_parent_chain_state(&parent_hash) {
                 None => {
                     // Parent doesn't exist in tree - this is an error condition
-                    error!("CRITICAL: Parent block {} not found for block {} at height {}",
-                           parent_hash, self.block.block_hash, self.block.height);
+                    error!(
+                        "CRITICAL: Parent block {} not found for block {} at height {}",
+                        parent_hash, self.block.block_hash, self.block.height
+                    );
                     return ParentValidationResult::Cancelled;
                 }
                 Some(parent_state) if self.is_parent_ready(&parent_state) => {
