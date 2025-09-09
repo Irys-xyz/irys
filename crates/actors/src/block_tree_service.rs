@@ -2,7 +2,7 @@ use crate::{
     block_index_service::BlockIndexService,
     block_validation::PreValidationError,
     broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
-    chunk_migration_service::ChunkMigrationService,
+    chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
@@ -24,6 +24,7 @@ use irys_types::{
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
+    collections::HashMap,
     sync::{Arc, RwLock},
     time::SystemTime,
 };
@@ -320,9 +321,14 @@ impl BlockTreeServiceInner {
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
             .await?;
 
+        // TODO: Migrate block_index to use the HashMap so we don't have to close these headers
         let mut all_txs = vec![];
-        all_txs.extend(publish_txs);
-        all_txs.extend(submit_txs);
+        all_txs.extend(publish_txs.clone());
+        all_txs.extend(submit_txs.clone());
+
+        let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
+        all_txs_map.insert(DataLedger::Submit, submit_txs);
+        all_txs_map.insert(DataLedger::Publish, publish_txs);
 
         info!(
             "Migrating to block_index - hash: {} height: {}",
@@ -332,15 +338,27 @@ impl BlockTreeServiceInner {
         // HACK
         System::set_current(self.system.clone());
 
-        let chunk_migration = ChunkMigrationService::from_registry();
+        let arc_block = Arc::new(block_header);
+        let arc_all_txs = Arc::new(all_txs);
+
+        // Let block_index know about the migrated block
+        // TODO: Make block index a tokio service
         let block_index = BlockIndexService::from_registry();
         let block_finalized_message = BlockMigrationMessage {
-            block_header: Arc::new(block_header),
-            all_txs: Arc::new(all_txs),
+            block_header: arc_block.clone(),
+            all_txs: arc_all_txs,
         };
+        block_index.do_send(block_finalized_message);
 
-        block_index.do_send(block_finalized_message.clone());
-        chunk_migration.do_send(block_finalized_message);
+        // Let the chunk_migration_service know about the block migration
+        self.service_senders
+            .chunk_migration
+            .send(ChunkMigrationServiceMessage::BlockMigrated(
+                arc_block,
+                Arc::new(all_txs_map),
+            ))
+            .map_err(|e| eyre::eyre!("Failed to send BlockMigrated message: {}", e))?;
+
         Ok(())
     }
 
