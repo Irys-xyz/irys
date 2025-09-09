@@ -367,7 +367,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         tokio::runtime::Handle::current(),
     );
 
-    // Set the fake server to mimic get_data -> gossip_service sends message to block pool
+    // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = block2.clone();
     let pool_for_server = block_pool.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
