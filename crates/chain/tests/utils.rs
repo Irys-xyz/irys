@@ -550,14 +550,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         .expect("for packing to complete in the wait period");
     }
 
-    pub async fn start_mining(&self) {
-        if self.node_ctx.start_mining().await.is_err() {
+    pub fn start_mining(&self) {
+        if self.node_ctx.start_mining().is_err() {
             panic!("Expected to start mining")
         }
     }
 
-    pub async fn stop_mining(&self) {
-        if self.node_ctx.stop_mining().await.is_err() {
+    pub fn stop_mining(&self) {
+        if self.node_ctx.stop_mining().is_err() {
             panic!("Expected to stop mining")
         }
     }
@@ -951,7 +951,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             )))
             .unwrap();
         let height = self.get_canonical_chain_height().await;
-        self.node_ctx.start_mining().await?;
+        self.node_ctx.start_mining()?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
@@ -960,7 +960,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(None))
             .unwrap();
-        self.node_ctx.stop_mining().await
+        self.node_ctx.stop_mining()
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
