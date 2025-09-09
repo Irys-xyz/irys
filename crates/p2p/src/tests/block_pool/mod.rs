@@ -102,6 +102,7 @@ struct MockedServices {
     execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
     service_senders: ServiceSenders,
+    vdf_state_readonly: VdfStateReadonly,
 }
 
 impl MockedServices {
@@ -145,13 +146,13 @@ impl MockedServices {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);
 
-        let vdf_state_stub =
+        let vdf_state_readonly =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
         let (service_senders, service_receivers) = ServiceSenders::new();
 
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
-        let vdf_state = vdf_state_stub;
+        let vdf_state = vdf_state_readonly.clone();
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
@@ -186,6 +187,7 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             service_senders,
+            vdf_state_readonly,
         }
     }
 }
@@ -202,6 +204,7 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        vdf_state_readonly: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -295,6 +298,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        vdf_state_readonly,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -359,6 +363,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         data_handler,
         None,
         vdf_mining_sender,
+        vdf_state_readonly,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -429,6 +434,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        vdf_state_readonly: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -501,6 +507,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        vdf_state_readonly,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -571,6 +578,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         data_handler,
         None,
         vdf_mining_sender,
+        vdf_state_readonly,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -671,6 +679,7 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        vdf_state_readonly: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
