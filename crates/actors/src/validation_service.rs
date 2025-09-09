@@ -185,6 +185,10 @@ impl ValidationService {
         let mut active_validations =
             pin!(ActiveValidations::new(self.inner.block_tree_guard.clone()));
 
+        // Create a timer for periodic pipeline logging
+        let mut pipeline_log_interval = tokio::time::interval(Duration::from_secs(5));
+        pipeline_log_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             if !self.inner.validation_enabled.load(Ordering::Relaxed) {
                 info!("Validation is disabled");
@@ -271,6 +275,11 @@ impl ValidationService {
                         // Process completed concurrent validations
                         active_validations.process_completed_concurrent().await;
                     }
+                }
+
+                // Periodic pipeline state logging
+                _ = pipeline_log_interval.tick() => {
+                    active_validations.log_pipeline_state();
                 }
             }
         }

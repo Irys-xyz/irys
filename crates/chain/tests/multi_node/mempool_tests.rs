@@ -793,13 +793,13 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// assert txs return to mempool
 /// gossip returned txs to C
 /// mine a block on C, assert that all reorgd txs are present
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
-    initialize_tracing();
+    // std::env::set_var(
+    //     "RUST_LOG",
+    //     "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+    // );
+    // initialize_tracing();
 
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool

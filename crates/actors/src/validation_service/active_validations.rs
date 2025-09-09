@@ -28,7 +28,7 @@ use std::mem::replace;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::{cmp::Reverse, sync::Arc};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::block_tree_service::ValidationResult;
 use crate::validation_service::block_validation_task::BlockValidationTask;
@@ -454,6 +454,52 @@ impl ActiveValidations {
                 validation_count = self.concurrent_len(),
                 "completed priority reevaluation after reorg"
             );
+        }
+    }
+
+    /// Log the current state of the validation pipeline
+    pub(crate) fn log_pipeline_state(&self) {
+        // Early return if info logging is not enabled
+        if !tracing::enabled!(tracing::Level::INFO) {
+            return;
+        }
+
+        // Use structured logging with direct field access
+        info!(
+            vdf_pending_count = self.vdf_pending_queue.len(),
+            vdf_current = ?self.vdf_task.as_ref().map(|t| &t.block_hash),
+            concurrent_pending_count = self.concurrent_queue.len(),
+            concurrent_active_count = self.concurrent_tasks.len(),
+            "Validation pipeline state"
+        );
+
+        // Log detailed queue contents only if debug enabled
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            // VDF pending blocks with height info
+            for (hash, task) in self.vdf_pending_queue.iter().take(5) {
+                debug!(
+                    block_hash = %hash,
+                    height = task.0.block.height,
+                    "VDF pending block"
+                );
+            }
+
+            // Concurrent pending blocks
+            for (_, task) in self.concurrent_queue.iter().take(5) {
+                debug!(
+                    block_hash = %task.0.block.block_hash,
+                    height = task.0.block.height,
+                    "Concurrent pending block"
+                );
+            }
+
+            // Active concurrent tasks
+            for hash in self.concurrent_tasks.keys().take(5) {
+                debug!(
+                    block_hash = %hash,
+                    "Active concurrent validation"
+                );
+            }
         }
     }
 }

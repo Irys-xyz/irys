@@ -73,7 +73,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::{future::Future, time::Duration};
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
-use tracing::{debug, debug_span, error, error_span, info, instrument};
+use tracing::{debug, error, error_span, info, instrument};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -1668,11 +1668,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         }
 
-        // Deliver block header
-        BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(irys_block_header.clone()), false)
-            .await
-            .map_err(|e| eyre::eyre!("{e:?}"))?;
+        // IMPORTANT: Add execution payload to cache BEFORE sending block header
+        // This prevents a race condition where validation starts before the payload is available
 
         // Send execution payload if available
         if let Some(evm_block) = self
@@ -1689,6 +1686,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         } else {
             panic!("Full block cannot be sent to peer. Execution payload not available locally.");
         }
+
+        // Deliver block header (this triggers validation)
+        BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
+            .handle_block(Arc::new(irys_block_header.clone()), false)
+            .await
+            .map_err(|e| eyre::eyre!("{e:?}"))?;
 
         Ok(())
     }
