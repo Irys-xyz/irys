@@ -542,7 +542,7 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_data_txs = self
+        let max_data_txs: usize = self
             .config
             .node_config
             .consensus_config()
