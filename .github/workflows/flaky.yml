@@ -19,7 +19,6 @@ concurrency:
 
 env:
   RUNS: ${{ github.event.inputs.runs || '30' }}
-  TIMEOUT_MINUTES: 240
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
