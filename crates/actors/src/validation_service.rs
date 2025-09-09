@@ -70,6 +70,8 @@ pub struct ValidationService {
     block_state_rx: broadcast::Receiver<BlockStateUpdated>,
     /// VDF task completion notifier
     vdf_notify: Arc<Notify>,
+    /// Concurrent task completion notifier
+    concurrent_notify: Arc<Notify>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -98,6 +100,8 @@ pub(crate) struct ValidationServiceInner {
     pub validation_enabled: Arc<AtomicBool>,
     /// VDF task completion notifier
     pub(crate) vdf_notify: Arc<Notify>,
+    /// Concurrent task completion notifier
+    pub(crate) concurrent_notify: Arc<Notify>,
 }
 
 impl ValidationService {
@@ -125,6 +129,7 @@ impl ValidationService {
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
         let vdf_notify = Arc::new(Notify::new());
+        let concurrent_notify = Arc::new(Notify::new());
 
         let handle = runtime_handle.spawn(
             async move {
@@ -134,6 +139,7 @@ impl ValidationService {
                     reorg_rx,
                     block_state_rx,
                     vdf_notify: vdf_notify.clone(),
+                    concurrent_notify: concurrent_notify.clone(),
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.vdf.parallel_verification_thread_limit)
@@ -149,6 +155,7 @@ impl ValidationService {
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
                         vdf_notify,
+                        concurrent_notify,
                     }),
                 };
 
@@ -226,11 +233,9 @@ impl ValidationService {
                             // When a block state changes, check if any validations can proceed
                             // This is especially important for child blocks waiting for parent validation
                             if !active_validations.is_empty() {
-                        tracing::error!("block state change begin");
                                 // Poll the VDF task & Process any completed validations (non-blocking)
                                 active_validations.process_completed_vdf().await;
                                 active_validations.process_completed_concurrent().await;
-                        tracing::error!("block state change end");
                             }
                         }
                         // lagged, skipping messages
@@ -252,11 +257,17 @@ impl ValidationService {
                 // Process VDF task completions when notified
                 _ = self.vdf_notify.notified() => {
                     if !active_validations.is_empty() {
-                        tracing::error!("vdf notify begin");
                         // Poll the VDF task & Process any completed validations (non-blocking)
                         active_validations.process_completed_vdf().await;
                         active_validations.process_completed_concurrent().await;
-                        tracing::error!("vdf notify end");
+                    }
+                }
+
+                // Process concurrent task completions when notified
+                _ = self.concurrent_notify.notified() => {
+                    if !active_validations.concurrent_is_empty() {
+                        // Process completed concurrent validations
+                        active_validations.process_completed_concurrent().await;
                     }
                 }
             }

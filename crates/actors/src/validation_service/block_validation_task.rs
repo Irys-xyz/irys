@@ -90,7 +90,7 @@ impl BlockValidationTask {
 
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_concurrent(self) {
+    pub(crate) async fn execute_concurrent(self, concurrent_notify: Arc<tokio::sync::Notify>) {
         let validation_result = self
             .validate_block()
             .await
@@ -111,6 +111,9 @@ impl BlockValidationTask {
 
         // Notify the block tree service
         self.send_validation_result(validation_result);
+        
+        // Notify that concurrent task has completed
+        concurrent_notify.notify_one();
     }
 
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
@@ -160,32 +163,51 @@ impl BlockValidationTask {
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
+        
+        // Subscribe to block state updates
+        let mut block_state_rx = self.service_inner.service_senders.subscribe_block_state_updates();
 
         loop {
-            // Check if block height is too far behind canonical tip
+            // 1. Check cancellation condition first
             if self.should_exit_due_to_height_diff() {
-                let _span = tracing::debug_span!("height_diff_exit", block_hash = %self.block.block_hash, block_height = %self.block.height).entered();
                 debug!("exiting validation task - block too far behind canonical tip");
                 return ParentValidationResult::Cancelled;
             }
 
-            let Some(parent_chain_state) = self.get_parent_chain_state(&parent_hash) else {
-                warn!("validated a valid block that is not inside the block tree");
-                break;
-            };
+            // 2. Check parent state (single check per iteration)
+            match self.get_parent_chain_state(&parent_hash) {
+                None => {
+                    // Parent doesn't exist in tree - this is an error condition
+                    warn!("Parent block {} not found in block tree", parent_hash);
+                    return ParentValidationResult::Cancelled;
+                }
+                Some(parent_state) if self.is_parent_ready(&parent_state) => {
+                    debug!("Parent validation complete");
+                    return ParentValidationResult::Ready;
+                }
+                Some(_) => {
+                    // Parent exists but not ready, wait for updates
+                }
+            }
 
-            if self.is_parent_ready(&parent_chain_state) {
-                // Parent is ready, we can proceed
-                break;
-            } else {
-                // Parent not ready, yield and try again when polled later
-                debug!("Waiting for parent...");
-                tokio::task::yield_now().await;
-                continue;
+            // 3. Wait for relevant state changes
+            debug!("Waiting for parent {} validation", parent_hash);
+            match block_state_rx.recv().await {
+                Ok(event) if event.block_hash == parent_hash => {
+                    // Parent state changed, loop back to check
+                    continue;
+                }
+                Ok(_) => {
+                    // Not our parent, continue waiting
+                    continue;
+                }
+                Err(_) => {
+                    // Channel closed - treat as error
+                    warn!("Block state channel closed while waiting for parent");
+                    return ParentValidationResult::Cancelled;
+                }
             }
         }
-
-        ParentValidationResult::Ready
     }
 
     /// Check if the block should exit due to height difference from canonical tip

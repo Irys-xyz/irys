@@ -115,9 +115,9 @@ pub(crate) struct ActiveValidations {
     /// Priority queue of (block_hash, meta) with  priority ordering of tasks that are ready for concurrent validation
     pub(crate) concurrent_queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>>,
 
-    /// Map from block hash to the concurrent tasks
+    /// Map from block hash to the concurrent task handles
     pub(crate) concurrent_tasks:
-        std::collections::HashMap<BlockHash, Pin<Box<dyn Future<Output = ()> + Send>>>,
+        std::collections::HashMap<BlockHash, tokio::task::JoinHandle<()>>,
     pub(crate) block_tree_guard: BlockTreeReadGuard,
 }
 
@@ -183,17 +183,17 @@ impl ActiveValidations {
     }
 
     #[instrument(skip_all, fields(block_hash = %block.block_hash))]
-    pub(crate) fn push_concurrent_fut(
+    pub(crate) fn push_concurrent_task(
         &mut self,
         block: Arc<IrysBlockHeader>,
-        future: Pin<Box<dyn Future<Output = ()> + Send>>,
+        handle: tokio::task::JoinHandle<()>,
     ) {
         let priority = self.calculate_priority(&block);
         debug!(
             "adding concurrent validation task with priority: {:?}",
             priority.0.state
         );
-        self.concurrent_tasks.insert(block.block_hash, future);
+        self.concurrent_tasks.insert(block.block_hash, handle);
         self.concurrent_queue.push(block.block_hash, priority);
     }
 
@@ -218,18 +218,18 @@ impl ActiveValidations {
         assert_eq!(
             self.concurrent_queue.len(),
             self.concurrent_tasks.len(),
-            "validations and futures out of sync"
+            "validations and handles out of sync"
         );
 
         if self.concurrent_queue.is_empty() {
             return false;
         }
 
-        // Check futures in priority order using poll_immediate for non-blocking check
+        // Check if tasks are finished
         for (block_hash, _priority) in self.concurrent_queue.clone().iter() {
-            if let Some(future) = self.concurrent_tasks.get_mut(block_hash) {
-                // Use poll_immediate to check if future is ready without blocking
-                if poll_immediate(future).await.is_some() {
+            if let Some(handle) = self.concurrent_tasks.get(block_hash) {
+                // Check if the task has completed
+                if handle.is_finished() {
                     completed_blocks.push(*block_hash);
                 }
             }
@@ -239,7 +239,10 @@ impl ActiveValidations {
         for block_hash in &completed_blocks {
             debug!(block_hash = %block_hash, "validation task completed");
             self.concurrent_queue.remove(block_hash);
-            self.concurrent_tasks.remove(block_hash);
+            // Join the handle to clean up the task
+            if let Some(handle) = self.concurrent_tasks.remove(block_hash) {
+                let _ = handle.await; // Join to clean up resources
+            }
         }
         let tasks_completed = !completed_blocks.is_empty();
         if tasks_completed {
@@ -339,8 +342,13 @@ impl ActiveValidations {
                     &hash
                 );
 
+                // Spawn concurrent validation task
+                let concurrent_notify = Arc::clone(&task.0.service_inner.concurrent_notify);
+                let block = task.0.block.clone();
+                let handle = tokio::spawn(task.0.execute_concurrent(concurrent_notify));
+                
                 // add to active concurrent validations (this also adds to the concurrent queue)
-                self.push_concurrent_fut(task.0.block.clone(), task.0.execute_concurrent().boxed())
+                self.push_concurrent_task(block, handle)
             }
             VdfValidationResult::Invalid(err) => {
                 // remove task from the vdf_pending queue
@@ -375,7 +383,6 @@ impl ActiveValidations {
             Some(task) => task,
             None => return false, // Nothing to do
         };
-        tracing::error!("vdf task is some");
 
         // process the provided task
         // either 1.) a previously produced task, 2.) a previously produced task that is getting cancelled, or 3.) a new task
@@ -384,13 +391,11 @@ impl ActiveValidations {
 
         if let Some(result) = poll_res {
             // handle the result of the VDF validation task
-            tracing::error!("vdf task completed");
             self.handle_vdf_validation_result(&task, result);
             true
         } else {
             // task hasn't completed
             self.vdf_task = Some(task);
-            tracing::error!("vdf task not completed");
             false
         }
     }
@@ -439,7 +444,6 @@ impl ActiveValidations {
 mod tests {
     use super::*;
     use crate::block_tree_service::test_utils::genesis_tree;
-    use futures::future::{pending, ready};
     use irys_domain::{dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, CommitmentSnapshot};
     use irys_types::{IrysBlockHeader, H256};
     use itertools::Itertools as _;
@@ -448,20 +452,22 @@ mod tests {
     use test_log::test;
     use tokio::time::{sleep, Duration};
 
-    /// Create a mock future that completes immediately
-    fn create_ready_future() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(ready(()))
+    /// Create a mock task handle that completes immediately
+    fn create_ready_task() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
     }
 
-    /// Create a mock future that never completes
-    fn create_pending_future() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(pending())
+    /// Create a mock task handle that never completes
+    fn create_pending_task() -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {
+            futures::future::pending::<()>().await;
+        })
     }
 
-    /// Create a mock future that completes after a delay (unused but kept for potential future tests)
+    /// Create a mock task handle that completes after a delay (unused but kept for potential future tests)
     #[expect(dead_code)]
-    fn create_delayed_future(delay_ms: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
+    fn create_delayed_task(delay_ms: u64) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
             sleep(Duration::from_millis(delay_ms)).await;
         })
     }
@@ -527,9 +533,9 @@ mod tests {
                 .expect("Block should exist");
 
             expected_hashes.push(block_hash);
-            active_validations.push_concurrent_fut(
+            active_validations.push_concurrent_task(
                 get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
+                create_pending_task(),
             );
         }
 
@@ -567,9 +573,9 @@ mod tests {
                 .expect("Block should exist");
 
             block_hashes.push(block_hash);
-            active_validations.push_concurrent_fut(
+            active_validations.push_concurrent_task(
                 get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
+                create_pending_task(),
             );
         }
 
@@ -610,9 +616,9 @@ mod tests {
                 .expect("Block should exist");
 
             height_to_hash.insert(height, block_hash);
-            active_validations.push_concurrent_fut(
+            active_validations.push_concurrent_task(
                 get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
+                create_pending_task(),
             );
         }
 
@@ -742,10 +748,10 @@ mod tests {
 
         // Add blocks to active validations in mixed order to test priority sorting
         for (block, _) in &fork_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_task(block.clone(), create_pending_task());
         }
         for (block, _) in &extension_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_task(block.clone(), create_pending_task());
         }
 
         // Verify priority ordering
@@ -835,9 +841,9 @@ mod tests {
 
         for &height in &shuffled_heights {
             let block_hash = height_to_hash[&height];
-            active_validations.push_concurrent_fut(
+            active_validations.push_concurrent_task(
                 get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
+                create_pending_task(),
             );
         }
 
@@ -885,17 +891,20 @@ mod tests {
 
             height_to_hash.insert(height, block_hash);
 
-            // Alternate between ready and pending futures
+            // Alternate between ready and pending tasks
             let future = if i % 2 == 0 {
-                create_ready_future()
+                create_ready_task()
             } else {
-                create_pending_future()
+                create_pending_task()
             };
 
             active_validations
-                .push_concurrent_fut(get_block_from_blocks(&blocks, block_hash), future);
+                .push_concurrent_task(get_block_from_blocks(&blocks, block_hash), future);
         }
 
+        // Give tasks a chance to run
+        tokio::task::yield_now().await;
+        
         // Process completed validations
         active_validations.process_completed_concurrent().await;
 
@@ -936,7 +945,7 @@ mod tests {
         let genesis_hash = chain[0].block_hash;
         let genesis_block = get_block_from_blocks(&blocks, genesis_hash);
 
-        active_validations.push_concurrent_fut(Arc::clone(&genesis_block), create_pending_future());
+        active_validations.push_concurrent_task(Arc::clone(&genesis_block), create_pending_task());
 
         // Genesis block should have priority based on height 0 and Canonical status
         let priority = active_validations.calculate_priority(&genesis_block);
@@ -1073,7 +1082,7 @@ mod tests {
 
         // Add extension blocks to active validations
         for block in &extension_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_task(block.clone(), create_pending_task());
         }
 
         // Verify initial priorities - extension blocks should be CanonicalExtension
@@ -1119,7 +1128,7 @@ mod tests {
 
         // Add fork blocks to active validations
         for block in &fork_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
+            active_validations.push_concurrent_task(block.clone(), create_pending_task());
         }
 
         // Action: Make the fork chain canonical by marking blocks as valid and advancing tip
