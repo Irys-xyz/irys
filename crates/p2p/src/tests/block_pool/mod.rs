@@ -327,6 +327,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     let sync_state = ChainSyncState::new(false, false);
 
+    let vdf_mining_sender = service_senders.vdf_mining.clone();
     let block_pool = Arc::new(BlockPool::new(
         db.clone(),
         block_discovery_stub.clone(),
@@ -357,6 +358,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_pool.clone(),
         data_handler,
         None,
+        vdf_mining_sender,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -533,6 +535,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     let sync_state = ChainSyncState::new(false, false);
 
+    let vdf_mining_sender = service_senders.vdf_mining.clone();
     let block_pool = Arc::new(BlockPool::new(
         db.clone(),
         block_discovery_stub.clone(),
@@ -567,6 +570,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_pool.clone(),
         data_handler,
         None,
+        vdf_mining_sender,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
