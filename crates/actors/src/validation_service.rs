@@ -207,8 +207,10 @@ impl ValidationService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(ValidationServiceMessage::ValidateBlock { block, skip_vdf_validation }) => {
-                            let Some(task) = self.inner.clone().create_validation_task(block, &active_validations, skip_vdf_validation) else {
+                            let Some(task) = self.inner.clone().create_validation_task(block.clone(), &active_validations, skip_vdf_validation) else {
                                 // validation task was not created. The task failed during vdf validation
+                                warn!("Failed to create validation task for block {} at height {}",
+                                      block.block_hash, block.height);
                                 continue;
                             };
 
@@ -328,6 +330,8 @@ impl ValidationServiceInner {
         let retries_per_second = 20;
         loop {
             if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                warn!("VDF validation cancelled while waiting for step {} (current: {})", 
+                      desired_step_number, self.vdf_state.read().global_step);
                 bail!("Cancelled");
             }
             let read = self.vdf_state.read().global_step;

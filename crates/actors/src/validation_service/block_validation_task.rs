@@ -125,7 +125,6 @@ impl BlockValidationTask {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
         let skip_validation = self.skip_vdf_validation;
-
         // run the VDF validation
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
         let cancel2 = Arc::clone(&cancel);
@@ -170,7 +169,14 @@ impl BlockValidationTask {
         loop {
             // 1. Check cancellation condition first
             if self.should_exit_due_to_height_diff() {
-                debug!("exiting validation task - block too far behind canonical tip");
+                let block_tree = self.block_tree_guard.read();
+                let tip_hash = block_tree.tip;
+                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
+                    let height_diff = tip_block.height.saturating_sub(self.block.height);
+                    warn!("Cancelling validation: block {} at height {} is {} blocks behind tip (threshold: {})",
+                          self.block.block_hash, self.block.height, height_diff, 
+                          self.service_inner.config.consensus.block_tree_depth);
+                }
                 return ParentValidationResult::Cancelled;
             }
 
@@ -178,7 +184,8 @@ impl BlockValidationTask {
             match self.get_parent_chain_state(&parent_hash) {
                 None => {
                     // Parent doesn't exist in tree - this is an error condition
-                    warn!("Parent block {} not found in block tree", parent_hash);
+                    error!("CRITICAL: Parent block {} not found for block {} at height {}",
+                           parent_hash, self.block.block_hash, self.block.height);
                     return ParentValidationResult::Cancelled;
                 }
                 Some(parent_state) if self.is_parent_ready(&parent_state) => {
@@ -203,7 +210,8 @@ impl BlockValidationTask {
                 }
                 Err(_) => {
                     // Channel closed - treat as error
-                    warn!("Block state channel closed while waiting for parent");
+                    error!("Block state channel closed while waiting for parent {} of block {} at height {}",
+                           parent_hash, self.block.block_hash, self.block.height);
                     return ParentValidationResult::Cancelled;
                 }
             }

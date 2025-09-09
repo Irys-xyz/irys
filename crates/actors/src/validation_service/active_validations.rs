@@ -28,7 +28,7 @@ use std::mem::replace;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::{cmp::Reverse, sync::Arc};
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, instrument, warn};
 
 use crate::block_tree_service::ValidationResult;
 use crate::validation_service::block_validation_task::BlockValidationTask;
@@ -266,18 +266,18 @@ impl ActiveValidations {
             // if cancelling, return current task (it'll poll to completion once cancellation completes)
             let current_cancel_state = task.cancel.load(Ordering::Relaxed);
             if current_cancel_state != CancelEnum::Continue as u8 {
-                debug!(
-                    "VDF task {} is being cancelled ({:?})",
-                    &task.block_hash, &current_cancel_state
+                warn!(
+                    "VDF task {} is being cancelled (state: {:?})",
+                    &task.block_hash, current_cancel_state
                 );
                 task
             } else if let Some((high_prio_hash, high_prio_task)) = peek {
                 // check if task needs to be replaced by a higher priority task
                 // check the hash of the highest priority according to the queue against the hash of the task
                 if *high_prio_hash != task.block_hash {
-                    info!(
-                        "Cancelling in-progress VDF validation for block {} in favour of block {:?} {}",
-                        &task.block_hash,&high_prio_task.0.priority.state, &high_prio_hash,
+                    warn!(
+                        "VDF PREEMPTION: Cancelling block {} (priority: {:?}) for higher priority block {} (priority: {:?})",
+                        &task.block_hash, &task.block_hash, high_prio_hash, &high_prio_task.0.priority,
                     );
                     // Cancel only if currently set to Continue
                     if let Err(e) = task.cancel.compare_exchange(
@@ -286,7 +286,7 @@ impl ActiveValidations {
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                     ) {
-                        error!("Error cancelling task {} - {}", &task.block_hash, e)
+                        error!("Failed to cancel VDF task for block {}: {}", &task.block_hash, e)
                     }
                 }
                 task
@@ -296,7 +296,7 @@ impl ActiveValidations {
             // if there is no active task, and we have a pending task in the queue, add it
         } else if let Some((pending_hash, pending_task)) = peek {
             // Create new task from highest priority pending task
-            debug!("Created VDF validation task for  {}", &pending_hash);
+            debug!("Created VDF validation task for {}", &pending_hash);
             let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
             VdfValidationTask {
@@ -361,15 +361,24 @@ impl ActiveValidations {
                             &task.block_hash
                         )
                     });
-                error!(block_hash = %invalid_hash, "Error validating VDF - {}", &err);
+                error!(block_hash = %invalid_hash, "VDF validation failed in result handler: {}", &err);
                 // notify the block tree
                 invalid_item
                     .0
                     .send_validation_result(ValidationResult::Invalid);
             }
             VdfValidationResult::Cancelled => {
-                debug!("VDF task {} was cancelled", &task.block_hash);
-                // do nothing, leave the task in the pending queue
+                debug!("VDF task {} was cancelled - removing from queue", &task.block_hash);
+                // Remove the cancelled task from the pending queue and get the notify handle
+                if let Some((_removed_hash, removed_task)) = self.vdf_pending_queue.remove(&task.block_hash) {
+                    // Trigger immediate reprocessing of the queue to start the next task
+                    // This is critical because after cancellation, no other event may occur
+                    // to trigger processing of the high-priority block that caused the preemption
+                    removed_task.0.service_inner.vdf_notify.notify_one();
+                } else {
+                    error!("Failed to remove cancelled block {} from pending queue - block not found!", 
+                           &task.block_hash);
+                }
             }
         };
     }
