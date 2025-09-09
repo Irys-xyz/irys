@@ -145,6 +145,14 @@ impl Compact for RethPeerInfo {
     }
 }
 
+const IPV4_TAG: u8 = 0;
+const IPV6_TAG: u8 = 1;
+
+const TAG_SIZE: usize = 1;
+const IPV4_ADDR_SIZE: usize = 4;
+const IPV6_ADDR_SIZE: usize = 16;
+const PORT_SIZE: usize = 2;
+
 pub fn encode_address<B>(address: &SocketAddr, buf: &mut B) -> usize
 where
     B: bytes::BufMut + AsMut<[u8]>,
@@ -152,16 +160,16 @@ where
     let mut size = 0;
     match address {
         SocketAddr::V4(addr4) => {
-            buf.put_u8(0); // Tag for IPv4
+            buf.put_u8(IPV4_TAG); // Tag for IPv4
             buf.put_slice(&addr4.ip().octets());
             buf.put_u16(addr4.port());
-            size += 7; // 1 byte tag + 4 bytes IPv4 + 2 bytes port
+            size += TAG_SIZE + IPV4_ADDR_SIZE + PORT_SIZE;
         }
         SocketAddr::V6(addr6) => {
-            buf.put_u8(1); // Tag for IPv6
+            buf.put_u8(IPV6_TAG); // Tag for IPv6
             buf.put_slice(&addr6.ip().octets());
             buf.put_u16(addr6.port());
-            size += 19; // 1 byte tag + 16 bytes IPv6 + 2 bytes port
+            size += TAG_SIZE + IPV6_ADDR_SIZE + PORT_SIZE;
         }
     };
     size
@@ -170,24 +178,33 @@ where
 pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     let tag = buf[0];
     let address = match tag {
-        0 => {
+        IPV4_TAG => {
             // IPv4 address (needs 4 bytes IP + 2 bytes port after tag)
-            if buf.len() < 7 {
+            if buf.len() < TAG_SIZE + IPV4_ADDR_SIZE + PORT_SIZE {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
             } else {
-                let ip_octets: [u8; 4] = buf[1..5].try_into().unwrap();
-                let port = u16::from_be_bytes(buf[5..7].try_into().unwrap());
+                let ip_octets: [u8; 4] =
+                    buf[TAG_SIZE..TAG_SIZE + IPV4_ADDR_SIZE].try_into().unwrap();
+                let port = u16::from_be_bytes(
+                    buf[TAG_SIZE + IPV4_ADDR_SIZE..TAG_SIZE + IPV4_ADDR_SIZE + PORT_SIZE]
+                        .try_into()
+                        .unwrap(),
+                );
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip_octets), port))
             }
         }
-        1 => {
+        IPV6_TAG => {
             // IPv6 address (needs 16 bytes IP + 2 bytes port after tag)
-            if buf.len() < 19 {
+            if buf.len() < TAG_SIZE + IPV6_ADDR_SIZE + PORT_SIZE {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0))
             } else {
                 let mut ip_octets = [0_u8; 16];
-                ip_octets.copy_from_slice(&buf[1..17]);
-                let port = u16::from_be_bytes(buf[17..19].try_into().unwrap());
+                ip_octets.copy_from_slice(&buf[TAG_SIZE..TAG_SIZE + IPV6_ADDR_SIZE]);
+                let port = u16::from_be_bytes(
+                    buf[TAG_SIZE + IPV6_ADDR_SIZE..TAG_SIZE + IPV6_ADDR_SIZE + PORT_SIZE]
+                        .try_into()
+                        .unwrap(),
+                );
                 SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip_octets), port, 0, 0))
             }
         }
@@ -195,9 +212,9 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
     };
 
     let consumed = match tag {
-        0 => 7,  // 1 byte tag + 4 bytes IPv4 + 2 bytes port
-        1 => 19, // 1 byte tag + 16 bytes IPv6 + 2 bytes port
-        _ => 1,  // unknown tag: we only consumed the tag byte
+        IPV4_TAG => TAG_SIZE + IPV4_ADDR_SIZE + PORT_SIZE,
+        IPV6_TAG => TAG_SIZE + IPV6_ADDR_SIZE + PORT_SIZE,
+        _ => TAG_SIZE, // unknown tag: we only consumed the tag byte
     };
     (address, consumed)
 }
