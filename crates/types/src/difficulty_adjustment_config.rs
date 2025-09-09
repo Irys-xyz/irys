@@ -123,7 +123,7 @@ pub fn calculate_difficulty(
     .try_into()
     .unwrap();
 
-    let is_adjusted = percent_diff > min_threshold;
+    let is_adjusted = percent_diff >= min_threshold;
 
     let stats = AdjustmentStats {
         actual_block_time,
