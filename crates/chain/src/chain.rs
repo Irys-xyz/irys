@@ -975,12 +975,14 @@ impl IrysNode {
         ));
 
         // spawn the chunk migration service
-        Self::init_chunk_migration_service(
-            &config,
+        let chunk_migration_handle = ChunkMigrationService::spawn_service(
+            receivers.chunk_migration,
             block_index.clone(),
-            &irys_db,
-            &service_senders,
             &storage_modules_guard,
+            irys_db.clone(),
+            service_senders.clone(),
+            &config,
+            runtime_handle.clone(),
         );
 
         // Spawn VDF service
@@ -1243,6 +1245,7 @@ impl IrysNode {
             services.push(ArbiterEnum::TokioService(chunk_cache_handle));
             services.push(ArbiterEnum::TokioService(storage_module_handle));
             services.push(ArbiterEnum::TokioService(data_sync_handle));
+            services.push(ArbiterEnum::TokioService(chunk_migration_handle));
 
             // 5. Sync operations
             services.push(ArbiterEnum::TokioService(sync_service_handle));
@@ -1535,23 +1538,6 @@ impl IrysNode {
             block_discovery_rx,
             runtime_handle,
         )
-    }
-
-    fn init_chunk_migration_service(
-        config: &Config,
-        block_index: Arc<RwLock<BlockIndex>>,
-        irys_db: &DatabaseProvider,
-        service_senders: &ServiceSenders,
-        storage_modules_guard: &StorageModulesReadGuard,
-    ) {
-        let chunk_migration_service = ChunkMigrationService::new(
-            block_index,
-            config.clone(),
-            storage_modules_guard,
-            irys_db.clone(),
-            service_senders.clone(),
-        );
-        SystemRegistry::set(chunk_migration_service.start());
     }
 
     fn init_storage_modules(
