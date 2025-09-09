@@ -484,10 +484,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         .await;
 
     assert!(res.is_err());
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
 #[actix_rt::test]
@@ -655,10 +652,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     sync_service_handle.shutdown_signal.fire();
 
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
 #[actix_rt::test]

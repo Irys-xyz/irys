@@ -1,4 +1,4 @@
-use actix::prelude::*;
+use crate::{cache_service::CacheServiceAction, services::ServiceSenders};
 use eyre::eyre;
 use irys_database::{
     cached_chunk_by_chunk_offset,
@@ -12,16 +12,21 @@ use irys_storage::{ie, ii, InclusiveInterval as _};
 use irys_types::{
     app_state::DatabaseProvider, Base64, Config, DataLedger, DataRoot, DataTransactionHeader,
     DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
-    TxChunkOffset, UnpackedChunk, H256,
+    TokioServiceHandle, TxChunkOffset, UnpackedChunk, H256,
 };
-use std::sync::{Arc, RwLock};
+use reth::tasks::shutdown::Shutdown;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, instrument};
 
-use crate::services::Stop;
-use crate::{
-    block_producer::BlockMigrationMessage, cache_service::CacheServiceAction,
-    services::ServiceSenders,
-};
+pub struct ChunkMigrationService {
+    shutdown: Shutdown,
+    msg_rx: UnboundedReceiver<ChunkMigrationServiceMessage>,
+    inner: ChunkMigrationServiceInner,
+}
 
 /// Central coordinator for chunk storage operations.
 ///
@@ -31,7 +36,7 @@ use crate::{
 /// - Coordinates chunk reads/writes
 /// - Manages storage state transitions
 #[derive(Debug)]
-pub struct ChunkMigrationService {
+pub struct ChunkMigrationServiceInner {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
     pub block_index: Option<Arc<RwLock<BlockIndex>>>,
     /// Configuration parameters for storage system
@@ -44,23 +49,20 @@ pub struct ChunkMigrationService {
     pub service_senders: Option<ServiceSenders>,
 }
 
-impl Default for ChunkMigrationService {
-    fn default() -> Self {
-        unimplemented!("don't rely on `Default` impl");
-    }
+pub enum ChunkMigrationServiceMessage {
+    BlockMigrated(
+        Arc<IrysBlockHeader>,
+        Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
+    ),
 }
 
-impl Actor for ChunkMigrationService {
-    type Context = Context<Self>;
-}
-
-impl ChunkMigrationService {
+impl ChunkMigrationServiceInner {
     pub fn new(
         block_index: Arc<RwLock<BlockIndex>>,
-        config: Config,
         storage_modules_guard: &StorageModulesReadGuard,
         db: DatabaseProvider,
         service_senders: ServiceSenders,
+        config: Config,
     ) -> Self {
         println!("service started: chunk_migration");
         Self {
@@ -71,34 +73,29 @@ impl ChunkMigrationService {
             service_senders: Some(service_senders),
         }
     }
-}
 
-/// Adds this actor the the local service registry
-impl Supervised for ChunkMigrationService {}
-
-impl SystemService for ChunkMigrationService {
-    fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        println!("chunk_migration service started");
+    pub fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) -> eyre::Result<()> {
+        match msg {
+            ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
+                self.on_block_migrated(block_header, all_txs)?;
+            }
+        }
+        Ok(())
     }
-}
 
-impl Handler<BlockMigrationMessage> for ChunkMigrationService {
-    type Result = ResponseFuture<eyre::Result<()>>;
-
-    #[instrument(skip_all, fields(
-    height = %block.height, // instrument seems to be just wrapping the Boxed future
-    hash = %block.block_hash
-))]
-    fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
+    fn on_block_migrated(
+        &mut self,
+        block_header: Arc<IrysBlockHeader>,
+        all_txs: Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
+    ) -> eyre::Result<()> {
         // Early return if not initialized
         if self.block_index.is_none() || self.db.is_none() {
             error!("chunk_migration service not initialized");
-            return Box::pin(async move { Err(eyre!("chunk_migration service not initialized")) });
+            return Err(eyre!("chunk_migration service not initialized"));
         }
 
         // Collect working variables to move into the closure
-        let block = msg.block_header;
-        let all_txs = msg.all_txs;
+        let block = block_header;
         let block_index = self.block_index.clone().unwrap();
         let chunk_size = self.config.consensus.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules_guard.clone());
@@ -106,16 +103,16 @@ impl Handler<BlockMigrationMessage> for ChunkMigrationService {
         let service_senders = self.service_senders.clone().unwrap();
 
         // Extract transactions for each ledger
-        let submit_tx_count = block.data_ledgers[DataLedger::Submit].tx_ids.len();
-        let submit_txs = all_txs[..submit_tx_count].to_vec();
-        let publish_txs = all_txs[submit_tx_count..].to_vec();
+        let submit_txs = all_txs.get(&DataLedger::Submit);
+        let publish_txs = all_txs.get(&DataLedger::Publish);
         let block_height = block.height;
-        Box::pin(async move {
-            // Process Submit ledger transactions
+
+        // Process Submit ledger transactions
+        if let Some(submit_txs) = submit_txs {
             process_ledger_transactions(
                 &block,
                 DataLedger::Submit,
-                &submit_txs,
+                submit_txs,
                 &block_index,
                 chunk_size,
                 &storage_modules,
@@ -123,34 +120,28 @@ impl Handler<BlockMigrationMessage> for ChunkMigrationService {
             )
             // TODO: fix this & child functions so they forward errors?
             .map_err(|()| eyre!("Unexpected error processing submit ledger transactions"))?;
+        }
 
-            // Process Publish ledger transactions
+        // Process Publish ledger transactions
+        if let Some(publish_txs) = publish_txs {
             process_ledger_transactions(
                 &block,
                 DataLedger::Publish,
-                &publish_txs,
+                publish_txs,
                 &block_index,
                 chunk_size,
                 &storage_modules,
                 &db,
             )
             .map_err(|()| eyre!("Unexpected error processing publish ledger transactions"))?;
+        }
 
-            // forward the finalization message to the cache service for cleanup
-            let _ = service_senders
-                .chunk_cache
-                .send(CacheServiceAction::OnBlockMigrated(block_height, None));
+        // forward the finalization message to the cache service for cleanup
+        let _ = service_senders
+            .chunk_cache
+            .send(CacheServiceAction::OnBlockMigrated(block_height, None));
 
-            Ok(())
-        })
-    }
-}
-
-impl Handler<Stop> for ChunkMigrationService {
-    type Result = ();
-
-    fn handle(&mut self, _msg: Stop, ctx: &mut Self::Context) {
-        ctx.stop();
+        Ok(())
     }
 }
 
@@ -374,4 +365,78 @@ fn write_chunk_to_module(
         })?;
     }
     Ok(())
+}
+
+impl ChunkMigrationService {
+    pub fn spawn_service(
+        rx: UnboundedReceiver<ChunkMigrationServiceMessage>,
+        block_index: Arc<RwLock<BlockIndex>>,
+        storage_modules_guard: &StorageModulesReadGuard,
+        db: DatabaseProvider,
+        service_senders: ServiceSenders,
+        config: &Config,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        let config = config.clone();
+        // let block_index = block_index.clone();
+        let storage_modules_guard = storage_modules_guard.clone();
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(async move {
+            let data_sync_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                inner: ChunkMigrationServiceInner::new(
+                    block_index,
+                    &storage_modules_guard,
+                    db,
+                    service_senders,
+                    config,
+                ),
+            };
+            data_sync_service
+                .start()
+                .await
+                .expect("DataSync Service encountered an irrecoverable error")
+        });
+
+        TokioServiceHandle {
+            name: "data_sync_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
+    }
+
+    async fn start(mut self) -> eyre::Result<()> {
+        tracing::info!("starting DataSync Service");
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut self.shutdown => {
+                    tracing::info!("Shutdown signal received for DataSync Service");
+                    break;
+                }
+
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => self.inner.handle_message(msg)?,
+                        None => {
+                            tracing::warn!("Message channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process remaining messages before shutdown
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.inner.handle_message(msg)?;
+        }
+
+        tracing::info!("shutting down DataSync Service gracefully");
+        Ok(())
+    }
 }

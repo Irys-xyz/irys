@@ -1094,6 +1094,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
+            solution_hash: H256,
             expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
@@ -1111,6 +1112,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
                     data_txs_with_proofs,
                     reward_amount,
                     timestamp_ms,
+                    solution_hash,
                     expired_ledger_fees,
                 )
                 .await
@@ -1419,6 +1421,105 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
         );
     }
 
+    node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(actix::test)]
+async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
+    // Evil strategy that uses an incorrect solution hash
+    struct InvalidSolutionHashStrategy {
+        pub prod: ProductionStrategy,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for InvalidSolutionHashStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn create_evm_block(
+            &self,
+            prev_block_header: &IrysBlockHeader,
+            prev_evm_block: &reth_ethereum_primitives::Block,
+            commitment_txs_to_bill: &[CommitmentTransaction],
+            submit_txs: &[DataTransactionHeader],
+            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            timestamp_ms: u128,
+            _solution_hash: H256,
+            expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
+        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
+            // Deliberately use an incorrect solution hash (all zeros)
+            // This should cause the block to be rejected during validation
+            let invalid_solution_hash = H256::zero();
+
+            self.prod
+                .create_evm_block(
+                    prev_block_header,
+                    prev_evm_block,
+                    commitment_txs_to_bill,
+                    submit_txs,
+                    data_txs_with_proofs,
+                    reward_amount,
+                    timestamp_ms,
+                    invalid_solution_hash,
+                    expired_ledger_fees,
+                )
+                .await
+        }
+    }
+
+    // Configure test network
+    let config = NodeConfig::testing();
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // Create the evil strategy that will use an invalid solution hash
+    let evil_strategy = InvalidSolutionHashStrategy {
+        prod: ProductionStrategy {
+            inner: node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    // Generate a valid solution context
+    let solution = solution_context(&node.node_ctx).await?;
+
+    // Produce a block with the evil strategy (invalid solution hash)
+    let (evil_block, _eth_payload) = evil_strategy
+        .fully_produce_new_block(solution.clone())
+        .await?
+        .unwrap();
+
+    // Now try to build another block on top of the evil block - it should fail or build on previous good block
+    let initial_canonical_tip = node.node_ctx.block_tree_guard.read().tip;
+
+    // The evil block should not become the tip
+    assert_ne!(
+        evil_block.block_hash, initial_canonical_tip,
+        "Block with invalid solution hash should not become the tip"
+    );
+
+    // Now produce a valid block with the correct strategy to ensure the system still works
+    let (valid_block, _) = ProductionStrategy {
+        inner: node.node_ctx.block_producer_inner.clone(),
+    }
+    .fully_produce_new_block(solution_context(&node.node_ctx).await?)
+    .await?
+    .unwrap();
+
+    // The valid block should NOT build on the evil block
+    assert_ne!(
+        valid_block.previous_block_hash, evil_block.block_hash,
+        "Valid block should not build on block with invalid solution hash"
+    );
+
+    // The valid block should build on the genesis block (or previous valid block)
+    assert_eq!(
+        valid_block.previous_block_hash, initial_canonical_tip,
+        "Valid block should build on the previous valid tip, not the evil block"
+    );
+
+    // Cleanup
     node.stop().await;
     Ok(())
 }
