@@ -44,7 +44,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    genesis_node.start_mining().await;
+    genesis_node.start_mining();
 
     genesis_node.wait_until_height(1, seconds_to_wait).await?;
 
@@ -104,7 +104,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     assert_matches!(res, Ok(()));
 
     let height = genesis_node.get_canonical_chain_height().await;
-    genesis_node.start_mining().await;
+    genesis_node.start_mining();
     genesis_node
         .wait_until_height_confirmed(height + 1, seconds_to_wait)
         .await?;

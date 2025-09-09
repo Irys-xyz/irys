@@ -233,7 +233,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    node.node_ctx.start_mining().await?;
+    node.node_ctx.start_mining()?;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
     // Collect block hashes as we mine
