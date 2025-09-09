@@ -11,6 +11,7 @@ use irys_types::{
     Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle,
 };
+use irys_vdf::state::VdfStateReadonly;
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{HashMap, VecDeque};
@@ -113,6 +114,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     reth_service_actor: Option<Addr<RethServiceActor>>,
     /// Sender to disable VDF mining when sync is in progress
     vdf_mining_state_sender: Sender<bool>,
+    vdf_state_readonly: VdfStateReadonly,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -159,6 +161,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
         vdf_mining_state_sender: Sender<bool>,
+        vdf_state_readonly: VdfStateReadonly,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -170,6 +173,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             gossip_data_handler,
             reth_service_actor,
             vdf_mining_state_sender,
+            vdf_state_readonly,
         )
     }
 }
@@ -185,6 +189,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
         vdf_mining_state_sender: Sender<bool>,
+        vdf_state_readonly: VdfStateReadonly,
     ) -> Self {
         Self {
             sync_state,
@@ -197,6 +202,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             gossip_data_handler,
             reth_service_actor,
             vdf_mining_state_sender,
+            vdf_state_readonly,
         }
     }
 
@@ -237,6 +243,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let block_pool = self.block_pool.clone();
         let reth_service_addr = self.reth_service_actor.clone();
         let vdf_mining_state_sender = self.vdf_mining_state_sender.clone();
+        let vdf_state_readonly = self.vdf_state_readonly.clone();
 
         tokio::spawn(
             async move {
@@ -245,9 +252,15 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     .hydrate_peers_online_status(&peer_list)
                     .await;
 
+                debug!("Sync task: Disabling VDF mining before starting sync");
+                let was_mining_enabled_before_sync = { vdf_state_readonly.read().is_mining_enabled };
                 // Disable VDF mining when sync is in progress
-                if let Err(err) = vdf_mining_state_sender.send(false).await {
-                    error!("Sync task: Failed to disable VDF mining: {:?}", err);
+                if was_mining_enabled_before_sync {
+                    if let Err(err) = vdf_mining_state_sender.send(false).await {
+                        error!("Sync task: Failed to disable VDF mining: {:?}", err);
+                    }
+                } else {
+                    debug!("Sync task: VDF mining was already disabled before sync, not sending disable signal");
                 }
 
                 if let Err(err) = block_pool
@@ -272,10 +285,15 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 )
                 .await;
 
-                // Re-enable VDF mining after sync is done
-                if let Err(err) = vdf_mining_state_sender.send(true).await {
-                    error!("Sync task: Failed to re-enable VDF mining: {:?}", err);
+                debug!("Sync task: Enabling VDF mining after sync");
+                if was_mining_enabled_before_sync {
+                    if let Err(err) = vdf_mining_state_sender.send(was_mining_enabled_before_sync).await {
+                        error!("Sync task: Failed to re-enable VDF mining: {:?}", err);
+                    }
+                } else {
+                    debug!("Sync task: VDF mining was disabled before sync, not sending enable signal");
                 }
+
                 is_sync_task_spawned.store(false, Ordering::Relaxed);
 
                 match &res {

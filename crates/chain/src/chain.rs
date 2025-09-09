@@ -1147,6 +1147,7 @@ impl IrysNode {
             (chain_sync_tx, chain_sync_rx),
             reth_service_actor.clone(),
             service_senders.vdf_mining.clone(),
+            vdf_state_readonly.clone(),
         );
 
         // set up IrysNodeCtx
@@ -1580,6 +1581,7 @@ impl IrysNode {
         ),
         reth_service_addr: Addr<RethServiceActor>,
         vdf_mining_state_sender: Sender<bool>,
+        vdf_state_readonly: VdfStateReadonly,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
 
@@ -1592,6 +1594,7 @@ impl IrysNode {
             gossip_data_handler,
             Some(reth_service_addr),
             vdf_mining_state_sender,
+            vdf_state_readonly,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);

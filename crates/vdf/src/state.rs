@@ -36,6 +36,8 @@ pub struct VdfState {
     global_step_from_the_latest_canonical_block: u64,
     /// minimum global step to keep in the seeds VecDeque
     minimum_step_to_keep: u64,
+    /// whether mining is enabled or not
+    pub is_mining_enabled: bool,
 }
 
 impl VdfState {
@@ -51,6 +53,7 @@ impl VdfState {
             seeds: VecDeque::with_capacity(capacity),
             capacity,
             mining_state_sender,
+            is_mining_enabled: false,
         }
     }
 
@@ -261,6 +264,7 @@ pub fn create_state(
         seeds,
         capacity,
         mining_state_sender: Some(vdf_mining_state_sender),
+        is_mining_enabled: false,
     }
 }
 
@@ -447,6 +451,7 @@ pub mod test_helpers {
             capacity,
             seeds: VecDeque::default(),
             mining_state_sender: Some(vdf_mining_state_sender),
+            is_mining_enabled: false,
         };
         Arc::new(RwLock::new(state))
     }

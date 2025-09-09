@@ -77,7 +77,9 @@ pub fn run_vdf<B: BlockProvider>(
 
     // maintain a state of whether or not this vdf loop should be mining
     // don't start the VDF right away
-    let mut vdf_mining: bool = false;
+    {
+        vdf_state.write().unwrap().is_mining_enabled = false;
+    }
 
     loop {
         if shutdown_listener.try_recv().is_ok() {
@@ -123,8 +125,8 @@ pub fn run_vdf<B: BlockProvider>(
 
         // check if vdf mining state should change
         if let Ok(new_mining_state) = vdf_mining_state_listener.try_recv() {
-            tracing::info!("Setting mining state to {}", new_mining_state);
-            vdf_mining = new_mining_state;
+            info!("Setting mining state to {}", new_mining_state);
+            vdf_state.write().unwrap().is_mining_enabled = new_mining_state;
         }
 
         if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
@@ -143,7 +145,7 @@ pub fn run_vdf<B: BlockProvider>(
             && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
-        if !vdf_mining || is_too_far_ahead {
+        if !vdf_state.read().unwrap().is_mining_enabled || is_too_far_ahead {
             if is_too_far_ahead {
                 warn!(
                     "VDF mining is too far ahead: global step is {}, canonical global step is {} + cutoff is {} * 2, waiting a bit to catch up",
