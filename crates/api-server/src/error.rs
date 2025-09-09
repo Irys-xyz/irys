@@ -7,6 +7,7 @@ use awc::http::StatusCode;
 pub enum ApiError {
     ErrNoId { id: String, err: String },
     Internal { err: String },
+    NotImplemented { feature: String },
 }
 
 impl ResponseError for ApiError {
@@ -14,6 +15,7 @@ impl ResponseError for ApiError {
         match self {
             Self::ErrNoId { .. } => StatusCode::NOT_FOUND,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::NotImplemented { .. } => StatusCode::FORBIDDEN,
         }
     }
 
