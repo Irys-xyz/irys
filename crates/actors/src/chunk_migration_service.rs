@@ -74,16 +74,16 @@ impl ChunkMigrationServiceInner {
         }
     }
 
-    pub async fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) -> eyre::Result<()> {
+    pub fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) -> eyre::Result<()> {
         match msg {
             ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
-                self.on_block_migrated(block_header, all_txs).await?;
+                self.on_block_migrated(block_header, all_txs)?;
             }
         }
         Ok(())
     }
 
-    async fn on_block_migrated(
+    fn on_block_migrated(
         &mut self,
         block_header: Arc<IrysBlockHeader>,
         all_txs: Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
@@ -96,7 +96,6 @@ impl ChunkMigrationServiceInner {
 
         // Collect working variables to move into the closure
         let block = block_header;
-        let all_txs = all_txs;
         let block_index = self.block_index.clone().unwrap();
         let chunk_size = self.config.consensus.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules_guard.clone());
@@ -113,7 +112,7 @@ impl ChunkMigrationServiceInner {
             process_ledger_transactions(
                 &block,
                 DataLedger::Submit,
-                &submit_txs,
+                submit_txs,
                 &block_index,
                 chunk_size,
                 &storage_modules,
@@ -128,7 +127,7 @@ impl ChunkMigrationServiceInner {
             process_ledger_transactions(
                 &block,
                 DataLedger::Publish,
-                &publish_txs,
+                publish_txs,
                 &block_index,
                 chunk_size,
                 &storage_modules,
@@ -379,7 +378,6 @@ impl ChunkMigrationService {
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         let config = config.clone();
-        let service_senders = service_senders.clone();
         // let block_index = block_index.clone();
         let storage_modules_guard = storage_modules_guard.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -423,7 +421,7 @@ impl ChunkMigrationService {
 
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => self.inner.handle_message(msg).await?,
+                        Some(msg) => self.inner.handle_message(msg)?,
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
                             break;
@@ -435,7 +433,7 @@ impl ChunkMigrationService {
 
         // Process remaining messages before shutdown
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+            self.inner.handle_message(msg)?;
         }
 
         tracing::info!("shutting down DataSync Service gracefully");

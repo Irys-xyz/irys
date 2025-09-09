@@ -346,9 +346,9 @@ impl BlockTreeServiceInner {
         let block_index = BlockIndexService::from_registry();
         let block_finalized_message = BlockMigrationMessage {
             block_header: arc_block.clone(),
-            all_txs: arc_all_txs.clone(),
+            all_txs: arc_all_txs,
         };
-        block_index.do_send(block_finalized_message.clone());
+        block_index.do_send(block_finalized_message);
 
         // Let the chunk_migration_service know about the block migration
         self.service_senders
