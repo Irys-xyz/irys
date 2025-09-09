@@ -16,9 +16,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tokio::{
-    time::{sleep, Duration},
-};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
@@ -131,7 +129,7 @@ impl VdfState {
         ))
     }
 
-    pub async fn start_mining(&self) -> eyre::Result<()> {
+    pub fn start_mining(&self) -> eyre::Result<()> {
         self.is_vdf_mining_enabled
             .as_ref()
             .ok_or(eyre!("Mining state sender isn't set!"))?
@@ -139,7 +137,7 @@ impl VdfState {
         Ok(())
     }
 
-    pub async fn stop_mining(&self) -> eyre::Result<()> {
+    pub fn stop_mining(&self) -> eyre::Result<()> {
         self.is_vdf_mining_enabled
             .as_ref()
             .ok_or(eyre!("Mining state sender isn't set!"))?

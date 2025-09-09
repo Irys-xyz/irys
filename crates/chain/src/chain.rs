@@ -148,13 +148,13 @@ impl IrysNodeCtx {
     }
 
     /// Stop the VDF thread and send a message to all known partition actors to ignore any received VDF steps
-    pub async fn stop_mining(&self) -> eyre::Result<()> {
+    pub fn stop_mining(&self) -> eyre::Result<()> {
         // stop the VDF thread
         self.stop_vdf();
         self.set_partition_mining(false)
     }
     /// Start VDF thread and send a message to all known partition actors to begin mining when they receive a VDF step
-    pub async fn start_mining(&self) -> eyre::Result<()> {
+    pub fn start_mining(&self) -> eyre::Result<()> {
         // start the VDF thread
         self.start_vdf();
         self.set_partition_mining(true)
@@ -1182,7 +1182,7 @@ impl IrysNode {
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),
             sync_service_facade,
-            is_vdf_mining_enabled
+            is_vdf_mining_enabled,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1594,7 +1594,7 @@ impl IrysNode {
             block_pool,
             gossip_data_handler,
             Some(reth_service_addr),
-            is_vdf_mining_enabled
+            is_vdf_mining_enabled,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);

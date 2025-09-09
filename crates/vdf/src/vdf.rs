@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
 use irys_types::block_provider::BlockProvider;
@@ -7,6 +5,8 @@ use irys_types::{
     block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
 };
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tracing::{debug, info, warn};

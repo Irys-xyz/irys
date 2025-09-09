@@ -21,9 +21,9 @@ use irys_types::{
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tracing::{debug, error};
 
@@ -153,7 +153,7 @@ impl MockedServices {
         let (service_senders, service_receivers) = ServiceSenders::new();
 
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
-        let vdf_state = vdf_state_readonly.clone();
+        let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {

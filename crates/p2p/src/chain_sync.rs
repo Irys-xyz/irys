@@ -183,7 +183,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
-        is_vdf_mining_enabled: Arc<AtomicBool>
+        is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sync_state,
