@@ -229,10 +229,10 @@ impl ValidationService {
                         match result {
                             VdfValidationResult::Valid => {
                                 // Valid VDF - task continues to concurrent validation
-                                debug!("VDF validation succeeded for {}", hash);
+                                debug!(block_hash = %hash, "VDF validation succeeded");
                             }
                             VdfValidationResult::Invalid(e) => {
-                                error!("VDF validation failed for {}: {}", hash, e);
+                                error!(block_hash = %hash, error = %e, "VDF validation failed");
                                 // Send failure to block tree
                                 if let Err(e) = self.inner.service_senders.block_tree.send(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
@@ -240,23 +240,26 @@ impl ValidationService {
                                         validation_result: ValidationResult::Invalid,
                                     }
                                 ) {
-                                    error!("Failed to send VDF failure to block tree service: {:?}", e);
+                                    error!(?e, "Failed to send VDF failure to block tree service");
                                 }
                             }
                             VdfValidationResult::Cancelled => {
-                                debug!("VDF validation cancelled for {}", hash);
+                                debug!(block_hash = %hash, "VDF validation cancelled");
                                 // Cancelled tasks are re-queued internally, no action needed
                             }
                         }
                     }
                 }
 
-                // Process concurrent task completions - direct await on JoinSet!
+                // Process concurrent task completions
                 Some(result) = coordinator.concurrent_pool.join_next() => {
                     match result {
                         Ok(validation) => {
-                            debug!("Concurrent validation completed for {}: {:?}",
-                                   validation.block_hash, validation.validation_result);
+                            debug!(
+                                block_hash = %validation.block_hash,
+                                validation_result = ?validation.validation_result,
+                                "Concurrent validation completed"
+                            );
 
                             // Send the validation result to the block tree service
                             if let Err(e) = self.inner.service_senders.block_tree.send(
@@ -265,14 +268,14 @@ impl ValidationService {
                                     validation_result: validation.validation_result,
                                 }
                             ) {
-                                error!("Failed to send validation result to block tree service: {:?}", e);
+                                error!(?e, "Failed to send validation result to block tree service");
                             }
                         }
                         Err(e) if e.is_cancelled() => {
                             debug!("Concurrent task was cancelled");
                         }
                         Err(e) => {
-                            error!("Concurrent task panicked: {}", e);
+                            error!(error = %e, "Concurrent task panicked");
                         }
                     }
                 }
@@ -311,9 +314,9 @@ impl ValidationServiceInner {
         loop {
             if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
                 warn!(
-                    "VDF validation cancelled while waiting for step {} (current: {})",
-                    desired_step_number,
-                    self.vdf_state.read().global_step
+                    desired_step = desired_step_number,
+                    current_step = self.vdf_state.read().global_step,
+                    "VDF validation cancelled while waiting for step"
                 );
                 bail!("Cancelled");
             }
@@ -394,8 +397,8 @@ impl ValidationServiceInner {
             .await??;
         } else {
             debug!(
-                "Skipping vdf_steps_are_valid for block {:?}",
-                block.block_hash
+                block_hash = ?block.block_hash,
+                "Skipping vdf_steps_are_valid for block"
             );
         }
 

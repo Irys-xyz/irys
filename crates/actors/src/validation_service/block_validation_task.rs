@@ -149,7 +149,7 @@ impl BlockValidationTask {
                     VdfValidationResult::Invalid(e)
                 }
             });
-        debug!("Finished validating with result {:?}", &mapped_res);
+        debug!(?mapped_res, "Finished validating");
         mapped_res
     }
 
@@ -172,9 +172,13 @@ impl BlockValidationTask {
                 let tip_hash = block_tree.tip;
                 if let Some(tip_block) = block_tree.get_block(&tip_hash) {
                     let height_diff = tip_block.height.saturating_sub(self.block.height);
-                    warn!("Cancelling validation: block {} at height {} is {} blocks behind tip (threshold: {})",
-                          self.block.block_hash, self.block.height, height_diff,
-                          self.service_inner.config.consensus.block_tree_depth);
+                    warn!(
+                        block_hash = %self.block.block_hash,
+                        block_height = %self.block.height,
+                        height_diff,
+                        threshold = self.service_inner.config.consensus.block_tree_depth,
+                        "Cancelling validation: block too far behind tip"
+                    );
                 }
                 return ParentValidationResult::Cancelled;
             }
@@ -184,8 +188,10 @@ impl BlockValidationTask {
                 None => {
                     // Parent doesn't exist in tree - this is an error condition
                     error!(
-                        "CRITICAL: Parent block {} not found for block {} at height {}",
-                        parent_hash, self.block.block_hash, self.block.height
+                        parent_hash = %parent_hash,
+                        block_hash = %self.block.block_hash,
+                        block_height = %self.block.height,
+                        "CRITICAL: Parent block not found"
                     );
                     return ParentValidationResult::Cancelled;
                 }
@@ -199,7 +205,7 @@ impl BlockValidationTask {
             }
 
             // 3. Wait for relevant state changes
-            debug!("Waiting for parent {} validation", parent_hash);
+            debug!(parent_hash = %parent_hash, "Waiting for parent validation");
             match block_state_rx.recv().await {
                 Ok(event) if event.block_hash == parent_hash => {
                     // Parent state changed, loop back to check
@@ -211,8 +217,12 @@ impl BlockValidationTask {
                 }
                 Err(_) => {
                     // Channel closed - treat as error
-                    error!("Block state channel closed while waiting for parent {} of block {} at height {}",
-                           parent_hash, self.block.block_hash, self.block.height);
+                    error!(
+                        parent_hash = %parent_hash,
+                        block_hash = %self.block.block_hash,
+                        block_height = %self.block.height,
+                        "Block state channel closed while waiting for parent"
+                    );
                     return ParentValidationResult::Cancelled;
                 }
             }
@@ -286,7 +296,7 @@ impl BlockValidationTask {
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
-                    debug!("Skipping POA validation due to skip_vdf_validation flag for block {block_hash:?}");
+                    debug!(?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
                     return Ok(ValidationResult::Valid);
                 }
                 poa_is_valid(

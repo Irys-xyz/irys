@@ -49,7 +49,7 @@
 //! - **ValidationCoordinator**: Orchestrates the entire validation pipeline
 //! - **VdfScheduler**: Manages VDF validation with preemption support
 //! - **ConcurrentValidationPool**: Manages parallel validation tasks with concurrency limits
-//! - **ValidationPriority**: Determines task execution order
+//! - **BlockPriorityMeta**: Determines task execution order
 //!
 //! # Concurrency Model
 //!
@@ -79,69 +79,37 @@ use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::VdfValidationResult;
 
 /// Block priority states for validation ordering
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum BlockPriority {
-    /// Canonical extensions that extend from the canonical tip (highest priority)
-    CanonicalExtension,
-    /// Canonical blocks already on chain (medium priority)
-    Canonical,
-    /// Fork blocks that don't extend the canonical tip (low priority)
-    Fork,
     /// Unknown/orphan blocks (lowest priority)
     Unknown,
+    /// Fork blocks that don't extend the canonical tip (low priority)
+    Fork,
+    /// Canonical blocks already on chain (medium priority)
+    Canonical,
+    /// Canonical extensions that extend from the canonical tip (highest priority)
+    CanonicalExtension,
 }
 
-impl Ord for BlockPriority {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Invert the comparison so higher priority items compare as "greater"
-        // CanonicalExtension > Canonical > Fork > Unknown
-        use BlockPriority::*;
-        match (self, other) {
-            (CanonicalExtension, CanonicalExtension) => std::cmp::Ordering::Equal,
-            (CanonicalExtension, _) => std::cmp::Ordering::Greater,
-            (_, CanonicalExtension) => std::cmp::Ordering::Less,
-
-            (Canonical, Canonical) => std::cmp::Ordering::Equal,
-            (Canonical, Fork | Unknown) => std::cmp::Ordering::Greater,
-
-            (Fork, Fork) => std::cmp::Ordering::Equal,
-            (Fork, Unknown) => std::cmp::Ordering::Greater,
-            (Fork, _) => std::cmp::Ordering::Less,
-
-            (Unknown, Unknown) => std::cmp::Ordering::Equal,
-            (Unknown, _) => std::cmp::Ordering::Less,
-        }
-    }
-}
-
-impl PartialOrd for BlockPriority {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Validation priority with explicit ordering logic
+/// Metadata struct that is used to inform block validation priority decisions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ValidationPriority {
-    /// Block state determines primary ordering
-    pub state: BlockPriority,
-    /// Lower height = higher priority
+pub(super) struct BlockPriorityMeta {
     pub height: u64,
-    /// Fewer VDF steps = higher priority
+    pub state: BlockPriority,
     pub vdf_step_count: u64,
 }
 
-impl ValidationPriority {
+impl BlockPriorityMeta {
     pub(super) fn new(block: &IrysBlockHeader, state: BlockPriority) -> Self {
         Self {
-            state,
             height: block.height,
+            state,
             vdf_step_count: block.vdf_limiter_info.steps.len() as u64,
         }
     }
 }
 
-impl Ord for ValidationPriority {
+impl Ord for BlockPriorityMeta {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // First compare by state (CanonicalExtension > Canonical > Fork > Unknown)
         self.state
@@ -153,11 +121,12 @@ impl Ord for ValidationPriority {
     }
 }
 
-impl PartialOrd for ValidationPriority {
+impl PartialOrd for BlockPriorityMeta {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
+
 
 /// Result from a concurrent validation task
 #[derive(Debug)]
@@ -175,7 +144,7 @@ pub(super) struct ConcurrentValidationPool {
     pub tasks: JoinSet<ConcurrentValidationResult>,
 
     /// Tasks waiting for capacity
-    pub pending: PriorityQueue<BlockHash, (ValidationPriority, BlockValidationTask)>,
+    pub pending: PriorityQueue<BlockHash, (BlockPriorityMeta, BlockValidationTask)>,
 
     /// Maximum concurrent validations
     pub max_concurrent: usize,
@@ -193,7 +162,7 @@ impl ConcurrentValidationPool {
 
     /// Submit a task for validation
     #[instrument(skip_all, fields(block_hash = %task.block.block_hash))]
-    pub fn submit(&mut self, task: BlockValidationTask, priority: ValidationPriority) {
+    pub fn submit(&mut self, task: BlockValidationTask, priority: BlockPriorityMeta) {
         let block_hash = task.block.block_hash;
 
         // Check for duplicates
@@ -263,7 +232,7 @@ impl ConcurrentValidationPool {
     #[instrument(skip_all)]
     pub(super) fn reevaluate_priorities<F>(&mut self, recalc_fn: F)
     where
-        F: Fn(&BlockHash) -> Option<ValidationPriority>,
+        F: Fn(&BlockHash) -> Option<BlockPriorityMeta>,
     {
         let old_pending = std::mem::take(&mut self.pending);
 
@@ -319,13 +288,13 @@ pub(super) struct VdfScheduler {
     /// Currently running VDF task with priority and cancellation signal
     pub current: Option<(
         BlockHash,
-        ValidationPriority,
+        BlockPriorityMeta,
         Arc<std::sync::atomic::AtomicU8>,
         JoinHandle<(VdfValidationResult, BlockValidationTask)>,
     )>,
 
     /// Pending VDF tasks
-    pub pending: PriorityQueue<BlockHash, (ValidationPriority, BlockValidationTask)>,
+    pub pending: PriorityQueue<BlockHash, (BlockPriorityMeta, BlockValidationTask)>,
 }
 
 impl VdfScheduler {
@@ -338,7 +307,7 @@ impl VdfScheduler {
 
     /// Submit a VDF task
     #[instrument(skip_all, fields(block_hash = %task.block.block_hash, ?priority))]
-    pub(super) fn submit(&mut self, task: BlockValidationTask, priority: ValidationPriority) {
+    pub(super) fn submit(&mut self, task: BlockValidationTask, priority: BlockPriorityMeta) {
         let hash = task.block.block_hash;
 
         // Check for duplicates
@@ -465,7 +434,7 @@ impl ValidationCoordinator {
 
     /// Calculate priority for a block
     #[instrument(skip_all, fields(block_hash = %block.block_hash, block_height = %block.height))]
-    pub(super) fn calculate_priority(&self, block: &Arc<IrysBlockHeader>) -> ValidationPriority {
+    pub(super) fn calculate_priority(&self, block: &Arc<IrysBlockHeader>) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
 
@@ -481,7 +450,7 @@ impl ValidationCoordinator {
             None => BlockPriority::Unknown,
         };
 
-        ValidationPriority::new(block, state)
+        BlockPriorityMeta::new(block, state)
     }
 
     /// Check if block extends canonical tip
@@ -562,7 +531,7 @@ impl ValidationCoordinator {
                     }
                     None => BlockPriority::Unknown,
                 };
-                ValidationPriority::new(block, state)
+                BlockPriorityMeta::new(block, state)
             })
         });
 
@@ -580,7 +549,7 @@ mod tests {
     use super::*;
     use irys_types::IrysBlockHeader;
 
-    /// Test that ValidationPriority ordering works correctly with manual Ord
+    /// Test that BlockPriorityMeta ordering works correctly with manual Ord
     #[test]
     fn test_validation_priority_ordering() {
         let mut header1 = IrysBlockHeader::new_mock_header();
@@ -590,21 +559,21 @@ mod tests {
         header2.height = 200;
 
         // Test 1: Canonical extension should have highest priority
-        let p1 = ValidationPriority::new(&header1, BlockPriority::CanonicalExtension);
-        let p2 = ValidationPriority::new(&header2, BlockPriority::Canonical);
+        let p1 = BlockPriorityMeta::new(&header1, BlockPriority::CanonicalExtension);
+        let p2 = BlockPriorityMeta::new(&header2, BlockPriority::Canonical);
         assert!(
             p1 > p2,
             "Canonical extension should have higher priority than canonical"
         );
 
         // Test 2: Among same type, lower height should have higher priority
-        let p3 = ValidationPriority::new(&header1, BlockPriority::Fork);
-        let p4 = ValidationPriority::new(&header2, BlockPriority::Fork);
+        let p3 = BlockPriorityMeta::new(&header1, BlockPriority::Fork);
+        let p4 = BlockPriorityMeta::new(&header2, BlockPriority::Fork);
         assert!(p3 > p4, "Lower height should have higher priority");
 
         // Test 3: Canonical should have higher priority than fork
-        let p5 = ValidationPriority::new(&header1, BlockPriority::Canonical);
-        let p6 = ValidationPriority::new(&header1, BlockPriority::Fork);
+        let p5 = BlockPriorityMeta::new(&header1, BlockPriority::Canonical);
+        let p6 = BlockPriorityMeta::new(&header1, BlockPriority::Fork);
         assert!(p5 > p6, "Canonical should have higher priority than fork");
 
         // Test 4: Test BlockPriority enum ordering (higher priority > lower priority)
@@ -662,8 +631,8 @@ mod tests {
         h2.height = 0;
 
         // Edge case: Very high height vs very low height
-        let p1 = ValidationPriority::new(&h1, BlockPriority::Fork);
-        let p2 = ValidationPriority::new(&h2, BlockPriority::Fork);
+        let p1 = BlockPriorityMeta::new(&h1, BlockPriority::Fork);
+        let p2 = BlockPriorityMeta::new(&h2, BlockPriority::Fork);
 
         assert!(p2 > p1, "Height 0 should have higher priority than MAX-1");
     }
