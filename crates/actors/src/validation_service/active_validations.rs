@@ -207,6 +207,7 @@ impl ConcurrentValidationPool {
     }
 
     /// Try to spawn as many pending tasks as we have capacity for
+    #[instrument(skip_all)]
     fn try_spawn_pending(&mut self) {
         while !self.pending.is_empty() {
             match self.semaphore.clone().try_acquire_owned() {
@@ -233,7 +234,8 @@ impl ConcurrentValidationPool {
                                 validation_result,
                             }
                         }
-                        .instrument(tracing::Span::current()),
+                        .instrument(tracing::info_span!("concurrent_validation", block_hash = %hash))
+                        .in_current_span(),
                     );
                 }
                 Err(_) => {
@@ -245,6 +247,7 @@ impl ConcurrentValidationPool {
     }
 
     /// Poll for next completed task
+    #[instrument(skip_all)]
     pub(super) async fn join_next(
         &mut self,
     ) -> Option<Result<ConcurrentValidationResult, tokio::task::JoinError>> {
@@ -257,6 +260,7 @@ impl ConcurrentValidationPool {
     }
 
     /// Reevaluate priorities after a reorg
+    #[instrument(skip_all)]
     pub(super) fn reevaluate_priorities<F>(&mut self, recalc_fn: F)
     where
         F: Fn(&BlockHash) -> Option<ValidationPriority>,
@@ -280,6 +284,7 @@ pub(super) struct PreemptibleVdfTask {
 }
 
 impl PreemptibleVdfTask {
+    #[instrument(skip_all, fields(block_hash = %self.task.block.block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
         let inner = Arc::clone(&self.task.service_inner);
         let block = Arc::clone(&self.task.block);
@@ -332,6 +337,7 @@ impl VdfScheduler {
     }
 
     /// Submit a VDF task
+    #[instrument(skip_all, fields(block_hash = %task.block.block_hash, ?priority))]
     pub(super) fn submit(&mut self, task: BlockValidationTask, priority: ValidationPriority) {
         let hash = task.block.block_hash;
 
@@ -367,6 +373,7 @@ impl VdfScheduler {
     }
 
     /// Start next VDF task if none running
+    #[instrument(skip_all)]
     pub(super) fn start_next(&mut self) -> Option<()> {
         if self.current.is_some() {
             return None; // Already running
@@ -385,7 +392,8 @@ impl VdfScheduler {
         let handle = tokio::spawn(
             preemptible
                 .execute()
-                .instrument(tracing::info_span!("vdf_validation", block_hash = %hash)),
+                .instrument(tracing::info_span!("vdf_validation", block_hash = %hash, ?priority))
+                .in_current_span(),
         );
 
         self.current = Some((hash, priority, cancel_u8, handle));
@@ -398,6 +406,7 @@ impl VdfScheduler {
     }
 
     /// Poll current VDF task
+    #[instrument(skip_all)]
     pub(super) async fn poll_current(
         &mut self,
     ) -> Option<(BlockHash, VdfValidationResult, BlockValidationTask)> {
@@ -455,6 +464,7 @@ impl ValidationCoordinator {
     }
 
     /// Calculate priority for a block
+    #[instrument(skip_all, fields(block_hash = %block.block_hash, block_height = %block.height))]
     pub(super) fn calculate_priority(&self, block: &Arc<IrysBlockHeader>) -> ValidationPriority {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
@@ -475,6 +485,7 @@ impl ValidationCoordinator {
     }
 
     /// Check if block extends canonical tip
+    #[instrument(skip_all, fields(%block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;
@@ -494,6 +505,7 @@ impl ValidationCoordinator {
     }
 
     /// Submit a validation task
+    #[instrument(skip_all, fields(block_hash = %task.block.block_hash, block_height = %task.block.height))]
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
         let priority = self.calculate_priority(&task.block);
         self.vdf_scheduler.submit(task, priority);
@@ -505,6 +517,7 @@ impl ValidationCoordinator {
     }
 
     /// Process VDF completion
+    #[instrument(skip_all)]
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
@@ -526,6 +539,7 @@ impl ValidationCoordinator {
     }
 
     /// Reevaluate all priorities after reorg
+    #[instrument(skip_all)]
     pub(super) fn reevaluate_priorities(&mut self) {
         info!("Reevaluating priorities after reorg");
 
