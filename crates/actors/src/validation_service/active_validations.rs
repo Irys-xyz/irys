@@ -125,42 +125,42 @@ impl ConcurrentValidationPool {
     /// Try to spawn as many pending tasks as we have capacity for
     #[instrument(skip_all)]
     fn try_spawn_pending(&mut self) {
-        while !self.pending.is_empty() {
-            match self.semaphore.clone().try_acquire_owned() {
-                Ok(permit) => {
-                    let (hash, (_priority, task)) = self.pending.pop().unwrap();
+        loop {
+            // Early return if no pending tasks
+            let Some((hash, (priority, task))) = self.pending.pop() else {
+                return;
+            };
 
-                    debug!(
-                        "Spawning concurrent validation for {} (active: {}/{})",
-                        hash,
-                        self.max_concurrent - self.semaphore.available_permits(),
-                        self.max_concurrent
-                    );
+            // Try to acquire permit, return if no capacity
+            let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
+                // Put the task back since we couldn't spawn it
+                self.pending.push(hash, (priority, task));
+                return;
+            };
 
-                    self.tasks.spawn(
-                        async move {
-                            // Permit is held for the duration of the task
-                            let _permit = permit;
+            debug!(
+                block_hash = %hash,
+                active = self.max_concurrent - self.semaphore.available_permits(),
+                max_concurrent = self.max_concurrent,
+                "Spawning concurrent validation"
+            );
 
-                            // Execute the validation and return the result
-                            let validation_result = task.execute_concurrent().await;
+            self.tasks.spawn(
+                async move {
+                    // Permit is held for the duration of the task
+                    let _permit = permit;
 
-                            ConcurrentValidationResult {
-                                block_hash: hash,
-                                validation_result,
-                            }
-                        }
-                        .instrument(
-                            tracing::info_span!("concurrent_validation", block_hash = %hash),
-                        )
-                        .in_current_span(),
-                    );
+                    // Execute the validation and return the result
+                    let validation_result = task.execute_concurrent().await;
+
+                    ConcurrentValidationResult {
+                        block_hash: hash,
+                        validation_result,
+                    }
                 }
-                Err(_) => {
-                    // No capacity available
-                    break;
-                }
-            }
+                .instrument(tracing::info_span!("concurrent_validation", block_hash = %hash))
+                .in_current_span(),
+            );
         }
     }
 
