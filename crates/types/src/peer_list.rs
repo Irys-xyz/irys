@@ -28,21 +28,30 @@ impl PeerScore {
         Self(score.clamp(Self::MIN, Self::MAX))
     }
 
-    pub fn increase(&mut self) {
-        self.0 = (self.0 + 1).min(Self::MAX);
-    }
-
-    /// Limited increase for data requests (prevents farming)
-    pub fn increase_limited(&mut self, amount: u16) {
+    /// Base method to increase score by a given amount
+    pub fn increase_by(&mut self, amount: u16) {
         self.0 = (self.0 + amount).min(Self::MAX);
     }
 
+    /// Base method to decrease score by a given amount
+    pub fn decrease_by(&mut self, amount: u16) {
+        self.0 = self.0.saturating_sub(amount);
+    }
+
+    pub fn increase(&mut self) {
+        self.increase_by(1);
+    }
+
+    pub fn decrease(&mut self) {
+        self.decrease_by(1);
+    }
+
     pub fn decrease_offline(&mut self) {
-        self.0 = self.0.saturating_sub(3);
+        self.decrease_by(3);
     }
 
     pub fn decrease_bogus_data(&mut self) {
-        self.0 = self.0.saturating_sub(5);
+        self.decrease_by(5);
     }
 
     pub fn is_active(&self) -> bool {
@@ -548,6 +557,211 @@ mod tests {
         let (decoded_address, consumed) = decode_address(&buf[..]);
         assert_eq!(consumed, 7);
         assert_eq!(decoded_address, original_address);
+    }
+
+    mod peer_score_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(50, 5, 45)]
+        #[case(3, 5, 0)]
+        #[case(100, 5, 95)]
+        #[case(2, 5, 0)]
+        fn test_decrease_bogus_data(
+            #[case] initial: u16,
+            #[case] _decrease: u16,
+            #[case] expected: u16,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.decrease_bogus_data();
+            assert_eq!(score.get(), expected);
+        }
+
+        #[rstest]
+        #[case(50, 3, 47)]
+        #[case(1, 3, 0)]
+        #[case(100, 3, 97)]
+        #[case(2, 3, 0)]
+        fn test_decrease_offline(
+            #[case] initial: u16,
+            #[case] _decrease: u16,
+            #[case] expected: u16,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.decrease_offline();
+            assert_eq!(score.get(), expected);
+        }
+
+        #[rstest]
+        #[case(50, 1, 49)]
+        #[case(0, 1, 0)]
+        #[case(100, 1, 99)]
+        fn test_decrease_slow_response(
+            #[case] initial: u16,
+            #[case] _decrease: u16,
+            #[case] expected: u16,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.decrease();
+            assert_eq!(score.get(), expected);
+        }
+
+        #[rstest]
+        #[case(PeerScore::ACTIVE_THRESHOLD + 1, 3, false)]
+        #[case(PeerScore::ACTIVE_THRESHOLD + 3, 3, true)]
+        #[case(PeerScore::ACTIVE_THRESHOLD + 5, 5, true)]
+        #[case(PeerScore::ACTIVE_THRESHOLD, 1, false)]
+        fn test_active_threshold_crossing(
+            #[case] initial: u16,
+            #[case] decrease: u16,
+            #[case] should_be_active: bool,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.decrease_by(decrease);
+            assert_eq!(score.is_active(), should_be_active);
+        }
+
+        #[rstest]
+        #[case(PeerScore::PERSISTENCE_THRESHOLD + 1, 2, false)]
+        #[case(PeerScore::PERSISTENCE_THRESHOLD + 5, 5, true)]
+        #[case(PeerScore::PERSISTENCE_THRESHOLD, 1, false)]
+        fn test_persistence_threshold_crossing(
+            #[case] initial: u16,
+            #[case] decrease: u16,
+            #[case] should_be_persistable: bool,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.decrease_by(decrease);
+            assert_eq!(score.is_persistable(), should_be_persistable);
+        }
+
+        #[test]
+        fn test_score_clamping() {
+            let score = PeerScore::new(150);
+            assert_eq!(score.get(), PeerScore::MAX);
+
+            let mut score = PeerScore::new(PeerScore::MAX);
+            score.increase_by(10);
+            assert_eq!(score.get(), PeerScore::MAX);
+
+            let mut score = PeerScore::new(0);
+            score.decrease_by(10);
+            assert_eq!(score.get(), 0);
+        }
+
+        #[test]
+        fn test_combined_decreases() {
+            let mut score = PeerScore::new(50);
+
+            score.decrease_bogus_data();
+            assert_eq!(score.get(), 45);
+
+            score.decrease_offline();
+            assert_eq!(score.get(), 42);
+
+            score.decrease();
+            assert_eq!(score.get(), 41);
+
+            score.decrease_offline();
+            assert_eq!(score.get(), 38);
+        }
+
+        #[rstest]
+        #[case(0, 10)]
+        #[case(50, 50)]
+        #[case(90, 20)]
+        fn test_increase_and_decrease_cycles(#[case] start: u16, #[case] cycles: u16) {
+            let mut score = PeerScore::new(start);
+
+            for _ in 0..cycles {
+                let before = score.get();
+                score.increase();
+                if before < PeerScore::MAX {
+                    assert_eq!(score.get(), before + 1);
+                } else {
+                    assert_eq!(score.get(), PeerScore::MAX);
+                }
+
+                score.decrease();
+                if score.get() > 0 {
+                    assert_eq!(score.get(), before);
+                }
+            }
+        }
+
+        #[rstest]
+        #[case(0_u16, vec![(0_u8, 10_u16), (1, 5), (2, 0), (3, 0)])]
+        #[case(50, vec![(1, 10), (0, 5), (1, 20), (0, 30)])]
+        #[case(100, vec![(0, 10), (1, 110), (0, 50)])]
+        fn test_score_bounds_with_operations(
+            #[case] initial: u16,
+            #[case] operations: Vec<(u8, u16)>,
+        ) {
+            let mut score = PeerScore::new(initial);
+
+            for (op_type, amount) in operations {
+                match op_type {
+                    0 => score.increase_by(amount),
+                    1 => score.decrease_by(amount),
+                    2 => score.decrease_bogus_data(),
+                    3 => score.decrease_offline(),
+                    _ => {}
+                }
+
+                // Score is always >= MIN due to saturating arithmetic
+                assert!(score.get() <= PeerScore::MAX);
+            }
+        }
+
+        #[rstest]
+        #[case(0, 10, 0)]
+        #[case(5, 10, 0)]
+        #[case(100, 10, 90)]
+        #[case(50, 200, 0)]
+        fn test_decrease_saturating_behavior(
+            #[case] initial: u16,
+            #[case] decrease: u16,
+            #[case] expected: u16,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.decrease_by(decrease);
+            assert_eq!(score.get(), expected);
+        }
+
+        #[rstest]
+        #[case(90, 10, 100)]
+        #[case(95, 10, 100)]
+        #[case(50, 100, 100)]
+        #[case(0, 100, 100)]
+        fn test_increase_clamping_behavior(
+            #[case] initial: u16,
+            #[case] increase: u16,
+            #[case] expected: u16,
+        ) {
+            let mut score = PeerScore::new(initial);
+            score.increase_by(increase);
+            assert_eq!(score.get(), expected);
+        }
+
+        #[test]
+        fn test_decrease_operations_relative_impact() {
+            let initial = 50_u16;
+            let mut score1 = PeerScore::new(initial);
+            let mut score2 = PeerScore::new(initial);
+            let mut score3 = PeerScore::new(initial);
+
+            score1.decrease();
+            score2.decrease_offline();
+            score3.decrease_bogus_data();
+
+            assert_eq!(score1.get(), 49);
+            assert_eq!(score2.get(), 47);
+            assert_eq!(score3.get(), 45);
+
+            assert!(score1.get() > score2.get());
+            assert!(score2.get() > score3.get());
+        }
     }
 
     #[test]

@@ -48,7 +48,6 @@ use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
-use irys_reth_node_bridge::signal::run_until_ctrl_c_or_channel_message;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -59,6 +58,7 @@ use irys_types::{
     OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, ServiceSet,
     TokioServiceHandle, H256, U256,
 };
+use irys_utils::signal::run_until_ctrl_c_or_channel_message;
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
     state::{AtomicVdfState, VdfStateReadonly},
