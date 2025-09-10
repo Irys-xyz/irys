@@ -559,7 +559,6 @@ mod tests {
         assert_eq!(decoded_address, original_address);
     }
 
-
     mod peer_score_tests {
         use super::*;
         use rstest::rstest;
@@ -763,6 +762,7 @@ mod tests {
             assert!(score1.get() > score2.get());
             assert!(score2.get() > score3.get());
         }
+    }
 
     #[test]
     fn peer_list_item_compact_remainder_empty() {
