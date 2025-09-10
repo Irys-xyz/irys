@@ -966,10 +966,11 @@ mod tests {
 
         #[test]
         fn test_handle_data_retrieval_score_slow_response() {
+            const EXPECTED_DECREASE_OF_ONE: u16 = 1;
             let test_cases = vec![
-                (Duration::from_secs(3), 1),
-                (Duration::from_secs(5), 1),
-                (Duration::from_secs(10), 1),
+                (Duration::from_secs(3), EXPECTED_DECREASE_OF_ONE),
+                (Duration::from_secs(5), EXPECTED_DECREASE_OF_ONE),
+                (Duration::from_secs(10), EXPECTED_DECREASE_OF_ONE),
             ];
 
             for (response_time, expected_decrease) in test_cases {
