@@ -164,12 +164,14 @@ impl ValidationService {
     /// Main service loop
     #[tracing::instrument(skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
+        const MAX_CONCURRENT_VALIDATIONS: usize = 100;
         info!("starting validation service");
 
         // Use the improved implementation
         let mut coordinator = active_validations::ValidationCoordinator::new(
             self.inner.block_tree_guard.clone(),
-            10, // max concurrent validations
+            MAX_CONCURRENT_VALIDATIONS,
+            Arc::clone(&self.vdf_notify),
         );
 
         // Create a timer for periodic pipeline logging
@@ -223,16 +225,28 @@ impl ValidationService {
 
                 // Process VDF completions
                 _ = self.vdf_notify.notified() => {
-                    if let Some((hash, VdfValidationResult::Invalid(e))) = coordinator.process_vdf().await {
-                        error!("VDF validation failed for {}: {}", hash, e);
-                        // Send failure to block tree
-                        if let Err(e) = self.inner.service_senders.block_tree.send(
-                            crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                                block_hash: hash,
-                                validation_result: ValidationResult::Invalid,
+                    if let Some((hash, result)) = coordinator.process_vdf().await {
+                        match result {
+                            VdfValidationResult::Valid => {
+                                // Valid VDF - task continues to concurrent validation
+                                debug!("VDF validation succeeded for {}", hash);
                             }
-                        ) {
-                            error!("Failed to send VDF failure to block tree service: {:?}", e);
+                            VdfValidationResult::Invalid(e) => {
+                                error!("VDF validation failed for {}: {}", hash, e);
+                                // Send failure to block tree
+                                if let Err(e) = self.inner.service_senders.block_tree.send(
+                                    crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                        block_hash: hash,
+                                        validation_result: ValidationResult::Invalid,
+                                    }
+                                ) {
+                                    error!("Failed to send VDF failure to block tree service: {:?}", e);
+                                }
+                            }
+                            VdfValidationResult::Cancelled => {
+                                debug!("VDF validation cancelled for {}", hash);
+                                // Cancelled tasks are re-queued internally, no action needed
+                            }
                         }
                     }
                 }
@@ -265,13 +279,17 @@ impl ValidationService {
 
                 // Periodic pipeline state logging
                 _ = pipeline_log_interval.tick() => {
-                    let stats = coordinator.stats();
+                    let vdf_running = coordinator.vdf_scheduler.current.is_some();
+                    let vdf_pending = coordinator.vdf_scheduler.pending.len();
+                    let concurrent_active = coordinator.concurrent_pool.max_concurrent - coordinator.concurrent_pool.semaphore.available_permits();
+                    let concurrent_pending = coordinator.concurrent_pool.pending.len();
+
                     info!(
-                        "Validation pipeline - VDF: {} running, {} pending | Concurrent: {} active, {} pending",
-                        if stats.vdf_running { 1 } else { 0 },
-                        stats.vdf_pending,
-                        stats.concurrent.active,
-                        stats.concurrent.pending
+                        vdf_running = if vdf_running { 1 } else { 0 },
+                        vdf_pending,
+                        concurrent_active,
+                        concurrent_pending,
+                        "Validation pipeline status"
                     );
                 }
             }

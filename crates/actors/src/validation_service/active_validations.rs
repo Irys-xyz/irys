@@ -66,10 +66,11 @@
 
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
+use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -168,16 +169,16 @@ pub(super) struct ConcurrentValidationResult {
 /// Clean concurrent validation pool using JoinSet + Semaphore
 pub(super) struct ConcurrentValidationPool {
     /// Controls maximum concurrent validations
-    semaphore: Arc<Semaphore>,
+    pub semaphore: Arc<Semaphore>,
 
     /// Active validation tasks
-    tasks: JoinSet<ConcurrentValidationResult>,
+    pub tasks: JoinSet<ConcurrentValidationResult>,
 
     /// Tasks waiting for capacity
-    pending: PriorityQueue<BlockHash, (ValidationPriority, BlockValidationTask)>,
+    pub pending: PriorityQueue<BlockHash, (ValidationPriority, BlockValidationTask)>,
 
     /// Maximum concurrent validations
-    max_concurrent: usize,
+    pub max_concurrent: usize,
 }
 
 impl ConcurrentValidationPool {
@@ -255,15 +256,6 @@ impl ConcurrentValidationPool {
         Some(result)
     }
 
-    /// Get current statistics
-    pub(super) fn stats(&self) -> PoolStats {
-        PoolStats {
-            active: self.max_concurrent - self.semaphore.available_permits(),
-            pending: self.pending.len(),
-        }
-    }
-
-
     /// Reevaluate priorities after a reorg
     pub(super) fn reevaluate_priorities<F>(&mut self, recalc_fn: F)
     where
@@ -281,59 +273,54 @@ impl ConcurrentValidationPool {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct PoolStats {
-    pub active: usize,
-    pub pending: usize,
-}
-
 /// VDF task with preemption support
 pub(super) struct PreemptibleVdfTask {
     pub task: BlockValidationTask,
-    pub cancel: Arc<AtomicBool>,
+    pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl PreemptibleVdfTask {
-    pub(super) async fn execute(self) -> VdfValidationResult {
+    pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
         let inner = Arc::clone(&self.task.service_inner);
         let block = Arc::clone(&self.task.block);
         let skip_vdf = self.task.skip_vdf_validation;
+        let vdf_notify = Arc::clone(&self.task.service_inner.vdf_notify);
 
-        // Convert AtomicBool to AtomicU8 for compatibility with existing code
-        use irys_vdf::state::CancelEnum;
-        let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
-        let cancel_bool = Arc::clone(&self.cancel);
-
-        // Spawn a task to bridge the cancel signal
-        let cancel_u8_clone = Arc::clone(&cancel_u8);
-        tokio::spawn(
-            async move {
-                loop {
-                    if cancel_bool.load(Ordering::Relaxed) {
-                        cancel_u8_clone.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        // No bridge task needed - just use the AtomicU8 directly!
+        let result = match inner
+            .ensure_vdf_is_valid(&block, self.cancel_u8.clone(), skip_vdf)
+            .await
+        {
+            Ok(()) => VdfValidationResult::Valid,
+            Err(e) => {
+                // Check if we were cancelled by inspecting the AtomicU8
+                if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                    VdfValidationResult::Cancelled
+                } else {
+                    VdfValidationResult::Invalid(e)
                 }
             }
-            .instrument(tracing::info_span!("vdf_cancel_bridge", block_hash = %block.block_hash)),
-        );
+        };
 
-        match inner.ensure_vdf_is_valid(&block, cancel_u8, skip_vdf).await {
-            Ok(()) => VdfValidationResult::Valid,
-            Err(e) if e.to_string().contains("Cancelled") => VdfValidationResult::Cancelled,
-            Err(e) => VdfValidationResult::Invalid(e),
-        }
+        // Notify that VDF task has completed so it can be collected
+        vdf_notify.notify_one();
+
+        (result, self.task)
     }
 }
 
 /// Simplified VDF scheduler with preemption
 pub(super) struct VdfScheduler {
-    /// Currently running VDF task
-    current: Option<(BlockHash, Arc<AtomicBool>, JoinHandle<VdfValidationResult>)>,
+    /// Currently running VDF task with priority and cancellation signal
+    pub current: Option<(
+        BlockHash,
+        ValidationPriority,
+        Arc<std::sync::atomic::AtomicU8>,
+        JoinHandle<(VdfValidationResult, BlockValidationTask)>,
+    )>,
 
     /// Pending VDF tasks
-    pending: PriorityQueue<BlockHash, (ValidationPriority, BlockValidationTask)>,
+    pub pending: PriorityQueue<BlockHash, (ValidationPriority, BlockValidationTask)>,
 }
 
 impl VdfScheduler {
@@ -355,7 +342,7 @@ impl VdfScheduler {
         }
 
         // Check if current task exists
-        if let Some((current_hash, _, _)) = &self.current {
+        if let Some((current_hash, _, _, _)) = &self.current {
             if *current_hash == hash {
                 debug!("VDF task for {} already running", hash);
                 return;
@@ -365,14 +352,15 @@ impl VdfScheduler {
         self.pending.push(hash, (priority, task));
 
         // Check if we should preempt current task
-        if let Some((current_hash, cancel, _)) = &self.current {
-            if let Some((highest_hash, _)) = self.pending.peek() {
-                if *highest_hash != *current_hash {
+        if let Some((current_hash, current_priority, cancel_u8, _)) = &self.current {
+            if let Some((_, (new_priority, _))) = self.pending.peek() {
+                // Only preempt if new task has HIGHER priority
+                if new_priority > current_priority {
                     info!(
-                        "Preempting VDF task {} for higher priority {}",
-                        current_hash, highest_hash
+                        "Preempting VDF task {} (priority {:?}) for higher priority {:?}",
+                        current_hash, current_priority, new_priority
                     );
-                    cancel.store(true, Ordering::Relaxed);
+                    cancel_u8.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
                 }
             }
         }
@@ -384,12 +372,14 @@ impl VdfScheduler {
             return None; // Already running
         }
 
-        let (hash, (_priority, task)) = self.pending.pop()?;
-        let cancel = Arc::new(AtomicBool::new(false));
+        let (hash, (priority, task)) = self.pending.pop()?;
+
+        // Create AtomicU8 for cancellation
+        let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
 
         let preemptible = PreemptibleVdfTask {
             task,
-            cancel: Arc::clone(&cancel),
+            cancel_u8: Arc::clone(&cancel_u8),
         };
 
         let handle = tokio::spawn(
@@ -397,70 +387,41 @@ impl VdfScheduler {
                 .execute()
                 .instrument(tracing::info_span!("vdf_validation", block_hash = %hash)),
         );
-        self.current = Some((hash, cancel, handle));
 
-        debug!("Started VDF validation for {}", hash);
+        self.current = Some((hash, priority, cancel_u8, handle));
+
+        debug!(
+            "Started VDF validation for {} with priority {:?}",
+            hash, priority
+        );
         Some(())
     }
 
     /// Poll current VDF task
-    pub(super) async fn poll_current(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
-        let (hash, _cancel, mut handle) = self.current.take()?;
+    pub(super) async fn poll_current(
+        &mut self,
+    ) -> Option<(BlockHash, VdfValidationResult, BlockValidationTask)> {
+        let (hash, priority, cancel_u8, mut handle) = self.current.take()?;
 
         // Use poll_immediate to check without blocking
         let poll_result = futures::future::poll_immediate(&mut handle).await;
 
         match poll_result {
-            Some(Ok(result)) => {
+            Some(Ok((result, task))) => {
                 // Task completed
-                Some((hash, result))
+                Some((hash, result, task))
             }
             Some(Err(e)) => {
                 error!("VDF task panicked: {}", e);
-                Some((
-                    hash,
-                    VdfValidationResult::Invalid(eyre::eyre!("Task panicked")),
-                ))
+                // We lost the task on panic, cannot continue
+                None
             }
             None => {
                 // Still running, put it back
-                self.current = Some((hash, _cancel, handle));
+                self.current = Some((hash, priority, cancel_u8, handle));
                 None
             }
         }
-    }
-
-    /// Handle VDF completion
-    pub(super) fn handle_completion(
-        &mut self,
-        hash: BlockHash,
-        result: &VdfValidationResult,
-    ) -> Option<BlockValidationTask> {
-        match result {
-            VdfValidationResult::Valid => {
-                // Remove from pending and return for concurrent validation
-                self.pending.remove(&hash).map(|(_, (_, task))| task)
-            }
-            VdfValidationResult::Invalid(_) => {
-                // Remove the failed task
-                self.pending.remove(&hash);
-                None
-            }
-            VdfValidationResult::Cancelled => {
-                debug!("VDF task {} was cancelled", hash);
-                // Remove cancelled task and trigger reprocessing
-                if let Some((_, (_, task))) = self.pending.remove(&hash) {
-                    // Notify to trigger immediate reprocessing
-                    task.service_inner.vdf_notify.notify_one();
-                }
-                None
-            }
-        }
-    }
-
-
-    pub(super) fn pending_len(&self) -> usize {
-        self.pending.len()
     }
 }
 
@@ -474,14 +435,22 @@ pub(super) struct ValidationCoordinator {
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
+
+    /// VDF task completion notifier
+    vdf_notify: Arc<Notify>,
 }
 
 impl ValidationCoordinator {
-    pub(super) fn new(block_tree_guard: BlockTreeReadGuard, max_concurrent: usize) -> Self {
+    pub(super) fn new(
+        block_tree_guard: BlockTreeReadGuard,
+        max_concurrent: usize,
+        vdf_notify: Arc<Notify>,
+    ) -> Self {
         Self {
             vdf_scheduler: VdfScheduler::new(),
             concurrent_pool: ConcurrentValidationPool::new(max_concurrent),
             block_tree_guard,
+            vdf_notify,
         }
     }
 
@@ -528,16 +497,20 @@ impl ValidationCoordinator {
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
         let priority = self.calculate_priority(&task.block);
         self.vdf_scheduler.submit(task, priority);
+
+        // Notify to start processing if VDF is idle
+        if self.vdf_scheduler.current.is_none() && !self.vdf_scheduler.pending.is_empty() {
+            self.vdf_notify.notify_one();
+        }
     }
 
     /// Process VDF completion
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
-        if let Some((hash, result)) = self.vdf_scheduler.poll_current().await {
-            debug!("VDF completed for {}: {:?}", hash, result);
+        if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
+            debug!(?hash, ?result, "VDF completed");
 
-            // Handle completion and maybe get task for concurrent validation
-            if let Some(task) = self.vdf_scheduler.handle_completion(hash, &result) {
+            if matches!(result, VdfValidationResult::Valid) {
                 let priority = self.calculate_priority(&task.block);
                 self.concurrent_pool.submit(task, priority);
             }
@@ -586,23 +559,6 @@ impl ValidationCoordinator {
             self.vdf_scheduler.pending.push(hash, (new_priority, task));
         }
     }
-
-    /// Get statistics
-    pub(super) fn stats(&self) -> CoordinatorStats {
-        CoordinatorStats {
-            vdf_running: self.vdf_scheduler.current.is_some(),
-            vdf_pending: self.vdf_scheduler.pending_len(),
-            concurrent: self.concurrent_pool.stats(),
-        }
-    }
-
-}
-
-#[derive(Debug)]
-pub(super) struct CoordinatorStats {
-    pub vdf_running: bool,
-    pub vdf_pending: usize,
-    pub concurrent: PoolStats,
 }
 
 #[cfg(test)]
@@ -649,10 +605,10 @@ mod tests {
         let mut pool = ConcurrentValidationPool::new(2);
 
         // Initial state
-        let stats = pool.stats();
-        assert_eq!(stats.active, 0);
-        assert_eq!(stats.pending, 0);
-        assert_eq!(pool.stats().pending, 0);
+        let active = pool.max_concurrent - pool.semaphore.available_permits();
+        let pending = pool.pending.len();
+        assert_eq!(active, 0);
+        assert_eq!(pending, 0);
         // Capacity was 2 as configured
 
         // We can't easily test with real BlockValidationTask without a lot of setup,
@@ -666,14 +622,14 @@ mod tests {
         );
     }
 
-    /// Test VDF scheduler with preemption using AtomicBool
+    /// Test VDF scheduler with preemption using AtomicU8
     #[test]
     fn test_vdf_scheduler_preemption() {
         let scheduler = VdfScheduler::new();
 
         // Initially empty
         assert!(scheduler.current.is_none());
-        assert_eq!(scheduler.pending_len(), 0);
+        assert_eq!(scheduler.pending.len(), 0);
 
         // Can't easily test real tasks without full setup, but structure is validated
     }
@@ -696,34 +652,5 @@ mod tests {
         let p2 = ValidationPriority::new(&h2, BlockPriority::Fork);
 
         assert!(p2 > p1, "Height 0 should have higher priority than MAX-1");
-    }
-
-    /// Test stats reporting
-    #[test]
-    fn test_pool_stats() {
-        let stats = PoolStats {
-            active: 5,
-            pending: 10,
-        };
-
-        assert_eq!(stats.active, 5);
-        assert_eq!(stats.pending, 10);
-    }
-
-    /// Test coordinator stats
-    #[test]
-    fn test_coordinator_stats() {
-        let stats = CoordinatorStats {
-            vdf_running: true,
-            vdf_pending: 3,
-            concurrent: PoolStats {
-                active: 2,
-                pending: 5,
-            },
-        };
-
-        assert!(stats.vdf_running);
-        assert_eq!(stats.vdf_pending, 3);
-        assert_eq!(stats.concurrent.active, 2);
     }
 }
