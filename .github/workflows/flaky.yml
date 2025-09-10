@@ -22,14 +22,15 @@ env:
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+  # RUSTFLAGS: "-C link-arg=-fuse-ld=lld"  # Disabled for ubuntu-latest runner
   RUST_BACKTRACE: short
   # keep build artifacts contained to this repo's workspace on the self-hosted runner
   CARGO_TARGET_DIR: ${{ github.workspace }}/.target
 
 jobs:
   flaky-tests:
-    runs-on: [self-hosted, test-runner]
+    #runs-on: [self-hosted, test-runner]
+    runs-on: [ubuntu-latest]
     timeout-minutes: 240
     steps:
       - name: Checkout code
@@ -59,7 +60,7 @@ jobs:
           
           START_TIME=$(date +%s)
           set +e
-          cargo flaky --release -i "${{ env.RUNS }}" -- --release 2>&1 | tee flaky-test-results/flaky-test-output.txt
+          cargo flaky --release -i "${{ env.RUNS }}" 2>&1 | tee flaky-test-results/flaky-test-output.txt
           EXIT_CODE=$?
           END_TIME=$(date +%s)
           
