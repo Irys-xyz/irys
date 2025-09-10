@@ -5056,6 +5056,7 @@ dependencies = [
  "eyre",
  "irys-types",
  "openssl",
+ "rstest",
  "tracing",
 ]
 

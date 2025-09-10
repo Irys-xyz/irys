@@ -10,5 +10,8 @@ eyre.workspace = true
 openssl.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+rstest.workspace = true
+
 [lints]
 workspace = true
