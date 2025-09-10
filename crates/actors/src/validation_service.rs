@@ -202,6 +202,7 @@ impl ValidationService {
                             );
 
                             coordinator.submit_task(task);
+                            tracing::error!("task submitted");
                         }
                         None => {
                             warn!("receiver channel closed");
@@ -223,11 +224,12 @@ impl ValidationService {
 
                 // Process VDF completions
                 _ = self.vdf_notify.notified() => {
+                    tracing::error!("vdf notify");
                     if let Some((hash, result)) = coordinator.process_vdf().await {
                         match result {
                             VdfValidationResult::Valid => {
                                 // Valid VDF - task continues to concurrent validation
-                                debug!(block_hash = %hash, "VDF validation succeeded");
+                                tracing::error!(block_hash = %hash, "VDF validation succeeded");
                             }
                             VdfValidationResult::Invalid(e) => {
                                 error!(block_hash = %hash, error = %e, "VDF validation failed");
@@ -242,18 +244,18 @@ impl ValidationService {
                                 }
                             }
                             VdfValidationResult::Cancelled => {
-                                debug!(block_hash = %hash, "VDF validation cancelled");
+                                tracing::error!(block_hash = %hash, "VDF validation cancelled");
                                 // Cancelled tasks are re-queued internally, no action needed
                             }
                         }
                     }
                 }
 
-                // Process concurrent task completions
-                Some(result) = coordinator.concurrent_tasks.join_next() => {
+                // Process concurrent task completions (only if there are tasks)
+                result = coordinator.concurrent_tasks.join_next(), if !coordinator.concurrent_tasks.is_empty() => {
                     match result {
-                        Ok(validation) => {
-                            debug!(
+                        Some(Ok(validation)) => {
+                            tracing::error!(
                                 block_hash = %validation.block_hash,
                                 validation_result = ?validation.validation_result,
                                 "Concurrent validation completed"
@@ -269,11 +271,12 @@ impl ValidationService {
                                 error!(?e, "Failed to send validation result to block tree service");
                             }
                         }
-                        Err(e) if e.is_cancelled() => {
-                            debug!("Concurrent task was cancelled");
-                        }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             error!(error = %e, "Concurrent task panicked");
+                        }
+                        None => {
+                            // This shouldn't happen when we check is_empty()
+                            debug!("JoinSet returned None despite not being empty");
                         }
                     }
                 }
@@ -284,7 +287,7 @@ impl ValidationService {
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
 
-                    info!(
+                    error!(
                         vdf_running = if vdf_running { 1 } else { 0 },
                         vdf_pending,
                         concurrent_active,

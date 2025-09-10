@@ -58,6 +58,12 @@ impl PartialEq for BlockValidationTask {
 
 impl Eq for BlockValidationTask {}
 
+impl std::hash::Hash for BlockValidationTask {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.block.block_hash.as_bytes());
+    }
+}
+
 impl PartialOrd for BlockValidationTask {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))

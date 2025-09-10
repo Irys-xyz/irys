@@ -86,16 +86,18 @@ pub(super) struct ConcurrentValidationResult {
 pub(super) struct PreemptibleVdfTask {
     pub task: BlockValidationTask,
     pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+    vdf_notify: Arc<Notify>,
 }
 
 impl PreemptibleVdfTask {
     #[instrument(skip_all, fields(block_hash = %self.task.block.block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
+        tracing::error!("PreemptibleVdfTask 1");
         let inner = Arc::clone(&self.task.service_inner);
         let block = Arc::clone(&self.task.block);
         let skip_vdf = self.task.skip_vdf_validation;
-        let vdf_notify = Arc::clone(&self.task.service_inner.vdf_notify);
 
+        tracing::error!("PreemptibleVdfTask 2");
         // No bridge task needed - just use the AtomicU8 directly!
         let result = match inner
             .ensure_vdf_is_valid(&block, self.cancel_u8.clone(), skip_vdf)
@@ -112,8 +114,8 @@ impl PreemptibleVdfTask {
             }
         };
 
-        // Notify that VDF task has completed so it can be collected
-        vdf_notify.notify_one();
+        self.vdf_notify.notify_one();
+        tracing::error!("here2");
 
         (result, self.task)
     }
@@ -125,6 +127,7 @@ pub(super) struct CurrentVdfTask {
     pub priority: BlockPriorityMeta,
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
     pub handle: JoinHandle<(VdfValidationResult, BlockValidationTask)>,
+    pub block: Arc<IrysBlockHeader>,
 }
 
 /// Simplified VDF scheduler with preemption
@@ -133,14 +136,18 @@ pub(super) struct VdfScheduler {
     pub current: Option<CurrentVdfTask>,
 
     /// Pending VDF tasks
-    pub pending: PriorityQueue<BlockHash, (BlockPriorityMeta, BlockValidationTask)>,
+    pub pending: PriorityQueue<BlockValidationTask, BlockPriorityMeta>,
+
+    /// VDF task completion notifier
+    vdf_notify: Arc<Notify>,
 }
 
 impl VdfScheduler {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(vdf_notify: Arc<Notify>) -> Self {
         Self {
             current: None,
             pending: PriorityQueue::new(),
+            vdf_notify,
         }
     }
 
@@ -150,23 +157,26 @@ impl VdfScheduler {
         let hash = task.block.block_hash;
 
         // Check for duplicates
-        if self.pending.get(&hash).is_some() {
-            debug!("VDF task for {} already pending", hash);
+        if self.pending.get(&task).is_some() {
+            tracing::error!("VDF task for {} already pending", hash);
             return;
         }
 
         // Check if current task exists
         if let Some(current) = &self.current {
             if current.hash == hash {
-                debug!("VDF task for {} already running", hash);
+                tracing::error!("VDF task for {} already running", hash);
                 return;
             }
         }
 
-        self.pending.push(hash, (priority, task));
+        self.pending.push(task, priority);
 
         // Check if we should preempt current task
         self.check_preemption();
+
+        // Notify the main loop to process the task
+        self.vdf_notify.notify_one();
     }
 
     /// Check if current task should be preempted by higher priority pending task
@@ -175,15 +185,17 @@ impl VdfScheduler {
             return;
         };
 
-        let Some((_, (pending_priority, _))) = self.pending.peek() else {
+        let Some((_, pending_priority)) = self.pending.peek() else {
             return;
         };
 
         // Only preempt if pending task has HIGHER priority
         if pending_priority > &current.priority {
-            info!(
+            tracing::error!(
                 "Preempting VDF task {} (priority {:?}) for higher priority {:?}",
-                current.hash, current.priority, pending_priority
+                current.hash,
+                current.priority,
+                pending_priority
             );
             current
                 .cancel_signal
@@ -198,33 +210,41 @@ impl VdfScheduler {
             return None; // Already running
         }
 
-        let (hash, (priority, task)) = self.pending.pop()?;
+        tracing::error!("start next 1");
+        let (task, priority) = self.pending.pop()?;
+        tracing::error!("start next 2");
+        let hash = task.block.block_hash;
 
         // Create AtomicU8 for cancellation
         let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
 
+        tracing::error!("start next 3");
+        let block = Arc::clone(&task.block);
         let preemptible = PreemptibleVdfTask {
             task,
             cancel_u8: Arc::clone(&cancel_u8),
+            vdf_notify: Arc::clone(&self.vdf_notify),
         };
 
+        tracing::error!("start next 4");
         let handle = tokio::spawn(
             preemptible
                 .execute()
                 .instrument(tracing::info_span!("vdf_validation", block_hash = %hash, ?priority))
                 .in_current_span(),
         );
-
         self.current = Some(CurrentVdfTask {
             hash,
             priority,
+            block,
             cancel_signal: cancel_u8,
             handle,
         });
 
-        debug!(
+        tracing::error!(
             "Started VDF validation for {} with priority {:?}",
-            hash, priority
+            hash,
+            priority
         );
         Some(())
     }
@@ -241,12 +261,14 @@ impl VdfScheduler {
 
         match poll_result {
             Some(Ok((result, task))) => {
+                self.vdf_notify.notify_one();
                 // Task completed
                 Some((current.hash, result, task))
             }
             Some(Err(e)) => {
                 error!("VDF task panicked: {}", e);
                 // We lost the task on panic, cannot continue
+                self.vdf_notify.notify_one();
                 None
             }
             None => {
@@ -276,7 +298,7 @@ pub(super) struct ValidationCoordinator {
 impl ValidationCoordinator {
     pub(super) fn new(block_tree_guard: BlockTreeReadGuard, vdf_notify: Arc<Notify>) -> Self {
         Self {
-            vdf_scheduler: VdfScheduler::new(),
+            vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify)),
             concurrent_tasks: JoinSet::new(),
             block_tree_guard,
             vdf_notify,
@@ -329,11 +351,6 @@ impl ValidationCoordinator {
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
         let priority = self.calculate_priority(&*task.block);
         self.vdf_scheduler.submit(task, priority);
-
-        // Notify to start processing if VDF is idle
-        if self.vdf_scheduler.current.is_none() && !self.vdf_scheduler.pending.is_empty() {
-            self.vdf_notify.notify_one();
-        }
     }
 
     /// Process VDF completion
@@ -341,20 +358,22 @@ impl ValidationCoordinator {
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
-            debug!(?hash, ?result, "VDF completed");
+            tracing::error!(?hash, ?result, "VDF completed");
 
             if matches!(result, VdfValidationResult::Valid) {
                 let block_hash = task.block.block_hash;
 
-                debug!(
+                tracing::error!(
                     block_hash = %block_hash,
                     "Spawning concurrent validation"
                 );
 
                 self.concurrent_tasks.spawn(
                     async move {
+                        tracing::error!("spawning new");
                         // Execute the validation and return the result
                         let validation_result = task.execute_concurrent().await;
+                        tracing::error!(?validation_result, "exiting");
 
                         ConcurrentValidationResult {
                             block_hash,
@@ -362,7 +381,7 @@ impl ValidationCoordinator {
                         }
                     }
                     .instrument(
-                        tracing::info_span!("concurrent_validation", block_hash = %block_hash),
+                        tracing::error_span!("concurrent_validation", block_hash = %block_hash),
                     )
                     .in_current_span(),
                 );
@@ -396,15 +415,8 @@ impl ValidationCoordinator {
             return;
         };
 
-        // Get block from tree
-        let block_tree = self.block_tree_guard.read();
-        let Some(block) = block_tree.get_block(&current.hash) else {
-            return;
-        };
-
         // Calculate new priority (block is already a reference)
-        let new_priority = self.calculate_priority(block);
-        drop(block_tree); // Release lock after calculation
+        let new_priority = self.calculate_priority(&current.block);
 
         if new_priority == current.priority {
             return; // No change
@@ -428,22 +440,38 @@ impl ValidationCoordinator {
 
     /// Reevaluate pending VDF task priorities
     fn reevaluate_pending_vdf(&mut self) {
-        let old_pending = std::mem::take(&mut self.vdf_scheduler.pending);
-        let count = old_pending.len();
+        // Collect tasks that need priority updates (can't mutate while iterating)
+        let tasks_to_update: Vec<_> = self
+            .vdf_scheduler
+            .pending
+            .iter()
+            .map(|(task, _priority)| task.clone())
+            .collect();
 
-        if count == 0 {
+        if tasks_to_update.is_empty() {
             return;
         }
 
-        for (hash, (_old_priority, task)) in old_pending {
+        let mut updated_count = 0;
+        for task in tasks_to_update {
             let new_priority = self.calculate_priority(&*task.block);
-            self.vdf_scheduler.pending.push(hash, (new_priority, task));
+            // update_priority returns true if the item existed and was updated
+            if self
+                .vdf_scheduler
+                .pending
+                .change_priority(&task, new_priority)
+                .is_some()
+            {
+                updated_count += 1;
+            }
         }
 
-        debug!(
-            vdf_pending_updated = count,
-            "Reevaluated VDF pending task priorities after reorg"
-        );
+        if updated_count > 0 {
+            debug!(
+                vdf_pending_updated = updated_count,
+                "Reevaluated VDF pending task priorities after reorg"
+            );
+        }
     }
 }
 
@@ -454,7 +482,8 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
-    use irys_types::{IrysBlockHeader, H256};
+    use irys_types::{serialization::H256List, BlockHash, IrysBlockHeader, H256};
+    use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
     /// Test that BlockPriorityMeta ordering works correctly with manual Ord
@@ -462,9 +491,11 @@ mod tests {
     fn test_validation_priority_ordering() {
         let mut header1 = IrysBlockHeader::new_mock_header();
         header1.height = 100;
+        header1.vdf_limiter_info.steps = H256List(vec![Default::default(); 5]); // 5 VDF steps
 
         let mut header2 = IrysBlockHeader::new_mock_header();
         header2.height = 200;
+        header2.vdf_limiter_info.steps = H256List(vec![Default::default(); 10]); // 10 VDF steps
 
         // Test 1: Canonical extension should have highest priority
         let p1 = BlockPriorityMeta::new(&header1, BlockPriority::CanonicalExtension);
@@ -488,6 +519,96 @@ mod tests {
         assert!(BlockPriority::CanonicalExtension > BlockPriority::Canonical);
         assert!(BlockPriority::Canonical > BlockPriority::Fork);
         assert!(BlockPriority::Fork > BlockPriority::Unknown);
+
+        // Test 5: VDF step count as tiebreaker (fewer steps = higher priority)
+        let mut header3 = header1.clone();
+        header3.vdf_limiter_info.steps = H256List(vec![Default::default(); 20]); // More steps
+        let p7 = BlockPriorityMeta::new(&header1, BlockPriority::Fork); // 5 steps
+        let p8 = BlockPriorityMeta::new(&header3, BlockPriority::Fork); // 20 steps
+        assert!(p7 > p8, "Fewer VDF steps should have higher priority");
+    }
+
+    /// Tests BlockPriority ordering with PriorityQueue to ensure correct behavior.
+    /// Setup: Create priorities with different states, heights, and VDF steps.
+    /// Expected: Items popped in order of CanonicalExtension > Canonical > Fork,
+    ///          with lower heights and fewer VDF steps having higher priority.
+    /// Verifies: PriorityQueue correctly uses BlockPriorityMeta ordering.
+    #[test]
+    fn test_priority_queue_ordering() {
+        // Create headers with different properties
+        let mkheader = |height: u64, vdf_steps: usize| {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = height;
+            header.block_hash = BlockHash::random();
+            header.vdf_limiter_info.steps = H256List(vec![Default::default(); vdf_steps]);
+            header
+        };
+
+        // Create priority metadata
+        let mkprio =
+            |header: &IrysBlockHeader, state: BlockPriority| BlockPriorityMeta::new(header, state);
+
+        // Create a priority queue
+        let mut queue: PriorityQueue<BlockHash, (BlockPriorityMeta, ())> = PriorityQueue::new();
+
+        // Add items in random order
+        let h1 = mkheader(10, 5);
+        let h2 = mkheader(9, 10);
+        let h3 = mkheader(10, 100);
+        let h4 = mkheader(9, 1);
+
+        // Expected order (highest priority first):
+        // 1. CanonicalExtension, height 9, 10 VDF steps
+        // 2. CanonicalExtension, height 10, 5 VDF steps
+        // 3. CanonicalExtension, height 10, 100 VDF steps
+        // 4. Canonical, height 9, 1 VDF step
+
+        let items = vec![
+            (
+                h2.block_hash,
+                mkprio(&h2, BlockPriority::CanonicalExtension),
+            ),
+            (
+                h1.block_hash,
+                mkprio(&h1, BlockPriority::CanonicalExtension),
+            ),
+            (
+                h3.block_hash,
+                mkprio(&h3, BlockPriority::CanonicalExtension),
+            ),
+            (h4.block_hash, mkprio(&h4, BlockPriority::Canonical)),
+        ];
+
+        // Insert in different order to test sorting
+        queue.push(items[3].0, (items[3].1.clone(), ()));
+        queue.push(items[1].0, (items[1].1.clone(), ()));
+        queue.push(items[0].0, (items[0].1.clone(), ()));
+        queue.push(items[2].0, (items[2].1.clone(), ()));
+
+        // Pop items and verify order
+        let result1 = queue.pop().unwrap();
+        assert_eq!(
+            result1.0, items[0].0,
+            "First item should be CanonicalExtension with height 9"
+        );
+
+        let result2 = queue.pop().unwrap();
+        assert_eq!(
+            result2.0, items[1].0,
+            "Second item should be CanonicalExtension with height 10, 5 steps"
+        );
+
+        let result3 = queue.pop().unwrap();
+        assert_eq!(
+            result3.0, items[2].0,
+            "Third item should be CanonicalExtension with height 10, 100 steps"
+        );
+
+        let result4 = queue.pop().unwrap();
+        assert_eq!(
+            result4.0, items[3].0,
+            "Fourth item should be Canonical with height 9"
+        );
     }
 
     /// Helper function to setup a canonical chain scenario with n blocks  
