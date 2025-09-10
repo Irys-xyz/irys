@@ -5,6 +5,8 @@ use irys_types::{
     block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
 };
 use sha2::{Digest as _, Sha256};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tracing::{debug, info, warn};
@@ -54,7 +56,7 @@ pub fn run_vdf<B: BlockProvider>(
     current_vdf_hash: H256,
     initial_reset_seed: H256,
     mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
-    mut vdf_mining_state_listener: Receiver<bool>,
+    is_mining_enabled: Arc<AtomicBool>,
     mut shutdown_listener: Receiver<()>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
@@ -77,7 +79,7 @@ pub fn run_vdf<B: BlockProvider>(
 
     // maintain a state of whether or not this vdf loop should be mining
     // don't start the VDF right away
-    let mut vdf_mining: bool = false;
+    is_mining_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
 
     loop {
         if shutdown_listener.try_recv().is_ok() {
@@ -121,12 +123,6 @@ pub fn run_vdf<B: BlockProvider>(
             }
         }
 
-        // check if vdf mining state should change
-        if let Ok(new_mining_state) = vdf_mining_state_listener.try_recv() {
-            tracing::info!("Setting mining state to {}", new_mining_state);
-            vdf_mining = new_mining_state;
-        }
-
         if let Some(canonical_vdf_info) = block_provider.latest_canonical_vdf_info() {
             next_reset_seed = canonical_vdf_info.next_seed;
             canonical_global_step_number = canonical_vdf_info.global_step_number;
@@ -143,7 +139,7 @@ pub fn run_vdf<B: BlockProvider>(
             && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
-        if !vdf_mining || is_too_far_ahead {
+        if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed) || is_too_far_ahead {
             if is_too_far_ahead {
                 warn!(
                     "VDF mining is too far ahead: global step is {}, canonical global step is {} + cutoff is {} * 2, waiting a bit to catch up",
@@ -332,8 +328,7 @@ mod tests {
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
 
-        let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
-        mining_state_tx.send(true).await.unwrap();
+        let is_mining_enabled = Arc::new(AtomicBool::new(false));
 
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -346,6 +341,7 @@ mod tests {
         // Set global step number to 2 to simulate a scenario where canonical chain progresses
         mock_header.vdf_limiter_info.global_step_number = 2;
 
+        let mining_state = Arc::clone(&is_mining_enabled);
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
             move || {
@@ -355,7 +351,7 @@ mod tests {
                     seed,
                     reset_seed,
                     ff_step_receiver,
-                    mining_state_rx,
+                    mining_state,
                     shutdown_rx,
                     broadcast_mining_service,
                     vdf_state.clone(),
@@ -365,8 +361,10 @@ mod tests {
             }
         });
 
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        is_mining_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
         // wait for some vdf steps
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let step_num = vdf_steps_guard.read().global_step;
 
@@ -450,8 +448,7 @@ mod tests {
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
 
-        let (mining_state_tx, mining_state_rx) = mpsc::channel::<bool>(1);
-        mining_state_tx.send(true).await.unwrap();
+        let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -460,6 +457,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
+        let mining_state = Arc::clone(&is_mining_enabled);
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
             move || {
@@ -469,7 +467,7 @@ mod tests {
                     seed,
                     reset_seed,
                     ff_step_receiver,
-                    mining_state_rx,
+                    mining_state,
                     shutdown_rx,
                     broadcast_mining_service,
                     vdf_state.clone(),
@@ -479,8 +477,10 @@ mod tests {
             }
         });
 
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        is_mining_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
         // wait for some vdf steps
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let step_num = vdf_steps_guard.read().global_step;
 
