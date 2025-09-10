@@ -9,6 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+tokio.workspace = true
+tracing.workspace = true
+eyre.workspace = true
 
 [lints]
 workspace = true

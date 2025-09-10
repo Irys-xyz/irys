@@ -4910,6 +4910,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-utils",
  "irys-vdf",
  "itertools 0.13.0",
  "k256",
@@ -5319,6 +5320,11 @@ dependencies = [
 [[package]]
 name = "irys-utils"
 version = "0.1.0"
+dependencies = [
+ "eyre",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "irys-vdf"
