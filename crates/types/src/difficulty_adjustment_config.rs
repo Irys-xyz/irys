@@ -205,14 +205,14 @@ mod tests {
         let expected = consensus_config.difficulty_adjustment.block_time as f64;
         let actual = block_time;
         assert_expected_with_tolerance(expected, actual, 1.0);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         // Lets increase the hashrate by 2x so blocks are coming too quickly
         println!("Double the hash power and verify block_times are half as long");
         storage_module_count = 6;
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         let expected = 2.5; // with 2x the hash power we expect 1/2 the block time.
         let actual = block_time;
@@ -230,7 +230,7 @@ mod tests {
         let difficulty =
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         let expected = 5.0; // Expect the difficulty to adjust back to 5s blocks
         let actual = block_time;
@@ -241,7 +241,10 @@ mod tests {
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
+        println!(
+            " block time: {:.2?}",
+            Duration::from_secs_f64(new_block_time)
+        );
 
         let expected = 2.5; // with 2x the hash power we expect roughly 1/2 the block time.
         let actual = new_block_time;
@@ -261,7 +264,10 @@ mod tests {
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
+        println!(
+            " block time: {:.2?}",
+            Duration::from_secs_f64(new_block_time)
+        );
 
         let expected = 5.0; // Expect the difficulty to adjust back to 5s blocks
         let actual = new_block_time;
@@ -272,7 +278,10 @@ mod tests {
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
+        println!(
+            " block time: {:.2?}",
+            Duration::from_secs_f64(new_block_time)
+        );
 
         let expected = 8.33; // with 60% of the hashpower we'd expect 1.667x the block times
         let actual = new_block_time;
@@ -290,7 +299,7 @@ mod tests {
         let difficulty =
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         let expected = 5.0;
         let actual = block_time;
@@ -308,7 +317,7 @@ mod tests {
         let difficulty =
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (mean, _seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(mean));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(mean));
 
         let expected = 5.0;
         let actual = block_time;
@@ -323,10 +332,6 @@ mod tests {
             abs_difference,
             tolerance
         );
-    }
-
-    fn seconds_to_duration(seconds: f64) -> Duration {
-        Duration::from_secs_f64(seconds)
     }
 
     fn one_second_of_hashes(
