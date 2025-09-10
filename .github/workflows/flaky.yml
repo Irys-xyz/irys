@@ -57,7 +57,7 @@ jobs:
         run: |
           if ! command -v cargo-flaky >/dev/null 2>&1; then
             echo "Installing cargo-flaky..."
-            cargo install cargo-flaky --locked
+            cargo install cargo-flaky --version 0.4.0 --locked
           else
             echo "cargo-flaky already installed ($(cargo-flaky --version))"
           fi
