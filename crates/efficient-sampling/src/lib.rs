@@ -93,6 +93,10 @@ impl Ranges {
     }
 
     pub fn new(num_recall_ranges_in_partition: usize) -> Self {
+        assert!(
+            num_recall_ranges_in_partition > 0,
+            "num_recall_ranges_in_partition must be > 0 (misconfiguration: partition size and/or recall range size)"
+        );
         let mut ranges = Vec::with_capacity(num_recall_ranges_in_partition);
         for i in 0..num_recall_ranges_in_partition {
             ranges.push(i);
