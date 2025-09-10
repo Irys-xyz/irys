@@ -250,7 +250,7 @@ impl ValidationService {
                 }
 
                 // Process concurrent task completions
-                Some(result) = coordinator.concurrent_pool.join_next() => {
+                Some(result) = coordinator.concurrent_tasks.join_next() => {
                     match result {
                         Ok(validation) => {
                             debug!(
@@ -282,7 +282,7 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     let vdf_running = coordinator.vdf_scheduler.current.is_some();
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
-                    let concurrent_active = coordinator.concurrent_pool.tasks.len();
+                    let concurrent_active = coordinator.concurrent_tasks.len();
 
                     info!(
                         vdf_running = if vdf_running { 1 } else { 0 },

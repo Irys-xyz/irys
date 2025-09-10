@@ -82,63 +82,6 @@ pub(super) struct ConcurrentValidationResult {
     pub validation_result: ValidationResult,
 }
 
-/// Clean concurrent validation pool using JoinSet
-pub(super) struct ConcurrentValidationPool {
-    /// Active validation tasks
-    pub tasks: JoinSet<ConcurrentValidationResult>,
-}
-
-impl ConcurrentValidationPool {
-    pub(super) fn new() -> Self {
-        Self {
-            tasks: JoinSet::new(),
-        }
-    }
-
-    /// Submit a task for validation - spawns immediately without limits
-    #[instrument(skip_all, fields(block_hash = %task.block.block_hash))]
-    pub fn submit(&mut self, task: BlockValidationTask, _priority: BlockPriorityMeta) {
-        let block_hash = task.block.block_hash;
-
-        debug!(
-            block_hash = %block_hash,
-            "Spawning concurrent validation"
-        );
-
-        self.tasks.spawn(
-            async move {
-                // Execute the validation and return the result
-                let validation_result = task.execute_concurrent().await;
-
-                ConcurrentValidationResult {
-                    block_hash,
-                    validation_result,
-                }
-            }
-            .instrument(tracing::info_span!("concurrent_validation", block_hash = %block_hash))
-            .in_current_span(),
-        );
-    }
-
-    /// Poll for next completed task
-    #[instrument(skip_all)]
-    pub(super) async fn join_next(
-        &mut self,
-    ) -> Option<Result<ConcurrentValidationResult, tokio::task::JoinError>> {
-        self.tasks.join_next().await
-    }
-
-    /// Reevaluate priorities after a reorg - no-op since we don't queue tasks
-    #[instrument(skip_all)]
-    pub(super) fn reevaluate_priorities<F>(&mut self, _recalc_fn: F)
-    where
-        F: Fn(&BlockHash) -> Option<BlockPriorityMeta>,
-    {
-        // No pending tasks to reevaluate since all tasks spawn immediately
-        debug!("Reevaluate priorities called - no pending tasks to update");
-    }
-}
-
 /// VDF task with preemption support
 pub(super) struct PreemptibleVdfTask {
     pub task: BlockValidationTask,
@@ -176,15 +119,18 @@ impl PreemptibleVdfTask {
     }
 }
 
+/// Currently running VDF task
+pub(super) struct CurrentVdfTask {
+    pub hash: BlockHash,
+    pub priority: BlockPriorityMeta,
+    pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
+    pub handle: JoinHandle<(VdfValidationResult, BlockValidationTask)>,
+}
+
 /// Simplified VDF scheduler with preemption
 pub(super) struct VdfScheduler {
-    /// Currently running VDF task with priority and cancellation signal
-    pub current: Option<(
-        BlockHash,
-        BlockPriorityMeta,
-        Arc<std::sync::atomic::AtomicU8>,
-        JoinHandle<(VdfValidationResult, BlockValidationTask)>,
-    )>,
+    /// Currently running VDF task
+    pub current: Option<CurrentVdfTask>,
 
     /// Pending VDF tasks
     pub pending: PriorityQueue<BlockHash, (BlockPriorityMeta, BlockValidationTask)>,
@@ -210,8 +156,8 @@ impl VdfScheduler {
         }
 
         // Check if current task exists
-        if let Some((current_hash, _, _, _)) = &self.current {
-            if *current_hash == hash {
+        if let Some(current) = &self.current {
+            if current.hash == hash {
                 debug!("VDF task for {} already running", hash);
                 return;
             }
@@ -220,17 +166,28 @@ impl VdfScheduler {
         self.pending.push(hash, (priority, task));
 
         // Check if we should preempt current task
-        if let Some((current_hash, current_priority, cancel_u8, _)) = &self.current {
-            if let Some((_, (new_priority, _))) = self.pending.peek() {
-                // Only preempt if new task has HIGHER priority
-                if new_priority > current_priority {
-                    info!(
-                        "Preempting VDF task {} (priority {:?}) for higher priority {:?}",
-                        current_hash, current_priority, new_priority
-                    );
-                    cancel_u8.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
-                }
-            }
+        self.check_preemption();
+    }
+
+    /// Check if current task should be preempted by higher priority pending task
+    pub(super) fn check_preemption(&self) {
+        let Some(current) = &self.current else {
+            return;
+        };
+
+        let Some((_, (pending_priority, _))) = self.pending.peek() else {
+            return;
+        };
+
+        // Only preempt if pending task has HIGHER priority
+        if pending_priority > &current.priority {
+            info!(
+                "Preempting VDF task {} (priority {:?}) for higher priority {:?}",
+                current.hash, current.priority, pending_priority
+            );
+            current
+                .cancel_signal
+                .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
         }
     }
 
@@ -258,7 +215,12 @@ impl VdfScheduler {
                 .in_current_span(),
         );
 
-        self.current = Some((hash, priority, cancel_u8, handle));
+        self.current = Some(CurrentVdfTask {
+            hash,
+            priority,
+            cancel_signal: cancel_u8,
+            handle,
+        });
 
         debug!(
             "Started VDF validation for {} with priority {:?}",
@@ -272,15 +234,15 @@ impl VdfScheduler {
     pub(super) async fn poll_current(
         &mut self,
     ) -> Option<(BlockHash, VdfValidationResult, BlockValidationTask)> {
-        let (hash, priority, cancel_u8, mut handle) = self.current.take()?;
+        let mut current = self.current.take()?;
 
         // Use poll_immediate to check without blocking
-        let poll_result = futures::future::poll_immediate(&mut handle).await;
+        let poll_result = futures::future::poll_immediate(&mut current.handle).await;
 
         match poll_result {
             Some(Ok((result, task))) => {
                 // Task completed
-                Some((hash, result, task))
+                Some((current.hash, result, task))
             }
             Some(Err(e)) => {
                 error!("VDF task panicked: {}", e);
@@ -289,7 +251,7 @@ impl VdfScheduler {
             }
             None => {
                 // Still running, put it back
-                self.current = Some((hash, priority, cancel_u8, handle));
+                self.current = Some(current);
                 None
             }
         }
@@ -301,8 +263,8 @@ pub(super) struct ValidationCoordinator {
     /// VDF validation scheduler
     pub vdf_scheduler: VdfScheduler,
 
-    /// Concurrent validation pool
-    pub concurrent_pool: ConcurrentValidationPool,
+    /// Concurrent validation tasks
+    pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
@@ -315,7 +277,7 @@ impl ValidationCoordinator {
     pub(super) fn new(block_tree_guard: BlockTreeReadGuard, vdf_notify: Arc<Notify>) -> Self {
         Self {
             vdf_scheduler: VdfScheduler::new(),
-            concurrent_pool: ConcurrentValidationPool::new(),
+            concurrent_tasks: JoinSet::new(),
             block_tree_guard,
             vdf_notify,
         }
@@ -323,7 +285,7 @@ impl ValidationCoordinator {
 
     /// Calculate priority for a block
     #[instrument(skip_all, fields(block_hash = %block.block_hash, block_height = %block.height))]
-    pub(super) fn calculate_priority(&self, block: &Arc<IrysBlockHeader>) -> BlockPriorityMeta {
+    pub(super) fn calculate_priority(&self, block: &IrysBlockHeader) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
 
@@ -365,7 +327,7 @@ impl ValidationCoordinator {
     /// Submit a validation task
     #[instrument(skip_all, fields(block_hash = %task.block.block_hash, block_height = %task.block.height))]
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
-        let priority = self.calculate_priority(&task.block);
+        let priority = self.calculate_priority(&*task.block);
         self.vdf_scheduler.submit(task, priority);
 
         // Notify to start processing if VDF is idle
@@ -382,8 +344,28 @@ impl ValidationCoordinator {
             debug!(?hash, ?result, "VDF completed");
 
             if matches!(result, VdfValidationResult::Valid) {
-                let priority = self.calculate_priority(&task.block);
-                self.concurrent_pool.submit(task, priority);
+                let block_hash = task.block.block_hash;
+
+                debug!(
+                    block_hash = %block_hash,
+                    "Spawning concurrent validation"
+                );
+
+                self.concurrent_tasks.spawn(
+                    async move {
+                        // Execute the validation and return the result
+                        let validation_result = task.execute_concurrent().await;
+
+                        ConcurrentValidationResult {
+                            block_hash,
+                            validation_result,
+                        }
+                    }
+                    .instrument(
+                        tracing::info_span!("concurrent_validation", block_hash = %block_hash),
+                    )
+                    .in_current_span(),
+                );
             }
 
             // Start next VDF task
@@ -401,35 +383,67 @@ impl ValidationCoordinator {
     pub(super) fn reevaluate_priorities(&mut self) {
         info!("Reevaluating priorities after reorg");
 
-        // Reevaluate concurrent pool
-        let block_tree_guard = &self.block_tree_guard;
-        self.concurrent_pool.reevaluate_priorities(|hash| {
-            let block_tree = block_tree_guard.read();
-            block_tree.get_block(hash).map(|block| {
-                let state = match block_tree.get_block_and_status(hash) {
-                    Some((_, ChainState::Onchain)) => BlockPriority::Canonical,
-                    Some((_, _)) => {
-                        // Simplified check for canonical extension
-                        let (canonical_chain, _) = block_tree.get_canonical_chain();
-                        let canonical_tip = canonical_chain.last().unwrap().block_hash;
-                        if block.previous_block_hash == canonical_tip {
-                            BlockPriority::CanonicalExtension
-                        } else {
-                            BlockPriority::Fork
-                        }
-                    }
-                    None => BlockPriority::Unknown,
-                };
-                BlockPriorityMeta::new(block, state)
-            })
-        });
+        // Reevaluate current VDF task
+        self.reevaluate_current_vdf();
 
-        // Reevaluate VDF pending
+        // Reevaluate pending VDF tasks
+        self.reevaluate_pending_vdf();
+    }
+
+    /// Reevaluate and potentially preempt current VDF task
+    fn reevaluate_current_vdf(&mut self) {
+        let Some(current) = &self.vdf_scheduler.current else {
+            return;
+        };
+
+        // Get block from tree
+        let block_tree = self.block_tree_guard.read();
+        let Some(block) = block_tree.get_block(&current.hash) else {
+            return;
+        };
+
+        // Calculate new priority (block is already a reference)
+        let new_priority = self.calculate_priority(block);
+        drop(block_tree); // Release lock after calculation
+
+        if new_priority == current.priority {
+            return; // No change
+        }
+
+        debug!(
+            block_hash = %current.hash,
+            old_priority = ?current.priority,
+            ?new_priority,
+            "Current VDF task priority changed after reorg"
+        );
+
+        // Update priority and check for preemption
+        if let Some(current_mut) = &mut self.vdf_scheduler.current {
+            current_mut.priority = new_priority;
+        }
+
+        // Use consolidated preemption check
+        self.vdf_scheduler.check_preemption();
+    }
+
+    /// Reevaluate pending VDF task priorities
+    fn reevaluate_pending_vdf(&mut self) {
         let old_pending = std::mem::take(&mut self.vdf_scheduler.pending);
+        let count = old_pending.len();
+
+        if count == 0 {
+            return;
+        }
+
         for (hash, (_old_priority, task)) in old_pending {
-            let new_priority = self.calculate_priority(&task.block);
+            let new_priority = self.calculate_priority(&*task.block);
             self.vdf_scheduler.pending.push(hash, (new_priority, task));
         }
+
+        debug!(
+            vdf_pending_updated = count,
+            "Reevaluated VDF pending task priorities after reorg"
+        );
     }
 }
 
