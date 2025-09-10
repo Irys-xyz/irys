@@ -777,11 +777,6 @@ where
                 .is_processed()
     }
 
-    /// Internal method for the p2p services to get direct access to the cache
-    pub(crate) fn block_cache_guard(&self) -> BlockCacheGuard {
-        self.blocks_cache.clone()
-    }
-
     /// Inserts an execution payload into the internal cache so that it can be
     /// retrieved by the [`ExecutionPayloadProvider`].
     pub async fn add_execution_payload_to_cache(

@@ -224,8 +224,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let start_sync_from_height = self.block_index.read().latest_height();
-        // Clear any pending blocks from the cache
-        self.block_pool.block_cache_guard().clear().await;
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
