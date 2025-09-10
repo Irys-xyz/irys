@@ -18,7 +18,7 @@ use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -82,86 +82,42 @@ pub(super) struct ConcurrentValidationResult {
     pub validation_result: ValidationResult,
 }
 
-/// Clean concurrent validation pool using JoinSet + Semaphore
+/// Clean concurrent validation pool using JoinSet
 pub(super) struct ConcurrentValidationPool {
-    /// Controls maximum concurrent validations
-    pub semaphore: Arc<Semaphore>,
-
     /// Active validation tasks
     pub tasks: JoinSet<ConcurrentValidationResult>,
-
-    /// Tasks waiting for capacity
-    pub pending: PriorityQueue<BlockHash, (BlockPriorityMeta, BlockValidationTask)>,
-
-    /// Maximum concurrent validations
-    pub max_concurrent: usize,
 }
 
 impl ConcurrentValidationPool {
-    pub(super) fn new(max_concurrent: usize) -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(max_concurrent)),
             tasks: JoinSet::new(),
-            pending: PriorityQueue::new(),
-            max_concurrent,
         }
     }
 
-    /// Submit a task for validation
+    /// Submit a task for validation - spawns immediately without limits
     #[instrument(skip_all, fields(block_hash = %task.block.block_hash))]
-    pub fn submit(&mut self, task: BlockValidationTask, priority: BlockPriorityMeta) {
+    pub fn submit(&mut self, task: BlockValidationTask, _priority: BlockPriorityMeta) {
         let block_hash = task.block.block_hash;
 
-        // Check for duplicates
-        if self.pending.get(&block_hash).is_some() {
-            debug!("Block {} already pending, skipping duplicate", block_hash);
-            return;
-        }
+        debug!(
+            block_hash = %block_hash,
+            "Spawning concurrent validation"
+        );
 
-        self.pending.push(block_hash, (priority, task));
-        self.try_spawn_pending();
-    }
+        self.tasks.spawn(
+            async move {
+                // Execute the validation and return the result
+                let validation_result = task.execute_concurrent().await;
 
-    /// Try to spawn as many pending tasks as we have capacity for
-    #[instrument(skip_all)]
-    fn try_spawn_pending(&mut self) {
-        loop {
-            // Early return if no pending tasks
-            let Some((hash, (priority, task))) = self.pending.pop() else {
-                return;
-            };
-
-            // Try to acquire permit, return if no capacity
-            let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
-                // Put the task back since we couldn't spawn it
-                self.pending.push(hash, (priority, task));
-                return;
-            };
-
-            debug!(
-                block_hash = %hash,
-                active = self.max_concurrent - self.semaphore.available_permits(),
-                max_concurrent = self.max_concurrent,
-                "Spawning concurrent validation"
-            );
-
-            self.tasks.spawn(
-                async move {
-                    // Permit is held for the duration of the task
-                    let _permit = permit;
-
-                    // Execute the validation and return the result
-                    let validation_result = task.execute_concurrent().await;
-
-                    ConcurrentValidationResult {
-                        block_hash: hash,
-                        validation_result,
-                    }
+                ConcurrentValidationResult {
+                    block_hash,
+                    validation_result,
                 }
-                .instrument(tracing::info_span!("concurrent_validation", block_hash = %hash))
-                .in_current_span(),
-            );
-        }
+            }
+            .instrument(tracing::info_span!("concurrent_validation", block_hash = %block_hash))
+            .in_current_span(),
+        );
     }
 
     /// Poll for next completed task
@@ -169,29 +125,17 @@ impl ConcurrentValidationPool {
     pub(super) async fn join_next(
         &mut self,
     ) -> Option<Result<ConcurrentValidationResult, tokio::task::JoinError>> {
-        let result = self.tasks.join_next().await?;
-
-        // A task completed, try to spawn more
-        self.try_spawn_pending();
-
-        Some(result)
+        self.tasks.join_next().await
     }
 
-    /// Reevaluate priorities after a reorg
+    /// Reevaluate priorities after a reorg - no-op since we don't queue tasks
     #[instrument(skip_all)]
-    pub(super) fn reevaluate_priorities<F>(&mut self, recalc_fn: F)
+    pub(super) fn reevaluate_priorities<F>(&mut self, _recalc_fn: F)
     where
         F: Fn(&BlockHash) -> Option<BlockPriorityMeta>,
     {
-        let old_pending = std::mem::take(&mut self.pending);
-
-        for (hash, (_old_priority, task)) in old_pending {
-            if let Some(new_priority) = recalc_fn(&hash) {
-                self.pending.push(hash, (new_priority, task));
-            }
-        }
-
-        debug!("Reevaluated {} pending task priorities", self.pending.len());
+        // No pending tasks to reevaluate since all tasks spawn immediately
+        debug!("Reevaluate priorities called - no pending tasks to update");
     }
 }
 
@@ -368,14 +312,10 @@ pub(super) struct ValidationCoordinator {
 }
 
 impl ValidationCoordinator {
-    pub(super) fn new(
-        block_tree_guard: BlockTreeReadGuard,
-        max_concurrent: usize,
-        vdf_notify: Arc<Notify>,
-    ) -> Self {
+    pub(super) fn new(block_tree_guard: BlockTreeReadGuard, vdf_notify: Arc<Notify>) -> Self {
         Self {
             vdf_scheduler: VdfScheduler::new(),
-            concurrent_pool: ConcurrentValidationPool::new(max_concurrent),
+            concurrent_pool: ConcurrentValidationPool::new(),
             block_tree_guard,
             vdf_notify,
         }
@@ -592,7 +532,7 @@ mod tests {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let vdf_notify = Arc::new(Notify::new());
-        let coordinator = ValidationCoordinator::new(block_tree_guard.clone(), 10, vdf_notify);
+        let coordinator = ValidationCoordinator::new(block_tree_guard.clone(), vdf_notify);
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {

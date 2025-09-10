@@ -164,13 +164,11 @@ impl ValidationService {
     /// Main service loop
     #[tracing::instrument(skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
-        const MAX_CONCURRENT_VALIDATIONS: usize = 100;
         info!("starting validation service");
 
         // Use the improved implementation
         let mut coordinator = active_validations::ValidationCoordinator::new(
             self.inner.block_tree_guard.clone(),
-            MAX_CONCURRENT_VALIDATIONS,
             Arc::clone(&self.vdf_notify),
         );
 
@@ -284,14 +282,12 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     let vdf_running = coordinator.vdf_scheduler.current.is_some();
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
-                    let concurrent_active = coordinator.concurrent_pool.max_concurrent - coordinator.concurrent_pool.semaphore.available_permits();
-                    let concurrent_pending = coordinator.concurrent_pool.pending.len();
+                    let concurrent_active = coordinator.concurrent_pool.tasks.len();
 
                     info!(
                         vdf_running = if vdf_running { 1 } else { 0 },
                         vdf_pending,
                         concurrent_active,
-                        concurrent_pending,
                         "Validation pipeline status"
                     );
                 }
