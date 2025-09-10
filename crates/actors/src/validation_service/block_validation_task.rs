@@ -50,7 +50,6 @@ pub(super) struct BlockValidationTask {
     pub skip_vdf_validation: bool,
 }
 
-// Dummy Ord implementation - actual ordering is done via ValidationPriority
 impl PartialEq for BlockValidationTask {
     fn eq(&self, other: &Self) -> bool {
         self.block.block_hash == other.block.block_hash
@@ -67,7 +66,8 @@ impl PartialOrd for BlockValidationTask {
 
 impl Ord for BlockValidationTask {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Ordering is handled by ValidationPriority, this is just to satisfy PriorityQueue
+        // Ordering is handled by ValidationPriority, this is
+        // just to satisfy PriorityQueue requirement for the value to be Ord
         self.block.block_hash.cmp(&other.block.block_hash)
     }
 }
