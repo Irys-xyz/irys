@@ -78,7 +78,7 @@ jobs:
           
           START_TIME=$(date +%s)
           set +e
-          cargo flaky -i "${{ env.RUNS }}" -- --release 2>&1 | tee flaky-test-results/flaky-test-output.txt
+          cargo flaky --release -i "${{ env.RUNS }}" -- --release 2>&1 | tee flaky-test-results/flaky-test-output.txt
           EXIT_CODE=$?
           END_TIME=$(date +%s)
           
