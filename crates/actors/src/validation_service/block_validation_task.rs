@@ -19,12 +19,11 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
-use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
     recall_recall_range_is_valid, shadow_transactions_are_valid,
 };
-use crate::validation_service::active_validations::BlockPriorityMeta;
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -44,53 +43,53 @@ enum ParentValidationResult {
 
 /// Handles the execution of a single block validation task
 #[derive(Clone)]
-pub(crate) struct BlockValidationTask {
+pub(super) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub priority: BlockPriorityMeta,
     pub skip_vdf_validation: bool,
 }
 
-impl Ord for BlockValidationTask {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+// Dummy Ord implementation - actual ordering is done via ValidationPriority
+impl PartialEq for BlockValidationTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.block.block_hash == other.block.block_hash
     }
 }
+
+impl Eq for BlockValidationTask {}
+
 impl PartialOrd for BlockValidationTask {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for BlockValidationTask {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority // captures the block, so this should be good enough
+impl Ord for BlockValidationTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Ordering is handled by ValidationPriority, this is just to satisfy PriorityQueue
+        self.block.block_hash.cmp(&other.block.block_hash)
     }
 }
 
-impl Eq for BlockValidationTask {}
-
 impl BlockValidationTask {
-    pub(crate) fn new(
+    pub(super) fn new(
         block: Arc<IrysBlockHeader>,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
-        meta: BlockPriorityMeta,
         skip_vdf_validation: bool,
     ) -> Self {
         Self {
             block,
             service_inner,
             block_tree_guard,
-            priority: meta,
             skip_vdf_validation,
         }
     }
 
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_concurrent(self, concurrent_notify: Arc<tokio::sync::Notify>) {
+    pub async fn execute_concurrent(self) -> ValidationResult {
         let validation_result = self
             .validate_block()
             .await
@@ -101,7 +100,8 @@ impl BlockValidationTask {
             match self.wait_for_parent_validation().await {
                 ParentValidationResult::Cancelled => {
                     // Task was cancelled due to height difference
-                    return;
+                    // Return invalid to prevent this block from being accepted
+                    return ValidationResult::Invalid;
                 }
                 ParentValidationResult::Ready => {
                     // Parent is ready, continue to report validation result
@@ -109,11 +109,7 @@ impl BlockValidationTask {
             }
         }
 
-        // Notify the block tree service
-        self.send_validation_result(validation_result);
-
-        // Notify that concurrent task has completed
-        concurrent_notify.notify_one();
+        validation_result
     }
 
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
@@ -254,18 +250,6 @@ impl BlockValidationTask {
         )
     }
 
-    /// Send the validation result to the block tree service
-    pub(crate) fn send_validation_result(&self, validation_result: ValidationResult) {
-        if let Err(e) = self.service_inner.service_senders.block_tree.send(
-            BlockTreeServiceMessage::BlockValidationFinished {
-                block_hash: self.block.block_hash,
-                validation_result,
-            },
-        ) {
-            error!(?e, "Failed to send validation result to block tree service");
-        }
-    }
-
     /// Perform block validation
     #[tracing::instrument(skip_all, err, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
@@ -396,7 +380,7 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
             )
-            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
+            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
             .map(|()| ValidationResult::Valid)

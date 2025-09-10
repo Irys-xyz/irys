@@ -11,12 +11,10 @@
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
 use crate::{
-    block_tree_service::{BlockStateUpdated, ReorgEvent},
+    block_tree_service::{ReorgEvent, ValidationResult},
     block_validation::is_seed_data_valid,
     services::ServiceSenders,
 };
-use active_validations::ActiveValidations;
-use block_validation_task::BlockValidationTask;
 use eyre::{bail, ensure};
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -25,12 +23,9 @@ use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::shutdown::Shutdown;
-use std::{
-    pin::pin,
-    sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc,
 };
 use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver, Notify},
@@ -66,12 +61,8 @@ pub struct ValidationService {
     msg_rx: UnboundedReceiver<ValidationServiceMessage>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
-    /// Block state update event receiver
-    block_state_rx: broadcast::Receiver<BlockStateUpdated>,
     /// VDF task completion notifier
     vdf_notify: Arc<Notify>,
-    /// Concurrent task completion notifier
-    concurrent_notify: Arc<Notify>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -100,8 +91,6 @@ pub(crate) struct ValidationServiceInner {
     pub validation_enabled: Arc<AtomicBool>,
     /// VDF task completion notifier
     pub(crate) vdf_notify: Arc<Notify>,
-    /// Concurrent task completion notifier
-    pub(crate) concurrent_notify: Arc<Notify>,
 }
 
 impl ValidationService {
@@ -125,11 +114,9 @@ impl ValidationService {
         let config = config.clone();
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
-        let block_state_rx = service_senders.subscribe_block_state_updates();
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
         let vdf_notify = Arc::new(Notify::new());
-        let concurrent_notify = Arc::new(Notify::new());
 
         let handle = runtime_handle.spawn(
             async move {
@@ -137,9 +124,7 @@ impl ValidationService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
-                    block_state_rx,
                     vdf_notify: vdf_notify.clone(),
-                    concurrent_notify: concurrent_notify.clone(),
                     inner: Arc::new(ValidationServiceInner {
                         pool: rayon::ThreadPoolBuilder::new()
                             .num_threads(config.vdf.parallel_verification_thread_limit)
@@ -155,7 +140,6 @@ impl ValidationService {
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
                         vdf_notify,
-                        concurrent_notify,
                     }),
                 };
 
@@ -182,8 +166,11 @@ impl ValidationService {
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
-        let mut active_validations =
-            pin!(ActiveValidations::new(self.inner.block_tree_guard.clone()));
+        // Use the improved implementation
+        let mut coordinator = active_validations::ValidationCoordinator::new(
+            self.inner.block_tree_guard.clone(),
+            10, // max concurrent validations
+        );
 
         // Create a timer for periodic pipeline logging
         let mut pipeline_log_interval = tokio::time::interval(Duration::from_secs(5));
@@ -200,98 +187,95 @@ impl ValidationService {
                 // Check for shutdown signal
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for validation service");
-                    // cancel the VDF task if it's `Some`
-                     if let Some(task) = &active_validations.vdf_task {
-                        task.cancel.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
-                    };
                     break;
                 }
 
-                // Receive new validation messages (only when validation is enabled)
+                // Receive new validation messages
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(ValidationServiceMessage::ValidateBlock { block, skip_vdf_validation }) => {
-                            let Some(task) = self.inner.clone().create_validation_task(block.clone(), &active_validations, skip_vdf_validation) else {
-                                // validation task was not created. The task failed during vdf validation
-                                warn!("Failed to create validation task for block {} at height {}",
-                                      block.block_hash, block.height);
-                                continue;
-                            };
+                            let task = block_validation_task::BlockValidationTask::new(
+                                block.clone(),
+                                Arc::clone(&self.inner),
+                                self.inner.block_tree_guard.clone(),
+                                skip_vdf_validation,
+                            );
 
-                            // push this task to the VDF pending queue
-                            active_validations.vdf_pending_queue.push(task.block.block_hash, std::cmp::Reverse(task));
-
-                            // Immediately process VDF tasks when new ones are added
-                            active_validations.process_completed_vdf().await;
+                            coordinator.submit_task(task);
                         }
                         None => {
-                            // Channel closed
                             warn!("receiver channel closed");
                             break;
                         }
                     }
                 }
 
-                // Handle block state update events
-                result = self.block_state_rx.recv() => {
-                    match handle_broadcast_recv(result) {
-                        Ok(Some(_event)) => {
-                            // When a block state changes, check if any validations can proceed
-                            // This is especially important for child blocks waiting for parent validation
-                            if !active_validations.is_empty() {
-                                // Poll the VDF task & Process any completed validations (non-blocking)
-                                active_validations.process_completed_vdf().await;
-                                active_validations.process_completed_concurrent().await;
-                            }
-                        }
-                        // lagged, skipping messages
-                        Ok(None) => { },
-                        Err(_) => break,
-                    }
-                }
-
                 // Handle reorg events
                 result = self.reorg_rx.recv() => {
                     match handle_broadcast_recv(result) {
-                        Ok(Some(event)) => self.inner.handle_reorg(event, &mut active_validations).await,
-                        // lagged, skipping messages
+                        Ok(Some(_event)) => {
+                            coordinator.reevaluate_priorities();
+                        }
                         Ok(None) => { },
                         Err(_) => break,
                     }
                 }
 
-                // Process VDF task completions when notified
+                // Process VDF completions
                 _ = self.vdf_notify.notified() => {
-                    if !active_validations.is_empty() {
-                        // Poll the VDF task & Process any completed validations (non-blocking)
-                        active_validations.process_completed_vdf().await;
-                        active_validations.process_completed_concurrent().await;
+                    if let Some((hash, VdfValidationResult::Invalid(e))) = coordinator.process_vdf().await {
+                        error!("VDF validation failed for {}: {}", hash, e);
+                        // Send failure to block tree
+                        if let Err(e) = self.inner.service_senders.block_tree.send(
+                            crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                block_hash: hash,
+                                validation_result: ValidationResult::Invalid,
+                            }
+                        ) {
+                            error!("Failed to send VDF failure to block tree service: {:?}", e);
+                        }
                     }
                 }
 
-                // Process concurrent task completions when notified
-                _ = self.concurrent_notify.notified() => {
-                    if !active_validations.concurrent_is_empty() {
-                        // Process completed concurrent validations
-                        active_validations.process_completed_concurrent().await;
+                // Process concurrent task completions - direct await on JoinSet!
+                Some(result) = coordinator.concurrent_pool.join_next() => {
+                    match result {
+                        Ok(validation) => {
+                            debug!("Concurrent validation completed for {}: {:?}",
+                                   validation.block_hash, validation.validation_result);
+
+                            // Send the validation result to the block tree service
+                            if let Err(e) = self.inner.service_senders.block_tree.send(
+                                crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                    block_hash: validation.block_hash,
+                                    validation_result: validation.validation_result,
+                                }
+                            ) {
+                                error!("Failed to send validation result to block tree service: {:?}", e);
+                            }
+                        }
+                        Err(e) if e.is_cancelled() => {
+                            debug!("Concurrent task was cancelled");
+                        }
+                        Err(e) => {
+                            error!("Concurrent task panicked: {}", e);
+                        }
                     }
                 }
 
                 // Periodic pipeline state logging
                 _ = pipeline_log_interval.tick() => {
-                    active_validations.log_pipeline_state();
+                    let stats = coordinator.stats();
+                    info!(
+                        "Validation pipeline - VDF: {} running, {} pending | Concurrent: {} active, {} pending",
+                        if stats.vdf_running { 1 } else { 0 },
+                        stats.vdf_pending,
+                        stats.concurrent.active,
+                        stats.concurrent.pending
+                    );
                 }
             }
         }
-
-        // Drain remaining validations
-        // This will only process the ones that are instantly ready to be validated.
-        // If a task is awaiting on something and is not yet ready, it will be discarded.
-        info!(
-            "draining {} active validations before shutdown",
-            active_validations.concurrent_len()
-        );
-        active_validations.process_completed_concurrent().await;
 
         info!("shutting down validation service");
         Ok(())
@@ -299,37 +283,6 @@ impl ValidationService {
 }
 
 impl ValidationServiceInner {
-    /// Handle incoming messages
-    #[instrument(skip_all, fields(block_hash, block_height))]
-    fn create_validation_task(
-        self: Arc<Self>,
-        block: Arc<IrysBlockHeader>,
-        active_validations: &ActiveValidations,
-        skip_vdf_validation: bool,
-    ) -> Option<BlockValidationTask> {
-        let block_hash = block.block_hash;
-        let block_height = block.height;
-
-        tracing::Span::current().record("block_hash", tracing::field::display(&block_hash));
-        tracing::Span::current().record("block_height", block_height);
-
-        debug!("validating block");
-
-        // schedule validation task
-        let block_tree_guard = self.block_tree_guard.clone();
-
-        let priority: std::cmp::Reverse<active_validations::BlockPriorityMeta> =
-            active_validations.calculate_priority(&block);
-        let task = BlockValidationTask::new(
-            block,
-            self,
-            block_tree_guard,
-            priority.0,
-            skip_vdf_validation,
-        );
-        Some(task)
-    }
-
     #[instrument(skip_all, fields(%step=desired_step_number))]
     async fn wait_for_step_with_cancel(
         &self,
@@ -360,7 +313,7 @@ impl ValidationServiceInner {
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
     #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
-    async fn ensure_vdf_is_valid(
+    pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
         block: &IrysBlockHeader,
         cancel: Arc<AtomicU8>,
@@ -432,25 +385,6 @@ impl ValidationServiceInner {
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
         vdf_state.wait_for_step(vdf_info.global_step_number).await;
         Ok(())
-    }
-
-    /// Handle reorg events
-    #[instrument(skip_all)]
-    async fn handle_reorg(
-        &self,
-        event: ReorgEvent,
-        active_validations: &mut std::pin::Pin<&mut ActiveValidations>,
-    ) {
-        info!(
-            new_tip = ?event.new_tip,
-            new_height = ?event.fork_parent.height,
-            "Processing reorg in validation service"
-        );
-
-        // Reevaluate all block priorities based on the new canonical chain
-        active_validations.reevaluate_priorities();
-
-        info!("Validation service priorities updated after reorg");
     }
 }
 
