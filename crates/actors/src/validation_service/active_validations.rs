@@ -1,68 +1,16 @@
-//! Active validations management with priority-based task scheduling.
+//! Priority-based block validation task scheduling.
 //!
-//! This module manages the lifecycle of block validation tasks using modern Tokio concurrency
-//! patterns (JoinSet + Semaphore) for efficient resource utilization and clean task management.
+//! ## High-Level Flow
 //!
-//! # High-Level Architecture
+//! 1. New block enters VDF validation (sequential, preemptible)
+//! 2. Valid blocks proceed to concurrent validation (parallel: recall, PoA, shadow txs)
+//! 3. Validated blocks wait for parent validation to complete
+//! 4. Results are reported to the block tree service
 //!
-//! The validation pipeline consists of two main stages:
+//! ## Priority System
 //!
-//! 1. **VDF Validation** (Sequential)
-//!    - Single-threaded VDF verification with preemption support
-//!    - Higher priority blocks can preempt currently running VDF validations
-//!    - Successful VDF validations move to the concurrent pool
-//!
-//! 2. **Concurrent Validation** (Parallel)
-//!    - Multiple validation tasks run in parallel (recall range, PoA, shadow txs)
-//!    - Controlled concurrency via Semaphore (default: 10 concurrent tasks)
-//!    - Tasks wait for parent validation before reporting results
-//!
-//! # Priority System
-//!
-//! Blocks are prioritized using a four-tier system (`BlockPriority`):
-//!
-//! 1. **CanonicalExtension** - Blocks extending the canonical tip (highest priority)
-//! 2. **Canonical** - Blocks already on the canonical chain
-//! 3. **Fork** - Alternative chain blocks
-//! 4. **Unknown** - Orphan blocks (lowest priority)
-//!
-//! Within each tier, blocks are further ordered by:
-//! - Height (lower = higher priority)
-//! - VDF step count (fewer = higher priority)
-//!
-//! # Data Flow
-//!
-//! ```text
-//! New Block → VdfScheduler (priority queue)
-//!               ↓
-//!          VDF Validation (single task with preemption)
-//!               ↓ (if valid)
-//!          ConcurrentValidationPool (priority queue)
-//!               ↓
-//!          Parallel Validation (JoinSet + Semaphore)
-//!               ↓
-//!          Validation Result → Main Service → Block Tree
-//! ```
-//!
-//! # Key Components
-//!
-//! - **ValidationCoordinator**: Orchestrates the entire validation pipeline
-//! - **VdfScheduler**: Manages VDF validation with preemption support
-//! - **ConcurrentValidationPool**: Manages parallel validation tasks with concurrency limits
-//! - **BlockPriorityMeta**: Determines task execution order
-//!
-//! # Concurrency Model
-//!
-//! - **VDF**: Single task at a time, preemptible via AtomicBool cancellation
-//! - **Concurrent**: Up to N tasks (configurable), managed via Semaphore + JoinSet
-//! - **No explicit Notify**: Direct await on JoinSet eliminates need for external notifications
-//! - **Backpressure**: Semaphore naturally provides backpressure when at capacity
-//!
-//! # Reorg Handling
-//!
-//! During blockchain reorganizations, all pending task priorities are reevaluated
-//! based on the new canonical chain state. Running tasks continue but may become
-//! lower priority for future scheduling.
+//! Blocks are prioritized by: canonical extension > canonical > fork > unknown,
+//! then by height (lower first) and VDF steps (fewer first).
 
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -126,7 +74,6 @@ impl PartialOrd for BlockPriorityMeta {
         Some(self.cmp(other))
     }
 }
-
 
 /// Result from a concurrent validation task
 #[derive(Debug)]
@@ -203,7 +150,9 @@ impl ConcurrentValidationPool {
                                 validation_result,
                             }
                         }
-                        .instrument(tracing::info_span!("concurrent_validation", block_hash = %hash))
+                        .instrument(
+                            tracing::info_span!("concurrent_validation", block_hash = %hash),
+                        )
                         .in_current_span(),
                     );
                 }
