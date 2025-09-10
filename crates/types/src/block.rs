@@ -1197,4 +1197,54 @@ mod tests {
     fn mock_header() -> IrysBlockHeader {
         IrysBlockHeader::new_mock_header()
     }
+
+    #[test]
+    fn test_block_header_serialization() {
+        let mut header = IrysBlockHeader::default();
+        header.height = u64::MAX;
+
+        let json = serde_json::to_string(&header).unwrap();
+        assert!(json.contains(&format!("\"height\":\"{}\"", u64::MAX)));
+
+        let deserialized: IrysBlockHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.height, u64::MAX);
+    }
+
+    #[test]
+    fn test_vdf_limiter_info_serialization() {
+        let mut vdf_info = VDFLimiterInfo::default();
+        vdf_info.global_step_number = u64::MAX;
+
+        let json = serde_json::to_string(&vdf_info).unwrap();
+        assert!(json.contains(&format!("\"globalStepNumber\":\"{}\"", u64::MAX)));
+
+        let deserialized: VDFLimiterInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.global_step_number, u64::MAX);
+    }
+
+    #[test]
+    fn test_ledger_index_item_serialization() {
+        let mut ledger_item = LedgerIndexItem::default();
+        ledger_item.max_chunk_offset = u64::MAX;
+
+        let json = serde_json::to_string(&ledger_item).unwrap();
+        assert!(json.contains(&format!("\"maxChunkOffset\":\"{}\"", u64::MAX)));
+
+        let deserialized: LedgerIndexItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_chunk_offset, u64::MAX);
+    }
+
+    #[test]
+    fn test_data_transaction_ledger_expires_serialization() {
+        use serde_json;
+
+        let mut ledger = DataTransactionLedger::default();
+        ledger.expires = Some(u64::MAX);
+
+        let json = serde_json::to_string(&ledger).unwrap();
+        assert!(json.contains(&format!("\"expires\":\"{}\"", u64::MAX)));
+
+        let deserialized: DataTransactionLedger = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.expires, Some(u64::MAX));
+    }
 }
