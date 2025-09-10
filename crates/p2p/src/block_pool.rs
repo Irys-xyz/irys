@@ -174,14 +174,6 @@ impl BlockCacheGuard {
             .contains(block_hash)
     }
 
-    /// Internal crate method to clear cache
-    pub(crate) async fn clear(&self) {
-        let mut guard = self.inner.write().await;
-        guard.orphaned_blocks_by_parent.clear();
-        guard.requested_blocks.clear();
-        guard.blocks.clear();
-    }
-
     async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
         self.inner.write().await.is_block_processing(block_hash)
     }
