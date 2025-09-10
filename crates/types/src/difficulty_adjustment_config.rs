@@ -326,7 +326,7 @@ mod tests {
     }
 
     fn seconds_to_duration(seconds: f64) -> Duration {
-        Duration::from_nanos((seconds * 1_000_000_000.0) as u64)
+        Duration::from_secs_f64(seconds)
     }
 
     fn one_second_of_hashes(
