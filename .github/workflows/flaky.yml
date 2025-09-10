@@ -38,20 +38,6 @@ jobs:
           fetch-depth: 1
           clean: true  # Always start with clean workspace
 
-      # Weekly cleanup (Sundays) only for scheduled runs
-      - name: Weekly cleanup
-        if: ${{ github.event_name == 'schedule' }}
-        shell: bash
-        run: |
-          if [[ "$(date -u +%u)" == "7" ]]; then
-            echo "Performing weekly cleanup..."
-            cargo clean || true
-            find "${CARGO_TARGET_DIR:-target}" -name "*.d" -mtime +7 -delete 2>/dev/null || true
-            find "${CARGO_TARGET_DIR:-target}" -name "*.rmeta" -mtime +7 -delete 2>/dev/null || true
-          else
-            echo "Weekly cleanup skipped (not Sunday)"
-          fi
-
       - name: Ensure cargo-flaky is installed
         shell: bash
         run: |
