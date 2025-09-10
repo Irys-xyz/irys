@@ -42,7 +42,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     )
     .await?;
 
-    node.node_ctx.start_mining().await.unwrap();
+    node.node_ctx.start_mining().unwrap();
 
     let app = node.start_public_api().await;
 

@@ -113,6 +113,7 @@ pub struct IrysNodeCtx {
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub sync_service_facade: SyncChainServiceFacade,
+    pub is_vdf_mining_enabled: Arc<AtomicBool>,
 }
 
 impl IrysNodeCtx {
@@ -133,7 +134,7 @@ impl IrysNodeCtx {
     }
 
     pub async fn stop(self) {
-        let _ = self.stop_mining().await;
+        let _ = self.stop_mining();
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
         let _ = self.reth_shutdown_sender.send(()).await;
@@ -147,15 +148,15 @@ impl IrysNodeCtx {
     }
 
     /// Stop the VDF thread and send a message to all known partition actors to ignore any received VDF steps
-    pub async fn stop_mining(&self) -> eyre::Result<()> {
+    pub fn stop_mining(&self) -> eyre::Result<()> {
         // stop the VDF thread
-        self.stop_vdf().await?;
+        self.stop_vdf();
         self.set_partition_mining(false)
     }
     /// Start VDF thread and send a message to all known partition actors to begin mining when they receive a VDF step
-    pub async fn start_mining(&self) -> eyre::Result<()> {
+    pub fn start_mining(&self) -> eyre::Result<()> {
         // start the VDF thread
-        self.start_vdf().await?;
+        self.start_vdf();
         self.set_partition_mining(true)
     }
     // Send a custom control message to all known partition actors to enable/disable partition mining
@@ -168,16 +169,16 @@ impl IrysNodeCtx {
         Ok(())
     }
     // starts the VDF thread
-    pub async fn start_vdf(&self) -> eyre::Result<()> {
-        self.vdf_state(true).await
+    pub fn start_vdf(&self) {
+        self.vdf_state(true)
     }
     // stops the VDF thread
-    pub async fn stop_vdf(&self) -> eyre::Result<()> {
-        self.vdf_state(false).await
+    pub fn stop_vdf(&self) {
+        self.vdf_state(false)
     }
     // sets the running state of the VDF thread
-    pub async fn vdf_state(&self, running: bool) -> eyre::Result<()> {
-        Ok(self.service_senders.vdf_mining.send(running).await?)
+    pub fn vdf_state(&self, running: bool) {
+        self.is_vdf_mining_enabled.store(running, Ordering::Relaxed);
     }
 
     /// Sets whether the validation service should process incoming validation messages
@@ -985,11 +986,12 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
         // Spawn VDF service
         let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
             block_index.clone(),
             irys_db.clone(),
-            service_senders.vdf_mining.clone(),
+            Arc::clone(&is_vdf_mining_enabled),
             &config,
         )));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
@@ -1122,7 +1124,7 @@ impl IrysNode {
             &config,
             vdf_shutdown_receiver,
             receivers.vdf_fast_forward,
-            receivers.vdf_mining,
+            Arc::clone(&is_vdf_mining_enabled),
             latest_block,
             initial_hash,
             global_step_number,
@@ -1146,6 +1148,7 @@ impl IrysNode {
             gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
             reth_service_actor.clone(),
+            Arc::clone(&is_vdf_mining_enabled),
         );
 
         // set up IrysNodeCtx
@@ -1179,6 +1182,7 @@ impl IrysNode {
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),
             sync_service_facade,
+            is_vdf_mining_enabled,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1315,7 +1319,7 @@ impl IrysNode {
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
         vdf_fast_forward_receiver: mpsc::UnboundedReceiver<VdfStep>,
-        vdf_mining_state_rx: mpsc::Receiver<bool>,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
@@ -1365,7 +1369,7 @@ impl IrysNode {
                     initial_hash,
                     next_canonical_vdf_seed,
                     vdf_fast_forward_receiver,
-                    vdf_mining_state_rx,
+                    is_vdf_mining_enabled,
                     vdf_shutdown_receiver,
                     MiningServiceBroadcaster::from(broadcast_mining_actor.clone()),
                     vdf_state.clone(),
@@ -1578,6 +1582,7 @@ impl IrysNode {
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
         reth_service_addr: Addr<RethServiceActor>,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
 
@@ -1589,6 +1594,7 @@ impl IrysNode {
             block_pool,
             gossip_data_handler,
             Some(reth_service_addr),
+            is_vdf_mining_enabled,
         );
 
         let handle = ChainSyncService::spawn_service(inner, rx, runtime_handle);

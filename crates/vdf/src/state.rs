@@ -11,15 +11,12 @@ use nodit::{interval::ii, InclusiveInterval as _, Interval};
 use rayon::prelude::*;
 use reth_db::Database as _;
 use sha2::{Digest as _, Sha256};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
-use tokio::{
-    sync::mpsc::Sender,
-    time::{sleep, Duration},
-};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
@@ -31,7 +28,7 @@ pub struct VdfState {
     /// stored seeds
     pub seeds: VecDeque<Seed>,
     /// whether the VDF thread is mining or paused
-    pub mining_state_sender: Option<Sender<bool>>,
+    pub is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
     /// global step from the latest canonical block
     global_step_from_the_latest_canonical_block: u64,
     /// minimum global step to keep in the seeds VecDeque
@@ -42,7 +39,7 @@ impl VdfState {
     pub fn new(
         capacity: usize,
         global_step: u64,
-        mining_state_sender: Option<Sender<bool>>,
+        is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
             global_step,
@@ -50,7 +47,7 @@ impl VdfState {
             minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
             capacity,
-            mining_state_sender,
+            is_vdf_mining_enabled,
         }
     }
 
@@ -132,22 +129,20 @@ impl VdfState {
         ))
     }
 
-    pub async fn start_mining(&self) -> eyre::Result<()> {
-        self.mining_state_sender
+    pub fn start_mining(&self) -> eyre::Result<()> {
+        self.is_vdf_mining_enabled
             .as_ref()
             .ok_or(eyre!("Mining state sender isn't set!"))?
-            .send(true)
-            .await
-            .map_err(|err| eyre!("failed to send false to mining_state_sender: {:?}", err))
+            .store(true, Ordering::Relaxed);
+        Ok(())
     }
 
-    pub async fn stop_mining(&self) -> eyre::Result<()> {
-        self.mining_state_sender
+    pub fn stop_mining(&self) -> eyre::Result<()> {
+        self.is_vdf_mining_enabled
             .as_ref()
             .ok_or(eyre!("Mining state sender isn't set!"))?
-            .send(false)
-            .await
-            .map_err(|err| eyre!("failed to send false to mining_state_sender: {:?}", err))
+            .store(false, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -210,7 +205,7 @@ impl VdfStateReadonly {
 pub fn create_state(
     block_index: Arc<RwLock<BlockIndex>>,
     db: DatabaseProvider,
-    vdf_mining_state_sender: Sender<bool>,
+    is_vdf_mining_enabled: Arc<AtomicBool>,
     config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
@@ -260,7 +255,7 @@ pub fn create_state(
         minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
         seeds,
         capacity,
-        mining_state_sender: Some(vdf_mining_state_sender),
+        is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
     }
 }
 
@@ -434,10 +429,9 @@ pub mod test_helpers {
     use super::*;
 
     use std::sync::RwLock;
-    use tokio::sync::mpsc::channel;
 
     pub fn mocked_vdf_service(config: &Config) -> AtomicVdfState {
-        let (vdf_mining_state_sender, _) = channel::<bool>(1);
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
         let capacity = calc_capacity(config);
 
         let state = VdfState {
@@ -446,7 +440,7 @@ pub mod test_helpers {
             minimum_step_to_keep: 0,
             capacity,
             seeds: VecDeque::default(),
-            mining_state_sender: Some(vdf_mining_state_sender),
+            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
         };
         Arc::new(RwLock::new(state))
     }
