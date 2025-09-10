@@ -592,8 +592,7 @@ mod tests {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
         let vdf_notify = Arc::new(Notify::new());
-        let coordinator =
-            ValidationCoordinator::new(block_tree_guard.clone(), 10, vdf_notify);
+        let coordinator = ValidationCoordinator::new(block_tree_guard.clone(), 10, vdf_notify);
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
