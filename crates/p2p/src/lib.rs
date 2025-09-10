@@ -1,3 +1,4 @@
+#![deny(clippy::float_arithmetic)]
 mod block_pool;
 mod block_status_provider;
 mod cache;

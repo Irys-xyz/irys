@@ -1,3 +1,4 @@
+#![deny(clippy::float_arithmetic)]
 //! # Irys Price Oracle Module
 //!
 //! This module defines the `IrysPriceOracle` enum, which is responsible for

@@ -1,3 +1,4 @@
+#![deny(clippy::float_arithmetic)]
 //! Exponential-decay (base-2) emission curve
 //!
 //! R(t) = R_max * ln(2) / T_half * 2^-(t / T_half)

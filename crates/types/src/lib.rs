@@ -2,6 +2,7 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
+#![deny(clippy::float_arithmetic)]
 pub mod app_state;
 pub mod arbiter_handle;
 pub mod block;
