@@ -58,6 +58,19 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         )
         .await?;
 
+    // Mine blocks to include the stake commitments in a confirmed block, then wait for peers to catch up.
+    let height_before_commitments = genesis_node.get_canonical_chain_height().await;
+    genesis_node
+        .wait_until_height_confirmed(height_before_commitments + 1, seconds_to_wait)
+        .await?;
+    // Ensure peers see the same height so their snapshots include the new stakes
+    peer1_node
+        .wait_until_height(height_before_commitments + 1, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height(height_before_commitments + 1, seconds_to_wait)
+        .await?;
+
     // Post a transaction and it's chunks to all 3
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();

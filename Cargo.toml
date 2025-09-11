@@ -10,10 +10,8 @@ members = [
   "crates/packing",
   "crates/database",
   "crates/storage",
-  "crates/testing-utils",
   "crates/config",
   "crates/efficient-sampling",
-  "crates/debug-utils",
   "xtask",
   "crates/price-oracle",
   "crates/cli",
@@ -21,6 +19,9 @@ members = [
   "crates/api-client",
   "crates/reward-curve",
   "crates/irys-reth",
+  "crates/utils/utils",
+  "crates/utils/debug-utils",
+  "crates/utils/testing-utils",
 ]
 resolver = "2"
 
@@ -45,7 +46,7 @@ irys-config = { path = "./crates/config" }
 irys-reth-node-bridge = { path = "./crates/reth-node-bridge" }
 irys-types = { path = "./crates/types" }
 irys-storage = { path = "./crates/storage" }
-irys-testing-utils = { path = "./crates/testing-utils" }
+irys-testing-utils = { path = "./crates/utils/testing-utils" }
 irys-packing = { path = "./crates/packing" }
 irys-chain = { path = "./crates/chain" }
 irys-vdf = { path = "./crates/vdf" }
@@ -55,6 +56,7 @@ irys-price-oracle = { path = "./crates/price-oracle" }
 irys-p2p = { path = "./crates/p2p" }
 irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
+irys-utils = { path = "./crates/utils/utils" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
