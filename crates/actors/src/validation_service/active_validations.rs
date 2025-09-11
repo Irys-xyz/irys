@@ -92,19 +92,23 @@ pub(super) struct PreemptibleVdfTask {
 impl PreemptibleVdfTask {
     #[instrument(skip_all, fields(block_hash = %self.task.block.block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
-        tracing::error!("PreemptibleVdfTask 1");
+        tracing::error!("PreemptibleVdfTask starting for block {}", self.task.block.block_hash);
         let inner = Arc::clone(&self.task.service_inner);
         let block = Arc::clone(&self.task.block);
         let skip_vdf = self.task.skip_vdf_validation;
 
-        tracing::error!("PreemptibleVdfTask 2");
+        tracing::error!("PreemptibleVdfTask calling ensure_vdf_is_valid");
         // No bridge task needed - just use the AtomicU8 directly!
         let result = match inner
             .ensure_vdf_is_valid(&block, self.cancel_u8.clone(), skip_vdf)
             .await
         {
-            Ok(()) => VdfValidationResult::Valid,
+            Ok(()) => {
+                tracing::error!("PreemptibleVdfTask ensure_vdf_is_valid returned Ok");
+                VdfValidationResult::Valid
+            }
             Err(e) => {
+                tracing::error!("PreemptibleVdfTask ensure_vdf_is_valid returned Err: {}", e);
                 // Check if we were cancelled by inspecting the AtomicU8
                 if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
                     VdfValidationResult::Cancelled
@@ -114,8 +118,9 @@ impl PreemptibleVdfTask {
             }
         };
 
+        // Notify the main loop that VDF task completed so it can poll the result
         self.vdf_notify.notify_one();
-        tracing::error!("here2");
+        tracing::error!("PreemptibleVdfTask completing with result: {:?}", result);
 
         (result, self.task)
     }
@@ -210,15 +215,14 @@ impl VdfScheduler {
             return None; // Already running
         }
 
-        tracing::error!("start next 1");
+        tracing::error!("start_next popped task from pending queue");
         let (task, priority) = self.pending.pop()?;
-        tracing::error!("start next 2");
         let hash = task.block.block_hash;
 
         // Create AtomicU8 for cancellation
         let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
 
-        tracing::error!("start next 3");
+        tracing::error!("start_next creating PreemptibleVdfTask");
         let block = Arc::clone(&task.block);
         let preemptible = PreemptibleVdfTask {
             task,
@@ -226,7 +230,7 @@ impl VdfScheduler {
             vdf_notify: Arc::clone(&self.vdf_notify),
         };
 
-        tracing::error!("start next 4");
+        tracing::error!("start_next spawning task");
         let handle = tokio::spawn(
             preemptible
                 .execute()
@@ -261,13 +265,13 @@ impl VdfScheduler {
 
         match poll_result {
             Some(Ok((result, task))) => {
-                self.vdf_notify.notify_one();
-                // Task completed
+                // Task completed - no need to notify here since task already did
                 Some((current.hash, result, task))
             }
             Some(Err(e)) => {
                 error!("VDF task panicked: {}", e);
                 // We lost the task on panic, cannot continue
+                // Notify to ensure we can start the next task
                 self.vdf_notify.notify_one();
                 None
             }
@@ -360,31 +364,46 @@ impl ValidationCoordinator {
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
             tracing::error!(?hash, ?result, "VDF completed");
 
-            if matches!(result, VdfValidationResult::Valid) {
-                let block_hash = task.block.block_hash;
+            match result {
+                VdfValidationResult::Valid => {
+                    let block_hash = task.block.block_hash;
 
-                tracing::error!(
-                    block_hash = %block_hash,
-                    "Spawning concurrent validation"
-                );
+                    tracing::error!(
+                        block_hash = %block_hash,
+                        "Spawning concurrent validation"
+                    );
 
-                self.concurrent_tasks.spawn(
-                    async move {
-                        tracing::error!("spawning new");
-                        // Execute the validation and return the result
-                        let validation_result = task.execute_concurrent().await;
-                        tracing::error!(?validation_result, "exiting");
+                    self.concurrent_tasks.spawn(
+                        async move {
+                            tracing::error!("spawning concurrent validation");
+                            // Execute the validation and return the result
+                            let validation_result = task.execute_concurrent().await;
+                            tracing::error!(?validation_result, "concurrent validation completed");
 
-                        ConcurrentValidationResult {
-                            block_hash,
-                            validation_result,
+                            ConcurrentValidationResult {
+                                block_hash,
+                                validation_result,
+                            }
                         }
-                    }
-                    .instrument(
-                        tracing::error_span!("concurrent_validation", block_hash = %block_hash),
-                    )
-                    .in_current_span(),
-                );
+                        .instrument(
+                            tracing::error_span!("concurrent_validation", block_hash = %block_hash),
+                        )
+                        .in_current_span(),
+                    );
+                }
+                VdfValidationResult::Cancelled => {
+                    // Re-queue the cancelled task with recalculated priority
+                    let priority = self.calculate_priority(&*task.block);
+                    tracing::error!(
+                        block_hash = %hash,
+                        ?priority,
+                        "Re-queuing cancelled VDF task"
+                    );
+                    self.vdf_scheduler.pending.push(task, priority);
+                }
+                VdfValidationResult::Invalid(_) => {
+                    // Invalid tasks are not re-queued
+                }
             }
 
             // Start next VDF task

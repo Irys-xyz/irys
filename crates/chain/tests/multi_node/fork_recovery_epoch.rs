@@ -7,14 +7,14 @@ use std::{
 };
 use tracing::debug;
 
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
-    );
-    initialize_tracing();
+    // std::env::set_var(
+    //     "RUST_LOG",
+    //     "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
+    // );
+    // initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
