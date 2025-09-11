@@ -853,32 +853,22 @@ impl StorageModule {
 
         match chunk_type {
             ChunkType::Entropy => {
-                // First, collect pending entropy offsets
-                let pending_entropy_offsets: std::collections::HashSet<PartitionChunkOffset> =
-                    pending
-                        .iter()
-                        .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
-                        .map(|(offset, _)| *offset)
-                        .collect();
+                // First, add any pending entropy chunks to the set
+                pending
+                    .iter()
+                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
+                    .for_each(|(offset, _)| {
+                        let interval = partition_chunk_offset_ii!(*offset, *offset);
+                        let _ = set.insert_merge_touching_or_overlapping(interval);
+                    });
 
-                // Add pending entropy chunks to the set
-                for offset in &pending_entropy_offsets {
-                    let interval = partition_chunk_offset_ii!(*offset, *offset);
-                    let _ = set.insert_merge_touching_or_overlapping(interval);
-                }
-
-                // Only remove entropy offsets that have pending data chunks
-                // IF those offsets are also in pending entropy (not stored entropy)
+                // Then, remove any entropy offsets that have pending data chunks
                 pending
                     .iter()
                     .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Data)
                     .for_each(|(offset, _)| {
-                        // Only cut if this offset is a pending entropy chunk
-                        // Don't cut if it's a stored entropy chunk
-                        if pending_entropy_offsets.contains(offset) {
-                            let point_interval = ii(*offset, *offset);
-                            let _ = set.cut(point_interval);
-                        }
+                        let point_interval = ii(*offset, *offset);
+                        let _ = set.cut(point_interval);
                     });
             }
             ChunkType::Data => {
@@ -1899,6 +1889,7 @@ mod tests {
             ],
         }];
 
+        std::env::set_var("RUST_LOG", "debug");
         let tmp_dir = setup_tracing_and_temp_dir(Some("pending_writes_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
@@ -2009,16 +2000,18 @@ mod tests {
         let bytes = vec![30_u8; chunk_size];
         let chunk_offset = PartitionChunkOffset::from(20);
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Entropy);
-
         {
             // Verify the resulting intervals
             let entropy = storage_module.get_intervals(ChunkType::Entropy);
-            assert_eq!(entropy.len(), 3);
-            assert_eq!(entropy[0], partition_chunk_offset_ii!(0, 10));
-            // entropy[11] is data
-            assert_eq!(entropy[1], partition_chunk_offset_ii!(12, 18));
+            debug!("{:#?}", entropy);
+            assert_eq!(entropy.len(), 4);
+            assert_eq!(entropy[0], partition_chunk_offset_ii!(0, 1));
+            // chunk offset 2 is a (pending) data chunk
+            assert_eq!(entropy[1], partition_chunk_offset_ii!(3, 10));
+            // chunk_offset 11 is data
+            assert_eq!(entropy[2], partition_chunk_offset_ii!(12, 18));
             // entropy[19] is uninitialized
-            assert_eq!(entropy[2], partition_chunk_offset_ii!(20, 20));
+            assert_eq!(entropy[3], partition_chunk_offset_ii!(20, 20));
 
             let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
             assert_eq!(uninitialized.len(), 2);
