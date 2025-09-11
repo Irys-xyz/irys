@@ -152,9 +152,6 @@ impl ChunkOrchestrator {
                 let chunk_offset = PartitionChunkOffset::from(interval_step);
 
                 // Don't try to sync above the maximum amount of data stored in the partition
-                // TODO: If max_chunk_offset was actually an offset this would be `>=`  but
-                //       currently max_chunk_offset appears to be one chunk higher than the
-                //       max chunk offset. More of a "num chunks". This needs to be sorted out.
                 if chunk_offset > max_chunk_offset {
                     return;
                 }
@@ -264,8 +261,18 @@ impl ChunkOrchestrator {
         }
 
         if ledger_range.end() > max_chunk_offset.into() {
-            // If it is convert the max_chunk_offset from ledger_relative (u64) to partition relative
-            let part_relative: u64 = max_chunk_offset.saturating_sub(ledger_range.start().into());
+            // Convert max_chunk_offset from ledger-relative to partition-relative coordinates
+            //
+            // Two adjustments are needed:
+            // 1. Subtract ledger_range.start() to convert from ledger-relative to partition-relative
+            // 2. Subtract 1 because max_chunk_offset represents the count of chunks in the ledger, but we need
+            //    the highest valid offset (count - 1)
+            //
+            // Example: If ledger has 5 chunks, max_chunk_offset = 5, but highest partition relative offset = 4
+            // TODO: Rename max_chunk_offset in the ledger to max_chunk_count
+            let part_relative: u64 = max_chunk_offset
+                .saturating_sub(ledger_range.start().into())
+                .saturating_sub(1);
             Some((
                 PartitionChunkOffset::from(part_relative as u32),
                 LedgerChunkOffset::from(max_chunk_offset),
