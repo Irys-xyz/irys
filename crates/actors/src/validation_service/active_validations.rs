@@ -506,6 +506,7 @@ mod tests {
 
     /// Test that BlockPriorityMeta ordering works correctly with manual Ord
     #[test]
+    #[expect(clippy::redundant_clone)] // False positive: header1 is used after clone
     fn test_validation_priority_ordering() {
         let mut header1 = IrysBlockHeader::new_mock_header();
         header1.height = 100;
@@ -598,10 +599,10 @@ mod tests {
         ];
 
         // Insert in different order to test sorting
-        queue.push(items[3].0, (items[3].1.clone(), ()));
-        queue.push(items[1].0, (items[1].1.clone(), ()));
-        queue.push(items[0].0, (items[0].1.clone(), ()));
-        queue.push(items[2].0, (items[2].1.clone(), ()));
+        queue.push(items[3].0, (items[3].1, ()));
+        queue.push(items[1].0, (items[1].1, ()));
+        queue.push(items[0].0, (items[0].1, ()));
+        queue.push(items[2].0, (items[2].1, ()));
 
         // Pop items and verify order
         let result1 = queue.pop().unwrap();
