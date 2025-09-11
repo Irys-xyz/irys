@@ -4,6 +4,17 @@ on:
   schedule:
     - cron: '0 4 * * *'  # Daily at 4 AM UTC
   workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of iterations to run'
+        required: false
+        default: '5'
+        type: string
+      tolerable_failures:
+        description: 'Number of tolerable failures'
+        required: false
+        default: '5'
+        type: string
 
 # Only run scheduled jobs on master branch
 # Manual workflow_dispatch can run on any branch
@@ -16,6 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  ITERATIONS: ${{ github.event.inputs.iterations || '5' }}
+  TOLERABLE_FAILURES: ${{ github.event.inputs.tolerable_failures || '5' }}
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -54,7 +67,7 @@ jobs:
           
           START_TIME=$(date +%s)
           set +e
-          cargo xtask flaky --clean --save -i 5 -f 5
+          cargo xtask flaky --clean --save -i ${{ env.ITERATIONS }} -f ${{ env.TOLERABLE_FAILURES }}
           EXIT_CODE=$?
           END_TIME=$(date +%s)
           
@@ -82,8 +95,8 @@ jobs:
             echo "**Commit:** ${{ github.sha }}"
             echo "**Runner:** ${{ runner.name }}"
             echo "**Tool:** cargo xtask flaky"
-            echo "**Iterations:** 5"
-            echo "**Tolerable Failures:** 5"
+            echo "**Iterations:** ${{ env.ITERATIONS }}"
+            echo "**Tolerable Failures:** ${{ env.TOLERABLE_FAILURES }}"
             echo "**Clean Workspace:** Yes"
             echo "**Output Saved:** Yes (timestamped file in target/)"
             echo "**Duration:** $DURATION"
