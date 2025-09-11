@@ -7,7 +7,9 @@ use irys_database::{
     },
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
-use irys_types::{Config, DataLedger, DatabaseProvider, TokioServiceHandle, GIGABYTE};
+use irys_types::{
+    Config, DataLedger, DatabaseProvider, LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
+};
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -152,7 +154,7 @@ impl ChunkCacheService {
                 let block_bounds = self
                     .block_index_guard
                     .read()
-                    .get_block_bounds(ledger_id, chunk_offset)
+                    .get_block_bounds(ledger_id, LedgerChunkOffset::from(chunk_offset))
                     .expect("Should be able to get block bounds as max_chunk_offset was checked");
                 prune_height = Some((block_bounds.height - 1).try_into().unwrap());
             }

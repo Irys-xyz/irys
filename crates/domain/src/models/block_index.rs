@@ -3,8 +3,8 @@
 use actix::dev::MessageResponse;
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerIndexItem,
-    NodeConfig, H256,
+    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
+    LedgerIndexItem, NodeConfig, H256,
 };
 use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -165,14 +165,14 @@ impl BlockIndex {
     pub fn get_block_bounds(
         &self,
         ledger: DataLedger,
-        chunk_offset: u64,
+        chunk_offset: LedgerChunkOffset,
     ) -> eyre::Result<BlockBounds> {
         let mut block_bounds = BlockBounds {
             ledger,
             ..Default::default()
         };
 
-        let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset)?;
+        let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset.into())?;
         let previous_item = self
             .get_item(block_height.saturating_sub(1))
             .ok_or_else(|| {
@@ -395,7 +395,8 @@ mod tests {
         assert_eq!(*block_index.get_item(2).unwrap(), block_items[2]);
 
         // check an invalid byte offset causes get_block_bounds to return an error
-        let invalid_block_bounds = block_index.get_block_bounds(DataLedger::Publish, 300);
+        let invalid_block_bounds =
+            block_index.get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(300));
         assert!(
             invalid_block_bounds.is_err(),
             "expected invalid block bound to generate an error"
@@ -403,7 +404,7 @@ mod tests {
 
         // check valid block bound
         let block_bounds = block_index
-            .get_block_bounds(DataLedger::Publish, 150)
+            .get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(150))
             .expect("expected valid block bounds");
         assert_eq!(
             block_bounds,
@@ -417,7 +418,7 @@ mod tests {
         );
 
         let block_bounds = block_index
-            .get_block_bounds(DataLedger::Submit, 1000)
+            .get_block_bounds(DataLedger::Submit, LedgerChunkOffset::from(1000))
             .expect("expected valid block bounds");
         assert_eq!(
             block_bounds,
