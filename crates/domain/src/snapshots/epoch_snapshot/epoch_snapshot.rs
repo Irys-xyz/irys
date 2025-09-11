@@ -517,8 +517,10 @@ impl EpochSnapshot {
         // Deterministic ceil to integer, then convert to u64
         let (ceil_int, _) = scaled_trunc
             .to_integer_round(rug::float::Round::Up)
-            .unwrap();
-        ceil_int.to_string().parse::<u64>().unwrap_or(u64::MAX)
+            .expect("value must be finite (not NaN/Inf)");
+        ceil_int
+            .to_u64()
+            .expect("ceiled value must be in 0..=u64::MAX")
     }
 
     /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
