@@ -1089,6 +1089,7 @@ where
                         }
                     }
 
+                    // do not sleep on the final iteration
                     if attempt != retries {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
