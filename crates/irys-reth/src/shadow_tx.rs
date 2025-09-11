@@ -700,13 +700,11 @@ mod tests {
             assert_eq!(decoded, tx, "Packet {:?} failed roundtrip", packet);
 
             // Verify solution hash is preserved
-            if let ShadowTransaction::V1 {
+            let ShadowTransaction::V1 {
                 solution_hash: decoded_hash,
                 ..
-            } = decoded
-            {
-                assert_eq!(decoded_hash, solution_hash, "Solution hash mismatch");
-            }
+            } = decoded;
+            assert_eq!(decoded_hash, solution_hash, "Solution hash mismatch");
         }
     }
 
@@ -718,7 +716,7 @@ mod tests {
 
         // Add a block reward packet in old format
         buf.push(0x02); // BlockReward discriminant
-        buf.extend_from_slice(&[0u8; 32]); // amount
+        buf.extend_from_slice(&[0_u8; 32]); // amount
 
         let result = ShadowTransaction::decode(&mut &buf[..]);
         assert!(result.is_err(), "should fail with missing solution hash");

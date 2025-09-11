@@ -316,37 +316,6 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(rewards_map)
     }
 
-    fn create_publish_shadow_txs_old(
-        &self,
-        aggregated_rewards: BTreeMap<Address, (RewardAmount, RollingHash)>,
-    ) -> Result<Vec<ShadowMetadata>> {
-        let mut shadow_txs = Vec::new();
-
-        for (address, (reward_amount, rolling_hash)) in aggregated_rewards {
-            // Convert rolling hash to irys_ref
-            let hash_bytes = rolling_hash.to_bytes();
-            let h256 = irys_types::H256::from(hash_bytes);
-            let irys_ref = h256.into();
-
-            // Extract the inner U256 from RewardAmount
-            let total_amount = reward_amount.into_inner();
-
-            shadow_txs.push(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::IngressProofReward(BalanceIncrement {
-                        amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
-                        target: address,
-                        irys_ref,
-                    }),
-                    (*self.solution_hash).into(),
-                ),
-                transaction_fee: 0,
-            });
-        }
-
-        Ok(shadow_txs)
-    }
-
     /// Get the current treasury balance
     pub fn treasury_balance(&self) -> U256 {
         self.treasury_balance
@@ -1278,11 +1247,12 @@ mod tests {
         let mut expected_shadow_txs = vec![
             // Block reward
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                    BlockRewardIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
                         amount: reward_amount.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
         ];
@@ -1290,22 +1260,25 @@ mod tests {
         // Add miner rewards in sorted order (BTreeMap guarantees this)
         for (miner, (reward, hash)) in expired_fees.miner_balance_increment.iter() {
             expected_shadow_txs.push(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::TermFeeReward(
-                    BalanceIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::TermFeeReward(BalanceIncrement {
                         amount: Uint::from_le_bytes(reward.to_le_bytes()),
                         target: *miner,
                         irys_ref: H256::from(hash.to_bytes()).into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             });
         }
 
+        let solution_hash = H256::zero();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &[],
@@ -1373,11 +1346,12 @@ mod tests {
         let mut expected_shadow_txs = vec![
             // Block reward
             ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                    BlockRewardIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
                         amount: reward_amount.into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             },
         ];
@@ -1385,22 +1359,25 @@ mod tests {
         // Add user refunds in sorted order (already sorted by tx_id)
         for (tx_id, refund_amount, user) in expired_fees.user_perm_fee_refunds.iter() {
             expected_shadow_txs.push(ShadowMetadata {
-                shadow_tx: ShadowTransaction::new_v1(TransactionPacket::PermFeeRefund(
-                    BalanceIncrement {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PermFeeRefund(BalanceIncrement {
                         amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
                         target: *user,
                         irys_ref: (*tx_id).into(),
-                    },
-                )),
+                    }),
+                    H256::zero().into(),
+                ),
                 transaction_fee: 0,
             });
         }
 
+        let solution_hash = H256::zero();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &[],
@@ -1446,19 +1423,22 @@ mod tests {
 
         // Only expect block reward
         let expected_shadow_txs = vec![ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-                BlockRewardIncrement {
+            shadow_tx: ShadowTransaction::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement {
                     amount: reward_amount.into(),
-                },
-            )),
+                }),
+                H256::zero().into(),
+            ),
             transaction_fee: 0,
         }];
 
+        let solution_hash = H256::zero();
         let mut generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
             &reward_amount,
             &parent_block,
+            &solution_hash,
             &config,
             &[],
             &[],

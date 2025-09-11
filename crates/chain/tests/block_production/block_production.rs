@@ -1426,7 +1426,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             _solution_hash: H256,
-            expired_ledger_fees: BTreeMap<Address, (irys_types::U256, RollingHash)>,
+            expired_ledger_fees: LedgerExpiryBalanceDiff,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Deliberately use an incorrect solution hash (all zeros)
             // This should cause the block to be rejected during validation
