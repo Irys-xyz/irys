@@ -6,7 +6,8 @@ use irys_types::{
 };
 
 use std::sync::{Arc, RwLock};
-use tracing::error;
+use std::collections::BTreeMap;
+use tracing::{debug, error, warn};
 
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
@@ -45,6 +46,8 @@ pub struct BlockIndexService {
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
     chunk_size: u64,
+    /// Buffer of out-of-order migration messages keyed by height
+    pending: BTreeMap<u64, (Arc<IrysBlockHeader>, Arc<Vec<DataTransactionHeader>>)>,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -81,6 +84,7 @@ impl BlockIndexService {
             block_log: Vec::new(),
             num_blocks: 0,
             chunk_size: consensus_config.chunk_size,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -100,7 +104,37 @@ impl BlockIndexService {
     /// * `block` - The migrated block header to be added
     /// * `all_txs` - Complete list of transaction headers, where the first `n` entries
     ///               correspond to the submit ledger's transaction IDs
-    pub fn migrate_block(
+    fn try_process_next_in_order(&mut self) {
+        if self.block_index.is_none() {
+            error!("block_index service not initialized");
+            return;
+        }
+
+        // Keep processing contiguous buffered heights starting at the current next expected height
+        loop {
+            let next_height = {
+                let binding = self
+                    .block_index
+                    .clone()
+                    .expect("block_index must be initialized");
+                let bi = binding.read().expect("block_index read lock poisoned");
+                bi.num_blocks() // next expected height to insert
+            };
+
+            if let Some((block, all_txs)) = self.pending.remove(&next_height) {
+                debug!(
+                    height = block.height,
+                    expected = next_height,
+                    "processing buffered migration in order"
+                );
+                self.migrate_block_inner(&block, &all_txs);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn migrate_block_inner(
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<DataTransactionHeader>>,
@@ -112,7 +146,8 @@ impl BlockIndexService {
 
         let chunk_size = self.chunk_size;
 
-        self.block_index
+        self
+            .block_index
             .clone()
             .expect("block_index must be initialized")
             .write()
@@ -158,14 +193,50 @@ impl BlockIndexService {
 impl Handler<BlockMigrationMessage> for BlockIndexService {
     type Result = eyre::Result<()>;
     fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
-        // Collect working variables to move into the closure
         let block = msg.block_header;
         let all_txs = msg.all_txs;
 
-        // migrate the block
-        self.migrate_block(&block, &all_txs);
+        // Determine next expected height and current index tip for logging/ordering
+        let (next_height, latest_height) = if let Some(binding) = self.block_index.clone() {
+            let bi = binding.read().expect("block_index read lock poisoned");
+            (bi.num_blocks(), bi.latest_height())
+        } else {
+            (0, 0)
+        };
 
-        Ok(())
+        debug!(
+            incoming_height = block.height,
+            next_expected_height = next_height,
+            latest_index_height = latest_height,
+            "received BlockMigrationMessage"
+        );
+
+        if block.height == next_height {
+            // Process immediately and then drain any contiguous buffered ones
+            self.migrate_block_inner(&block, &all_txs);
+            self.try_process_next_in_order();
+            Ok(())
+        } else if block.height > next_height {
+            // Buffer until predecessors arrive
+            let height = block.height;
+            if self.pending.insert(height, (block, all_txs)).is_some() {
+                warn!("replaced pending migration at height {}", height);
+            }
+            debug!(
+                buffered_height = height,
+                waiting_for = next_height,
+                "buffered out-of-order migration"
+            );
+            Ok(())
+        } else {
+            // Height is less than next expected; likely duplicate or reorg artifact
+            warn!(
+                incoming_height = block.height,
+                next_expected_height = next_height,
+                "received stale migration; dropping"
+            );
+            Ok(())
+        }
     }
 }
 
