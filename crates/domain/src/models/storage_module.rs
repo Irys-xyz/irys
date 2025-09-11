@@ -1316,17 +1316,46 @@ impl StorageModule {
         let front = recent_chunk_times.front().unwrap();
         let back = recent_chunk_times.back().unwrap();
 
-        // Calculate the actual time span covered by our records
+        // Calculate the actual time span covered by our records.
+        //
+        // Why this exists:
+        // - The storage module batches writes of fixed-size chunks (consensus chunk_size).
+        // - We want a lightweight, real-time estimate of sustained write throughput (bytes/sec)
+        //   to make backpressure decisions in the data sync layer (e.g., throttling request rate).
+        // - We derive throughput from the recorded timing of recent chunk writes to avoid heavy I/O stats.
+        //
+        // Behavior:
+        // - Computes total bytes written over the time window spanned by the first and last sample.
+        // - If there are no samples, returns 0 (no signal).
+        // - If the window is extremely small, we treat it conservatively (see below) to avoid spikes.
         let time_span = back.completion_time.duration_since(front.start_time);
 
-        // Total bytes processed in this time span
+        // Total bytes processed in this time span: chunk_size × number_of_chunks_in_window
         let total_bytes = chunk_size * recent_chunk_times.len() as u64;
 
-        // Calculate throughput with minimum 1 second time span
-        let time_span_secs = time_span.as_secs_f64().max(1.0);
+        // Throughput calculation (integer-only to avoid non-deterministic floating point):
+        // - For spans >= 1s: return rounded division total_bytes / secs.
+        // - For spans < 1s: scale using milliseconds with rounding, i.e.
+        //     bytes_per_sec = round((total_bytes * 1000) / millis).
+        // This keeps the signal smooth and deterministic while remaining inexpensive.
+        let secs = time_span.as_secs();
+        if secs >= 1 {
+            // Rounded integer division for stable signal over longer spans
+            return (total_bytes + secs / 2) / secs;
+        }
 
-        let bytes_per_second = total_bytes as f64 / time_span_secs;
-        bytes_per_second.round() as u64
+        let millis = time_span.as_millis();
+        if millis == 0 {
+            // Extremely small span (sub-millisecond): avoid division-by-zero and
+            // treat this as an instantaneous estimate bounded by total_bytes/sec.
+            return total_bytes;
+        }
+
+        // Scale to per-second using millisecond precision with rounding.
+        // Use u128 intermediates for headroom, then convert back to u64.
+        let scaled = (total_bytes as u128) * 1000_u128;
+        let per_sec = (scaled + millis / 2) / millis;
+        per_sec as u64
     }
 
     /// Utility method asking the StorageModule to return its chunk range in

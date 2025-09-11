@@ -517,8 +517,10 @@ impl EpochSnapshot {
         // Deterministic ceil to integer, then convert to u64
         let (ceil_int, _) = scaled_trunc
             .to_integer_round(rug::float::Round::Up)
-            .unwrap();
-        ceil_int.to_string().parse::<u64>().unwrap_or(u64::MAX)
+            .expect("value must be finite (not NaN/Inf)");
+        ceil_int
+            .to_u64()
+            .expect("ceiled value must be in 0..=u64::MAX")
     }
 
     /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
@@ -1108,15 +1110,14 @@ fn rug_truncate_to_3_decimals(value: &rug::Float) -> rug::Float {
     // Preserve the input's precision for all intermediate calculations
     let p = value.prec();
 
-    // Scale by 1000 to bring 3 decimal places into the integer domain
-    let thousand = rug::Float::with_val(p, 1000);
+    // Multiply by 1000 to bring 3 decimal places into the integer domain without allocating a Float
 
     // Multiply and then truncate toward -inf to implement "truncate" semantics
-    let tmp = rug::Float::with_val(p, value * &thousand);
+    let tmp = rug::Float::with_val(p, value * 1000);
     let (int, _) = tmp.to_integer_round(rug::float::Round::Down).unwrap();
 
     // Scale back down to 3-decimal fixed point
-    rug::Float::with_val(p, int) / &thousand
+    rug::Float::with_val(p, int) / 1000
 }
 
 #[cfg(test)]
