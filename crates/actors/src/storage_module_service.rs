@@ -251,42 +251,65 @@ impl StorageModuleServiceInner {
             // We have to do this because we don't know if we're resuming this indexing from a crash
             // or restart of the node.
             let first_unindexed_chunk_offset =
-                Self::find_first_unindexed_chunk(assigned_sm, partition_range);
+                Self::find_first_unindexed_chunk(assigned_sm.clone(), partition_range);
 
             // If we found some unindexed chunks that should be present, let's build a list of blocks to migrate
             if let Some(chunk_offset) = first_unindexed_chunk_offset {
                 let ledger_chunk_offset =
                     ledger_range.start() + LedgerChunkOffset::from(*chunk_offset);
 
-                let block_bounds = match self.block_index.read().get_block_bounds(
-                    DataLedger::try_from(ledger_id).unwrap(),
-                    ledger_chunk_offset,
-                ) {
-                    Ok(bounds) => bounds,
-                    Err(e) => {
-                        error!(
-                            "Error reading block bounds for chunk_offset {}: {}",
-                            ledger_chunk_offset, e
-                        );
-                        return Err(eyre::eyre!(
-                            "Error reading block bounds for chunk_offset: {}: {}",
-                            ledger_chunk_offset,
-                            e
-                        ));
-                    }
+                // check max_chunk_offset first
+                let block_index_guard = self.block_index.read();
+                let latest_item = match block_index_guard.get_latest_item() {
+                    Some(item) => item,
+                    None => continue, // No blocks yet, skip
                 };
+
+                let data_ledger = DataLedger::try_from(ledger_id).unwrap();
+                let max_chunk_offset = latest_item.ledgers[data_ledger as usize].max_chunk_offset;
+
+                // Check if start offset is within bounds
+                if *ledger_chunk_offset >= max_chunk_offset {
+                    // This offset is beyond the actual data in the ledger, skip this storage module
+                    continue;
+                }
+
+                // Now we can safely get block bounds for the start
+                let block_bounds = block_index_guard
+                    .get_block_bounds(data_ledger, ledger_chunk_offset)
+                    .expect("Should be able to get block bounds as max_chunk_offset was checked");
 
                 let start_block = block_bounds.height;
 
-                let Ok(block_bounds) = self.block_index.read().get_block_bounds(
-                    DataLedger::try_from(ledger_id).unwrap(),
-                    // TODO: Why do we have to - 1 here?
-                    ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1),
-                ) else {
-                    return Err(eyre::eyre!("Error reading block bounds"));
+                // Calculate end offset
+                let end_ledger_offset =
+                    ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1);
+
+                // Clamp end offset to actual data bounds
+                let clamped_end_offset = if *end_ledger_offset >= max_chunk_offset {
+                    if max_chunk_offset > 0 {
+                        LedgerChunkOffset::from(max_chunk_offset - 1)
+                    } else {
+                        continue; // No data at all
+                    }
+                } else {
+                    end_ledger_offset
                 };
 
-                let end_block = block_bounds.height;
+                // Ensure we have a valid range after clamping
+                if clamped_end_offset < ledger_chunk_offset {
+                    continue; // Skip if the range is invalid
+                }
+
+                // Now get block bounds for the end
+                let end_block_bounds = block_index_guard
+                    .get_block_bounds(data_ledger, clamped_end_offset)
+                    .expect("Should be able to get end block bounds as offset was validated");
+
+                let end_block = end_block_bounds.height;
+
+                // Drop the guard before the next read
+                drop(block_index_guard);
 
                 {
                     let bi = self.block_index.read();

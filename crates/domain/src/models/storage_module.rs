@@ -853,22 +853,32 @@ impl StorageModule {
 
         match chunk_type {
             ChunkType::Entropy => {
-                // First, add any pending entropy chunks to the set
-                pending
-                    .iter()
-                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
-                    .for_each(|(offset, _)| {
-                        let interval = partition_chunk_offset_ii!(*offset, *offset);
-                        let _ = set.insert_merge_touching_or_overlapping(interval);
-                    });
+                // First, collect pending entropy offsets
+                let pending_entropy_offsets: std::collections::HashSet<PartitionChunkOffset> =
+                    pending
+                        .iter()
+                        .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
+                        .map(|(offset, _)| *offset)
+                        .collect();
 
-                // Then, remove any entropy offsets that have pending data chunks
+                // Add pending entropy chunks to the set
+                for offset in &pending_entropy_offsets {
+                    let interval = partition_chunk_offset_ii!(*offset, *offset);
+                    let _ = set.insert_merge_touching_or_overlapping(interval);
+                }
+
+                // Only remove entropy offsets that have pending data chunks
+                // IF those offsets are also in pending entropy (not stored entropy)
                 pending
                     .iter()
                     .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Data)
                     .for_each(|(offset, _)| {
-                        let point_interval = ii(*offset, *offset);
-                        let _ = set.cut(point_interval);
+                        // Only cut if this offset is a pending entropy chunk
+                        // Don't cut if it's a stored entropy chunk
+                        if pending_entropy_offsets.contains(offset) {
+                            let point_interval = ii(*offset, *offset);
+                            let _ = set.cut(point_interval);
+                        }
                     });
             }
             ChunkType::Data => {
