@@ -344,8 +344,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         let line = line?;
                         eprintln!("{}", line);
                         writeln!(file, "{}", line)?;
-                        file.flush()?;
                     }
+                    file.flush()?;
                 }
 
                 // Wait for command to complete
