@@ -1,0 +1,154 @@
+name: Flaky Test Detection
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Daily at 4 AM UTC
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'Number of test runs'
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flaky-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUNS: ${{ github.event.inputs.runs || '30' }}
+  RETENTION_DAYS: 10
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+  RUST_BACKTRACE: short
+  # keep build artifacts contained to this repo's workspace on the self-hosted runner
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.target
+
+jobs:
+  flaky-tests:
+    runs-on: [self-hosted, test-runner]
+    timeout-minutes: 240
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true  # Always start with clean workspace
+
+      - name: Ensure cargo-flaky is installed
+        shell: bash
+        run: |
+          if ! command -v cargo-flaky >/dev/null 2>&1; then
+            echo "Installing cargo-flaky..."
+            cargo install cargo-flaky --version 0.4.0 --locked
+          else
+            echo "cargo-flaky already installed ($(cargo-flaky --version))"
+          fi
+
+      - name: Pre-build tests in release mode
+        shell: bash
+        run: |
+          cargo test --release --no-run --message-format=short
+
+      - name: Create results directory
+        run: mkdir -p flaky-test-results
+
+      - name: Run flaky test detection (with timing)
+        shell: bash
+        run: |
+          # Use available cores (Linux/macOS fallback)
+          export RUST_TEST_THREADS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+          
+          START_TIME=$(date +%s)
+          set +e
+          cargo flaky --release -i "${{ env.RUNS }}" -- --release 2>&1 | tee flaky-test-results/flaky-test-output.txt
+          EXIT_CODE=$?
+          END_TIME=$(date +%s)
+          
+          echo $EXIT_CODE > flaky-test-results/exit_code.txt
+          echo "Duration: $((END_TIME - START_TIME)) seconds" > flaky-test-results/duration.txt
+        continue-on-error: true
+
+      - name: Generate summary report
+        if: always()
+        shell: bash
+        run: |
+          # Read duration if available
+          DURATION=$(cat flaky-test-results/duration.txt 2>/dev/null || echo "n/a")
+          
+          {
+            echo "# Flaky Test Detection Report"
+            echo "**Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "**Commit:** ${{ github.sha }}"
+            echo "**Runner:** ${{ runner.name }}"
+            echo "**Runs:** ${{ env.RUNS }}"
+            echo "**Duration:** $DURATION"
+            echo
+            echo "## Results"
+            if grep -Eiq 'Found.*failing test|flaky|intermittent' flaky-test-results/flaky-test-output.txt; then
+              echo "### Flaky Tests Detected"
+              echo
+              echo '```text'
+              # Show matching lines with line numbers (top 200 for brevity)
+              grep -Ein 'Found.*failing test|flaky|intermittent' flaky-test-results/flaky-test-output.txt | head -n 200 || true
+              echo '```'
+            else
+              echo "### No Flaky Tests Detected"
+            fi
+            echo
+            echo "### Exit Code"
+            echo '```text'
+            cat flaky-test-results/exit_code.txt 2>/dev/null || echo "n/a"
+            echo '```'
+          } > flaky-test-results/summary.md
+
+      - name: Parse flaky test details
+        id: parse
+        if: always()
+        shell: bash
+        run: |
+          # Extract test names and failure counts
+          grep -E "^test:.*stdout" flaky-test-results/flaky-test-output.txt | \
+            awk '{print $2, $3}' | \
+            sort | uniq > flaky-test-results/flaky-tests-list.txt || true
+          
+          # Count for metrics
+          FLAKY_COUNT=$(wc -l < flaky-test-results/flaky-tests-list.txt 2>/dev/null || echo 0)
+          echo "flaky_count=$FLAKY_COUNT" >> "$GITHUB_OUTPUT"
+          
+          # Add count to summary
+          echo "" >> flaky-test-results/summary.md
+          echo "### Flaky Test Count: $FLAKY_COUNT" >> flaky-test-results/summary.md
+
+      - name: Compress results
+        if: always()
+        shell: bash
+        run: |
+          # Create a tar.gz of everything except summary.md
+          cd flaky-test-results
+          tar -czf compressed-results.tar.gz \
+            --exclude=summary.md \
+            --exclude=compressed-results.tar.gz \
+            *.txt 2>/dev/null || true
+          cd ..
+
+      - name: Upload flaky test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-test-results-${{ github.run_number }}
+          path: |
+            flaky-test-results/summary.md
+            flaky-test-results/compressed-results.tar.gz
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Post to job summary
+        if: always()
+        run: |
+          if [ -f flaky-test-results/summary.md ]; then
+            cat flaky-test-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
