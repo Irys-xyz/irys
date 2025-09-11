@@ -22,6 +22,7 @@ members = [
   "crates/utils/utils",
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
+  "crates/packing-worker",
 ]
 resolver = "2"
 
@@ -125,6 +126,9 @@ async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
 priority-queue = "2.5"
 moka = "0.12.10"
+socket2 = "0.5"
+async-stream = "0.3"
+
 
 # Reth & Alloy deps
 # These should be kept in lockstep with the Reth dependencies - for compatability and built times

@@ -254,6 +254,31 @@ pub struct RethNetworkConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackingConfig {
+    #[serde(default)]
+    pub local: LocalPackingConfig,
+    #[serde(default)]
+    pub remote: Vec<RemotePackingConfig>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LocalPackingConfig {
+    /// Number of CPU threads to use for data packing operations
+    pub cpu_packing_concurrency: u16,
+
+    /// Batch size for GPU-accelerated packing operations
+    pub gpu_packing_batch_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePackingConfig {
+    pub url: String,
+
+    pub secret: String,
+
+    pub timeout: Duration,
+
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
 
@@ -541,8 +566,11 @@ impl NodeConfig {
                 },
             },
             packing: PackingConfig {
-                cpu_packing_concurrency: 4,
-                gpu_packing_batch_size: 1024,
+                local: LocalPackingConfig {
+                    cpu_packing_concurrency: 4,
+                    gpu_packing_batch_size: 1024,
+                },
+                remote: Default::default(),
             },
             cache: CacheConfig { cache_clean_lag: 2 },
             http: HttpConfig {
@@ -665,8 +693,11 @@ impl NodeConfig {
                 },
             },
             packing: PackingConfig {
-                cpu_packing_concurrency: 4,
-                gpu_packing_batch_size: 1024,
+                local: LocalPackingConfig {
+                    cpu_packing_concurrency: 4,
+                    gpu_packing_batch_size: 1024,
+                },
+                remote: Default::default(),
             },
             cache: CacheConfig { cache_clean_lag: 2 },
             http: HttpConfig {

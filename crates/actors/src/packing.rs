@@ -56,10 +56,10 @@ impl PackingConfig {
     pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
-            concurrency: config.node_config.packing.cpu_packing_concurrency,
+            concurrency: config.node_config.packing.local.cpu_packing_concurrency,
             chain_id: config.consensus.chain_id,
             #[cfg(feature = "nvidia")]
-            max_chunks: config.node_config.packing.gpu_packing_batch_size,
+            max_chunks: config.node_config.packing.local.gpu_packing_batch_size,
         }
     }
 }
@@ -123,6 +123,7 @@ impl PackingActor {
 
             let start_value = *chunk_range.0.start();
             let end_value = *chunk_range.0.end();
+            // TODO: pass through the node config here
             let short_writes_before_sync: u32 = (storage_module
                 .config
                 .node_config
@@ -131,6 +132,7 @@ impl PackingActor {
                 .div_ceil(2))
             .try_into()
             .expect("Should be able to convert min_writes_before_sync to u32");
+
             match PACKING_TYPE {
                 PackingType::CPU => {
                     for i in start_value..=end_value {
@@ -433,8 +435,11 @@ mod tests {
                 num_writes_before_sync: 1,
             },
             packing: irys_types::PackingConfig {
-                cpu_packing_concurrency: 1,
-                gpu_packing_batch_size: 1,
+                local: irys_types::LocalPackingConfig {
+                    cpu_packing_concurrency: 1,
+                    gpu_packing_batch_size: 1,
+                },
+                remote: Default::default(),
             },
             base_directory: base_path.clone(),
             ..NodeConfig::testing()

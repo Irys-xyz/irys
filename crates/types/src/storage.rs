@@ -171,7 +171,7 @@ impl TryFrom<PartitionChunkOffset> for usize {
     }
 }
 /// Partition relative chunk interval/ranges
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionChunkRange(pub Interval<PartitionChunkOffset>);
 
 impl Deref for PartitionChunkRange {

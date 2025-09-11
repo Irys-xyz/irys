@@ -5117,6 +5117,7 @@ dependencies = [
  "irys-c",
  "irys-types",
  "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]
@@ -6640,6 +6641,26 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "packing-worker"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "clap",
+ "eyre",
+ "futures",
+ "futures-util",
+ "irys-packing",
+ "irys-testing-utils",
+ "irys-types",
+ "irys-utils",
+ "serde",
+ "socket2",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
