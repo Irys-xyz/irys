@@ -391,7 +391,7 @@ impl DataSyncServiceInner {
             // so we can filter the active_peer_bandwidth_managers list for peers assigned to this ledger/slot in the future
             if !entry.partition_assignments.contains(&pa) {
                 debug!(
-                    "Ading partition assignment: {:#?} to Peer: {}",
+                    "Adding partition assignment: {:#?} to Peer: {}",
                     pa, entry.miner_address
                 );
                 entry.partition_assignments.push(pa);
