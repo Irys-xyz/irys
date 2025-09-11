@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
-use tracing::{debug, warn, Instrument};
+use tracing::{debug, warn, Instrument as _};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -136,7 +136,7 @@ impl DataSyncServiceInner {
         // TODO: this is a temporary solution until the PeerListService can message
         // the DataSyncService to let it know of peer changes. Until then we poll/synchronize with
         // the PeerList on a fixed interval
-        if Instant::now() - self.last_peer_list_check > self.peer_list_check_interval {
+        if self.last_peer_list_check.elapsed() > self.peer_list_check_interval {
             self.synchronize_peers_and_orchestrators();
             self.last_peer_list_check = Instant::now();
         }
@@ -228,8 +228,8 @@ impl DataSyncServiceInner {
             consensus.chain_id,
         );
 
-        // Do not write directly to the storage module, indexes need to be set up
-        // the parent data_tx with the data_root may not have arrived yet...
+        // Attempt to write the chunk directly to the sm, if it doesn't succeed
+        // for a variety of reasons, indexes not initialized, no packing etc etc...
         let sm = self
             .storage_modules
             .read()
@@ -237,26 +237,15 @@ impl DataSyncServiceInner {
             .get(storage_module_id)
             .unwrap()
             .clone();
-
-        let so = sm.collect_start_offsets(unpacked_chunk.data_root);
-        let pa = sm.partition_assignment().unwrap();
-
-        if let Ok(so) = so {
-            debug!(
-                "start_offsets: Ledger:{:?} index: {:?}  {:?} {}",
-                pa.ledger_id, pa.slot_index, so, chunk.partition_offset
-            );
-            let x = 5;
+        if sm.write_data_chunk(&unpacked_chunk).is_err() {
+            // ..then, send the unpacked chunk to the mempool and let the it do it's thing.
+            self.service_senders
+                .mempool
+                .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
+                    unpacked_chunk,
+                ))
+                .expect("to send MempoolServiceMessage");
         }
-
-        //
-        // Instead, send the unpacked chunk to the mempool and let the it do it's thing.
-        self.service_senders
-            .mempool
-            .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
-                unpacked_chunk,
-            ))
-            .expect("to send MempoolServiceMessage");
 
         Ok(())
     }
