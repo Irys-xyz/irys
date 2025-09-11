@@ -266,7 +266,7 @@ impl StorageModuleServiceInner {
                 };
 
                 let data_ledger = DataLedger::try_from(ledger_id).unwrap();
-                let max_chunk_offset = latest_item.ledgers[data_ledger as usize].max_chunk_offset;
+                let max_chunk_offset = latest_item.ledgers[data_ledger as usize].total_chunks;
 
                 // Check if start offset is within bounds
                 if *ledger_chunk_offset >= max_chunk_offset {
@@ -386,7 +386,7 @@ impl StorageModuleServiceInner {
 
         let max_ledger_offset = self
             .block_tree
-            .get_max_chunk_offset(migration_height, ledger_id);
+            .get_total_chunks(migration_height, ledger_id);
 
         let range = storage_module
             .get_storage_module_ledger_range()

@@ -653,9 +653,8 @@ pub trait BlockProdStrategy {
         // Publish Ledger Transactions
         let publish_chunks_added =
             calculate_chunks_added(&publish_txs.txs, self.inner().config.consensus.chunk_size);
-        let publish_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Publish]
-            .max_chunk_offset
-            + publish_chunks_added;
+        let publish_total_chunks =
+            prev_block_header.data_ledgers[DataLedger::Publish].total_chunks + publish_chunks_added;
         let opt_proofs = publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
@@ -724,9 +723,8 @@ pub trait BlockProdStrategy {
         }
         let submit_chunks_added =
             calculate_chunks_added(&submit_txs, self.inner().config.consensus.chunk_size);
-        let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit]
-            .max_chunk_offset
-            + submit_chunks_added;
+        let submit_total_chunks =
+            prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
         // build a new block header
         let mut irys_block = IrysBlockHeader {
@@ -754,7 +752,7 @@ pub trait BlockProdStrategy {
                     ledger_id: DataLedger::Publish.into(),
                     tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs.txs).0,
                     tx_ids: H256List(publish_txs.txs.iter().map(|t| t.id).collect::<Vec<_>>()),
-                    max_chunk_offset: publish_max_chunk_offset,
+                    total_chunks: publish_total_chunks,
                     expires: None,
                     proofs: opt_proofs,
                     required_proof_count: Some(
@@ -770,7 +768,7 @@ pub trait BlockProdStrategy {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                     tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
-                    max_chunk_offset: submit_max_chunk_offset,
+                    total_chunks: submit_total_chunks,
                     expires: Some(
                         self.inner()
                             .config

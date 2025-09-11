@@ -335,7 +335,7 @@ fn find_block_range(
         .last()
         .expect("expected block index to contain at least one item");
     let max_chunk_offset_across_all_partitions =
-        LedgerChunkOffset::from(last_item.ledgers[ledger_type].max_chunk_offset);
+        LedgerChunkOffset::from(last_item.ledgers[ledger_type].total_chunks);
 
     // Track min and max blocks as we iterate
     let mut min_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
@@ -375,8 +375,8 @@ fn find_block_range(
 
             // Skip to the next chunk after this block ends.
             // We do this by going to the very end of the current blocks max chunk offset
-            chunk_offset = (block_index_item.ledgers[ledger_type].max_chunk_offset + 1)
-                .min(*chunk_range.end());
+            chunk_offset =
+                (block_index_item.ledgers[ledger_type].total_chunks + 1).min(*chunk_range.end());
         }
     }
 
@@ -437,7 +437,7 @@ fn get_previous_max_offset(
                 .get_item(prev_height)
                 .ok_or_eyre("previous block must exist")?
                 .ledgers[ledger_type]
-                .max_chunk_offset,
+                .total_chunks,
         ))
     }
 }

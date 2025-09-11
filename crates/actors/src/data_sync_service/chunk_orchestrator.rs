@@ -248,7 +248,7 @@ impl ChunkOrchestrator {
                     .iter()
                     .find(|dl| dl.ledger_id == self.ledger_id)
                     .expect("should be able to look up data_ledger by id");
-                data_ledger.max_chunk_offset
+                data_ledger.total_chunks.saturating_sub(1)
             } else {
                 0
             }
@@ -270,9 +270,7 @@ impl ChunkOrchestrator {
             //
             // Example: If ledger has 5 chunks, max_chunk_offset = 5, but highest partition relative offset = 4
             // TODO: Rename max_chunk_offset in the ledger to max_chunk_count
-            let part_relative: u64 = max_chunk_offset
-                .saturating_sub(ledger_range.start().into())
-                .saturating_sub(1);
+            let part_relative: u64 = max_chunk_offset.saturating_sub(ledger_range.start().into());
             Some((
                 PartitionChunkOffset::from(part_relative as u32),
                 LedgerChunkOffset::from(max_chunk_offset),

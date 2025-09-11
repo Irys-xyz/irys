@@ -211,8 +211,8 @@ pub fn process_ledger_transactions(
     db: &Arc<DatabaseProvider>,
 ) -> Result<(), MigrationError> {
     let path_pairs = get_tx_path_pairs(block, ledger, txs).unwrap();
-    let block_range = get_block_range(block, ledger, block_index.clone());
-    let mut prev_chunk_offset = block_range.start();
+    let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index.clone());
+    let mut prev_chunk_offset = block_offsets.start();
 
     for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
         let num_chunks_in_tx: u32 = data_size
@@ -297,7 +297,7 @@ fn process_transaction_chunks(
 /// # Returns
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
-fn get_block_range(
+fn get_block_offsets_in_ledger(
     block: &IrysBlockHeader,
     ledger: DataLedger,
     block_index: Arc<RwLock<BlockIndex>>,
@@ -306,17 +306,26 @@ fn get_block_range(
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
+        // We subtract 1 from `total_chunks` to get the offsets
         index_reader
             .get_item(block.height - 1)
-            .map(|prev| prev.ledgers[ledger].max_chunk_offset)
+            .map(|prev| prev.ledgers[ledger].total_chunks)
             .unwrap_or(0)
+            .saturating_sub(1)
     } else {
         0
     };
 
+    // debug!(
+    //     "get_block_range - {} {}",
+    //     start_chunk_offset,
+    //     block.data_ledgers[ledger].total_chunks.saturating_sub(1)
+    // );
+
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
-        LedgerChunkOffset::from(block.data_ledgers[ledger].max_chunk_offset),
+        // We subtract 1 from `total_chunks` to get the offsets
+        LedgerChunkOffset::from(block.data_ledgers[ledger].total_chunks.saturating_sub(1)),
     ))
 }
 

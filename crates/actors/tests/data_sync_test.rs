@@ -509,7 +509,7 @@ impl TestSetup {
 
         // Make sure the genesis block track the ledger size
         let mut fake_genesis = IrysBlockHeader::new_mock_header();
-        fake_genesis.data_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks;
+        fake_genesis.data_ledgers[DataLedger::Publish].total_chunks = num_chunks;
 
         let data_tx = signer
             .create_transaction(data, fake_genesis.block_hash)

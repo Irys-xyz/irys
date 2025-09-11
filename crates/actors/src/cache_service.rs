@@ -148,7 +148,7 @@ impl ChunkCacheService {
         // Check to see if the first overlapping block in our first active submit ledger slot is in the block index
         let mut prune_height: Option<u64> = None;
         if let Some(latest) = self.block_index_guard.read().get_latest_item() {
-            let submit_ledger_max_chunk_offset = latest.ledgers[ledger_id].max_chunk_offset;
+            let submit_ledger_max_chunk_offset = latest.ledgers[ledger_id].total_chunks;
             if submit_ledger_max_chunk_offset > chunk_offset {
                 // If the chunk_offset is in the block index look up the block_bounds
                 let block_bounds = self
@@ -168,9 +168,9 @@ impl ChunkCacheService {
                 let block_hash = block_entry.block_hash;
                 let block_tree = self.block_tree_guard.read();
                 let block = block_tree.get_block(&block_hash)?;
-                let ledger_max_offset = block.data_ledgers[ledger_id].max_chunk_offset;
-                if ledger_max_offset <= chunk_offset {
-                    Some((block_entry.height, ledger_max_offset))
+                let ledger_total_chunks = block.data_ledgers[ledger_id].total_chunks;
+                if ledger_total_chunks <= chunk_offset {
+                    Some((block_entry.height, ledger_total_chunks))
                 } else {
                     None
                 }
