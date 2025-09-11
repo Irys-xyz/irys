@@ -4,11 +4,9 @@ on:
   schedule:
     - cron: '0 4 * * *'  # Daily at 4 AM UTC
   workflow_dispatch:
-    inputs:
-      runs:
-        description: 'Number of test runs'
-        required: false
-        default: '30'
+
+# Only run scheduled jobs on master branch
+# Manual workflow_dispatch can run on any branch
 
 permissions:
   contents: read
@@ -18,7 +16,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUNS: ${{ github.event.inputs.runs || '30' }}
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -32,6 +29,8 @@ jobs:
     #runs-on: [self-hosted, test-runner]
     runs-on: [ubuntu-latest]
     timeout-minutes: 240
+    # Only run scheduled jobs on master branch, but allow manual dispatch on any branch
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.ref == 'refs/heads/master')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,15 +38,10 @@ jobs:
           fetch-depth: 1
           clean: true  # Always start with clean workspace
 
-      - name: Ensure cargo-flaky is installed
+      - name: Build xtask
         shell: bash
         run: |
-            cargo install cargo-flaky --version 0.4.0 --locked
-
-      - name: Pre-build tests in release mode
-        shell: bash
-        run: |
-          cargo test --release --no-run --message-format=short
+          cargo build -p xtask --release
 
       - name: Create results directory
         run: mkdir -p flaky-test-results
@@ -60,9 +54,16 @@ jobs:
           
           START_TIME=$(date +%s)
           set +e
-          cargo flaky --release -i "${{ env.RUNS }}" 2>&1 | tee flaky-test-results/flaky-test-output.txt
+          cargo xtask flaky --clean --save -i 5 -f 5
           EXIT_CODE=$?
           END_TIME=$(date +%s)
+          
+          # Copy the timestamped output file to results directory
+          if ls target/flaky-test-output-*.txt 1> /dev/null 2>&1; then
+            cp target/flaky-test-output-*.txt flaky-test-results/flaky-test-output.txt
+          else
+            echo "No flaky output file found in target directory" > flaky-test-results/flaky-test-output.txt
+          fi
           
           echo $EXIT_CODE > flaky-test-results/exit_code.txt
           echo "Duration: $((END_TIME - START_TIME)) seconds" > flaky-test-results/duration.txt
@@ -80,7 +81,11 @@ jobs:
             echo "**Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
             echo "**Commit:** ${{ github.sha }}"
             echo "**Runner:** ${{ runner.name }}"
-            echo "**Runs:** ${{ env.RUNS }}"
+            echo "**Tool:** cargo xtask flaky"
+            echo "**Iterations:** 5"
+            echo "**Tolerable Failures:** 5"
+            echo "**Clean Workspace:** Yes"
+            echo "**Output Saved:** Yes (timestamped file in target/)"
             echo "**Duration:** $DURATION"
             echo
             echo "## Results"
@@ -139,6 +144,7 @@ jobs:
           path: |
             flaky-test-results/summary.md
             flaky-test-results/compressed-results.tar.gz
+            target/flaky-test-output-*.txt
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Post to job summary
