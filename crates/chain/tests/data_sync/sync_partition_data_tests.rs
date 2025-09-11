@@ -113,28 +113,63 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         .start_and_wait_for_packing("PEER1", seconds_to_wait)
         .await;
 
-    // let peer2_node = IrysNodeTest::new(peer2_config.clone())
-    //     .start_and_wait_for_packing("PEER2", seconds_to_wait)
-    //     .await;
+    let peer2_node = IrysNodeTest::new(peer2_config.clone())
+        .start_and_wait_for_packing("PEER2", seconds_to_wait)
+        .await;
 
     let _block = genesis_node.mine_block().await?;
 
+    let (mut genesis_synced, mut peer1_synced, mut peer2_synced) = (false, false, false);
+
     for _ in 0..120 {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
-        check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
+        let counts1 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
+        let counts2 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
+        let counts3 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
 
-        check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
-        check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
+        genesis_synced = (counts1.data == 50 && counts1.packed == 10)
+            && (counts2.data == 50 && counts2.packed == 10)
+            && (counts3.packed == 60 && counts3.data == 0);
 
-        // check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
-        // check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
+        let counts1 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
+        let counts2 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
+        let counts3 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 1);
+
+        peer1_synced = (counts1.data == 50 && counts1.packed == 10)
+            && (counts2.data == 50 && counts2.packed == 10)
+            && (counts3.packed == 60 && counts3.data == 0);
+
+        let counts1 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
+        let counts2 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
+        let counts3 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 1);
+
+        peer2_synced = (counts1.data == 50 && counts1.packed == 10)
+            && (counts2.data == 50 && counts2.packed == 10)
+            && (counts3.packed == 60 && counts3.data == 0);
+
+        if genesis_synced && peer1_synced && peer2_synced {
+            break;
+        }
     }
 
+    assert!(genesis_synced);
+    assert!(peer1_synced);
+    assert!(peer2_synced);
+
+    // Make sure peers can mine. Note this isn't a perfect test but it may show
+    // up as flakiness if the peers get stuck producing invalid block solutions
+    peer1_node.mine_blocks(5).await?;
+    peer2_node.mine_blocks(5).await?;
+
     peer1_node.stop().await;
-    // peer2_node.stop().await;
+    peer2_node.stop().await;
     genesis_node.stop().await;
     Ok(())
+}
+
+struct ChunkCountTotals {
+    pub data: usize,
+    pub packed: usize,
 }
 
 fn check_submodule_chunks(
@@ -142,7 +177,7 @@ fn check_submodule_chunks(
     name: &str,
     ledger: DataLedger,
     slot_index: usize,
-) {
+) -> ChunkCountTotals {
     let data_intervals = node.get_storage_module_intervals(ledger, slot_index, ChunkType::Data);
     let packed_intervals =
         node.get_storage_module_intervals(ledger, slot_index, ChunkType::Entropy);
@@ -170,6 +205,11 @@ fn check_submodule_chunks(
         "\n{}: {:?}:{}\n data offsets: {:?}\n pack offsets: {:?}\n",
         name, ledger, slot_index, data_chunks, packed_chunks
     );
+
+    ChunkCountTotals {
+        data: data_chunks.len(),
+        packed: packed_chunks.len(),
+    }
 }
 
 fn validate_partition_assignments(
@@ -191,7 +231,7 @@ fn validate_partition_assignments(
         .count();
     let capacity_count = partition_assignments
         .iter()
-        .filter(|pa| pa.ledger_id == None)
+        .filter(|pa| pa.ledger_id.is_none())
         .count();
 
     assert_eq!(

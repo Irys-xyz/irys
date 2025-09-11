@@ -12,22 +12,30 @@
 /// Acts as the central authority for storage module membership, with other
 /// components accessing this information through read guards to ensure
 /// consistency throughout the system.
-use irys_config::StorageSubmodulesConfig;
-use irys_domain::{PackingParams, StorageModule, StorageModuleInfo};
-use irys_types::{Config, PartitionChunkRange, TokioServiceHandle};
-use reth::tasks::shutdown::Shutdown;
-use std::{
-    path::Path,
-    sync::{Arc, RwLock},
-    time::{Duration, Instant},
-};
-use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
-use tracing::{debug, error, warn, Instrument, Span};
-
 use crate::{
-    chunk_migration_service::process_ledger_transactions, packing::PackingRequest,
+    chunk_migration_service::ChunkMigrationServiceMessage, packing::PackingRequest,
     services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
 };
+use eyre::eyre;
+use irys_config::StorageSubmodulesConfig;
+use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
+use irys_domain::{
+    BlockIndexReadGuard, BlockTreeReadGuard, PackingParams, StorageModule, StorageModuleInfo,
+};
+use irys_types::{
+    BlockHash, Config, DataLedger, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
+    TokioServiceHandle,
+};
+use reth::tasks::shutdown::Shutdown;
+use std::{
+    collections::BTreeMap,
+    ops::Range,
+    path::Path,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
+use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
+use tracing::{debug, error, warn, Instrument as _, Span};
 
 // Messages that the StorageModuleService service supports
 #[derive(Debug)]
@@ -48,16 +56,20 @@ pub struct StorageModuleService {
 #[derive(Debug)]
 pub struct StorageModuleServiceInner {
     storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
+    block_index: BlockIndexReadGuard,
+    block_tree: BlockTreeReadGuard,
     actor_addresses: ActorAddresses,
     submodules_config: StorageSubmodulesConfig,
     service_senders: ServiceSenders,
-    _config: Config,
+    config: Config,
 }
 
 impl StorageModuleServiceInner {
     /// Create a new StorageModuleServiceInner instance
     pub fn new(
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
+        block_index: BlockIndexReadGuard,
+        block_tree: BlockTreeReadGuard,
         actor_addresses: ActorAddresses,
         service_senders: ServiceSenders,
         config: Config,
@@ -70,27 +82,37 @@ impl StorageModuleServiceInner {
 
         Self {
             storage_modules,
+            block_index,
+            block_tree,
             actor_addresses,
             submodules_config,
             service_senders,
-            _config: config,
+            config,
         }
     }
 
-    fn handle_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
+    async fn handle_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
         match msg {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos,
                 update_height,
-            } => self.handle_partition_assignments_update(storage_module_infos, update_height),
+            } => {
+                self.handle_partition_assignments_update(storage_module_infos, update_height)
+                    .await?
+            }
         }
+        Ok(())
     }
 
     fn tick(&self) {
         // Check to see if any of the storage modules are ready to be flushed to disk
-        let storage_modules = self.storage_modules.read().unwrap();
+        let storage_modules = {
+            let guard = self.storage_modules.read().unwrap();
+            guard.clone()
+        }; // <- Don't hold the read guard across an async boundary
+
         for sm in storage_modules.iter() {
-            if Instant::now() - sm.last_pending_write() > Duration::from_secs(5) {
+            if sm.last_pending_write().elapsed() > Duration::from_secs(5) {
                 if let Err(e) = sm.force_sync_pending_chunks() {
                     error!("Couldn't flush pending chunks: {}", e);
                 }
@@ -98,7 +120,7 @@ impl StorageModuleServiceInner {
         }
     }
 
-    fn handle_partition_assignments_update(
+    async fn handle_partition_assignments_update(
         &mut self,
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
         update_height: u64,
@@ -107,7 +129,8 @@ impl StorageModuleServiceInner {
         let _span = span.enter();
 
         // Read the current storage modules once, outside the loop
-        let current_modules = self.storage_modules.read().unwrap();
+        let modules_snapshot: Vec<Arc<StorageModule>> =
+            { self.storage_modules.read().unwrap().clone() };
         let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();
         let mut packing_modules: Vec<Arc<StorageModule>> = Vec::new();
 
@@ -115,10 +138,12 @@ impl StorageModuleServiceInner {
 
         for sm_info in storage_module_infos.iter() {
             // Get the existing StorageModule from our state with the same storage module id
-            let existing = current_modules
+            let existing = {
+                modules_snapshot
                 .iter()
                 .find(|sm| sm.id == sm_info.id)
-                .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &current_modules, &storage_module_infos));
+                .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
+            };
 
             // Did this storage module from our state get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
@@ -205,9 +230,109 @@ impl StorageModuleServiceInner {
 
         // For each storage module assigned to a data ledger, we need to update the data_root indexes
         // that may overlap the assigned slot so that it can index chunks
+        let mut blocks_to_migrate: BTreeMap<u128, BlockHash> = BTreeMap::new();
         for assigned_sm in assigned_modules {
             // Rebuild indexes
-            process_ledger_transactions
+            let ledger_id = assigned_sm
+                .partition_assignment()
+                .and_then(|a| a.ledger_id)
+                .expect("storage module must be assigned to a data ledger slot");
+
+            let ledger_range = assigned_sm
+                .get_storage_module_ledger_range()
+                .expect("storage module should be assigned to a ledger");
+
+            // Get the chunk range in PartitionRelative offsets for the min and max
+            // relative offset of data stored in this partition.
+            let max_partition_offset = self.get_max_partition_offset(assigned_sm.clone());
+            let partition_range = PartitionChunkOffset::from(0)..max_partition_offset;
+
+            // Use a binary search to find the first chunk in that range without a tx_path_hash
+            // We have to do this because we don't know if we're resuming this indexing from a crash
+            // or restart of the node.
+            let first_unindexed_chunk_offset =
+                Self::find_first_unindexed_chunk(assigned_sm, partition_range);
+
+            // If we found some unindexed chunks that should be present, let's build a list of blocks to migrate
+            if let Some(chunk_offset) = first_unindexed_chunk_offset {
+                let ledger_chunk_offset =
+                    ledger_range.start() + LedgerChunkOffset::from(*chunk_offset);
+
+                let block_bounds = match self.block_index.read().get_block_bounds(
+                    DataLedger::try_from(ledger_id).unwrap(),
+                    ledger_chunk_offset,
+                ) {
+                    Ok(bounds) => bounds,
+                    Err(e) => {
+                        error!(
+                            "Error reading block bounds for chunk_offset {}: {}",
+                            ledger_chunk_offset, e
+                        );
+                        return Err(eyre::eyre!(
+                            "Error reading block bounds for chunk_offset: {}: {}",
+                            ledger_chunk_offset,
+                            e
+                        ));
+                    }
+                };
+
+                let start_block = block_bounds.height;
+
+                let Ok(block_bounds) = self.block_index.read().get_block_bounds(
+                    DataLedger::try_from(ledger_id).unwrap(),
+                    // TODO: Why do we have to - 1 here?
+                    ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1),
+                ) else {
+                    return Err(eyre::eyre!("Error reading block bounds"));
+                };
+
+                let end_block = block_bounds.height;
+
+                {
+                    let bi = self.block_index.read();
+                    for height in start_block..=end_block {
+                        let block_hash = bi
+                            .get_item(height.try_into().unwrap())
+                            .expect("block item to be present in index")
+                            .block_hash;
+                        blocks_to_migrate.insert(height, block_hash);
+                    }
+                }
+            }
+        }
+
+        if !blocks_to_migrate.is_empty() {
+            // If we have blocks to migrate, lets do so. The BTreeSet ensures in-order traversal
+            let migration_service = &self.service_senders.chunk_migration;
+            for (block_height, block_hash) in blocks_to_migrate {
+                // Send migration request
+                let (tx, rx) = tokio::sync::oneshot::channel();
+
+                // Handle send error
+                if let Err(e) = migration_service.send(
+                    ChunkMigrationServiceMessage::UpdateStorageModuleIndexes {
+                        block_hash,
+                        receiver: tx,
+                    },
+                ) {
+                    error!(
+                        "Failed to send migration request for block {}: {}",
+                        block_height, e
+                    );
+                    return Err(eyre!(
+                        "Unable to index storage module chunks do to mpsc send failure: {}",
+                        e
+                    ));
+                }
+
+                // We await responses so we only perform one migration at a time
+                if let Err(e) = rx.await {
+                    error!(
+                        "Failed to receive migration response for block {}: {}",
+                        block_height, e
+                    );
+                }
+            }
         }
 
         // Only once the storage module partition assignments are updated we can a
@@ -224,6 +349,66 @@ impl StorageModuleServiceInner {
         }
 
         Ok(())
+    }
+
+    fn get_max_partition_offset(&self, storage_module: Arc<StorageModule>) -> PartitionChunkOffset {
+        let ledger_id = storage_module
+            .partition_assignment()
+            .and_then(|a| a.ledger_id)
+            .expect("storage module must be assigned to a data ledger slot");
+
+        let current_height = self.block_tree.read().get_latest_canonical_entry().height;
+        let migration_height =
+            current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
+
+        let max_ledger_offset = self
+            .block_tree
+            .get_max_chunk_offset(migration_height, ledger_id);
+
+        let range = storage_module
+            .get_storage_module_ledger_range()
+            .expect("storage module should be assigned to a ledger");
+        let start: u64 = *range.start();
+        let end: u64 = *range.end();
+
+        // Make the max offset partition relative
+        let part_end = match max_ledger_offset {
+            Some(max) if end >= *max => max.saturating_sub(start),
+            Some(_) => end - start,
+            None => 0,
+        };
+
+        PartitionChunkOffset::from(part_end)
+    }
+
+    fn find_first_unindexed_chunk(
+        storage_module: Arc<StorageModule>,
+        range: Range<PartitionChunkOffset>,
+    ) -> Option<PartitionChunkOffset> {
+        let mut lo = range.start;
+        let mut hi = range.end;
+
+        let mut path_hashes: Option<ChunkPathHashes> = None;
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+
+            path_hashes = storage_module
+                .query_submodule_db_by_offset(mid, |tx| get_path_hashes_by_offset(tx, mid))
+                .expect("to be able to query submodule db");
+
+            if path_hashes.is_some() {
+                lo = mid + 1; // skip initialized
+            } else {
+                hi = mid; // candidate for first uninitialized
+            }
+        }
+
+        if lo < range.end && path_hashes.is_none() {
+            Some(lo)
+        } else {
+            None
+        }
     }
 
     /// Validates that a storage module's partition assignment matches the on-disk parameters.
@@ -313,6 +498,8 @@ impl StorageModuleService {
     pub fn spawn_service(
         rx: UnboundedReceiver<StorageModuleServiceMessage>,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
+        block_index: BlockIndexReadGuard,
+        block_tree: BlockTreeReadGuard,
         actor_addresses: &ActorAddresses,
         service_senders: ServiceSenders,
         config: &Config,
@@ -332,6 +519,8 @@ impl StorageModuleService {
                     msg_rx: rx,
                     inner: StorageModuleServiceInner::new(
                         storage_modules,
+                        block_index,
+                        block_tree,
                         actor_addresses,
                         service_senders,
                         config,
@@ -371,7 +560,7 @@ impl StorageModuleService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            self.inner.handle_message(msg)?;
+                            self.inner.handle_message(msg).await?;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -379,7 +568,7 @@ impl StorageModuleService {
                         }
                     }
                 }
-                // Handle ticks of the internval
+                // Handle ticks of the interval
                 _ = interval.tick() => {
                      self.inner.tick();
                 }
@@ -388,7 +577,7 @@ impl StorageModuleService {
 
         tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg)?
+            self.inner.handle_message(msg).await?
         }
 
         tracing::info!("shutting down StorageModule Service gracefully");

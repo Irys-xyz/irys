@@ -424,7 +424,7 @@ impl StorageModule {
     }
 
     pub fn last_pending_write(&self) -> Instant {
-        self.last_pending_write.read().unwrap().clone()
+        *self.last_pending_write.read().unwrap()
     }
 
     /// Reinit intervals setting them as Uninitialized, and erase db
