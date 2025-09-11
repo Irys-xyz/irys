@@ -58,7 +58,7 @@ async fn external_api() -> eyre::Result<()> {
     ]);
     let node = node.start().await;
 
-    node.node_ctx.stop_mining().await?;
+    node.node_ctx.stop_mining()?;
     wait_for_packing(
         node.node_ctx.actor_addresses.packing.clone(),
         Some(Duration::from_secs(10)),

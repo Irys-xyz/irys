@@ -334,7 +334,8 @@ pub struct NodeInfo {
     pub height: u64,
     pub block_hash: H256,
     pub block_index_height: u64,
-    pub blocks: u64,
+    pub block_index_hash: H256,
+    pub pending_blocks: u64,
     pub is_syncing: bool,
     pub current_sync_height: usize,
 }

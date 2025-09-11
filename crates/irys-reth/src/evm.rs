@@ -639,7 +639,7 @@ where
 
         // Get the target address from the shadow transaction
         let fee_payer_address = match &shadow_tx {
-            ShadowTransaction::V1 { packet } => packet.fee_payer_address(),
+            ShadowTransaction::V1 { packet, .. } => packet.fee_payer_address(),
         };
 
         // Check if this is a block reward transaction

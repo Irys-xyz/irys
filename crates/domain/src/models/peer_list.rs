@@ -24,6 +24,8 @@ pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
 pub enum ScoreDecreaseReason {
     BogusData,
     Offline,
+    SlowResponse,
+    NoResponse,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -31,6 +33,7 @@ pub enum ScoreIncreaseReason {
     Online,
     ValidData,
     DataRequest,
+    TimelyResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -531,8 +534,10 @@ impl PeerListDataInner {
                     peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    // Limited increase for data requests to prevent farming
-                    peer.reputation_score.increase_limited(1);
+                    peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::TimelyResponse => {
+                    peer.reputation_score.increase();
                 }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(mining_addr) {
@@ -545,8 +550,10 @@ impl PeerListDataInner {
                     peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    // Limited increase for data requests to prevent farming
-                    peer.reputation_score.increase_limited(1);
+                    peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::TimelyResponse => {
+                    peer.reputation_score.increase();
                 }
             }
 
@@ -573,6 +580,12 @@ impl PeerListDataInner {
                     peer_item.reputation_score.decrease_bogus_data();
                 }
                 ScoreDecreaseReason::Offline => {
+                    peer_item.reputation_score.decrease_offline();
+                }
+                ScoreDecreaseReason::SlowResponse => {
+                    peer_item.reputation_score.decrease();
+                }
+                ScoreDecreaseReason::NoResponse => {
                     peer_item.reputation_score.decrease_offline();
                 }
             }
@@ -859,6 +872,157 @@ mod tests {
             peer_network_service_sender: create_mock_sender(),
         };
         PeerList(Arc::new(RwLock::new(peer_list_data)))
+    }
+
+    mod peer_list_scoring_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(ScoreDecreaseReason::BogusData, 45)]
+        #[case(ScoreDecreaseReason::Offline, 47)]
+        #[case(ScoreDecreaseReason::SlowResponse, 49)]
+        #[case(ScoreDecreaseReason::NoResponse, 47)]
+        fn test_decrease_peer_score_persistent_cache(
+            #[case] reason: ScoreDecreaseReason,
+            #[case] expected_score: u16,
+        ) {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.decrease_peer_score(&addr, reason);
+            let updated_peer = peer_list.get_peer(&addr).unwrap();
+            assert_eq!(updated_peer.reputation_score.get(), expected_score);
+        }
+
+        #[test]
+        fn test_multiple_decreases_cumulative() {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                45
+            );
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                42
+            );
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::SlowResponse);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                41
+            );
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::NoResponse);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                38
+            );
+        }
+
+        #[test]
+        fn test_decrease_score_removes_inactive_from_known_peers() {
+            let peer_list = create_test_peer_list();
+            let (addr, mut peer) = create_test_peer(1);
+            peer.reputation_score = PeerScore::new(25);
+
+            peer_list.add_or_update_peer(addr, peer.clone(), true);
+            assert!(peer_list.all_known_peers().contains(&peer.address));
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            let updated_peer = peer_list.get_peer(&addr);
+
+            if let Some(p) = updated_peer {
+                if !p.reputation_score.is_active() {
+                    assert!(!peer_list.all_known_peers().contains(&peer.address));
+                }
+            }
+        }
+
+        #[test]
+        fn test_decrease_score_unstaked_peer_removal() {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer.clone(), false);
+            assert!(peer_list.get_peer(&addr).is_some());
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            assert!(peer_list.get_peer(&addr).is_none());
+            assert!(!peer_list.all_known_peers().contains(&peer.address));
+        }
+
+        #[rstest]
+        #[case(ScoreIncreaseReason::ValidData, 51)]
+        #[case(ScoreIncreaseReason::Online, 51)]
+        #[case(ScoreIncreaseReason::DataRequest, 51)]
+        #[case(ScoreIncreaseReason::TimelyResponse, 51)]
+        fn test_increase_peer_score(
+            #[case] reason: ScoreIncreaseReason,
+            #[case] expected_score: u16,
+        ) {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.increase_peer_score(&addr, reason);
+            let updated_peer = peer_list.get_peer(&addr).unwrap();
+            assert_eq!(updated_peer.reputation_score.get(), expected_score);
+        }
+
+        #[test]
+        fn test_score_transitions_across_thresholds() {
+            let peer_list = create_test_peer_list();
+            let (addr, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            let updated_peer = peer_list.get_peer(&addr).unwrap();
+
+            assert_eq!(updated_peer.reputation_score.get(), 19);
+            assert!(!updated_peer.reputation_score.is_active());
+
+            peer_list.increase_peer_score(&addr, ScoreIncreaseReason::Online);
+            let final_peer = peer_list.get_peer(&addr).unwrap();
+            assert_eq!(final_peer.reputation_score.get(), 20);
+            assert!(final_peer.reputation_score.is_active());
+        }
+
+        #[test]
+        fn test_unstaked_peer_operations() {
+            let peer_list = create_test_peer_list();
+            let (addr, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(50);
+            peer_list.add_or_update_peer(addr, peer, false);
+
+            let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            assert_eq!(initial_score, 50);
+
+            peer_list.increase_peer_score(&addr, ScoreIncreaseReason::ValidData);
+            let after_increase_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            assert_eq!(after_increase_score, 51);
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+
+            let final_peer = peer_list.get_peer(&addr);
+            assert!(
+                final_peer.is_none(),
+                "Unstaked peer should be removed after any decrease operation"
+            );
+        }
     }
 
     #[tokio::test]

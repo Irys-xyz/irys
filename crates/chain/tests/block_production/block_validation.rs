@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
-use irys_types::{NodeConfig, U256};
+use irys_types::{NodeConfig, H256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
@@ -53,6 +53,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
+            solution_hash: H256,
             expired_ledger_fees: LedgerExpiryBalanceDiff,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
@@ -64,6 +65,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     data_txs_with_proofs,
                     reward_amount,
                     self.invalid_timestamp,
+                    solution_hash,
                     expired_ledger_fees,
                 )
                 .await
