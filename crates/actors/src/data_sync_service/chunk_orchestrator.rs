@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{debug, Instrument};
+use tracing::{debug, Instrument as _};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -147,17 +147,15 @@ impl ChunkOrchestrator {
 
         let entropy_intervals = self.storage_module.get_intervals(ChunkType::Entropy);
 
-        debug!(
-            "entropy_intervals for ledger_id:{:?} slot_index:{:?} -> {:?}",
-            pa.ledger_id, pa.slot_index, entropy_intervals
-        );
-
         for interval in entropy_intervals {
             for interval_step in *interval.start()..=*interval.end() {
                 let chunk_offset = PartitionChunkOffset::from(interval_step);
 
                 // Don't try to sync above the maximum amount of data stored in the partition
-                if chunk_offset >= max_chunk_offset {
+                // TODO: If max_chunk_offset was actually an offset this would be `>=`  but
+                //       currently max_chunk_offset appears to be one chunk higher than the
+                //       max chunk offset. More of a "num chunks". This needs to be sorted out.
+                if chunk_offset > max_chunk_offset {
                     return;
                 }
 
@@ -187,8 +185,6 @@ impl ChunkOrchestrator {
             return;
         }
 
-        let total_requests = self.chunk_requests.len();
-
         let pending_offsets: Vec<_> = self
             .chunk_requests
             .iter()
@@ -196,16 +192,6 @@ impl ChunkOrchestrator {
                 matches!(req.request_state, ChunkRequestState::Pending).then_some(offset)
             })
             .collect();
-
-        debug!(
-            "total_requests: {} pending_offsets: {}",
-            total_requests,
-            pending_offsets.len()
-        );
-
-        if total_requests == 50 && pending_offsets.len() == 0 {
-            debug!("{:#?}", self.chunk_requests);
-        }
 
         for chunk_offset in pending_offsets {
             // Reset exclusions if all peers are excluded
@@ -223,11 +209,6 @@ impl ChunkOrchestrator {
             let Some(peer_address) = self.find_best_peer(chunk_request.excluded.as_ref()) else {
                 continue;
             };
-
-            debug!(
-                "found_best_peer: {} (excluding: {:?}) {:?}",
-                peer_address, chunk_request.excluded, self.current_peers
-            );
 
             self.dispatch_chunk_request(chunk_offset, peer_address);
         }
