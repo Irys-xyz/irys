@@ -7,23 +7,25 @@ cat << 'EOF' >> ~/.cargo/config.toml
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 EOF
 
-# remove these once GCC13 stops being in the testing branch (or when we upgrade debian releases)
-cat << 'EOF' >> /etc/apt/sources.list.d/testing.list
-deb http://deb.debian.org/debian testing main
-EOF
+# # remove these once GCC13 stops being in the testing branch (or when we upgrade debian releases)
+# cat << 'EOF' >> /etc/apt/sources.list.d/trixie.list
+# deb http://deb.debian.org/debian trixie main
+# EOF
 
-cat << 'EOF' >>  /etc/apt/preferences.d/50-local
-Package: *
-Pin: release a=bookworm
-Pin-Priority: 500
+# cat << 'EOF' >>  /etc/apt/preferences.d/50-local
+# Package: *
+# Pin: release a=bookworm
+# Pin-Priority: 500
 
-Package: *
-Pin: release a=testing
-Pin-Priority: 100
-EOF
+# Package: *
+# Pin: release a=trixie
+# Pin-Priority: 100
+# EOF
 
 sudo apt update
-sudo apt -t testing install -y --no-install-recommends gcc-13 g++-13
+# sudo apt -t trixie install -y --no-install-recommends gcc-13 g++-13
+#  sudo apt install -y --no-install-recommends gcc-13 g++-13
+
 
 
 sudo apt install -y --no-install-recommends \
