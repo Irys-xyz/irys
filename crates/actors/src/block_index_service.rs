@@ -2,11 +2,11 @@ use crate::BlockMigrationMessage;
 use actix::prelude::*;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
-    BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256, U256,
+    BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256, U256,
 };
 
 use std::sync::{Arc, RwLock};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
@@ -45,6 +45,7 @@ pub struct BlockIndexService {
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
     chunk_size: u64,
+    last_received_block: Option<(u64, BlockHash)>,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -81,6 +82,7 @@ impl BlockIndexService {
             block_log: Vec::new(),
             num_blocks: 0,
             chunk_size: consensus_config.chunk_size,
+            last_received_block: None,
         }
     }
 
@@ -161,6 +163,21 @@ impl Handler<BlockMigrationMessage> for BlockIndexService {
         // Collect working variables to move into the closure
         let block = msg.block_header;
         let all_txs = msg.all_txs;
+
+        if let Some((previous_height, previous_hash)) = &self.last_received_block {
+            if block.height != previous_height + 1 {
+                error!("BlockMigrationMessage received out of order or with a gap. Previous block height: {}, hash: {:x}. Current block height: {}, hash: {:x}", previous_height, previous_hash, block.height, block.block_hash);
+                // TODO: the tree disregards any errors in the handler right now, so we just panic
+                // return Err(eyre::eyre!("BlockMigrationMessage received out of order or with a gap"));
+                panic!("BlockMigrationMessage received out of order or with a gap");
+            }
+        } else {
+            warn!(
+                "Block index service received its first block: height {}, hash {:x}",
+                block.height, block.block_hash
+            );
+        }
+        self.last_received_block = Some((block.height, block.block_hash));
 
         // migrate the block
         self.migrate_block(&block, &all_txs);
