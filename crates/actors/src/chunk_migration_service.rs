@@ -407,7 +407,7 @@ fn find_storage_module(
             .and_then(|pa| pa.ledger_id)
             .filter(|&id| id == ledger as u32)
             // Then check offset range
-            .and_then(|_| module.get_storage_module_ledger_range().ok())
+            .and_then(|_| module.get_storage_module_ledger_offsets().ok())
             .filter(|range| range.contains_point(ledger_offset.into()))
             .map(|_| module.clone()) // Clone the Arc here (it's cheap)
     })

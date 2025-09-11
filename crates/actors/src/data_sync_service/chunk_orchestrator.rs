@@ -224,7 +224,7 @@ impl ChunkOrchestrator {
         // Find the maximum LedgerRelativeOffset of this storage module
         let ledger_range = self
             .storage_module
-            .get_storage_module_ledger_range()
+            .get_storage_module_ledger_offsets()
             .expect("storage module should be assigned to a ledger");
 
         // Fetch the most recently migrated block
@@ -261,15 +261,6 @@ impl ChunkOrchestrator {
         }
 
         if ledger_range.end() > max_chunk_offset.into() {
-            // Convert max_chunk_offset from ledger-relative to partition-relative coordinates
-            //
-            // Two adjustments are needed:
-            // 1. Subtract ledger_range.start() to convert from ledger-relative to partition-relative
-            // 2. Subtract 1 because max_chunk_offset represents the count of chunks in the ledger, but we need
-            //    the highest valid offset (count - 1)
-            //
-            // Example: If ledger has 5 chunks, max_chunk_offset = 5, but highest partition relative offset = 4
-            // TODO: Rename max_chunk_offset in the ledger to max_chunk_count
             let part_relative: u64 = max_chunk_offset.saturating_sub(ledger_range.start().into());
             Some((
                 PartitionChunkOffset::from(part_relative as u32),
@@ -345,7 +336,7 @@ impl ChunkOrchestrator {
         // Get a ledger chunk offset
         let start_ledger_offset = u64::from(
             self.storage_module
-                .get_storage_module_ledger_range()
+                .get_storage_module_ledger_offsets()
                 .unwrap()
                 .start(),
         );

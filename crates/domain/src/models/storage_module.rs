@@ -929,7 +929,7 @@ impl StorageModule {
         chunk_range: LedgerChunkRange,
         data_size: u64,
     ) -> eyre::Result<()> {
-        let storage_range = self.get_storage_module_ledger_range()?;
+        let storage_range = self.get_storage_module_ledger_offsets()?;
         let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
 
         let overlap = storage_range
@@ -1111,7 +1111,7 @@ impl StorageModule {
         &self,
         ledger_offset: LedgerChunkOffset,
     ) -> Result<Option<PackedChunk>> {
-        let range = self.get_storage_module_ledger_range()?;
+        let range = self.get_storage_module_ledger_offsets()?;
         let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
         self.generate_full_chunk(partition_offset)
     }
@@ -1372,7 +1372,7 @@ impl StorageModule {
 
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
-    pub fn get_storage_module_ledger_range(&self) -> eyre::Result<LedgerChunkRange> {
+    pub fn get_storage_module_ledger_offsets(&self) -> eyre::Result<LedgerChunkRange> {
         let pa = self.partition_assignment.read().unwrap();
         if let Some(part_assign) = *pa {
             if let Some(slot_index) = part_assign.slot_index {
@@ -1394,7 +1394,7 @@ impl StorageModule {
         &self,
         chunk_range: LedgerChunkRange,
     ) -> eyre::Result<PartitionChunkRange> {
-        let storage_module_range = self.get_storage_module_ledger_range()?;
+        let storage_module_range = self.get_storage_module_ledger_offsets()?;
         let start = chunk_range.start() - storage_module_range.start();
         let end = chunk_range.end() - storage_module_range.start();
         Ok(PartitionChunkRange(ii(
@@ -1410,7 +1410,7 @@ impl StorageModule {
         &self,
         start_offset: LedgerChunkOffset,
     ) -> eyre::Result<i32> {
-        let storage_module_range = self.get_storage_module_ledger_range()?;
+        let storage_module_range = self.get_storage_module_ledger_offsets()?;
         let start = *start_offset as i64 - *storage_module_range.start() as i64;
         Ok(start.try_into()?)
     }
@@ -1569,7 +1569,7 @@ pub fn get_overlapped_storage_modules(
                 .and_then(|pa| pa.ledger_id)
                 == Some(ledger as u32))
                 && module
-                    .get_storage_module_ledger_range()
+                    .get_storage_module_ledger_offsets()
                     .is_ok_and(|range| range.overlaps(tx_chunk_range))
         })
         .cloned() // Clone the Arc, which is cheap
@@ -1594,7 +1594,7 @@ pub fn get_storage_module_at_offset(
                 .and_then(|pa| pa.ledger_id)
                 == Some(ledger as u32))
                 && module
-                    .get_storage_module_ledger_range()
+                    .get_storage_module_ledger_offsets()
                     .is_ok_and(|range| range.contains_point(chunk_offset))
         })
         .cloned()

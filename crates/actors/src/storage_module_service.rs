@@ -239,7 +239,7 @@ impl StorageModuleServiceInner {
                 .expect("storage module must be assigned to a data ledger slot");
 
             let ledger_range = assigned_sm
-                .get_storage_module_ledger_range()
+                .get_storage_module_ledger_offsets()
                 .expect("storage module should be assigned to a ledger");
 
             // Get the chunk range in PartitionRelative offsets for the min and max
@@ -389,7 +389,7 @@ impl StorageModuleServiceInner {
             .get_total_chunks(migration_height, ledger_id);
 
         let range = storage_module
-            .get_storage_module_ledger_range()
+            .get_storage_module_ledger_offsets()
             .expect("storage module should be assigned to a ledger");
         let start: u64 = *range.start();
         let end: u64 = *range.end();
