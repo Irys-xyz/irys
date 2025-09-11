@@ -234,52 +234,63 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 cmd!(sh, "cargo clean --package {name}").remove_and_run()?;
             }
         }
-        Commands::Flaky { iterations, clean, threads, save, tolerable_failures, args } => {
+        Commands::Flaky {
+            iterations,
+            clean,
+            threads,
+            save,
+            tolerable_failures,
+            args,
+        } => {
             // Clean workspace if requested
             if clean {
                 run_command(Commands::CleanWorkspace, sh)?;
-                
+
                 // Prebuild the project after cleaning
                 println!("Prebuilding the project");
                 cmd!(sh, "cargo build --workspace --tests").remove_and_run()?;
             }
-            
+
             println!("Running cargo-flake to detect flaky tests");
-            
+
             // Install cargo-flake if not already installed
-            cmd!(sh, "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake").remove_and_run()?;
-            
+            cmd!(
+                sh,
+                "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
+            )
+            .remove_and_run()?;
+
             // Build command arguments
             let mut command_args = vec!["flake".to_string()];
-            
+
             // Add iterations (default to 5 if not specified)
             let iters = iterations.unwrap_or(5);
             command_args.push("--iterations".to_string());
             command_args.push(iters.to_string());
-            
+
             // Add threads if specified
             if let Some(thread_count) = threads {
                 command_args.push("--threads".to_string());
                 command_args.push(thread_count.to_string());
             }
-            
+
             // Add tolerable failures if specified
             if let Some(failures) = tolerable_failures {
                 command_args.push("--tolerable-failures".to_string());
                 command_args.push(failures.to_string());
             }
-            
+
             // Add any additional arguments after --
             let args_for_header = args.clone();
             if !args.is_empty() {
                 command_args.push("--".to_string());
                 command_args.extend(args);
             }
-            
+
             if save {
                 // Create target directory if it doesn't exist
                 fs::create_dir_all("target")?;
-                
+
                 // Generate timestamp for output file
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)?
@@ -288,9 +299,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     .unwrap()
                     .format("%Y-%m-%d-%H-%M-%S");
                 let output_file = format!("target/flaky-test-output-{}.txt", timestamp);
-                
+
                 println!("Streaming output to: {}", output_file);
-                
+
                 // Create output file and write header
                 let mut file = fs::File::create(&output_file)?;
                 writeln!(file, "=== Flaky Test Run - {} ===", timestamp)?;
@@ -306,7 +317,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
                 writeln!(file)?;
                 writeln!(file)?;
-                
+
                 // Spawn cargo command with streaming output to file
                 let mut child = Command::new("cargo")
                     .args(&command_args)
@@ -314,7 +325,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()?;
-                
+
                 // Stream stdout
                 if let Some(stdout) = child.stdout.take() {
                     let reader = BufReader::new(stdout);
@@ -325,7 +336,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         file.flush()?;
                     }
                 }
-                
+
                 // Stream stderr
                 if let Some(stderr) = child.stderr.take() {
                     let reader = BufReader::new(stderr);
@@ -336,11 +347,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         file.flush()?;
                     }
                 }
-                
+
                 // Wait for command to complete
                 let status = child.wait()?;
                 if !status.success() {
-                    return Err(eyre::eyre!("cargo-flake failed with exit code: {:?}", status.code()));
+                    return Err(eyre::eyre!(
+                        "cargo-flake failed with exit code: {:?}",
+                        status.code()
+                    ));
                 }
             } else {
                 // Run command without file output - just pass through to terminal
@@ -348,9 +362,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     .args(&command_args)
                     .env("RUST_BACKTRACE", "1")
                     .status()?;
-                
+
                 if !status.success() {
-                    return Err(eyre::eyre!("cargo-flake failed with exit code: {:?}", status.code()));
+                    return Err(eyre::eyre!(
+                        "cargo-flake failed with exit code: {:?}",
+                        status.code()
+                    ));
                 }
             }
         }
