@@ -92,7 +92,10 @@ pub(super) struct PreemptibleVdfTask {
 impl PreemptibleVdfTask {
     #[instrument(skip_all, fields(block_hash = %self.task.block.block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
-        tracing::error!("PreemptibleVdfTask starting for block {}", self.task.block.block_hash);
+        tracing::error!(
+            "PreemptibleVdfTask starting for block {}",
+            self.task.block.block_hash
+        );
         let inner = Arc::clone(&self.task.service_inner);
         let block = Arc::clone(&self.task.block);
         let skip_vdf = self.task.skip_vdf_validation;
@@ -294,9 +297,6 @@ pub(super) struct ValidationCoordinator {
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
-
-    /// VDF task completion notifier
-    vdf_notify: Arc<Notify>,
 }
 
 impl ValidationCoordinator {
@@ -305,7 +305,6 @@ impl ValidationCoordinator {
             vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify)),
             concurrent_tasks: JoinSet::new(),
             block_tree_guard,
-            vdf_notify,
         }
     }
 
@@ -353,7 +352,7 @@ impl ValidationCoordinator {
     /// Submit a validation task
     #[instrument(skip_all, fields(block_hash = %task.block.block_hash, block_height = %task.block.height))]
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
-        let priority = self.calculate_priority(&*task.block);
+        let priority = self.calculate_priority(&task.block);
         self.vdf_scheduler.submit(task, priority);
     }
 
@@ -393,7 +392,7 @@ impl ValidationCoordinator {
                 }
                 VdfValidationResult::Cancelled => {
                     // Re-queue the cancelled task with recalculated priority
-                    let priority = self.calculate_priority(&*task.block);
+                    let priority = self.calculate_priority(&task.block);
                     tracing::error!(
                         block_hash = %hash,
                         ?priority,
@@ -473,7 +472,7 @@ impl ValidationCoordinator {
 
         let mut updated_count = 0;
         for task in tasks_to_update {
-            let new_priority = self.calculate_priority(&*task.block);
+            let new_priority = self.calculate_priority(&task.block);
             // update_priority returns true if the item existed and was updated
             if self
                 .vdf_scheduler

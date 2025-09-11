@@ -449,9 +449,9 @@ pub mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{Config, NodeConfig, VDFLimiterInfo, H256List};
-    use std::sync::Arc;
+    use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo};
     use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[tokio::test]
@@ -460,30 +460,34 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         // Set moderately high computational cost for longer computation
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 5_000_000; // Moderately high difficulty
-        node_config.consensus.get_mut().vdf.num_checkpoints_in_vdf_step = 10;
-        
+        node_config
+            .consensus
+            .get_mut()
+            .vdf
+            .num_checkpoints_in_vdf_step = 10;
+
         let config = Config::new(node_config.clone());
         let vdf_config = config.vdf.clone();
 
         // Generate fewer steps but with much higher computational cost each
         let num_steps = 10; // Fewer steps but each takes longer
         let mut steps = Vec::new();
-        
+
         // Generate initial seed
         let mut seed = H256::from_low_u64_be(42);
-        
+
         println!("Generating {} VDF steps for test...", num_steps);
         for i in 0..num_steps {
             // Apply reset seed if needed
-            if i > 0 && i % vdf_config.reset_frequency as usize == 0 {
+            if i > 0 && i % vdf_config.reset_frequency == 0 {
                 seed = apply_reset_seed(seed, H256::from_low_u64_be(1337));
             }
-            
+
             // Calculate next step
             let mut hasher = Sha256::new();
             let mut salt = U256::from(step_number_to_salt_number(&vdf_config, i as u64));
             let mut checkpoints = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-            
+
             vdf_sha(
                 &mut hasher,
                 &mut salt,
@@ -492,14 +496,14 @@ mod tests {
                 vdf_config.num_iterations_per_checkpoint(),
                 &mut checkpoints,
             );
-            
+
             steps.push(seed);
         }
-        
+
         // Create VDF state WITHOUT the steps we're going to validate
         // This forces vdf_steps_are_valid to actually compute them
         let vdf_state = Arc::new(RwLock::new(VdfState {
-            global_step: 0,  // Start at 0, not at num_steps
+            global_step: 0, // Start at 0, not at num_steps
             global_step_from_the_latest_canonical_block: 0,
             minimum_step_to_keep: 0,
             capacity: 1000,
@@ -516,10 +520,13 @@ mod tests {
         let vdf_info = VDFLimiterInfo {
             output: steps.last().copied().unwrap_or(H256::from_low_u64_be(42)), // Last step output
             global_step_number: num_steps as u64,
-            seed: H256::from_low_u64_be(1337), // Reset seed  
+            seed: H256::from_low_u64_be(1337),      // Reset seed
             next_seed: H256::from_low_u64_be(1338), // Next reset seed
             prev_output: H256::from_low_u64_be(42), // Initial seed
-            last_step_checkpoints: H256List(vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step]),
+            last_step_checkpoints: H256List(vec![
+                H256::default();
+                vdf_config.num_checkpoints_in_vdf_step
+            ]),
             steps: H256List(steps.clone()),
             vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
             next_vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
@@ -560,7 +567,7 @@ mod tests {
         let start = std::time::Instant::now();
         let result = validation_handle.await;
         let elapsed = start.elapsed();
-        
+
         println!("Validation completed in {:?}", elapsed);
 
         // Verify the result

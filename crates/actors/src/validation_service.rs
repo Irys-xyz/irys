@@ -89,8 +89,6 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) execution_payload_provider: ExecutionPayloadCache,
     /// Toggle to enable/disable validation message processing
     pub validation_enabled: Arc<AtomicBool>,
-    /// VDF task completion notifier
-    pub(crate) vdf_notify: Arc<Notify>,
 }
 
 impl ValidationService {
@@ -139,7 +137,6 @@ impl ValidationService {
                         db,
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
-                        vdf_notify,
                     }),
                 };
 
@@ -339,7 +336,10 @@ impl ValidationServiceInner {
         cancel: Arc<AtomicU8>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
-        tracing::error!("ensure_vdf_is_valid starting for block {}", block.block_hash);
+        tracing::error!(
+            "ensure_vdf_is_valid starting for block {}",
+            block.block_hash
+        );
         debug!("Verifying VDF info");
 
         let vdf_info = block.vdf_limiter_info.clone();
@@ -348,7 +348,10 @@ impl ValidationServiceInner {
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
 
-        tracing::error!("ensure_vdf_is_valid waiting for step {}", prev_output_step_number);
+        tracing::error!(
+            "ensure_vdf_is_valid waiting for step {}",
+            prev_output_step_number
+        );
         self.wait_for_step_with_cancel(prev_output_step_number, Arc::clone(&cancel))
             .await?;
         tracing::error!("ensure_vdf_is_valid got step {}", prev_output_step_number);
@@ -398,7 +401,10 @@ impl ValidationServiceInner {
                     &this_inner.vdf_state,
                     cancel,
                 );
-                tracing::error!("vdf_steps_are_valid completed with result: {:?}", res.is_ok());
+                tracing::error!(
+                    "vdf_steps_are_valid completed with result: {:?}",
+                    res.is_ok()
+                );
                 res
             })
             .await??;
@@ -413,7 +419,10 @@ impl ValidationServiceInner {
         // Fast forward VDF steps
         tracing::error!("ensure_vdf_is_valid fast forwarding VDF steps");
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
-        tracing::error!("ensure_vdf_is_valid waiting for step {}", vdf_info.global_step_number);
+        tracing::error!(
+            "ensure_vdf_is_valid waiting for step {}",
+            vdf_info.global_step_number
+        );
         vdf_state.wait_for_step(vdf_info.global_step_number).await;
         tracing::error!("ensure_vdf_is_valid completed successfully");
         Ok(())

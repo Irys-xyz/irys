@@ -15,7 +15,7 @@ use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::{
     block_producer::BlockProducerCommand,
-    block_tree_service::{BlockStateUpdated, ReorgEvent},
+    block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
     packing::wait_for_packing,
@@ -71,7 +71,10 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::{future::Future, time::{Duration, Instant}};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument};
 
@@ -594,8 +597,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             if latest_block.height >= target_height {
                 // Get the specific block at target height, not the latest
-                if let Some(target_block) = canonical_chain.0.iter()
-                    .find(|b| b.height == target_height) {
+                if let Some(target_block) =
+                    canonical_chain.0.iter().find(|b| b.height == target_height)
+                {
                     info!(
                         "reached height {} after {} retries",
                         target_height, &retries
@@ -630,29 +634,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<H256> {
         // Subscribe to block state updates
-        let mut block_state_rx = self.node_ctx
+        let mut block_state_rx = self
+            .node_ctx
             .service_senders
             .subscribe_block_state_updates();
-        
+
         // Set timeout
         let timeout = Duration::from_secs(max_seconds as u64);
         let deadline = Instant::now() + timeout;
-        
+
         // First check if we already have the block
-        let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone())
-            .await?;
-        
+        let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+
         // Look for the exact block at target height
         if let Some(block) = canonical_chain.0.iter().find(|b| b.height == target_height) {
             // Check if it's part of canonical chain (not discarded)
             let tree = self.node_ctx.block_tree_guard.read();
             let (canonical_entries, _) = tree.get_canonical_chain();
-            if canonical_entries.iter().any(|b| b.block_hash == block.block_hash) {
+            if canonical_entries
+                .iter()
+                .any(|b| b.block_hash == block.block_hash)
+            {
                 info!("Block at height {} already available", target_height);
                 return Ok(block.block_hash);
             }
         }
-        
+
         // Wait for events
         loop {
             // Check timeout
@@ -663,31 +670,34 @@ impl IrysNodeTest<IrysNodeCtx> {
                     max_seconds
                 ));
             }
-            
+
             // Wait for next block state update with timeout
-            match tokio::time::timeout_at(
-                deadline.into(),
-                block_state_rx.recv()
-            ).await {
+            match tokio::time::timeout_at(deadline.into(), block_state_rx.recv()).await {
                 Ok(Ok(event)) => {
                     // Check if this is the block we're waiting for
                     if event.height == target_height && !event.discarded {
                         // Verify it's canonical
                         let tree = self.node_ctx.block_tree_guard.read();
                         let (canonical_entries, _) = tree.get_canonical_chain();
-                        if canonical_entries.iter().any(|b| b.block_hash == event.block_hash) {
+                        if canonical_entries
+                            .iter()
+                            .any(|b| b.block_hash == event.block_hash)
+                        {
                             info!("Received block at height {} via event", target_height);
                             return Ok(event.block_hash);
                         }
                     }
                     // Also check after reorgs if our target block is now canonical
                     if event.height > target_height {
-                        let canonical_chain = get_canonical_chain(
-                            self.node_ctx.block_tree_guard.clone()
-                        ).await?;
-                        if let Some(block) = canonical_chain.0.iter()
-                            .find(|b| b.height == target_height) {
-                            info!("Block at height {} became canonical after reorg", target_height);
+                        let canonical_chain =
+                            get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+                        if let Some(block) =
+                            canonical_chain.0.iter().find(|b| b.height == target_height)
+                        {
+                            info!(
+                                "Block at height {} became canonical after reorg",
+                                target_height
+                            );
                             return Ok(block.block_hash);
                         }
                     }
