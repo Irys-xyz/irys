@@ -9,6 +9,7 @@ xshell = "0.2"
 eyre = "0.6"
 color-eyre = "0.6"
 cargo_metadata = { version = "0.21.0", default-features = false }
+chrono = "0.4"
 
 [lints]
 workspace = true
