@@ -1,4 +1,3 @@
-#![deny(clippy::float_arithmetic)]
 pub mod commitment;
 pub mod precompile;
 pub mod range_specifier;

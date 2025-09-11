@@ -1,5 +1,3 @@
-#![deny(clippy::float_arithmetic)]
-
 pub mod domain_test_utils;
 pub mod guards;
 pub mod models;

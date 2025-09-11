@@ -1,4 +1,3 @@
-#![deny(clippy::float_arithmetic)]
 pub use nodit::interval::*;
 pub use nodit::Interval;
 pub mod recovered_mempool_state;

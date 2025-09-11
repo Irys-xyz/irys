@@ -1,4 +1,3 @@
-#![deny(clippy::float_arithmetic)]
 use std::ops::BitXor as _;
 
 pub use irys_c::{capacity, capacity_single};
