@@ -156,6 +156,10 @@ pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_arithmetic,
+    reason = "tests use float seconds; production code remains integer/fixed-point"
+)]
 mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
