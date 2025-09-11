@@ -1702,6 +1702,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "az"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
+
+[[package]]
 name = "backon"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3907,6 +3913,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gmp-mpfr-sys"
+version = "1.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c66d61197a68f6323b9afa616cf83d55d69191e1bf364d4eb7d35ae18defe776"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5039,6 +5055,7 @@ dependencies = [
  "reth",
  "reth-db",
  "rstest",
+ "rug",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -10501,6 +10518,18 @@ dependencies = [
  "rustc_version 0.4.1",
  "syn 2.0.101",
  "unicode-ident",
+]
+
+[[package]]
+name = "rug"
+version = "1.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58ad2e973fe3c3214251a840a621812a4f40468da814b1a3d6947d433c2af11f"
+dependencies = [
+ "az",
+ "gmp-mpfr-sys",
+ "libc",
+ "libm",
 ]
 
 [[package]]

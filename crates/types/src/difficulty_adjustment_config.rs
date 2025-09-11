@@ -156,6 +156,10 @@ pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::float_arithmetic,
+    reason = "tests use float seconds; production code remains integer/fixed-point"
+)]
 mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
@@ -205,14 +209,14 @@ mod tests {
         let expected = consensus_config.difficulty_adjustment.block_time as f64;
         let actual = block_time;
         assert_expected_with_tolerance(expected, actual, 1.0);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         // Lets increase the hashrate by 2x so blocks are coming too quickly
         println!("Double the hash power and verify block_times are half as long");
         storage_module_count = 6;
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         let expected = 2.5; // with 2x the hash power we expect 1/2 the block time.
         let actual = block_time;
@@ -230,7 +234,7 @@ mod tests {
         let difficulty =
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         let expected = 5.0; // Expect the difficulty to adjust back to 5s blocks
         let actual = block_time;
@@ -241,7 +245,10 @@ mod tests {
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
+        println!(
+            " block time: {:.2?}",
+            Duration::from_secs_f64(new_block_time)
+        );
 
         let expected = 2.5; // with 2x the hash power we expect roughly 1/2 the block time.
         let actual = new_block_time;
@@ -261,7 +268,10 @@ mod tests {
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
+        println!(
+            " block time: {:.2?}",
+            Duration::from_secs_f64(new_block_time)
+        );
 
         let expected = 5.0; // Expect the difficulty to adjust back to 5s blocks
         let actual = new_block_time;
@@ -272,7 +282,10 @@ mod tests {
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
         let (new_block_time, seed) =
             simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(new_block_time));
+        println!(
+            " block time: {:.2?}",
+            Duration::from_secs_f64(new_block_time)
+        );
 
         let expected = 8.33; // with 60% of the hashpower we'd expect 1.667x the block times
         let actual = new_block_time;
@@ -290,7 +303,7 @@ mod tests {
         let difficulty =
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(block_time));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(block_time));
 
         let expected = 5.0;
         let actual = block_time;
@@ -308,7 +321,7 @@ mod tests {
         let difficulty =
             adjust_difficulty(difficulty, actual_time_ms, target_time_ms, max_threshold);
         let (mean, _seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
-        println!(" block time: {:.2?}", seconds_to_duration(mean));
+        println!(" block time: {:.2?}", Duration::from_secs_f64(mean));
 
         let expected = 5.0;
         let actual = block_time;
@@ -316,33 +329,41 @@ mod tests {
     }
 
     fn assert_expected_with_tolerance(expected: f64, actual: f64, tolerance: f64) {
-        let abs_difference = (expected - actual).abs();
+        // Compare using integer milliseconds only:
+        // Convert the provided seconds (expected/actual/tolerance) to integer milliseconds by rounding.
+        let expected_ms = (expected * 1000.0).round() as i64;
+        let actual_ms = (actual * 1000.0).round() as i64;
+        let tolerance_ms = (tolerance * 1000.0).round() as i64;
+        let diff_ms = (expected_ms - actual_ms).abs();
         assert!(
-            abs_difference <= tolerance,
-            "Difference {} exceeds tolerance {}",
-            abs_difference,
-            tolerance
+            diff_ms <= tolerance_ms,
+            "Difference {}ms exceeds tolerance {}ms",
+            diff_ms,
+            tolerance_ms
         );
-    }
-
-    fn seconds_to_duration(seconds: f64) -> Duration {
-        Duration::from_nanos((seconds * 1_000_000_000.0) as u64)
     }
 
     fn one_second_of_hashes(
         hashes_per_second: u64,
         initial_hash: H256,
         difficulty: U256,
-    ) -> ((bool, H256), f64) {
+    ) -> ((bool, H256), u64) {
         let mut prev_hash = initial_hash;
         for i in 0..hashes_per_second {
             prev_hash = hash_sha256(&prev_hash.0);
             let hash_val = hash_to_number(&prev_hash.0);
             if hash_val >= difficulty {
-                return ((true, prev_hash), i as f64 / hashes_per_second as f64);
+                // Return elapsed time within this one-second bucket in milliseconds.
+                // i hashes out of hashes_per_second ⇒ elapsed_ms = floor(i * 1000 / hashes_per_second)
+                let elapsed_ms = if hashes_per_second == 0 {
+                    1000
+                } else {
+                    ((i as u128) * 1000_u128 / (hashes_per_second as u128)) as u64
+                };
+                return ((true, prev_hash), elapsed_ms);
             }
         }
-        ((false, prev_hash), 1.0)
+        ((false, prev_hash), 1000)
     }
 
     /// SHA256 hash the message parameter
@@ -357,19 +378,20 @@ mod tests {
     }
 
     fn mine_block(hashes_per_second: u64, seed: H256, difficulty: U256) -> (f64, H256) {
-        let mut num_seconds: f64 = 0.0;
+        // Accumulate integer milliseconds, convert to seconds (f64) once at the end.
+        let mut elapsed_ms: u128 = 0;
         let mut solution_found = false;
         let mut initial_hash = seed;
 
         while !solution_found {
-            let ((sf, seed), duration) =
+            let ((sf, seed), duration_ms) =
                 one_second_of_hashes(hashes_per_second, initial_hash, difficulty);
-            num_seconds += duration;
+            elapsed_ms += duration_ms as u128;
             solution_found = sf;
             initial_hash = seed;
         }
 
-        (num_seconds, initial_hash)
+        (elapsed_ms as f64 / 1000.0, initial_hash)
     }
 
     fn simulate_mining(
@@ -392,7 +414,12 @@ mod tests {
         let mean = if block_times.is_empty() {
             0.0
         } else {
-            block_times.iter().sum::<f64>() / block_times.len() as f64
+            // Sum using integer milliseconds to avoid repeated float arithmetic, then convert once.
+            let total_ms: u128 = block_times
+                .iter()
+                .map(|s| (s * 1000.0).round() as u128)
+                .sum();
+            (total_ms as f64 / 1000.0) / (block_times.len() as f64)
         };
         (mean, internal_seed)
     }
@@ -444,7 +471,10 @@ mod tests {
 
         let blocks = difficulty_config.difficulty_adjustment_interval as u128;
         let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
-        let actual_time = (target_time as f64 * time_multiplier) as u128;
+        // Compute actual_time in integer milliseconds from multiplier ratio (e.g., 1.25 -> +25%)
+        // Convert multiplier to percent as an integer to avoid float arithmetic
+        let multiplier_percent = (time_multiplier * 100.0).round() as u128;
+        let actual_time = target_time * multiplier_percent / 100;
         let current_timestamp = last_diff_timestamp + actual_time;
 
         let (new_diff, stats) = calculate_difficulty(
