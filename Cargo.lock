@@ -3010,20 +3010,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
 
 [[package]]
-name = "debug-utils"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "irys-database",
- "irys-types",
- "reth-node-core",
- "toml",
- "tracing",
- "tracing-error",
- "tracing-subscriber 0.3.19",
-]
-
-[[package]]
 name = "delay_map"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4924,6 +4910,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "irys-utils",
  "irys-vdf",
  "itertools 0.13.0",
  "k256",
@@ -5010,6 +4997,20 @@ dependencies = [
  "test-fuzz",
  "test-log",
  "tracing",
+]
+
+[[package]]
+name = "irys-debug-utils"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "irys-database",
+ "irys-types",
+ "reth-node-core",
+ "toml",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber 0.3.19",
 ]
 
 [[package]]
@@ -5313,6 +5314,15 @@ dependencies = [
  "tracing",
  "uint 0.9.5",
  "zerocopy",
+]
+
+[[package]]
+name = "irys-utils"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
