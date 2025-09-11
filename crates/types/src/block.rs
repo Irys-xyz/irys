@@ -17,7 +17,7 @@ use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Index, IndexMut};
 use tracing::debug;
@@ -328,8 +328,10 @@ impl IrysBlockHeader {
         commitment_txids
     }
 
-    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, HashSet<H256>> {
-        let mut data_txids = HashMap::new();
+    /// Retrieves a map of the data transaction ids by ledger type, uses a Vec
+    /// to ensure the txids are ordered identically to their order in the block.
+    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, Vec<H256>> {
+        let mut data_txids: HashMap<DataLedger, Vec<H256>> = HashMap::new();
         for data_ledger in self.data_ledgers.iter() {
             data_txids.insert(
                 DataLedger::from_u32(data_ledger.ledger_id).unwrap(),
