@@ -531,8 +531,8 @@ impl GossipClient {
             for peer in &current_round {
                 let address = &peer.0;
                 debug!(
-                    "Attempting to fetch {:?} from peer {} (attempt {}/5)",
-                    data_request, address, attempt
+                    "Attempting to fetch {:?} from peer {} (attempt {}/{})",
+                    data_request, address, attempt, DATA_REQUEST_RETRIES
                 );
 
                 match self
