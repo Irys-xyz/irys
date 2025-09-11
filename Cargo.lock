@@ -13279,6 +13279,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "cargo_metadata 0.21.0",
+ "chrono",
  "clap",
  "color-eyre",
  "eyre",
