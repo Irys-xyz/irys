@@ -36,7 +36,6 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
         .await;
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();
     genesis_node.stop_mining();
-    genesis_config.fund_genesis_accounts(vec![&genesis_signer]);
 
     // Retrieve the nodes capacity partition_hash
     let epoch_snapshot = genesis_node

@@ -55,7 +55,7 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         .await;
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();
 
-    genesis_node.stop_mining().await;
+    genesis_node.stop_mining();
 
     // Validate initial assignments
     let epoch_snapshot = genesis_node.get_canonical_epoch_snapshot();
