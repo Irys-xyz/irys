@@ -174,14 +174,6 @@ impl BlockCacheGuard {
             .contains(block_hash)
     }
 
-    /// Internal crate method to clear cache
-    pub(crate) async fn clear(&self) {
-        let mut guard = self.inner.write().await;
-        guard.orphaned_blocks_by_parent.clear();
-        guard.requested_blocks.clear();
-        guard.blocks.clear();
-    }
-
     async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
         self.inner.write().await.is_block_processing(block_hash)
     }
@@ -775,11 +767,6 @@ where
                 .block_status_provider
                 .block_status(block_height, block_hash)
                 .is_processed()
-    }
-
-    /// Internal method for the p2p services to get direct access to the cache
-    pub(crate) fn block_cache_guard(&self) -> BlockCacheGuard {
-        self.blocks_cache.clone()
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
