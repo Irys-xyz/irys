@@ -550,14 +550,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         .expect("for packing to complete in the wait period");
     }
 
-    pub async fn start_mining(&self) {
-        if self.node_ctx.start_mining().await.is_err() {
+    pub fn start_mining(&self) {
+        if self.node_ctx.start_mining().is_err() {
             panic!("Expected to start mining")
         }
     }
 
-    pub async fn stop_mining(&self) {
-        if self.node_ctx.stop_mining().await.is_err() {
+    pub fn stop_mining(&self) {
+        if self.node_ctx.stop_mining().is_err() {
             panic!("Expected to stop mining")
         }
     }
@@ -951,7 +951,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             )))
             .unwrap();
         let height = self.get_canonical_chain_height().await;
-        self.node_ctx.start_mining().await?;
+        self.node_ctx.start_mining()?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
@@ -960,7 +960,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(None))
             .unwrap();
-        self.node_ctx.stop_mining().await
+        self.node_ctx.stop_mining()
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -2353,12 +2353,12 @@ pub async fn solution_context_with_poa_chunk(
 ) -> Result<SolutionContext, eyre::Error> {
     // Ensure the VDF has at least two steps materialized (N-1, N)
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf().await?;
+    node_ctx.start_vdf();
     let start = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(5);
     let (step, steps) = loop {
         if start.elapsed() > max_wait {
-            node_ctx.stop_vdf().await?;
+            node_ctx.stop_vdf();
             return Err(eyre::eyre!(
                 "VDF steps unavailable: timed out waiting for (prev,current) pair"
             ));
@@ -2401,7 +2401,7 @@ pub async fn solution_context_with_poa_chunk(
     hasher_sol.update(steps[1].as_bytes());
     let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
-    node_ctx.stop_vdf().await?;
+    node_ctx.stop_vdf();
     Ok(SolutionContext {
         partition_hash,
         chunk_offset: partition_chunk_offset,
@@ -2457,7 +2457,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     };
 
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf().await?;
+    node_ctx.start_vdf();
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
@@ -2465,7 +2465,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         prev_block.diff,
     )
     .await;
-    node_ctx.stop_vdf().await?;
+    node_ctx.stop_vdf();
     Ok(poa_solution)
 }
 

@@ -53,6 +53,8 @@ pub enum BlockPoolError {
     ForkChoiceFailed(String),
     #[error("Previous block {0:?} not found")]
     PreviousBlockNotFound(BlockHash),
+    #[error("Block {0:?} is a part of a pruned fork")]
+    ForkedBlock(BlockHash),
 }
 
 impl From<PeerNetworkError> for BlockPoolError {
@@ -513,6 +515,17 @@ where
             current_block_hash, previous_block_status
         );
 
+        if previous_block_status.is_a_part_of_pruned_fork() {
+            error!(
+                "Block pool: Parent block ({:?}) for block {:?} is a part of a pruned fork, removing block from the pool",
+                prev_block_hash, current_block_hash
+            );
+            self.blocks_cache
+                .remove_block(&block_header.block_hash)
+                .await;
+            return Err(BlockPoolError::ForkedBlock(block_header.block_hash));
+        }
+
         if !previous_block_status.is_processed() {
             self.blocks_cache
                 .change_block_processing_status(block_header.block_hash, false)
@@ -872,6 +885,13 @@ fn check_block_status(
                     block_hash,
                 );
             Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
+        }
+        BlockStatus::PartOfAPrunedFork => {
+            debug!(
+                "Block pool: Block {:?} (height {}) is part of a pruned fork",
+                block_hash, block_height,
+            );
+            Err(BlockPoolError::ForkedBlock(block_hash))
         }
     }
 }

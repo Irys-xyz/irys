@@ -290,7 +290,7 @@ pub struct HttpConfig {
 
 /// P2P handshake configuration with sensible defaults
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct P2PHandshakeConfig {
     pub max_concurrent_handshakes: usize,
     pub max_peers_per_response: usize,
@@ -317,7 +317,7 @@ impl Default for P2PHandshakeConfig {
 
 /// P2P gossip/broadcast configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct P2PGossipConfig {
     /// Maximum peers to target per broadcast step
     pub broadcast_batch_size: usize,
@@ -336,7 +336,7 @@ impl Default for P2PGossipConfig {
 
 /// P2P pull/request configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct P2PPullConfig {
     /// How many top active peers to consider before random sampling
     pub top_active_window: usize,
