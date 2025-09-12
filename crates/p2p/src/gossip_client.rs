@@ -641,7 +641,7 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<Vec<Address>, PeerNetworkError> {
         // Work only with trusted peers
-        let mut peers = peer_list.trusted_peers();
+        let mut peers = peer_list.online_trusted_peers();
         peers.shuffle(&mut rand::thread_rng());
 
         if peers.is_empty() {
@@ -676,7 +676,7 @@ impl GossipClient {
 
                 let status = response.status();
 
-                let res: GossipResult<Vec<Address>> = match status {
+                let res: GossipResult<GossipResponse<Vec<Address>>> = match status {
                     StatusCode::OK => {
                         let text = response.text().await.map_err(|e| {
                             PeerNetworkError::FailedToRequestData(format!(
@@ -692,13 +692,13 @@ impl GossipClient {
                             )));
                         }
 
-                        let body = serde_json::from_str(&text).map_err(|e| {
+                        let gossip_response = serde_json::from_str(&text).map_err(|e| {
                             PeerNetworkError::FailedToRequestData(format!(
                                 "Failed to parse JSON: {} - Response: {}",
                                 e, text
                             ))
                         })?;
-                        Ok(body)
+                        Ok(gossip_response)
                     }
                     _ => {
                         let error_text = response.text().await.unwrap_or_default();
@@ -714,7 +714,35 @@ impl GossipClient {
                 Self::handle_score(peer_list, &res, &peer.0);
 
                 match res {
-                    Ok(addresses) => return Ok(addresses),
+                    Ok(response) => {
+                        match response {
+                            GossipResponse::Accepted(addresses) => {
+                                return Ok(addresses)
+                            }
+                            GossipResponse::Rejected(reason) => {
+                                match reason {
+                                    RejectionReason::HandshakeRequired => {
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {:?} requires a handshake",
+                                                peer.0
+                                            )),
+                                        ));
+                                        peer_list.initiate_handshake(peer.1.address.api, true);
+                                    }
+                                    RejectionReason::GossipDisabled => {
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {:?} has gossip disabled",
+                                                peer.0
+                                            )),
+                                        ));
+                                        peer_list.set_is_online(&peer.0, false);
+                                    }
+                                }
+                            }
+                        }
+                    },
                     Err(err) => {
                         last_error = Some(err);
                         continue;
