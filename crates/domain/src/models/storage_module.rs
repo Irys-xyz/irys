@@ -734,6 +734,12 @@ impl StorageModule {
     }
 
     pub fn get_chunk_type(&self, chunk_offset: &PartitionChunkOffset) -> Option<ChunkType> {
+        // Check pending writes first
+        if let Some((_, chunk_type)) = self.pending_writes.read().unwrap().get(chunk_offset) {
+            return Some(*chunk_type);
+        }
+
+        // Fall back to on-disk data
         self.intervals
             .read()
             .unwrap()

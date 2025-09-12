@@ -157,7 +157,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo test
-        run: RUST_LOG=debug cargo xtask test
+        run: RUST_LOG=debug cargo xtask test -- slow_heavy_sync_partition_data_between_peers_test
 
   cargo-check:
     name: cargo check

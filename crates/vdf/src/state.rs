@@ -445,3 +445,155 @@ pub mod test_helpers {
         Arc::new(RwLock::new(state))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_mid_execution_cancellation() {
+        // Create node config and extract VDF config
+        let mut node_config = NodeConfig::testing();
+        // Set moderately high computational cost for longer computation
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 5_000_000; // Moderately high difficulty
+        node_config
+            .consensus
+            .get_mut()
+            .vdf
+            .num_checkpoints_in_vdf_step = 10;
+
+        let config = Config::new(node_config.clone());
+        let vdf_config = config.vdf.clone();
+
+        // Generate fewer steps but with much higher computational cost each
+        let num_steps = 10; // Fewer steps but each takes longer
+        let mut steps = Vec::new();
+
+        // Generate initial seed
+        let mut seed = H256::from_low_u64_be(42);
+
+        println!("Generating {} VDF steps for test...", num_steps);
+        for i in 0..num_steps {
+            // Apply reset seed if needed
+            if i > 0 && i % vdf_config.reset_frequency == 0 {
+                seed = apply_reset_seed(seed, H256::from_low_u64_be(1337));
+            }
+
+            // Calculate next step
+            let mut hasher = Sha256::new();
+            let mut salt = U256::from(step_number_to_salt_number(&vdf_config, i as u64));
+            let mut checkpoints = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
+
+            vdf_sha(
+                &mut hasher,
+                &mut salt,
+                &mut seed,
+                vdf_config.num_checkpoints_in_vdf_step,
+                vdf_config.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+
+            steps.push(seed);
+        }
+
+        // Create VDF state WITHOUT the steps we're going to validate
+        // This forces vdf_steps_are_valid to actually compute them
+        let vdf_state = Arc::new(RwLock::new(VdfState {
+            global_step: 0, // Start at 0, not at num_steps
+            global_step_from_the_latest_canonical_block: 0,
+            minimum_step_to_keep: 0,
+            capacity: 1000,
+            seeds: {
+                let mut seeds = VecDeque::new();
+                // Only store the initial seed (step 0)
+                seeds.push_back(Seed(H256::from_low_u64_be(42)));
+                seeds
+            },
+            is_vdf_mining_enabled: None,
+        }));
+
+        // Create VDFLimiterInfo with our generated steps
+        let vdf_info = VDFLimiterInfo {
+            output: steps.last().copied().unwrap_or(H256::from_low_u64_be(42)), // Last step output
+            global_step_number: num_steps as u64,
+            seed: H256::from_low_u64_be(1337),      // Reset seed
+            next_seed: H256::from_low_u64_be(1338), // Next reset seed
+            prev_output: H256::from_low_u64_be(42), // Initial seed
+            last_step_checkpoints: H256List(vec![
+                H256::default();
+                vdf_config.num_checkpoints_in_vdf_step
+            ]),
+            steps: H256List(steps.clone()),
+            vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
+            next_vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
+        };
+
+        // Create thread pool with limited threads
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("Failed to build thread pool");
+
+        // Create cancel signal
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let cancel_clone = Arc::clone(&cancel);
+
+        // Create VdfStateReadonly wrapper
+        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
+
+        // Spawn validation task
+        let validation_handle = tokio::task::spawn_blocking(move || {
+            vdf_steps_are_valid(
+                &pool,
+                &vdf_info,
+                &vdf_config,
+                &vdf_state_readonly,
+                cancel_clone,
+            )
+        });
+
+        // Wait longer to ensure validation has started processing multiple steps
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Set cancellation signal
+        cancel.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+        println!("Cancellation signal set");
+
+        // Wait for validation to complete (should return quickly after cancellation)
+        let start = std::time::Instant::now();
+        let result = validation_handle.await;
+        let elapsed = start.elapsed();
+
+        println!("Validation completed in {:?}", elapsed);
+
+        // Verify the result
+        match result {
+            Ok(Err(e)) if e.to_string().contains("Cancelled") => {
+                println!("Validation cancelled successfully: {}", e);
+                // Success - validation was properly cancelled
+            }
+            Ok(Ok(())) => {
+                panic!("Validation should have been cancelled but completed successfully");
+            }
+            Ok(Err(e)) => {
+                panic!("Unexpected error during validation: {}", e);
+            }
+            Err(e) => {
+                panic!("Task panicked: {}", e);
+            }
+        }
+
+        // Verify cancellation happened relatively quickly
+        // With 20 steps at 50M difficulty, full validation would take many seconds
+        // Cancellation should happen within 5 seconds
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Cancellation took too long: {:?}",
+            elapsed
+        );
+    }
+}

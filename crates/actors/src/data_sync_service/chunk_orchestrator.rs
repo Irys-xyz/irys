@@ -156,9 +156,9 @@ impl ChunkOrchestrator {
                     return;
                 }
 
-                if let hash_map::Entry::Vacant(e) = self.chunk_requests.entry(chunk_offset) {
+                if let hash_map::Entry::Vacant(entry) = self.chunk_requests.entry(chunk_offset) {
                     // Only executes when the entry in the hashmap is vacant
-                    e.insert(ChunkRequest {
+                    entry.insert(ChunkRequest {
                         ledger_id: self.storage_module.id,
                         slot_index: self.slot_index,
                         chunk_offset,
@@ -201,9 +201,11 @@ impl ChunkOrchestrator {
 
             // Find best peer and dispatch
             let Some(chunk_request) = self.chunk_requests.get(&chunk_offset) else {
+                // Was the chunk requests at this offset removed? skip this offset (shouldn't happen)
                 continue;
             };
             let Some(peer_address) = self.find_best_peer(chunk_request.excluded.as_ref()) else {
+                // No available peers to request from? skip this offset (can happen)
                 continue;
             };
 
@@ -380,6 +382,9 @@ impl ChunkOrchestrator {
                     },
                 };
 
+                // Send the message to the DataSyncService so it can update the PeerBandwidthManagers and
+                // then call back into the orchestrator using `on_chunk_completed(...)` to mark the request as
+                // completed
                 let _ = tx.send(message);
             }
             .instrument(tracing::Span::current()),
@@ -397,10 +402,11 @@ impl ChunkOrchestrator {
 
         let (expected_peer, start_instant) = match request.request_state {
             ChunkRequestState::Requested(addr, started) => (addr, started),
-            _ => {
+            ref invalid_state => {
                 return Err(eyre::eyre!(
-                    "Invalid request state for chunk completion: {:?}",
-                    chunk_offset
+                    "Invalid state for chunk request completion at offset {}: expected Requested, got {:?}",
+                    chunk_offset,
+                    invalid_state
                 ))
             }
         };

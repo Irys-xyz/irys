@@ -19,12 +19,11 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
-use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
     recall_recall_range_is_valid, shadow_transactions_are_valid,
 };
-use crate::validation_service::active_validations::BlockPriorityMeta;
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -44,53 +43,59 @@ enum ParentValidationResult {
 
 /// Handles the execution of a single block validation task
 #[derive(Clone)]
-pub(crate) struct BlockValidationTask {
+pub(super) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub priority: BlockPriorityMeta,
     pub skip_vdf_validation: bool,
 }
 
-impl Ord for BlockValidationTask {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+impl PartialEq for BlockValidationTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.block.block_hash == other.block.block_hash
     }
 }
+
+impl Eq for BlockValidationTask {}
+
+impl std::hash::Hash for BlockValidationTask {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.block.block_hash.as_bytes());
+    }
+}
+
 impl PartialOrd for BlockValidationTask {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for BlockValidationTask {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority // captures the block, so this should be good enough
+impl Ord for BlockValidationTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Ordering is handled by ValidationPriority, this is
+        // just to satisfy PriorityQueue requirement for the value to be Ord
+        self.block.block_hash.cmp(&other.block.block_hash)
     }
 }
 
-impl Eq for BlockValidationTask {}
-
 impl BlockValidationTask {
-    pub(crate) fn new(
+    pub(super) fn new(
         block: Arc<IrysBlockHeader>,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
-        meta: BlockPriorityMeta,
         skip_vdf_validation: bool,
     ) -> Self {
         Self {
             block,
             service_inner,
             block_tree_guard,
-            priority: meta,
             skip_vdf_validation,
         }
     }
 
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_concurrent(self) {
+    pub async fn execute_concurrent(self) -> ValidationResult {
         let validation_result = self
             .validate_block()
             .await
@@ -101,7 +106,8 @@ impl BlockValidationTask {
             match self.wait_for_parent_validation().await {
                 ParentValidationResult::Cancelled => {
                     // Task was cancelled due to height difference
-                    return;
+                    // Return invalid to prevent this block from being accepted
+                    return ValidationResult::Invalid;
                 }
                 ParentValidationResult::Ready => {
                     // Parent is ready, continue to report validation result
@@ -109,24 +115,28 @@ impl BlockValidationTask {
             }
         }
 
-        // Notify the block tree service
-        self.send_validation_result(validation_result);
+        validation_result
     }
 
     #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
+    pub(crate) async fn execute_vdf(
+        self,
+        cancel: Arc<AtomicU8>,
+        vdf_notify: Arc<tokio::sync::Notify>,
+    ) -> VdfValidationResult {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
         let skip_validation = self.skip_vdf_validation;
-
         // run the VDF validation
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
         let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
             async move {
-                inner
+                let result = inner
                     .ensure_vdf_is_valid(&block, cancel2, skip_validation)
-                    .await
+                    .await;
+                vdf_notify.notify_one(); // Signal completion
+                result
             }
             .in_current_span(),
         )
@@ -145,7 +155,7 @@ impl BlockValidationTask {
                     VdfValidationResult::Invalid(e)
                 }
             });
-        debug!("Finished validating with result {:?}", &mapped_res);
+        debug!(?mapped_res, "Finished validating");
         mapped_res
     }
 
@@ -155,31 +165,74 @@ impl BlockValidationTask {
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
+        // Subscribe to block state updates
+        let mut block_state_rx = self
+            .service_inner
+            .service_senders
+            .subscribe_block_state_updates();
+
         loop {
-            // Check if block height is too far behind canonical tip
+            // 1. Check cancellation condition first
             if self.should_exit_due_to_height_diff() {
-                let _span = tracing::debug_span!("height_diff_exit", block_hash = %self.block.block_hash, block_height = %self.block.height).entered();
-                debug!("exiting validation task - block too far behind canonical tip");
+                let block_tree = self.block_tree_guard.read();
+                let tip_hash = block_tree.tip;
+                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
+                    let height_diff = tip_block.height.saturating_sub(self.block.height);
+                    warn!(
+                        block_hash = %self.block.block_hash,
+                        block_height = %self.block.height,
+                        height_diff,
+                        threshold = self.service_inner.config.consensus.block_tree_depth,
+                        "Cancelling validation: block too far behind tip"
+                    );
+                }
                 return ParentValidationResult::Cancelled;
             }
 
-            let Some(parent_chain_state) = self.get_parent_chain_state(&parent_hash) else {
-                warn!("validated a valid block that is not inside the block tree");
-                break;
-            };
+            // 2. Check parent state (single check per iteration)
+            match self.get_parent_chain_state(&parent_hash) {
+                None => {
+                    // Parent doesn't exist in tree - this is an error condition
+                    error!(
+                        parent_hash = %parent_hash,
+                        block_hash = %self.block.block_hash,
+                        block_height = %self.block.height,
+                        "CRITICAL: Parent block not found"
+                    );
+                    return ParentValidationResult::Cancelled;
+                }
+                Some(parent_state) if self.is_parent_ready(&parent_state) => {
+                    debug!("Parent validation complete");
+                    return ParentValidationResult::Ready;
+                }
+                Some(_) => {
+                    // Parent exists but not ready, wait for updates
+                }
+            }
 
-            if self.is_parent_ready(&parent_chain_state) {
-                // Parent is ready, we can proceed
-                break;
-            } else {
-                // Parent not ready, yield and try again when polled later
-                debug!("Waiting for parent...");
-                tokio::task::yield_now().await;
-                continue;
+            // 3. Wait for relevant state changes
+            debug!(parent_hash = %parent_hash, "Waiting for parent validation");
+            match block_state_rx.recv().await {
+                Ok(event) if event.block_hash == parent_hash => {
+                    // Parent state changed, loop back to check
+                    continue;
+                }
+                Ok(_) => {
+                    // Not our parent, continue waiting
+                    continue;
+                }
+                Err(_) => {
+                    // Channel closed - treat as error
+                    error!(
+                        parent_hash = %parent_hash,
+                        block_hash = %self.block.block_hash,
+                        block_height = %self.block.height,
+                        "Block state channel closed while waiting for parent"
+                    );
+                    return ParentValidationResult::Cancelled;
+                }
             }
         }
-
-        ParentValidationResult::Ready
     }
 
     /// Check if the block should exit due to height difference from canonical tip
@@ -211,18 +264,6 @@ impl BlockValidationTask {
                 | ChainState::Validated(_)
                 | ChainState::NotOnchain(BlockState::ValidBlock)
         )
-    }
-
-    /// Send the validation result to the block tree service
-    pub(crate) fn send_validation_result(&self, validation_result: ValidationResult) {
-        if let Err(e) = self.service_inner.service_senders.block_tree.send(
-            BlockTreeServiceMessage::BlockValidationFinished {
-                block_hash: self.block.block_hash,
-                validation_result,
-            },
-        ) {
-            error!(?e, "Failed to send validation result to block tree service");
-        }
     }
 
     /// Perform block validation
@@ -261,7 +302,7 @@ impl BlockValidationTask {
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
-                    debug!("Skipping POA validation due to skip_vdf_validation flag for block {block_hash:?}");
+                    debug!(?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
                     return Ok(ValidationResult::Valid);
                 }
                 poa_is_valid(
@@ -355,7 +396,7 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
             )
-            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
+            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
             .map(|()| ValidationResult::Valid)
