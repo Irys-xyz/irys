@@ -4,6 +4,7 @@ use actix_web::{
     HttpResponse, Result as ActixResult,
 };
 use irys_types::{
+    serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
@@ -19,6 +20,7 @@ pub struct PriceInfo {
     pub perm_fee: U256,
     pub term_fee: U256,
     pub ledger: u32,
+    #[serde(with = "string_u64")]
     pub bytes: u64,
 }
 
@@ -183,4 +185,53 @@ pub async fn get_unpledge_price(
         fee: U256::from(commitment_fee),
         user_address: Some(user_address),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn test_price_info_bytes_serialization() {
+        let price_info = PriceInfo {
+            perm_fee: U256::from(1000),
+            term_fee: U256::from(2000),
+            ledger: 1,
+            bytes: u64::MAX,
+        };
+
+        let json = serde_json::to_string(&price_info).unwrap();
+        assert!(json.contains(&format!("\"bytes\":\"{}\"", u64::MAX)));
+
+        let deserialized: PriceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.bytes, u64::MAX);
+    }
+
+    #[test]
+    fn test_price_info_javascript_compatibility() {
+        const JS_MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1; // 2^53 - 1
+        let above_safe_limit = JS_MAX_SAFE_INTEGER + 1;
+
+        let price_info = PriceInfo {
+            perm_fee: U256::from(1000),
+            term_fee: U256::from(2000),
+            ledger: 1,
+            bytes: above_safe_limit,
+        };
+
+        let json = serde_json::to_string(&price_info).unwrap();
+
+        // Should be string, not number
+        assert!(json.contains(&format!("\"bytes\":\"{}\"", above_safe_limit)));
+
+        // Test JavaScript parsing would work
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        if let Some(bytes_str) = parsed.get("bytes").and_then(|v| v.as_str()) {
+            let parsed_bytes: u64 = bytes_str.parse().unwrap();
+            assert_eq!(parsed_bytes, above_safe_limit);
+        } else {
+            panic!("bytes should be serialized as string");
+        }
+    }
 }
