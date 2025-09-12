@@ -51,7 +51,6 @@ use reth::{
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
-    collections::BTreeMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
