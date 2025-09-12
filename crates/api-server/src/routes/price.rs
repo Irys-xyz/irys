@@ -4,6 +4,7 @@ use actix_web::{
     HttpResponse, Result as ActixResult,
 };
 use irys_types::{
+    serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
@@ -19,6 +20,7 @@ pub struct PriceInfo {
     pub perm_fee: U256,
     pub term_fee: U256,
     pub ledger: u32,
+    #[serde(with = "string_u64")]
     pub bytes: u64,
 }
 

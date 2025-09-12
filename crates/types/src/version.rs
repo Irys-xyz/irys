@@ -1,4 +1,7 @@
-use crate::{decode_address, encode_address, Arbitrary, IrysSignature, RethPeerInfo, H256};
+use crate::{
+    decode_address, encode_address, serialization::string_u64, Arbitrary, IrysSignature,
+    RethPeerInfo, H256,
+};
 use alloy_primitives::{keccak256, Address};
 use bytes::Buf as _;
 use reth_codecs::Compact;
@@ -330,11 +333,15 @@ pub enum RejectionReason {
 pub struct NodeInfo {
     pub version: String,
     pub peer_count: usize,
+    #[serde(with = "string_u64")]
     pub chain_id: u64,
+    #[serde(with = "string_u64")]
     pub height: u64,
     pub block_hash: H256,
+    #[serde(with = "string_u64")]
     pub block_index_height: u64,
     pub block_index_hash: H256,
+    #[serde(with = "string_u64")]
     pub pending_blocks: u64,
     pub is_syncing: bool,
     pub current_sync_height: usize,
