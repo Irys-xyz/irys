@@ -5,6 +5,7 @@
 use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
+use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
@@ -526,85 +527,91 @@ impl GossipClient {
                 break;
             }
 
-            // Iterate over a snapshot to allow mutation of retryable_peers
-            let current_round = retryable_peers.clone();
-            for peer in &current_round {
-                let address = &peer.0;
-                debug!(
-                    "Attempting to fetch {:?} from peer {} (attempt {}/{})",
-                    data_request, address, attempt, DATA_REQUEST_RETRIES
-                );
+            // Fan-out concurrently to all retryable peers in this round and accept first success
 
-                match self
-                    .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
-                    .await
-                {
-                    Ok(response) => {
-                        match response {
-                            GossipResponse::Accepted(maybe_data) => match maybe_data {
-                                Some(data) => match map_data(data) {
-                                    Ok(data) => return Ok((*address, data)),
-                                    Err(err) => {
-                                        warn!("Failed to map data from peer {}: {}", address, err);
-                                        // Not retriable: remove peer from future rounds
-                                        retryable_peers.retain(|p| p.0 != *address);
-                                        continue;
-                                    }
-                                },
-                                None => {
-                                    // Peer doesn't have this data; keep for future rounds to allow re-gossip
-                                    debug!("Peer {} doesn't have {:?}", address, data_request);
-                                    continue;
+            let current_round = retryable_peers.clone();
+            let mut futs = futures::stream::FuturesUnordered::new();
+
+            for peer in current_round {
+                let gc = self.clone();
+                let dr = data_request.clone();
+                let pl = peer_list;
+                futs.push(async move {
+                    let addr = peer.0;
+                    let res = gc.pull_data_and_update_the_score(&peer, dr, pl).await;
+                    (addr, peer, res)
+                });
+            }
+
+            let mut next_retryable = Vec::new();
+
+            while let Some((address, peer, result)) = futs.next().await {
+                match result {
+                    Ok(GossipResponse::Accepted(maybe_data)) => {
+                        match maybe_data {
+                            Some(data) => match map_data(data) {
+                                Ok(data) => {
+                                    debug!(
+                                        "Successfully pulled {:?} from peer {}",
+                                        data_request, address
+                                    );
+                                    // Drop remaining futures to cancel outstanding requests
+                                    return Ok((address, data));
+                                }
+                                Err(err) => {
+                                    warn!("Failed to map data from peer {}: {}", address, err);
+                                    // Not retriable: don't include this peer for future rounds
                                 }
                             },
-                            GossipResponse::Rejected(reason) => {
-                                warn!(
-                                    "Peer {} reject the request: {:?}: {:?}",
-                                    address, data_request, reason
-                                );
-                                match reason {
-                                    RejectionReason::HandshakeRequired => {
-                                        peer_list.initiate_handshake(peer.1.address.api, true);
-                                        last_error = Some(GossipError::from(
-                                            PeerNetworkError::FailedToRequestData(format!(
-                                                "Peer {:?} requires a handshake",
-                                                address
-                                            )),
-                                        ));
-                                    }
-                                    RejectionReason::GossipDisabled => {
-                                        peer_list.set_is_online(&peer.0, false);
-                                        last_error = Some(GossipError::from(
-                                            PeerNetworkError::FailedToRequestData(format!(
-                                                "Peer {:?} has gossip disabled",
-                                                address
-                                            )),
-                                        ));
-                                    }
-                                }
-                                // Do not retry the same peer on rejection; remove from future rounds
-                                retryable_peers.retain(|p| p.0 != *address);
-                                continue;
+                            None => {
+                                // Peer doesn't have this data; keep for future rounds to allow re-gossip
+                                debug!("Peer {} doesn't have {:?}", address, data_request);
+                                next_retryable.push(peer);
                             }
                         }
+                    }
+                    Ok(GossipResponse::Rejected(reason)) => {
+                        warn!(
+                            "Peer {} reject the request: {:?}: {:?}",
+                            address, data_request, reason
+                        );
+                        match reason {
+                            RejectionReason::HandshakeRequired => {
+                                peer_list.initiate_handshake(peer.1.address.api, true);
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} requires a handshake", address),
+                                    )));
+                            }
+                            RejectionReason::GossipDisabled => {
+                                peer_list.set_is_online(&peer.0, false);
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} has gossip disabled", address),
+                                    )));
+                            }
+                        }
+                        // Do not retry the same peer on rejection
                     }
                     Err(err) => {
                         last_error = Some(err);
                         warn!(
-                            "Failed to fetch {:?} from peer {} (attempt {}/5): {}",
+                            "Failed to fetch {:?} from peer {:?} (attempt {}/{}): {}",
                             data_request,
                             address,
                             attempt,
+                            DATA_REQUEST_RETRIES,
                             last_error.as_ref().unwrap()
                         );
-
                         // Transient failure: keep peer for next round
-                        continue;
+                        next_retryable.push(peer);
                     }
                 }
             }
 
-            // don't add a delay after the final attempt
+            retryable_peers = next_retryable;
+
+            // minimal delay between attempts, skip after final iteration
             if attempt != DATA_REQUEST_RETRIES {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
