@@ -3,9 +3,8 @@ use std::time::Duration;
 // use assert_matches::assert_matches;
 use irys_chain::IrysNodeCtx;
 use irys_domain::{ChunkType, EpochSnapshot};
-use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, Address, DataLedger, NodeConfig};
-use tracing::debug;
+use tracing::{debug, info};
 // use tracing::debug;
 
 use crate::utils::IrysNodeTest;
@@ -21,14 +20,8 @@ use crate::utils::IrysNodeTest;
 // 9. Upload the chunks of the data_tx to the genesis node and wait for promotion
 // 10. Start the two peers and let them sync with the network, but not mine
 // 11. Validate that they are syncing data chunks to their assigned partitions
-#[actix_web::test]
+#[test_log::test(actix_web::test)]
 async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()> {
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,engine=off,irys_vdf::vdf=off,storage::db::mdbx=off;hyper=off",
-    );
-    initialize_tracing();
-
     let seconds_to_wait = 20;
     let chunk_size: usize = 32;
 
@@ -54,8 +47,6 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();
-
-    genesis_node.stop_mining();
 
     // Validate initial assignments
     let epoch_snapshot = genesis_node.get_canonical_epoch_snapshot();
@@ -117,12 +108,27 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         .start_and_wait_for_packing("PEER2", seconds_to_wait)
         .await;
 
-    let _block = genesis_node.mine_block().await?;
+    // Mine a block and wait for all nodes to sync to the same height
+    let latest_block = genesis_node.mine_block().await?;
 
+    // Wait for all nodes to reach the same block height before checking data
+    genesis_node
+        .wait_until_height(latest_block.height, seconds_to_wait)
+        .await?;
+    peer1_node
+        .wait_until_height(latest_block.height, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height(latest_block.height, seconds_to_wait)
+        .await?;
+
+    // Check data sync completion with simple polling
     let (mut genesis_synced, mut peer1_synced, mut peer2_synced) = (false, false, false);
 
-    for _ in 0..120 {
+    for attempt in 0..60 {
         tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Check genesis node
         let counts1 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
         let counts2 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
         let counts3 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
@@ -131,35 +137,88 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
             && (counts2.data == 50 && counts2.packed == 10)
             && (counts3.packed == 60 && counts3.data == 0);
 
-        let counts1 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
-        let counts2 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
-        let counts3 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 1);
+        // Check peer1
+        let peer1_counts1 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
+        let peer1_counts2 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
+        let peer1_counts3 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 1);
 
-        peer1_synced = (counts1.data == 50 && counts1.packed == 10)
-            && (counts2.data == 50 && counts2.packed == 10)
-            && (counts3.packed == 60 && counts3.data == 0);
+        peer1_synced = (peer1_counts1.data == 50 && peer1_counts1.packed == 10)
+            && (peer1_counts2.data == 50 && peer1_counts2.packed == 10)
+            && (peer1_counts3.packed == 60 && peer1_counts3.data == 0);
 
-        let counts1 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
-        let counts2 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
-        let counts3 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 1);
+        // Check peer2
+        let peer2_counts1 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
+        let peer2_counts2 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
+        let peer2_counts3 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 1);
 
-        peer2_synced = (counts1.data == 50 && counts1.packed == 10)
-            && (counts2.data == 50 && counts2.packed == 10)
-            && (counts3.packed == 60 && counts3.data == 0);
+        peer2_synced = (peer2_counts1.data == 50 && peer2_counts1.packed == 10)
+            && (peer2_counts2.data == 50 && peer2_counts2.packed == 10)
+            && (peer2_counts3.packed == 60 && peer2_counts3.data == 0);
+
+        // Log sync status
+        info!(
+            "Sync status at attempt {}: Genesis={}, Peer1={}, Peer2={}",
+            attempt, genesis_synced, peer1_synced, peer2_synced
+        );
+        info!(
+            "Genesis chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
+            counts1.data, counts1.packed, counts2.data, counts2.packed, counts3.data, counts3.packed
+        );
+        info!(
+            "Peer1 chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
+            peer1_counts1.data, peer1_counts1.packed, peer1_counts2.data, peer1_counts2.packed, peer1_counts3.data, peer1_counts3.packed
+        );
+        info!(
+            "Peer2 chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
+            peer2_counts1.data, peer2_counts1.packed, peer2_counts2.data, peer2_counts2.packed, peer2_counts3.data, peer2_counts3.packed
+        );
 
         if genesis_synced && peer1_synced && peer2_synced {
+            debug!("All nodes synced successfully at attempt {}", attempt);
             break;
         }
     }
 
-    assert!(genesis_synced);
-    assert!(peer1_synced);
-    assert!(peer2_synced);
+    assert!(genesis_synced, "Genesis node failed to sync data");
+    assert!(peer1_synced, "Peer1 node failed to sync data");
+    assert!(peer2_synced, "Peer2 node failed to sync data");
 
-    // Make sure peers can mine. Note this isn't a perfect test but it may show
-    // up as flakiness if the peers get stuck producing invalid block solutions
-    peer1_node.mine_blocks(5).await?;
-    peer2_node.mine_blocks(5).await?;
+    // Make sure peers can mine - mine one block at a time with sync verification
+    for i in 0..5 {
+        let current_height = peer1_node.get_canonical_chain_height().await;
+        peer1_node.mine_block().await?;
+
+        // Wait for all nodes to sync
+        let target_height = current_height + 1;
+        peer1_node
+            .wait_until_height(target_height, seconds_to_wait)
+            .await?;
+        peer2_node
+            .wait_until_height(target_height, seconds_to_wait)
+            .await?;
+        genesis_node
+            .wait_until_height(target_height, seconds_to_wait)
+            .await?;
+        debug!("Peer1 mined block {} at height {}", i + 1, target_height);
+    }
+
+    for i in 0..5 {
+        let current_height = peer2_node.get_canonical_chain_height().await;
+        peer2_node.mine_block().await?;
+
+        // Wait for all nodes to sync
+        let target_height = current_height + 1;
+        peer2_node
+            .wait_until_height(target_height, seconds_to_wait)
+            .await?;
+        peer1_node
+            .wait_until_height(target_height, seconds_to_wait)
+            .await?;
+        genesis_node
+            .wait_until_height(target_height, seconds_to_wait)
+            .await?;
+        debug!("Peer2 mined block {} at height {}", i + 1, target_height);
+    }
 
     peer1_node.stop().await;
     peer2_node.stop().await;
