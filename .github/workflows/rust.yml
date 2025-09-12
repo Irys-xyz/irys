@@ -142,12 +142,13 @@ jobs:
           # write output to the action output file
           echo "should-run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
 
-  cargo-test:
-    name: cargo test
+  cargo-test-setup:
+    name: Setup for cargo tests
     runs-on: [self-hosted, test-runner]
     needs: gate
     if: ${{ needs.gate.outputs.should-run == 'true' }}
-    timeout-minutes: 30
+    outputs:
+      packages: ${{ steps.get-packages.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -156,8 +157,54 @@ jobs:
       - name: Setup repo
         uses: ./.github/actions/setup-repo
 
+      - name: Get packages
+        id: get-packages
+        run: |
+          PACKAGES=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort | jq -R . | jq -s -c .)
+          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+          echo "Found packages: $PACKAGES"
+
+      - name: Build workspace
+        run: cargo build --workspace --tests
+
+      - name: Cache build artifacts
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: cargo-test-${{ github.run_id }}-${{ github.run_attempt }}
+
+  cargo-test:
+    name: cargo test (${{ matrix.package }})
+    runs-on: [self-hosted, test-runner]
+    needs: [gate, cargo-test-setup]
+    if: ${{ needs.gate.outputs.should-run == 'true' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.cargo-test-setup.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Restore build artifacts
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: cargo-test-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: cargo test
-        run: RUST_LOG=debug cargo xtask test
+        run: RUST_LOG=debug cargo xtask test -- --package ${{ matrix.package }}
 
   cargo-check:
     name: cargo check
