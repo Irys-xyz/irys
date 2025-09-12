@@ -460,7 +460,11 @@ pub struct DataTransactionLedger {
     #[serde(default, with = "u64_stringify")]
     pub total_chunks: u64,
     /// This ledger expires after how many epochs
-    #[serde(skip_serializing_if = "Option::is_none", with = "optional_string_u64")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_string_u64"
+    )]
     pub expires: Option<u64>,
     /// When transactions are promoted they must include their ingress proofs
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1234,7 +1238,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&ledger_item).unwrap();
-        assert!(json.contains(&format!("\"totalChunks\":\"{}\"", u64::MAX)));
+        assert!(json.contains(&format!("\"total_chunks\":\"{}\"", u64::MAX)));
 
         let deserialized: LedgerIndexItem = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.total_chunks, u64::MAX);
