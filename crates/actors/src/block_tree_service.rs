@@ -321,10 +321,13 @@ impl BlockTreeServiceInner {
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
             .await?;
 
-        // TODO: Migrate block_index to use the HashMap so we don't have to close these headers
-        let mut all_txs = vec![];
-        all_txs.extend(publish_txs.clone());
-        all_txs.extend(submit_txs.clone());
+    // TODO: Migrate block_index to use the HashMap so we don't have to close these headers
+    // BlockIndex::push_block expects `all_txs` layout to be:
+    //   [Submit ledger txs..., then Publish ledger txs...]
+    // so ensure we append in that exact order.
+    let mut all_txs = vec![];
+    all_txs.extend(submit_txs.clone());
+    all_txs.extend(publish_txs.clone());
 
         let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
         all_txs_map.insert(DataLedger::Submit, submit_txs);
