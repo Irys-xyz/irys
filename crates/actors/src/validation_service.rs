@@ -199,7 +199,6 @@ impl ValidationService {
                             );
 
                             coordinator.submit_task(task);
-                            tracing::error!("task submitted");
                         }
                         None => {
                             warn!("receiver channel closed");
@@ -221,12 +220,10 @@ impl ValidationService {
 
                 // Process VDF completions
                 _ = self.vdf_notify.notified() => {
-                    tracing::error!("vdf notify");
                     if let Some((hash, result)) = coordinator.process_vdf().await {
                         match result {
                             VdfValidationResult::Valid => {
                                 // Valid VDF - task continues to concurrent validation
-                                tracing::error!(block_hash = %hash, "VDF validation succeeded");
                             }
                             VdfValidationResult::Invalid(e) => {
                                 error!(block_hash = %hash, error = %e, "VDF validation failed");
@@ -241,7 +238,6 @@ impl ValidationService {
                                 }
                             }
                             VdfValidationResult::Cancelled => {
-                                tracing::error!(block_hash = %hash, "VDF validation cancelled");
                                 // Cancelled tasks are re-queued internally, no action needed
                             }
                         }
@@ -252,11 +248,6 @@ impl ValidationService {
                 result = coordinator.concurrent_tasks.join_next(), if !coordinator.concurrent_tasks.is_empty() => {
                     match result {
                         Some(Ok(validation)) => {
-                            tracing::error!(
-                                block_hash = %validation.block_hash,
-                                validation_result = ?validation.validation_result,
-                                "Concurrent validation completed"
-                            );
 
                             // Send the validation result to the block tree service
                             if let Err(e) = self.inner.service_senders.block_tree.send(
@@ -336,10 +327,6 @@ impl ValidationServiceInner {
         cancel: Arc<AtomicU8>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
-        tracing::error!(
-            "ensure_vdf_is_valid starting for block {}",
-            block.block_hash
-        );
         debug!("Verifying VDF info");
 
         let vdf_info = block.vdf_limiter_info.clone();
@@ -347,14 +334,8 @@ impl ValidationServiceInner {
         // First, wait for the previous VDF step to be available
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
-
-        tracing::error!(
-            "ensure_vdf_is_valid waiting for step {}",
-            prev_output_step_number
-        );
         self.wait_for_step_with_cancel(prev_output_step_number, Arc::clone(&cancel))
             .await?;
-        tracing::error!("ensure_vdf_is_valid got step {}", prev_output_step_number);
         let stored_previous_step = self
             .vdf_state
             .get_step(prev_output_step_number)
@@ -371,7 +352,6 @@ impl ValidationServiceInner {
         // Early guard: validate seeds against parent before heavy VDF work
         let vdf_reset_frequency = self.config.vdf.reset_frequency as u64;
         {
-            tracing::error!("ensure_vdf_is_valid checking seed data");
             let binding = self.block_tree_guard.read();
             let previous_block = binding
                 .get_block(&block.previous_block_hash)
@@ -383,7 +363,6 @@ impl ValidationServiceInner {
                 ),
                 "Seed data is invalid"
             );
-            tracing::error!("ensure_vdf_is_valid seed data valid");
         }
 
         // Spawn VDF validation task
@@ -392,23 +371,16 @@ impl ValidationServiceInner {
         if !skip_vdf_validation {
             let vdf_info = vdf_info.clone();
             let this_inner = Arc::clone(&self);
-            tracing::error!("ensure_vdf_is_valid spawning vdf_steps_are_valid");
             tokio::task::spawn_blocking(move || {
-                let res = vdf_steps_are_valid(
+                vdf_steps_are_valid(
                     &this_inner.pool,
                     &vdf_info,
                     &this_inner.config.vdf,
                     &this_inner.vdf_state,
                     cancel,
-                );
-                tracing::error!(
-                    "vdf_steps_are_valid completed with result: {:?}",
-                    res.is_ok()
-                );
-                res
+                )
             })
             .await??;
-            tracing::error!("ensure_vdf_is_valid vdf_steps_are_valid finished");
         } else {
             debug!(
                 block_hash = ?block.block_hash,
@@ -417,14 +389,8 @@ impl ValidationServiceInner {
         }
 
         // Fast forward VDF steps
-        tracing::error!("ensure_vdf_is_valid fast forwarding VDF steps");
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
-        tracing::error!(
-            "ensure_vdf_is_valid waiting for step {}",
-            vdf_info.global_step_number
-        );
         vdf_state.wait_for_step(vdf_info.global_step_number).await;
-        tracing::error!("ensure_vdf_is_valid completed successfully");
         Ok(())
     }
 }
