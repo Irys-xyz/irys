@@ -49,6 +49,9 @@ jobs:
           fetch-depth: 1
           clean: true  # Always start with clean workspace
 
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+        
       - name: Build xtask
         shell: bash
         run: |
