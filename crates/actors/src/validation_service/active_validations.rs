@@ -332,7 +332,6 @@ impl ValidationCoordinator {
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
-
             match result {
                 VdfValidationResult::Valid => {
                     let block_hash = task.block.block_hash;
