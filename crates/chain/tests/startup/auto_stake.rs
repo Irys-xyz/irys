@@ -66,11 +66,10 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     }
 
     if pledges > 0 {
-        let anchor = H256::zero();
         let mut prev_price = U256::MAX;
         for _idx in 0..pledges {
             let tx = genesis_node
-                .post_pledge_commitment_with_signer(&peer_signer, anchor)
+                .post_pledge_commitment_with_signer(&peer_signer)
                 .await;
             assert!(
                 tx.value < prev_price,

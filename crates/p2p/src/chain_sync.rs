@@ -200,7 +200,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
     }
 
     /// Perform a sync operation
-    async fn spawn_chain_sync_task(
+    fn spawn_chain_sync_task(
         &self,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
         is_initial_sync: bool,
@@ -224,8 +224,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let start_sync_from_height = self.block_index.read().latest_height();
-        // Clear any pending blocks from the cache
-        self.block_pool.block_cache_guard().clear().await;
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
@@ -484,8 +482,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
                 self.inner
-                    .spawn_chain_sync_task(Some(response_sender), true)
-                    .await;
+                    .spawn_chain_sync_task(Some(response_sender), true);
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
                 self.handle_periodic_sync_check().await;
@@ -568,7 +565,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None, false).await;
+                self.inner.spawn_chain_sync_task(None, false);
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");

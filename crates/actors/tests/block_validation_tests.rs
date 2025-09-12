@@ -36,25 +36,11 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
             num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     tx_root: H256::zero(),
                 },
                 LedgerIndexItem {
-                    max_chunk_offset: 0,
-                    tx_root: H256::zero(),
-                },
-            ],
-        },
-        BlockIndexItem {
-            block_hash: H256::zero(),
-            num_ledgers: 2,
-            ledgers: vec![
-                LedgerIndexItem {
-                    max_chunk_offset: 10,
-                    tx_root: H256::zero(),
-                },
-                LedgerIndexItem {
-                    max_chunk_offset: 10,
+                    total_chunks: 0,
                     tx_root: H256::zero(),
                 },
             ],
@@ -64,11 +50,25 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
             num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
-                    max_chunk_offset: 20,
+                    total_chunks: 10,
                     tx_root: H256::zero(),
                 },
                 LedgerIndexItem {
-                    max_chunk_offset: 20,
+                    total_chunks: 10,
+                    tx_root: H256::zero(),
+                },
+            ],
+        },
+        BlockIndexItem {
+            block_hash: H256::zero(),
+            num_ledgers: 2,
+            ledgers: vec![
+                LedgerIndexItem {
+                    total_chunks: 20,
+                    tx_root: H256::zero(),
+                },
+                LedgerIndexItem {
+                    total_chunks: 20,
                     tx_root: H256::zero(),
                 },
             ],

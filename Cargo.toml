@@ -429,6 +429,7 @@ style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
 pedantic = { priority = -8, level = "allow" }    # cherry pick
 nursery = { priority = -9, level = "allow" }     # cherry pick
+float_arithmetic = { priority = -10, level = "deny" }
 
 module_inception = "allow"
 doc-overindented-list-items = "allow"

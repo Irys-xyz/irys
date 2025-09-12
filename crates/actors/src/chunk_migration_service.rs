@@ -1,25 +1,25 @@
 use crate::{cache_service::CacheServiceAction, services::ServiceSenders};
-use eyre::eyre;
 use irys_database::{
-    cached_chunk_by_chunk_offset,
+    block_header_by_hash, cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
+    tx_header_by_txid,
 };
 use irys_domain::{
     get_overlapped_storage_modules, BlockIndex, StorageModule, StorageModulesReadGuard,
 };
 use irys_storage::{ie, ii, InclusiveInterval as _};
 use irys_types::{
-    app_state::DatabaseProvider, Base64, Config, DataLedger, DataRoot, DataTransactionHeader,
-    DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
-    TokioServiceHandle, TxChunkOffset, UnpackedChunk, H256,
+    app_state::DatabaseProvider, Base64, BlockHash, Config, DataLedger, DataRoot,
+    DataTransactionHeader, DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset,
+    LedgerChunkRange, Proof, TokioServiceHandle, TxChunkOffset, UnpackedChunk, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, instrument};
 
 pub struct ChunkMigrationService {
@@ -38,15 +38,28 @@ pub struct ChunkMigrationService {
 #[derive(Debug)]
 pub struct ChunkMigrationServiceInner {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
-    pub block_index: Option<Arc<RwLock<BlockIndex>>>,
+    pub block_index: Arc<RwLock<BlockIndex>>,
     /// Configuration parameters for storage system
     pub config: Config,
     /// Collection of storage modules for distributing chunk data
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Persistent database for storing chunk metadata and indices
-    pub db: Option<DatabaseProvider>,
+    pub db: DatabaseProvider,
     /// Service sender channels
-    pub service_senders: Option<ServiceSenders>,
+    pub service_senders: ServiceSenders,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MigrationError {
+    /// Failed to write chunk data to submodule
+    #[error("Failed to write chunk data to submodule")]
+    ChunkDataWrite,
+    /// Failed to write chunk index data to submodule database
+    #[error("Failed to write chunk index data to submodule database")]
+    ChunkIndexWrite,
+    /// Catch-all variant for other errors.
+    #[error("Ingress proof error: {0}")]
+    Other(String),
 }
 
 pub enum ChunkMigrationServiceMessage {
@@ -54,6 +67,10 @@ pub enum ChunkMigrationServiceMessage {
         Arc<IrysBlockHeader>,
         Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
     ),
+    UpdateStorageModuleIndexes {
+        block_hash: BlockHash,
+        receiver: oneshot::Sender<Result<(), MigrationError>>,
+    },
 }
 
 impl ChunkMigrationServiceInner {
@@ -66,11 +83,11 @@ impl ChunkMigrationServiceInner {
     ) -> Self {
         println!("service started: chunk_migration");
         Self {
-            block_index: Some(block_index),
+            block_index,
             config,
             storage_modules_guard: storage_modules_guard.clone(),
-            db: Some(db),
-            service_senders: Some(service_senders),
+            db,
+            service_senders,
         }
     }
 
@@ -79,28 +96,70 @@ impl ChunkMigrationServiceInner {
             ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
                 self.on_block_migrated(block_header, all_txs)?;
             }
+            ChunkMigrationServiceMessage::UpdateStorageModuleIndexes {
+                block_hash,
+                receiver,
+            } => {
+                let response_value = self.on_update_storage_module_indexes(block_hash);
+                if let Err(e) = receiver.send(response_value) {
+                    tracing::error!("UpdateStorageModuleIndexes receiver.send() error: {:?}", e);
+                };
+            }
         }
         Ok(())
     }
+
+    fn on_update_storage_module_indexes(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> Result<(), MigrationError> {
+        // Retrieve the block from the db
+        let block_header = self
+            .db
+            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
+            .expect("db query to succeed")
+            .expect("header should exist in db");
+
+        // For each data ledger, retrieve the tx headers and build a map
+        let data_ledger_txids = block_header.get_data_ledger_tx_ids();
+
+        let mut block_tx_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
+        for (ledger, tx_ids) in data_ledger_txids {
+            let mut txs = Vec::new();
+            for txid in tx_ids {
+                let tx = self
+                    .db
+                    .view_eyre(|tx| tx_header_by_txid(tx, &txid))
+                    .unwrap()
+                    .unwrap();
+                txs.push(tx);
+            }
+            block_tx_map.insert(ledger, txs);
+        }
+
+        // Invoke on_block_migrated to sync the indexes, this will also migrate any available chunks on hand
+        self.on_block_migrated(Arc::new(block_header), Arc::new(block_tx_map))?;
+
+        Ok(())
+    }
+
+    #[instrument(skip_all, fields(
+        height = %block_header.height,
+        hash = %block_header.block_hash
+    ))]
 
     fn on_block_migrated(
         &mut self,
         block_header: Arc<IrysBlockHeader>,
         all_txs: Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
-    ) -> eyre::Result<()> {
-        // Early return if not initialized
-        if self.block_index.is_none() || self.db.is_none() {
-            error!("chunk_migration service not initialized");
-            return Err(eyre!("chunk_migration service not initialized"));
-        }
-
+    ) -> Result<(), MigrationError> {
         // Collect working variables to move into the closure
         let block = block_header;
-        let block_index = self.block_index.clone().unwrap();
+        let block_index = self.block_index.clone();
         let chunk_size = self.config.consensus.chunk_size as usize;
         let storage_modules = Arc::new(self.storage_modules_guard.clone());
-        let db = Arc::new(self.db.clone().unwrap());
-        let service_senders = self.service_senders.clone().unwrap();
+        let db = Arc::new(self.db.clone());
+        let service_senders = self.service_senders.clone();
 
         // Extract transactions for each ledger
         let submit_txs = all_txs.get(&DataLedger::Submit);
@@ -117,9 +176,7 @@ impl ChunkMigrationServiceInner {
                 chunk_size,
                 &storage_modules,
                 &db,
-            )
-            // TODO: fix this & child functions so they forward errors?
-            .map_err(|()| eyre!("Unexpected error processing submit ledger transactions"))?;
+            )?
         }
 
         // Process Publish ledger transactions
@@ -132,8 +189,7 @@ impl ChunkMigrationServiceInner {
                 chunk_size,
                 &storage_modules,
                 &db,
-            )
-            .map_err(|()| eyre!("Unexpected error processing publish ledger transactions"))?;
+            )?
         }
 
         // forward the finalization message to the cache service for cleanup
@@ -145,7 +201,7 @@ impl ChunkMigrationServiceInner {
     }
 }
 
-fn process_ledger_transactions(
+pub fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
     txs: &[DataTransactionHeader],
@@ -153,10 +209,10 @@ fn process_ledger_transactions(
     chunk_size: usize,
     storage_modules_guard: &StorageModulesReadGuard,
     db: &Arc<DatabaseProvider>,
-) -> Result<(), ()> {
+) -> Result<(), MigrationError> {
     let path_pairs = get_tx_path_pairs(block, ledger, txs).unwrap();
-    let block_range = get_block_range(block, ledger, block_index.clone());
-    let mut prev_chunk_offset = block_range.start();
+    let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index.clone());
+    let mut prev_chunk_offset = block_offsets.start();
 
     for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
         let num_chunks_in_tx: u32 = data_size
@@ -205,7 +261,7 @@ fn process_transaction_chunks(
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
     db: &DatabaseProvider,
-) -> Result<(), ()> {
+) -> Result<(), MigrationError> {
     for tx_chunk_offset in 0..num_chunks_in_tx {
         let tx_chunk_offset = TxChunkOffset::from(tx_chunk_offset);
         // Attempt to retrieve the cached chunk from the mempool
@@ -241,7 +297,7 @@ fn process_transaction_chunks(
 /// # Returns
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
-fn get_block_range(
+fn get_block_offsets_in_ledger(
     block: &IrysBlockHeader,
     ledger: DataLedger,
     block_index: Arc<RwLock<BlockIndex>>,
@@ -250,17 +306,26 @@ fn get_block_range(
     // start of this new block from the previous block.
     let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
+        // We subtract 1 from `total_chunks` to get the offsets
         index_reader
             .get_item(block.height - 1)
-            .map(|prev| prev.ledgers[ledger].max_chunk_offset)
+            .map(|prev| prev.ledgers[ledger].total_chunks)
             .unwrap_or(0)
+            .saturating_sub(1)
     } else {
         0
     };
 
+    // debug!(
+    //     "get_block_range - {} {}",
+    //     start_chunk_offset,
+    //     block.data_ledgers[ledger].total_chunks.saturating_sub(1)
+    // );
+
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
-        LedgerChunkOffset::from(block.data_ledgers[ledger].max_chunk_offset),
+        // We subtract 1 from `total_chunks` to get the offsets
+        LedgerChunkOffset::from(block.data_ledgers[ledger].total_chunks.saturating_sub(1)),
     ))
 }
 
@@ -290,24 +355,30 @@ fn get_tx_path_pairs(
 }
 
 fn update_storage_module_indexes(
-    proof: &[u8],
+    tx_path_proof: &[u8],
     data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
     data_size: u64,
-) -> Result<(), ()> {
+) -> Result<(), MigrationError> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules_guard, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(&proof.to_vec(), data_root, tx_chunk_range, data_size)
+            .index_transaction_data(
+                &tx_path_proof.to_vec(),
+                data_root,
+                tx_chunk_range,
+                data_size,
+            )
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",
                     e
                 );
+                MigrationError::ChunkIndexWrite
             })?;
     }
     Ok(())
@@ -336,7 +407,7 @@ fn find_storage_module(
             .and_then(|pa| pa.ledger_id)
             .filter(|&id| id == ledger as u32)
             // Then check offset range
-            .and_then(|_| module.get_storage_module_ledger_range().ok())
+            .and_then(|_| module.get_storage_module_ledger_offsets().ok())
             .filter(|range| range.contains_point(ledger_offset.into()))
             .map(|_| module.clone()) // Clone the Arc here (it's cheap)
     })
@@ -348,7 +419,7 @@ fn write_chunk_to_module(
     data_root: DataRoot,
     data_size: u64,
     chunk_offset: TxChunkOffset,
-) -> Result<(), ()> {
+) -> Result<(), MigrationError> {
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
     if let Some(bytes) = chunk_info.1.chunk {
@@ -361,7 +432,8 @@ fn write_chunk_to_module(
         };
 
         storage_module.write_data_chunk(&chunk).map_err(|e| {
-            error!("Failed to write data chunk: {}", e);
+            error!("{:?}", e);
+            MigrationError::ChunkIndexWrite
         })?;
     }
     Ok(())

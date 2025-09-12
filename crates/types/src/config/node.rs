@@ -435,6 +435,19 @@ impl NodeConfig {
         }
     }
 
+    pub fn with_consensus<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut ConsensusConfig),
+    {
+        f(self.consensus.get_mut());
+        self
+    }
+
+    pub fn with_genesis_peer_discovery_timeout(mut self, timeout_millis: u64) -> Self {
+        self.genesis_peer_discovery_timeout_millis = timeout_millis;
+        self
+    }
+
     pub fn miner_address(&self) -> Address {
         Address::from_private_key(&self.mining_key)
     }
