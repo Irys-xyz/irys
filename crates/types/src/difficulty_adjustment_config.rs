@@ -123,7 +123,7 @@ pub fn calculate_difficulty(
     .try_into()
     .unwrap();
 
-    let is_adjusted = percent_diff > min_threshold;
+    let is_adjusted = percent_diff >= min_threshold;
 
     let stats = AdjustmentStats {
         actual_block_time,
@@ -433,9 +433,10 @@ mod tests {
     #[case(0.90, 10, false, false)]
     // 90% of target = 10% diff
 
-    // At min threshold boundary (25%) - no adjustment (need to exceed threshold)
-    #[case(1.25, 25, false, false)] // 125% of target = 25% diff
-    #[case(0.75, 25, false, false)] // 75% of target = 25% diff
+    // At min threshold boundary (25%) - adjustment happens (>= threshold)
+    #[case(1.25, 25, true, false)] // 125% of target = 25% diff - blocks too slow, decrease difficulty
+    #[case(0.75, 25, true, true)]
+    // 75% of target = 25% diff - blocks too fast, increase difficulty
 
     // Above min threshold - adjustment happens
     #[case(1.3, 30, true, false)] // 130% of target = 30% diff, decrease
@@ -525,6 +526,176 @@ mod tests {
             }
         } else {
             assert_eq!(new_diff, current_diff, "Difficulty should not change");
+        }
+    }
+
+    #[rstest]
+    fn test_boundary_condition_exact_threshold(
+        default_difficulty_config: DifficultyAdjustmentConfig,
+    ) {
+        // Test the specific boundary fix: percent_diff >= min_threshold vs percent_diff > min_threshold
+        let difficulty_config = default_difficulty_config;
+        let block_height = 100; // Adjustment block
+        let current_diff = U256::from(1000000_u64);
+        let last_diff_timestamp = 0_u128;
+
+        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
+        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
+
+        // Create scenario where percent_diff exactly equals min_threshold (25%)
+        let actual_time = target_time + (target_time / 4); // 125% of target = 25% diff
+        let current_timestamp = last_diff_timestamp + actual_time;
+
+        let (new_diff, stats) = calculate_difficulty(
+            block_height,
+            last_diff_timestamp,
+            current_timestamp,
+            current_diff,
+            &difficulty_config,
+        );
+
+        let stats = stats.expect("Stats should be Some at adjustment block");
+
+        // Exactly at threshold should trigger adjustment with >= comparison
+        assert_eq!(
+            stats.percent_different, 25,
+            "Should calculate 25% difference"
+        );
+        assert_eq!(stats.min_threshold, 25, "Min threshold should be 25%");
+        assert!(
+            stats.is_adjusted,
+            "Should adjust when percent_diff == min_threshold"
+        );
+        assert_ne!(
+            new_diff, current_diff,
+            "Difficulty should change at exact threshold"
+        );
+        assert!(
+            new_diff < current_diff,
+            "Difficulty should decrease (blocks too slow)"
+        );
+    }
+
+    #[rstest]
+    fn test_boundary_condition_just_below_threshold(
+        default_difficulty_config: DifficultyAdjustmentConfig,
+    ) {
+        let difficulty_config = default_difficulty_config;
+        let block_height = 100;
+        let current_diff = U256::from(1000000_u64);
+        let last_diff_timestamp = 0_u128;
+
+        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
+        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
+
+        // Create scenario just below threshold (24% diff)
+        let actual_time = target_time + (target_time * 24 / 100); // 124% of target = 24% diff
+        let current_timestamp = last_diff_timestamp + actual_time;
+
+        let (new_diff, stats) = calculate_difficulty(
+            block_height,
+            last_diff_timestamp,
+            current_timestamp,
+            current_diff,
+            &difficulty_config,
+        );
+
+        let stats = stats.expect("Stats should be Some at adjustment block");
+
+        assert_eq!(
+            stats.percent_different, 24,
+            "Should calculate 24% difference"
+        );
+        assert!(!stats.is_adjusted, "Should NOT adjust when below threshold");
+        assert_eq!(new_diff, current_diff, "Difficulty should remain unchanged");
+    }
+
+    #[rstest]
+    fn test_boundary_condition_just_above_threshold(
+        default_difficulty_config: DifficultyAdjustmentConfig,
+    ) {
+        let difficulty_config = default_difficulty_config;
+        let block_height = 100;
+        let current_diff = U256::from(1000000_u64);
+        let last_diff_timestamp = 0_u128;
+
+        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
+        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
+
+        // Create scenario just above threshold (26% diff)
+        let actual_time = target_time + (target_time * 26 / 100); // 126% of target = 26% diff
+        let current_timestamp = last_diff_timestamp + actual_time;
+
+        let (new_diff, stats) = calculate_difficulty(
+            block_height,
+            last_diff_timestamp,
+            current_timestamp,
+            current_diff,
+            &difficulty_config,
+        );
+
+        let stats = stats.expect("Stats should be Some at adjustment block");
+
+        assert_eq!(
+            stats.percent_different, 26,
+            "Should calculate 26% difference"
+        );
+        assert!(stats.is_adjusted, "Should adjust when above threshold");
+        assert_ne!(
+            new_diff, current_diff,
+            "Difficulty should change above threshold"
+        );
+    }
+
+    #[rstest]
+    #[case(0.75)] // Exactly at 25% threshold (blocks 25% faster than target)
+    #[case(0.76)] // Just above threshold (24% faster, should NOT adjust)
+    #[case(0.74)] // Just below threshold (26% faster, should adjust)
+    fn test_fast_blocks_boundary_conditions(
+        default_difficulty_config: DifficultyAdjustmentConfig,
+        #[case] time_fraction: f64,
+    ) {
+        let difficulty_config = default_difficulty_config;
+        let block_height = 100;
+        let current_diff = U256::from(1000000_u64);
+        let last_diff_timestamp = 0_u128;
+
+        let blocks = difficulty_config.difficulty_adjustment_interval as u128;
+        let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
+
+        // Fast blocks: actual_time < target_time
+        let actual_time = (target_time as f64 * time_fraction) as u128;
+        let current_timestamp = last_diff_timestamp + actual_time;
+
+        let (new_diff, stats) = calculate_difficulty(
+            block_height,
+            last_diff_timestamp,
+            current_timestamp,
+            current_diff,
+            &difficulty_config,
+        );
+
+        let stats = stats.expect("Stats should be Some at adjustment block");
+
+        let expected_percent = ((1.0 - time_fraction) * 100.0) as u32;
+        assert_eq!(
+            stats.percent_different, expected_percent,
+            "Percent calculation should be correct"
+        );
+
+        if time_fraction <= 0.75 {
+            // 25% or more difference
+            assert!(
+                stats.is_adjusted,
+                "Should adjust at/above 25% threshold for fast blocks"
+            );
+            assert!(
+                new_diff > current_diff,
+                "Difficulty should increase (blocks too fast)"
+            );
+        } else {
+            assert!(!stats.is_adjusted, "Should NOT adjust below 25% threshold");
+            assert_eq!(new_diff, current_diff, "Difficulty should remain unchanged");
         }
     }
 }
