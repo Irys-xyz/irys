@@ -1059,7 +1059,10 @@ impl IrysNode {
 
         // repair any missing payloads before triggering an FCU
         block_pool
-            .repair_missing_payloads_if_any(Some(reth_service_actor.clone()))
+            .repair_missing_payloads_if_any(
+                Some(reth_service_actor.clone()),
+                Arc::clone(&gossip_data_handler),
+            )
             .await?;
 
         // update reth service about the latest block data it must use
