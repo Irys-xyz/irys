@@ -633,7 +633,7 @@ impl EpochSnapshot {
         // there are 2 or 10 partition replicas of each slot across the network.
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
 
-        let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
+        let ledger_size = new_epoch_block.data_ledgers[ledger].total_chunks;
 
         // STRATEGY 1: Threshold-based capacity expansion
         // Add slots when utilization reaches within half partition of max capacity
@@ -650,7 +650,7 @@ impl EpochSnapshot {
         if new_epoch_block.height >= self.config.consensus.epoch.num_blocks_in_epoch {
             let previous_ledger_size = previous_epoch_block
                 .as_ref()
-                .map_or(0, |prev| prev.data_ledgers[ledger].max_chunk_offset);
+                .map_or(0, |prev| prev.data_ledgers[ledger].total_chunks);
 
             let data_added = ledger_size - previous_ledger_size;
 
@@ -1166,7 +1166,7 @@ mod tests {
         // correct capacity formula (4 slots * 10 chunks), this is below the
         // allocation threshold and should trigger two additional slots.
         for offset in 1..=34 {
-            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            header.data_ledgers[DataLedger::Submit].total_chunks = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 0, "offset: {:?}", offset);
@@ -1176,7 +1176,7 @@ mod tests {
         // correct capacity formula (4 slots * 10 chunks), this is above the
         // allocation threshold and should trigger two additional slots.
         for offset in 35..=40 {
-            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            header.data_ledgers[DataLedger::Submit].total_chunks = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
@@ -1185,7 +1185,7 @@ mod tests {
         // and test for more than 40 chunks
         // should produce the same result as 35..=40 as new slots are capped at 2 using the Threshold-based capacity expansion
         for offset in 41..=99 {
-            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            header.data_ledgers[DataLedger::Submit].total_chunks = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);

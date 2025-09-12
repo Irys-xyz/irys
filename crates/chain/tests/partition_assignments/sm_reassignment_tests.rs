@@ -20,27 +20,22 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     initialize_tracing();
 
     let seconds_to_wait = 10;
-    let mut genesis_config = NodeConfig::testing();
+    let mut config = NodeConfig::testing();
 
     let chunk_size: usize = 32;
-    genesis_config.consensus.get_mut().chunk_size = chunk_size as u64;
-    genesis_config.consensus.get_mut().num_chunks_in_partition = 10;
-    genesis_config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
-    genesis_config.genesis_peer_discovery_timeout_millis = 1000; // Faster restart
-    genesis_config.consensus.get_mut().block_migration_depth = 1; // <- so we lose less blocks in the restart
-    genesis_config
-        .consensus
-        .get_mut()
-        .epoch
-        .submit_ledger_epoch_length = 2;
+    config.consensus.get_mut().chunk_size = chunk_size as u64;
+    config.consensus.get_mut().num_chunks_in_partition = 10;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
+    config.genesis_peer_discovery_timeout_millis = 1000; // Faster restart
+    config.consensus.get_mut().block_migration_depth = 1; // <- so we lose less blocks in the restart
+    config.consensus.get_mut().epoch.submit_ledger_epoch_length = 2;
 
     // 1. Start a node
-    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();
     genesis_node.stop_mining();
-    genesis_config.fund_genesis_accounts(vec![&genesis_signer]);
 
     // Retrieve the nodes capacity partition_hash
     let epoch_snapshot = genesis_node

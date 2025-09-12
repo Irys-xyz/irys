@@ -17,7 +17,7 @@ use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Index, IndexMut};
 use tracing::debug;
@@ -328,8 +328,10 @@ impl IrysBlockHeader {
         commitment_txids
     }
 
-    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, HashSet<H256>> {
-        let mut data_txids = HashMap::new();
+    /// Retrieves a map of the data transaction ids by ledger type, uses a Vec
+    /// to ensure the txids are ordered identically to their order in the block.
+    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, Vec<H256>> {
+        let mut data_txids: HashMap<DataLedger, Vec<H256>> = HashMap::new();
         for data_ledger in self.data_ledgers.iter() {
             data_txids.insert(
                 DataLedger::from_u32(data_ledger.ledger_id).unwrap(),
@@ -450,9 +452,9 @@ pub struct DataTransactionLedger {
     pub tx_root: H256,
     /// List of transaction ids included in the block
     pub tx_ids: H256List,
-    /// The size of this ledger (in chunks) since genesis
+    /// The total number of chunks in this ledger since genesis
     #[serde(default, with = "u64_stringify")]
-    pub max_chunk_offset: u64,
+    pub total_chunks: u64,
     /// This ledger expires after how many epochs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<u64>,
@@ -647,7 +649,7 @@ impl IrysBlockHeader {
                     ledger_id: 0, // Publish ledger_id
                     tx_root: H256::zero(),
                     tx_ids,
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     expires: None,
                     proofs: None,
                     required_proof_count: Some(1),
@@ -657,7 +659,7 @@ impl IrysBlockHeader {
                     ledger_id: 1, // Submit ledger_id
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     expires: Some(1622543200),
                     proofs: None,
                     required_proof_count: None,
@@ -802,8 +804,8 @@ pub struct BlockIndexItem {
 /// and and the `tx_root` of the ledger in that block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LedgerIndexItem {
-    /// Size in bytes of the ledger
-    pub max_chunk_offset: u64, // 8 bytes
+    /// The total number of chunks in this ledger since genesis
+    pub total_chunks: u64, // 8 bytes
     /// The merkle root of the TX that apply to this ledger in the current block
     pub tx_root: H256, // 32 bytes
 }
@@ -812,7 +814,7 @@ impl LedgerIndexItem {
     fn to_bytes(&self) -> [u8; 40] {
         // Fixed size of 40 bytes
         let mut bytes = [0_u8; 40];
-        bytes[0..8].copy_from_slice(&self.max_chunk_offset.to_le_bytes()); // First 8 bytes
+        bytes[0..8].copy_from_slice(&self.total_chunks.to_le_bytes()); // First 8 bytes
         bytes[8..40].copy_from_slice(self.tx_root.as_bytes()); // Next 32 bytes
         bytes
     }
@@ -823,7 +825,7 @@ impl LedgerIndexItem {
         // Read ledger size (first 8 bytes)
         let mut size_bytes = [0_u8; 8];
         size_bytes.copy_from_slice(&bytes[0..8]);
-        item.max_chunk_offset = u64::from_le_bytes(size_bytes);
+        item.total_chunks = u64::from_le_bytes(size_bytes);
 
         // Read tx root (next 32 bytes)
         item.tx_root = H256::from_slice(&bytes[8..40]);
@@ -972,7 +974,7 @@ mod tests {
             ledger_id: 1,
             tx_root: H256::random(),
             tx_ids: H256List(vec![]),
-            max_chunk_offset: 55,
+            total_chunks: 55,
             expires: None,
             proofs: Some(IngressProofsList(vec![IngressProof {
                 proof: H256::random(),
@@ -1171,7 +1173,7 @@ mod tests {
             |h: &mut IrysBlockHeader| h.miner_address.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.data_ledgers[0].ledger_id.as_mut_bytes(),
-            |h: &mut IrysBlockHeader| h.data_ledgers[0].max_chunk_offset.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].total_chunks.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
             |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];

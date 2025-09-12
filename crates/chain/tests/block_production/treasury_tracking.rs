@@ -44,9 +44,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     let block1 = node.get_block_by_height(1).await?;
 
     // Block 2: Pledge commitment
-    let pledge_tx = node
-        .post_pledge_commitment_with_signer(&user1_signer, H256::zero())
-        .await;
+    let pledge_tx = node.post_pledge_commitment_with_signer(&user1_signer).await;
     node.wait_for_mempool(pledge_tx.id, 10).await?;
     node.mine_block().await?;
     let block2 = node.get_block_by_height(2).await?;

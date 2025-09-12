@@ -13,11 +13,11 @@ use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument as _};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -30,12 +30,14 @@ type StorageModuleId = usize;
 pub struct DataSyncServiceInner {
     pub block_tree: BlockTreeReadGuard,
     pub storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
-    pub active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+    pub active_peer_bandwidth_managers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
     pub chunk_orchestrators: HashMap<StorageModuleId, ChunkOrchestrator>,
     pub peer_list: PeerList,
     pub chunk_fetcher_factory: ChunkFetcherFactory,
     pub service_senders: ServiceSenders,
     pub config: Config,
+    last_peer_list_check: Instant,
+    peer_list_check_interval: Duration,
 }
 
 pub enum DataSyncServiceMessage {
@@ -43,7 +45,7 @@ pub enum DataSyncServiceMessage {
     ChunkCompleted {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_address: Address,
         chunk: PackedChunk,
     },
     ChunkFailed {
@@ -54,10 +56,11 @@ pub enum DataSyncServiceMessage {
     ChunkTimedOut {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_address: Address,
     },
+    PeerListUpdated,
     PeerDisconnected {
-        peer_addr: Address,
+        peer_address: Address,
     },
     GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>),
 }
@@ -75,16 +78,19 @@ impl DataSyncServiceInner {
             block_tree,
             storage_modules,
             peer_list,
-            active_sync_peers: Default::default(),
+            active_peer_bandwidth_managers: Default::default(),
             chunk_fetcher_factory,
             chunk_orchestrators: Default::default(),
             service_senders,
             config,
+            last_peer_list_check: Instant::now(),
+            peer_list_check_interval: Duration::from_secs(1),
         };
-        data_sync.initialize_peers_and_orchestrators();
+        data_sync.synchronize_peers_and_orchestrators();
         data_sync
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
@@ -94,7 +100,7 @@ impl DataSyncServiceInner {
             DataSyncServiceMessage::ChunkCompleted {
                 storage_module_id,
                 chunk_offset,
-                peer_addr,
+                peer_address: peer_addr,
                 chunk,
             } => self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)?,
             DataSyncServiceMessage::ChunkFailed {
@@ -105,16 +111,18 @@ impl DataSyncServiceInner {
             DataSyncServiceMessage::ChunkTimedOut {
                 storage_module_id,
                 chunk_offset,
-                peer_addr,
+                peer_address: peer_addr,
             } => self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr)?,
-            DataSyncServiceMessage::PeerDisconnected { peer_addr } => {
-                self.handle_peer_disconnection(peer_addr)
-            }
+            DataSyncServiceMessage::PeerListUpdated => self.handle_peer_list_updated(),
+            DataSyncServiceMessage::PeerDisconnected {
+                peer_address: peer_addr,
+            } => self.handle_peer_disconnection(peer_addr),
             DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
         }
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn tick(&mut self) -> eyre::Result<()> {
         for orchestrator in self.chunk_orchestrators.values_mut() {
             orchestrator.tick()?;
@@ -124,11 +132,21 @@ impl DataSyncServiceInner {
     }
 
     fn optimize_peer_concurrency(&mut self) {
-        let Ok(mut peers) = self.active_sync_peers.write() else {
+        // Check for any new peers
+        // TODO: this is a temporary solution until the PeerListService can message
+        // the DataSyncService to let it know of peer changes. Until then we poll/synchronize with
+        // the PeerList on a fixed interval
+        if self.last_peer_list_check.elapsed() > self.peer_list_check_interval {
+            self.synchronize_peers_and_orchestrators();
+            self.last_peer_list_check = Instant::now();
+        }
+
+        // Get a write lock on the peer bandwidth managers list
+        let Ok(mut peers) = self.active_peer_bandwidth_managers.write() else {
             return;
         };
 
-        // Build a list of peer score tuples (Address, health_score, active_requests, max_concurrency)
+        // Build a list of score tuples for the peer bandwidth managers (Address, health_score, active_requests, max_concurrency)
         let mut peer_scores: Vec<_> = peers
             .iter()
             .map(|(&addr, pm)| {
@@ -178,12 +196,13 @@ impl DataSyncServiceInner {
                     peer_manager.set_max_concurrency(current_max + increase);
                 }
             } else {
-                debug!(
-                "Not increasing concurrency for peer {} (concurrent utilization: {:.1}%, health: {:.2})",
-                peer_addr,
-                utilization_ratio * 100.0,
-                health_score
-            );
+                // debug!(
+                //     "Not increasing concurrency for peer {} max_concurrency {} (concurrent utilization: {:.1}%, health: {:.2})",
+                //     peer_addr,
+                //     current_max,
+                //     utilization_ratio * 100.0,
+                //     health_score
+                // );
             }
         }
     }
@@ -209,12 +228,24 @@ impl DataSyncServiceInner {
             consensus.chain_id,
         );
 
-        self.storage_modules
+        // Attempt to write the chunk directly to the sm, if it doesn't succeed
+        // for a variety of reasons, indexes not initialized, no packing etc etc...
+        let sm = self
+            .storage_modules
             .read()
             .unwrap()
             .get(storage_module_id)
             .unwrap()
-            .write_data_chunk(&unpacked_chunk)?;
+            .clone();
+        if sm.write_data_chunk(&unpacked_chunk).is_err() {
+            // ..then, send the unpacked chunk to the mempool and let the it do it's thing.
+            self.service_senders
+                .mempool
+                .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
+                    unpacked_chunk,
+                ))
+                .expect("to send MempoolServiceMessage");
+        }
 
         Ok(())
     }
@@ -225,9 +256,17 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: Address,
     ) -> eyre::Result<()> {
-        debug!("chunk failed: {} peer:{}", chunk_offset, peer_addr);
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
+
+            let pa = orchestrator
+                .storage_module
+                .partition_assignment()
+                .expect("A partition assignment present");
+            debug!(
+                "chunk failed: ledger:{:?}, slot_index:{:?} chunk_offset:{} peer:{}",
+                pa.ledger_id, pa.slot_index, chunk_offset, peer_addr
+            );
         }
         Ok(())
     }
@@ -246,6 +285,10 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
+    fn handle_peer_list_updated(&mut self) {
+        self.sync_peer_partition_assignments();
+    }
+
     fn handle_peer_disconnection(&mut self, peer_addr: Address) {
         // Remove peer from all orchestrators
         for orchestrator in self.chunk_orchestrators.values_mut() {
@@ -253,28 +296,42 @@ impl DataSyncServiceInner {
         }
 
         // Remove from peer list
-        self.active_sync_peers.write().unwrap().remove(&peer_addr);
+        self.active_peer_bandwidth_managers
+            .write()
+            .unwrap()
+            .remove(&peer_addr);
     }
 
     fn handle_get_active_peers_list(
         &self,
         tx: oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>,
     ) {
-        if let Err(e) = tx.send(self.active_sync_peers.clone()) {
+        if let Err(e) = tx.send(self.active_peer_bandwidth_managers.clone()) {
             tracing::error!("handle_get_active_peers_list() tx.send() error: {:?}", e);
         };
     }
 
-    fn initialize_peers_and_orchestrators(&mut self) {
+    fn synchronize_peers_and_orchestrators(&mut self) {
         self.sync_peer_partition_assignments();
         self.create_chunk_orchestrators();
         self.update_orchestrator_peers();
     }
 
+    /// Synchronizes peer bandwidth managers with current network peers and local
+    /// storage module assignments.
+    ///
+    /// For each local storage module assigned to a data ledger slot:
+    /// - Checks if the module has entropy chunks requiring data
+    /// - Ensures PeerBandwidthManagers exist for all peers storing relevant partition data
+    ///
+    /// This maintains an up-to-date mapping between peers and bandwidth managers
+    /// for efficient chunk downloading across the network.
     fn sync_peer_partition_assignments(&mut self) {
         let storage_modules = self.storage_modules.read().unwrap().clone();
 
+        // Loop though all the storage modules managed by the local node
         for storage_module in storage_modules {
+            // Skip any storage modules not assigned to a data ledger
             let Some(pa) = *storage_module.partition_assignment.read().unwrap() else {
                 continue;
             };
@@ -287,22 +344,24 @@ impl DataSyncServiceInner {
                 continue;
             };
 
-            // Only sync peers for storage modules that need data
+            // Check to see if the storage module has any entropy (packed) chunks that need data
             let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
             if entropy_intervals.is_empty() {
                 debug!("StorageModule has no entropy chunks\n{:?}", pa);
                 continue;
             }
 
+            // If it does, ensure there's a bandwidth manager for any peer storing the data for this storage module
             self.ensure_bandwidth_managers_for_peers(ledger_id, slot_index);
         }
     }
 
     /// Updates the active_peers list and ensures there are PeerBandwidthManagers for
     /// any peers assigned to store the same slot data.
+    #[tracing::instrument(skip_all)]
     fn ensure_bandwidth_managers_for_peers(&mut self, ledger_id: u32, slot_index: usize) {
+        // Get the slot assignments for all partition hashes in this slot
         let epoch_snapshot = self.block_tree.read().canonical_epoch_snapshot();
-
         let slot_assignments: Vec<_> = epoch_snapshot
             .partition_assignments
             .data_partitions
@@ -311,13 +370,15 @@ impl DataSyncServiceInner {
             .copied()
             .collect();
 
+        // Loop though all of this slots assigned partition_hashes
         for pa in slot_assignments {
+            // Use the mining address in the assignment to retrieve a peer from the global peer_list
             let Some(peer) = self.peer_list.peer_by_mining_address(&pa.miner_address) else {
                 continue;
             };
 
-            // Get existing peer bandwidth manager or add a new one for the peer
-            let mut active_peers = self.active_sync_peers.write().unwrap();
+            // Get existing entry for a peer bandwidth manager or add a new one for the peer
+            let mut active_peers = self.active_peer_bandwidth_managers.write().unwrap();
             let entry = active_peers
                 .entry(pa.miner_address)
                 .or_insert(PeerBandwidthManager::new(
@@ -326,10 +387,16 @@ impl DataSyncServiceInner {
                     &self.config,
                 ));
 
-            // Finally add the partition assignment to the peer if it isn't present
+            // Finally let the peer bandwidth manager for this peer store a reference to this partition assignment
+            // so we can filter the active_peer_bandwidth_managers list for peers assigned to this ledger/slot in the future
             if !entry.partition_assignments.contains(&pa) {
+                debug!(
+                    "Adding partition assignment: {:#?} to Peer: {}",
+                    pa, entry.miner_address
+                );
                 entry.partition_assignments.push(pa);
             }
+            // active_peers dropped here
         }
     }
 
@@ -348,12 +415,12 @@ impl DataSyncServiceInner {
         for sm in storage_modules {
             let sm_id = sm.id;
 
-            // Skip if we already have an orchestrator for this storage module
+            // Skip if we already have a chunk orchestrator for this storage module
             if self.chunk_orchestrators.contains_key(&sm_id) {
                 continue;
             }
 
-            // Skip unused storage modules without partition assignments (not yet initialized)
+            // Skip unused storage modules without partition assignments (not yet capacity or data)
             let Some(pa) = sm.partition_assignment() else {
                 continue;
             };
@@ -366,10 +433,10 @@ impl DataSyncServiceInner {
             // Use the factory to create a chunk_fetcher (allows mock chunk fetchers for testing)
             let chunk_fetcher = (self.chunk_fetcher_factory)(pa.ledger_id.unwrap());
 
-            // Create orchestrator for storage modules that needs to sync data
+            // Create a chunk orchestrator for storage modules that needs to sync data
             let orchestrator = ChunkOrchestrator::new(
                 sm.clone(),
-                self.active_sync_peers.clone(),
+                self.active_peer_bandwidth_managers.clone(),
                 self.block_tree.clone(),
                 &self.service_senders,
                 chunk_fetcher,
@@ -435,7 +502,7 @@ impl DataSyncServiceInner {
         let ledger_id = pa.ledger_id.unwrap();
 
         // Find all peers that are assigned to store data for the same ledger slot
-        let active_peers = self.active_sync_peers.read().unwrap();
+        let active_peers = self.active_peer_bandwidth_managers.read().unwrap();
         let mut candidates: Vec<&PeerBandwidthManager> = active_peers
             .values()
             .filter(|peer_manager| {
@@ -479,24 +546,27 @@ impl DataSyncService {
         let service_senders = service_senders.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let handle = runtime_handle.spawn(async move {
-            let data_sync_service = Self {
-                shutdown: shutdown_rx,
-                msg_rx: rx,
-                inner: DataSyncServiceInner::new(
-                    block_tree,
-                    storage_modules,
-                    peer_list,
-                    chunk_fetcher_factory,
-                    service_senders,
-                    config,
-                ),
-            };
-            data_sync_service
-                .start()
-                .await
-                .expect("DataSync Service encountered an irrecoverable error")
-        });
+        let handle = runtime_handle.spawn(
+            async move {
+                let data_sync_service = Self {
+                    shutdown: shutdown_rx,
+                    msg_rx: rx,
+                    inner: DataSyncServiceInner::new(
+                        block_tree,
+                        storage_modules,
+                        peer_list,
+                        chunk_fetcher_factory,
+                        service_senders,
+                        config,
+                    ),
+                };
+                data_sync_service
+                    .start()
+                    .await
+                    .expect("DataSync Service encountered an irrecoverable error")
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         TokioServiceHandle {
             name: "data_sync_service".to_string(),
