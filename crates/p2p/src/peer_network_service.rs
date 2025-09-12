@@ -1088,7 +1088,7 @@ where
 
                     // minimal delay between attempts, skip after final iteration
                     if attempt != retries {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
 
