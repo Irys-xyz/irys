@@ -129,7 +129,7 @@ impl<'a> ShadowTxGenerator<'a> {
         submit_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a mut PublishLedgerWithTxs,
         initial_treasury_balance: U256,
-        ledger_expiry_balance_diff: &'a LedgerExpiryBalanceDelta,
+        ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
     ) -> Result<Self> {
         // Sort publish ledger transactions by id for deterministic processing
         publish_ledger.txs.sort();
@@ -137,7 +137,7 @@ impl<'a> ShadowTxGenerator<'a> {
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
         for tx in &publish_ledger.txs {
-            for (refund_tx_id, _, _) in &ledger_expiry_balance_diff.user_perm_fee_refunds {
+            for (refund_tx_id, _, _) in &ledger_expiry_balance_delta.user_perm_fee_refunds {
                 if tx.id == *refund_tx_id {
                     return Err(eyre!(
                         "Transaction {} is in publish ledger but also has a perm_fee refund scheduled. \
@@ -150,8 +150,8 @@ impl<'a> ShadowTxGenerator<'a> {
 
         tracing::debug!(
             "ShadowTxGenerator initialized with {} miner fee increments and {} user refund addresses",
-            ledger_expiry_balance_diff.miner_balance_increment.len(),
-            ledger_expiry_balance_diff.user_perm_fee_refunds.len()
+            ledger_expiry_balance_delta.miner_balance_increment.len(),
+            ledger_expiry_balance_delta.user_perm_fee_refunds.len()
         );
 
         // Create a temporary generator to initialize the iterators
@@ -172,12 +172,12 @@ impl<'a> ShadowTxGenerator<'a> {
         };
 
         // Initialize expired ledger iterator with all fee rewards and refunds
-        let expired_ledger_txs = if !ledger_expiry_balance_diff
+        let expired_ledger_txs = if !ledger_expiry_balance_delta
             .miner_balance_increment
             .is_empty()
-            || !ledger_expiry_balance_diff.user_perm_fee_refunds.is_empty()
+            || !ledger_expiry_balance_delta.user_perm_fee_refunds.is_empty()
         {
-            generator.create_expired_ledger_shadow_txs(ledger_expiry_balance_diff)?
+            generator.create_expired_ledger_shadow_txs(ledger_expiry_balance_delta)?
         } else {
             Vec::new()
         };
@@ -220,12 +220,12 @@ impl<'a> ShadowTxGenerator<'a> {
     // Static helper methods for initialization
     fn create_expired_ledger_shadow_txs(
         &self,
-        balance_diff: &LedgerExpiryBalanceDelta,
+        balance_delta: &LedgerExpiryBalanceDelta,
     ) -> Result<Vec<ShadowMetadata>> {
         let mut shadow_txs = Vec::new();
 
         // First process miner rewards for storing the expired data
-        for (address, (amount, rolling_hash)) in balance_diff.miner_balance_increment.iter() {
+        for (address, (amount, rolling_hash)) in balance_delta.miner_balance_increment.iter() {
             // Convert the rolling hash to FixedBytes<32> for irys_ref
             let hash_bytes = rolling_hash.to_bytes();
             let h256 = irys_types::H256::from(hash_bytes);
@@ -247,9 +247,9 @@ impl<'a> ShadowTxGenerator<'a> {
         // Then process user refunds for non-promoted transactions (already sorted by tx_id)
         tracing::debug!(
             "Processing {} user perm fee refunds",
-            balance_diff.user_perm_fee_refunds.len()
+            balance_delta.user_perm_fee_refunds.len()
         );
-        for (tx_id, refund_amount, user_address) in balance_diff.user_perm_fee_refunds.iter() {
+        for (tx_id, refund_amount, user_address) in balance_delta.user_perm_fee_refunds.iter() {
             shadow_txs.push(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PermFeeRefund(BalanceIncrement {

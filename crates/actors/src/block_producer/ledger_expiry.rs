@@ -112,10 +112,7 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             block_height
         );
-        return Ok(LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: Vec::new(),
-        });
+        return Ok(LedgerExpiryBalanceDelta::default());
     }
 
     // Step 2: Find block ranges
@@ -124,10 +121,7 @@ pub async fn calculate_expired_ledger_fees(
         None => {
             // Check to see if there were no chunks uploaded to this ledger slot!
             // If there wasn't, there aren't any fees to distribute
-            return Ok(LedgerExpiryBalanceDelta {
-                miner_balance_increment: BTreeMap::new(),
-                user_perm_fee_refunds: Vec::new(),
-            });
+            return Ok(LedgerExpiryBalanceDelta::default());
         }
     };
 
@@ -231,7 +225,7 @@ pub async fn calculate_expired_ledger_fees(
             .len()
     );
 
-    let fees = aggregate_balance_diff(
+    let fees = aggregate_balance_deltas(
         transactions,
         &tx_to_miners,
         config,
@@ -626,16 +620,13 @@ pub struct LedgerExpiryBalanceDelta {
 }
 
 /// Calculates and aggregates fees for each miner
-fn aggregate_balance_diff(
+fn aggregate_balance_deltas(
     mut transactions: Vec<DataTransactionHeader>,
     tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<Address>>>,
     config: &Config,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
-    let mut balance_diff = LedgerExpiryBalanceDelta {
-        miner_balance_increment: BTreeMap::new(),
-        user_perm_fee_refunds: Vec::new(),
-    };
+    let mut balance_delta = LedgerExpiryBalanceDelta::default();
     transactions.sort(); // This ensures refunds will be sorted by tx_id
 
     for data_tx in transactions.iter() {
@@ -657,7 +648,7 @@ fn aggregate_balance_diff(
             let fee_distribution_per_miner = fee_charges.distribution_on_expiry(&unique_miners)?;
 
             for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
-                balance_diff
+                balance_delta
                     .miner_balance_increment
                     .entry(*miner)
                     .and_modify(|(current_fee, hash)| {
@@ -675,25 +666,25 @@ fn aggregate_balance_diff(
         // process refunds of perm fee if the tx was not promoted
         {
             if data_tx.promoted_height.is_none() {
-                // Only process refund if perm_fee exists (should always be present for unpromoted txs)
+                // Only process refund if perm_fee exists (should always be present if tx is expected to be promoted)
                 let perm_fee = data_tx
                     .perm_fee
                     .ok_or_eyre("unpromoted tx should have the prem fee present")?;
                 // Add refund to the vector (already sorted by tx_id due to transaction sorting)
-                balance_diff
+                balance_delta
                     .user_perm_fee_refunds
                     .push((data_tx.id, perm_fee, data_tx.signer));
             } else {
                 tracing::debug!(
-                    "Tx {} was promoted at height {:?}, no refund needed",
-                    data_tx.id,
-                    data_tx.promoted_height
+                    id = ?data_tx.id,
+                    promoted_height = ?data_tx.promoted_height,
+                    "Tx was promoted, no refund needed",
                 );
             }
         }
     }
 
-    Ok(balance_diff)
+    Ok(balance_delta)
 }
 
 /// Represents a slot index in the partition system
@@ -778,7 +769,8 @@ mod tests {
         tx_to_miners.insert(tx2.id, Arc::new(tx2_miners));
 
         // Call aggregate_miner_fees
-        let result = aggregate_balance_diff(vec![tx1, tx2], &tx_to_miners, &config, false).unwrap();
+        let result =
+            aggregate_balance_deltas(vec![tx1, tx2], &tx_to_miners, &config, false).unwrap();
 
         // Calculate expected fees
         // For tx1: term_fee = 1000, treasury = 950 (95%)

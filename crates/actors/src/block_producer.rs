@@ -471,7 +471,7 @@ pub trait BlockProdStrategy {
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
         solution_hash: H256,
-        ledger_expiry_balance_diff: LedgerExpiryBalanceDelta,
+        ledger_expiry_balance_delta: LedgerExpiryBalanceDelta,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -491,7 +491,7 @@ pub trait BlockProdStrategy {
             submit_txs,
             publish_txs,
             initial_treasury_balance,
-            &ledger_expiry_balance_diff,
+            &ledger_expiry_balance_delta,
         )?;
 
         let mut shadow_txs = Vec::new();
