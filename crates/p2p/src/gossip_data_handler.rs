@@ -10,6 +10,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, Memp
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
+use irys_primitives::Address;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
@@ -17,6 +18,7 @@ use irys_types::{
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
@@ -811,5 +813,33 @@ where
             }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
         }
+    }
+
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
+        self.mempool
+            .get_stake_and_pledge_whitelist()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) async fn pull_and_process_stake_and_pledge_whitelist(&self) -> GossipResult<()> {
+        let allowed_miner_addresses = self
+            .gossip_client
+            .clone()
+            .stake_and_pledge_whitelist(&self.peer_list)
+            .await?;
+
+        self.mempool
+            .update_stake_and_pledge_whitelist(HashSet::from_iter(
+                allowed_miner_addresses.into_iter(),
+            ))
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "get_stake_and_pledge_whitelist() errored: {:?}",
+                    e
+                )))
+            })
     }
 }
