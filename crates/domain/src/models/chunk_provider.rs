@@ -102,7 +102,7 @@ impl ChunkProvider {
 
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {
-            let sm_range_start = sm.get_storage_module_ledger_range().unwrap().start();
+            let sm_range_start = sm.get_storage_module_ledger_offsets().unwrap().start();
             let start_offsets = sm.collect_start_offsets(data_root)?;
             let mapped_offsets = start_offsets
                 .0
