@@ -412,11 +412,11 @@ impl LedgerExpiryTestContext {
             let tx_ids = block.get_data_ledger_tx_ids();
             let submit_count = tx_ids
                 .get(&DataLedger::Submit)
-                .map(std::collections::HashSet::len)
+                .map(std::vec::Vec::len)
                 .unwrap_or(0);
             let publish_count = tx_ids
                 .get(&DataLedger::Publish)
-                .map(std::collections::HashSet::len)
+                .map(std::vec::Vec::len)
                 .unwrap_or(0);
 
             info!(

@@ -1560,7 +1560,7 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
     for _ in 0..11 {
         let tx = genesis_node
-            .post_pledge_commitment_with_signer(&signer, H256::zero())
+            .post_pledge_commitment_with_signer(&signer)
             .await;
         tx_ids.push(tx.id);
     }

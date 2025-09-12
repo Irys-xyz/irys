@@ -34,8 +34,8 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
-    EmaSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -44,7 +44,6 @@ use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::VersionRequest;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
@@ -55,6 +54,7 @@ use irys_types::{
     DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
@@ -676,6 +676,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Failed waiting for chunk to arrive. Waited {} seconds",
             seconds,
         ))
+    }
+
+    pub fn get_storage_module_intervals(
+        &self,
+        ledger: DataLedger,
+        slot_index: usize,
+        chunk_type: ChunkType,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let sms = self.node_ctx.storage_modules_guard.read();
+        for sm in sms.iter() {
+            let Some(pa) = sm.partition_assignment() else {
+                continue;
+            };
+            if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
+                return sm.get_intervals(chunk_type);
+            }
+        }
+        Vec::new()
     }
 
     /// check number of chunks in the CachedChunks table
@@ -2028,13 +2046,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment_with_signer(
         &self,
         signer: &IrysSigner,
-        anchor: H256,
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
 
         let pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
-            anchor,
+            self.get_anchor().await.expect("anchor should be provided"),
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
@@ -2073,6 +2090,25 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
         let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
+        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        info!("Generated stake_tx.id: {}", stake_tx.id);
+
+        // Submit stake commitment via public API
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        self.post_commitment_tx_request(&api_uri, &stake_tx)
+            .await
+            .expect("posted commitment tx");
+
+        Ok(stake_tx)
+    }
+
+    pub async fn post_stake_commitment_with_signer(
+        &self,
+        signer: &IrysSigner,
+    ) -> eyre::Result<CommitmentTransaction> {
+        let config = &self.node_ctx.config.consensus;
+        let anchor = self.get_anchor().await?;
+        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
@@ -2244,6 +2280,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_tree_guard
             .read()
             .get_ema_snapshot(block_hash)
+    }
+
+    pub fn get_canonical_epoch_snapshot(&self) -> Arc<EpochSnapshot> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
     }
 
     /// Mine blocks until a condition is met

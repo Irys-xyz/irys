@@ -104,8 +104,10 @@ async fn slow_test_data_sync_with_different_peer_performance() {
 
     let _data_intervals = storage_module_ref.get_intervals(ChunkType::Data);
     let entropy_intervals = storage_module_ref.get_intervals(ChunkType::Entropy);
+    debug!("{:#?}", entropy_intervals);
 
     // Storage module should be fully synced (no entropy)
+    // TODO: Fix this.. there will always be one left when the max_chunk_offset of the block and the partition align
     assert!(entropy_intervals.is_empty());
 }
 
@@ -507,7 +509,7 @@ impl TestSetup {
 
         // Make sure the genesis block track the ledger size
         let mut fake_genesis = IrysBlockHeader::new_mock_header();
-        fake_genesis.data_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks;
+        fake_genesis.data_ledgers[DataLedger::Publish].total_chunks = num_chunks;
 
         let data_tx = signer
             .create_transaction(data, fake_genesis.block_hash)
@@ -853,8 +855,6 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
             8003 => ("fast", Duration::from_millis(150)),
             _ => ("default", Duration::from_millis(250)),
         };
-
-        // debug!("Fetching chunk from peer: {}: {}", name, api_addr);
 
         tokio::time::sleep(delay).await;
 
