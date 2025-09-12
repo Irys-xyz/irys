@@ -34,16 +34,16 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, CommitmentSnapshotStatus,
-    EmaSnapshot,
+    get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
+use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::VersionRequest;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
@@ -54,10 +54,10 @@ use irys_types::{
     DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
-use rand::{Rng as _, SeedableRng as _};
 use reth::{
     api::Block as _,
     network::{PeerInfo, Peers as _},
@@ -550,14 +550,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         .expect("for packing to complete in the wait period");
     }
 
-    pub async fn start_mining(&self) {
-        if self.node_ctx.start_mining().await.is_err() {
+    pub fn start_mining(&self) {
+        if self.node_ctx.start_mining().is_err() {
             panic!("Expected to start mining")
         }
     }
 
-    pub async fn stop_mining(&self) {
-        if self.node_ctx.stop_mining().await.is_err() {
+    pub fn stop_mining(&self) {
+        if self.node_ctx.stop_mining().is_err() {
             panic!("Expected to stop mining")
         }
     }
@@ -676,6 +676,24 @@ impl IrysNodeTest<IrysNodeCtx> {
             "Failed waiting for chunk to arrive. Waited {} seconds",
             seconds,
         ))
+    }
+
+    pub fn get_storage_module_intervals(
+        &self,
+        ledger: DataLedger,
+        slot_index: usize,
+        chunk_type: ChunkType,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let sms = self.node_ctx.storage_modules_guard.read();
+        for sm in sms.iter() {
+            let Some(pa) = sm.partition_assignment() else {
+                continue;
+            };
+            if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
+                return sm.get_intervals(chunk_type);
+            }
+        }
+        Vec::new()
     }
 
     /// check number of chunks in the CachedChunks table
@@ -951,7 +969,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             )))
             .unwrap();
         let height = self.get_canonical_chain_height().await;
-        self.node_ctx.start_mining().await?;
+        self.node_ctx.start_mining()?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
@@ -960,7 +978,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(None))
             .unwrap();
-        self.node_ctx.stop_mining().await
+        self.node_ctx.stop_mining()
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
@@ -974,6 +992,30 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.with_gossip_disabled(mine_block(&self.node_ctx))
             .await?
             .ok_or_eyre("block not returned")
+    }
+
+    /// Mine blocks until the next epoch boundary is reached.
+    /// Returns the number of blocks mined and the final height.
+    pub async fn mine_until_next_epoch(&self) -> eyre::Result<(usize, u64)> {
+        let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+        let current_height = self.get_canonical_chain_height().await;
+
+        // Calculate how many blocks we need to mine to reach the next epoch
+        let blocks_until_next_epoch = num_blocks_in_epoch - (current_height % num_blocks_in_epoch);
+
+        info!(
+            "Mining {} blocks to reach next epoch (current height: {}, epoch size: {})",
+            blocks_until_next_epoch, current_height, num_blocks_in_epoch
+        );
+
+        // Mine blocks until we reach the next epoch boundary
+        for i in 0..blocks_until_next_epoch {
+            self.mine_block().await?;
+            info!("Mined block {} of {}", i + 1, blocks_until_next_epoch);
+        }
+
+        let final_height = self.get_canonical_chain_height().await;
+        Ok((blocks_until_next_epoch as usize, final_height))
     }
 
     pub fn get_commitment_snapshot_status(
@@ -2028,13 +2070,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment_with_signer(
         &self,
         signer: &IrysSigner,
-        anchor: H256,
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
 
         let pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
-            anchor,
+            self.get_anchor().await.expect("anchor should be provided"),
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
@@ -2073,6 +2114,25 @@ impl IrysNodeTest<IrysNodeCtx> {
         };
         let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
+        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        info!("Generated stake_tx.id: {}", stake_tx.id);
+
+        // Submit stake commitment via public API
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        self.post_commitment_tx_request(&api_uri, &stake_tx)
+            .await
+            .expect("posted commitment tx");
+
+        Ok(stake_tx)
+    }
+
+    pub async fn post_stake_commitment_with_signer(
+        &self,
+        signer: &IrysSigner,
+    ) -> eyre::Result<CommitmentTransaction> {
+        let config = &self.node_ctx.config.consensus;
+        let anchor = self.get_anchor().await?;
+        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
@@ -2246,6 +2306,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .get_ema_snapshot(block_hash)
     }
 
+    pub fn get_canonical_epoch_snapshot(&self) -> Arc<EpochSnapshot> {
+        self.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+    }
+
     /// Mine blocks until a condition is met
     #[tracing::instrument(skip_all)]
     pub async fn mine_until_condition<F>(
@@ -2340,22 +2407,6 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-// simple "generator" that produces an iterator of deterministically random chunk bytes
-// this is used to create & verify large txs without having to write them to an intermediary
-pub fn chunk_bytes_gen(
-    count: u64,
-    chunk_size: usize,
-    seed: u64,
-) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    (0..count).map(move |i| {
-        debug!("generated chunk {}", &i);
-        let mut chunk_bytes = vec![0; chunk_size];
-        rng.fill(&mut chunk_bytes[..]);
-        Ok(chunk_bytes)
-    })
-}
-
 /// Construct a SolutionContext using a provided PoA chunk for the current step.
 /// Computes solution_hash = sha256(poa_chunk || offset_le || vdf_output) and returns immediately
 /// with a consistent cryptographic link, without attempting to satisfy difficulty or iterate offsets.
@@ -2369,12 +2420,12 @@ pub async fn solution_context_with_poa_chunk(
 ) -> Result<SolutionContext, eyre::Error> {
     // Ensure the VDF has at least two steps materialized (N-1, N)
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf().await?;
+    node_ctx.start_vdf();
     let start = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(5);
     let (step, steps) = loop {
         if start.elapsed() > max_wait {
-            node_ctx.stop_vdf().await?;
+            node_ctx.stop_vdf();
             return Err(eyre::eyre!(
                 "VDF steps unavailable: timed out waiting for (prev,current) pair"
             ));
@@ -2417,7 +2468,7 @@ pub async fn solution_context_with_poa_chunk(
     hasher_sol.update(steps[1].as_bytes());
     let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
-    node_ctx.stop_vdf().await?;
+    node_ctx.stop_vdf();
     Ok(SolutionContext {
         partition_hash,
         chunk_offset: partition_chunk_offset,
@@ -2473,7 +2524,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     };
 
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    node_ctx.start_vdf().await?;
+    node_ctx.start_vdf();
     let poa_solution = capacity_chunk_solution(
         node_ctx.config.node_config.miner_address(),
         vdf_steps_guard.clone(),
@@ -2481,7 +2532,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         prev_block.diff,
     )
     .await;
-    node_ctx.stop_vdf().await?;
+    node_ctx.stop_vdf();
     Ok(poa_solution)
 }
 

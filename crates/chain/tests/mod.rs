@@ -1,5 +1,6 @@
 pub mod api;
 pub mod block_production;
+pub mod data_sync;
 pub mod ema_pricing;
 mod external;
 pub mod integration;

@@ -46,7 +46,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let chain_id = config.consensus_config().chain_id;
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    node.node_ctx.start_mining().await?;
+    node.node_ctx.start_mining()?;
 
     let app = node.start_public_api().await;
 

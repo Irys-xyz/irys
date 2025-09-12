@@ -97,13 +97,9 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         let stake_tx1 = post_stake_commitment(&node, &signer1).await;
 
         // Create two pledge commitments for first test signer
-        let pledge1 = &node
-            .post_pledge_commitment_with_signer(&signer1, H256::default())
-            .await;
+        let pledge1 = &node.post_pledge_commitment_with_signer(&signer1).await;
 
-        let pledge2 = &node
-            .post_pledge_commitment_with_signer(&signer1, H256::default())
-            .await;
+        let pledge2 = &node.post_pledge_commitment_with_signer(&signer1).await;
 
         // Create stake commitment for second test signer
         let stake_tx2 = post_stake_commitment(&node, &signer2).await;

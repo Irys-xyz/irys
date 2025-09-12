@@ -102,7 +102,7 @@ impl ChunkProvider {
 
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {
-            let sm_range_start = sm.get_storage_module_ledger_range().unwrap().start();
+            let sm_range_start = sm.get_storage_module_ledger_offsets().unwrap().start();
             let start_offsets = sm.collect_start_offsets(data_root)?;
             let mapped_offsets = start_offsets
                 .0
@@ -178,7 +178,7 @@ mod tests {
         // Create a tx_root (and paths) from the tx
         let (_tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&vec![tx.header.clone()]);
 
-        let tx_path = proofs[0].proof.clone();
+        let tx_path = &proofs[0].proof;
 
         // let data_root = H256::zero();
         let data_root = tx.header.data_root;

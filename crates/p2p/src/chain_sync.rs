@@ -110,6 +110,8 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     reth_service_actor: Option<Addr<RethServiceActor>>,
+    /// An atomic bool to enable or disable VDF mining when sync is in progress
+    is_vdf_mining_enabled: Arc<AtomicBool>,
     is_update_whitelist_task_running: Arc<AtomicBool>,
 }
 
@@ -156,6 +158,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -166,6 +169,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             block_pool,
             gossip_data_handler,
             reth_service_actor,
+            is_vdf_mining_enabled,
         )
     }
 }
@@ -180,6 +184,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sync_state,
@@ -191,12 +196,13 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
             reth_service_actor,
+            is_vdf_mining_enabled,
             is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Perform a sync operation
-    async fn spawn_chain_sync_task(
+    fn spawn_chain_sync_task(
         &self,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
         is_initial_sync: bool,
@@ -222,8 +228,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let start_sync_from_height = self.block_index.read().latest_height();
-        // Clear any pending blocks from the cache
-        self.block_pool.block_cache_guard().clear().await;
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
@@ -233,9 +237,24 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
         let reth_service_addr = self.reth_service_actor.clone();
+        let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
 
         tokio::spawn(
             async move {
+                gossip_data_handler
+                    .gossip_client
+                    .hydrate_peers_online_status(&peer_list)
+                    .await;
+
+                debug!("Sync task: Disabling VDF mining before starting sync");
+                let was_mining_enabled_before_sync = is_vdf_mining_enabled.load(Ordering::Relaxed);
+                // Disable VDF mining when sync is in progress
+                if was_mining_enabled_before_sync {
+                    is_vdf_mining_enabled.store(false, Ordering::Relaxed);
+                } else {
+                    debug!("Sync task: VDF mining was already disabled before sync, not sending disable signal");
+                }
+
                 if let Err(err) = block_pool
                     .repair_missing_payloads_if_any(reth_service_addr)
                     .await
@@ -257,6 +276,13 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     gossip_data_handler,
                 )
                 .await;
+
+                debug!("Sync task: Enabling VDF mining after sync");
+                if was_mining_enabled_before_sync {
+                    is_vdf_mining_enabled.store(was_mining_enabled_before_sync, Ordering::Relaxed);
+                } else {
+                    debug!("Sync task: VDF mining was disabled before sync, not sending enable signal");
+                }
 
                 is_sync_task_spawned.store(false, Ordering::Relaxed);
 
@@ -484,8 +510,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
                 self.inner
-                    .spawn_chain_sync_task(Some(response_sender), true)
-                    .await;
+                    .spawn_chain_sync_task(Some(response_sender), true);
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
                 self.handle_periodic_sync_check().await;
@@ -553,6 +578,11 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
     }
 
     async fn handle_periodic_sync_check(&self) {
+        self.inner
+            .gossip_data_handler
+            .gossip_client
+            .hydrate_peers_online_status(&self.inner.peer_list)
+            .await;
         debug!("Starting a periodic sync check routine");
         // Check if we're behind the network
         match is_local_index_is_behind_trusted_peers(
@@ -565,7 +595,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None, false).await;
+                self.inner.spawn_chain_sync_task(None, false);
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");
@@ -649,7 +679,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     debug!("Sync task: Syncing started");
 
     if is_trusted_mode {
-        let trusted_peers = peer_list.trusted_peers();
+        let trusted_peers = peer_list.online_trusted_peers();
         if trusted_peers.is_empty() {
             return if is_a_genesis_node {
                 sync_state.mark_processed(sync_state.sync_target_height());
@@ -929,7 +959,7 @@ async fn pull_highest_blocks(
     // Pick peers: trusted or top N active
     let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Collecting highest blocks from trusted peers");
-        peer_list.trusted_peers()
+        peer_list.online_trusted_peers()
     } else {
         let limit = top_n.unwrap_or(10);
         debug!("Collecting highest blocks from top {} active peers", limit);
@@ -937,7 +967,9 @@ async fn pull_highest_blocks(
     };
 
     if peers.is_empty() {
-        return Err(ChainSyncError::Network("No peers available".to_string()));
+        return Err(ChainSyncError::Network(
+            "No online peers available".to_string(),
+        ));
     }
 
     let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)> =
@@ -1076,7 +1108,7 @@ async fn check_and_update_full_validation_switch_height(
 ) -> ChainSyncResult<()> {
     // We should enable full validation when the index nears the (tip - migration depth)
     let migration_depth = config.consensus.block_migration_depth as usize;
-    let trusted_peers = peer_list.trusted_peers();
+    let trusted_peers = peer_list.online_trusted_peers();
     if trusted_peers.is_empty() {
         return Err(ChainSyncError::Network(
             "No trusted peers available".to_string(),
@@ -1156,7 +1188,7 @@ async fn get_block_index(
     );
     let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
         debug!("Fetching block index from trusted peers");
-        peer_list.trusted_peers()
+        peer_list.online_trusted_peers()
     } else {
         debug!("Fetching block index from top active peers");
         peer_list.top_active_peers(Some(5), None)
@@ -1256,10 +1288,10 @@ async fn is_local_index_is_behind_trusted_peers(
 
     let mut highest_trusted_peer_height = None;
 
-    let trusted_peers = peer_list.trusted_peers();
+    let trusted_peers = peer_list.online_trusted_peers();
     if trusted_peers.is_empty() {
         return Err(ChainSyncError::Network(
-            "No trusted peers available".to_string(),
+            "No trusted peers available that are online".to_string(),
         ));
     }
 
@@ -1304,6 +1336,7 @@ mod tests {
         use super::*;
         use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
+        use crate::types::GossipResponse;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
@@ -1333,7 +1366,7 @@ mod tests {
             let sync_state_clone = sync_state.clone();
             fake_gossip_server.set_on_pull_data_request(move |data_request| {
                 match data_request {
-                    GossipDataRequest::ExecutionPayload(_) => None,
+                    GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
                     GossipDataRequest::Block(block_hash) => {
                         info!("Fake server pull data request: {block_hash:?}");
                         let mut block_requests = block_requests.lock().unwrap();
@@ -1342,15 +1375,15 @@ mod tests {
 
                         // Simulating one false response so the block gets requested again
                         if requests_len == 0 {
-                            None
+                            GossipResponse::Accepted(None)
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
-                            Some(GossipData::Block(Arc::new(
+                            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
                                 IrysBlockHeader::new_mock_header(),
-                            )))
+                            ))))
                         }
                     }
-                    GossipDataRequest::Chunk(_) => None,
+                    GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
                 }
             });
             let fake_gossip_address = fake_gossip_server.spawn();
@@ -1585,6 +1618,7 @@ mod tests {
         use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
         use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+        use crate::types::GossipResponse;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::Result as EyreResult;
@@ -1614,9 +1648,9 @@ mod tests {
                 GossipDataRequest::Block(_hash) => {
                     let mut c = s1_calls_clone.lock().unwrap();
                     *c += 1;
-                    None
+                    GossipResponse::Accepted(None)
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
 
             let s2_calls_clone = s2_calls.clone();
@@ -1624,11 +1658,11 @@ mod tests {
                 GossipDataRequest::Block(_hash) => {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
-                    Some(GossipData::Block(Arc::new(
+                    GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
                         IrysBlockHeader::new_mock_header(),
-                    )))
+                    ))))
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
 
             let addr1 = server1.spawn();
@@ -1745,17 +1779,17 @@ mod tests {
             server1.set_on_pull_data_request(move |req| match req {
                 GossipDataRequest::Block(_hash) => {
                     *s1_calls_clone.lock().unwrap() += 1;
-                    None
+                    GossipResponse::Accepted(None)
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
                 GossipDataRequest::Block(_hash) => {
                     *s2_calls_clone.lock().unwrap() += 1;
-                    None
+                    GossipResponse::Accepted(None)
                 }
-                _ => None,
+                _ => GossipResponse::Accepted(None),
             });
 
             let addr1: SocketAddr = server1.spawn();

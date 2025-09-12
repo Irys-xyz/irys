@@ -89,6 +89,7 @@ pub enum MempoolServiceMessage {
         UnpackedChunk,
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    IngestChunkFireAndForget(UnpackedChunk),
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Ingress Pre-validated Block
     IngestBlocks {
@@ -177,8 +178,17 @@ impl Inner {
                     let response_value: Result<(), ChunkIngressError> =
                         self.handle_chunk_ingress_message(chunk).await;
                     if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
+                        tracing::error!(
+                            "handle_chunk_ingress_message response.send() error: {:?}",
+                            e
+                        );
                     };
+                }
+                MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
+                    let result = self.handle_chunk_ingress_message(chunk).await;
+                    if let Err(e) = result {
+                        tracing::error!("handle_chunk_ingress_message error: {:?}", e);
+                    }
                 }
                 MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
                     let response_value = self.handle_get_best_mempool_txs(block_id).await;
@@ -557,7 +567,7 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_data_txs = self
+        let max_data_txs: usize = self
             .config
             .node_config
             .consensus_config()

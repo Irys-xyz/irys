@@ -12,7 +12,7 @@ use crate::services::ServiceSenders;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr as _;
-use irys_efficient_sampling::Ranges;
+use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
 use irys_storage::{ie, ii};
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
@@ -57,8 +57,7 @@ impl PartitionMiningActor {
             service_senders,
             packing_actor,
             ranges: Ranges::new(
-                (config.consensus.num_chunks_in_partition
-                    / config.consensus.num_chunks_in_recall_range)
+                num_recall_ranges_in_partition(&config.consensus)
                     .try_into()
                     .expect("Recall ranges number exceeds usize representation"),
             ),
@@ -514,7 +513,7 @@ mod tests {
         let data_size = chunk_size * chunk_count;
 
         let _ = storage_module.index_transaction_data(
-            tx_path.to_vec(),
+            &tx_path.to_vec(),
             data_root,
             LedgerChunkRange(ledger_chunk_offset_ie!(0, chunk_count)),
             data_size,

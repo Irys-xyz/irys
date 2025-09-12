@@ -24,6 +24,8 @@ pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
 pub enum ScoreDecreaseReason {
     BogusData,
     Offline,
+    SlowResponse,
+    NoResponse,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -31,6 +33,7 @@ pub enum ScoreIncreaseReason {
     Online,
     ValidData,
     DataRequest,
+    TimelyResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +97,16 @@ impl PeerList {
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
 
+    pub fn test_mock() -> Result<Self, PeerNetworkError> {
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let inner = PeerListDataInner::new(
+            vec![],
+            PeerNetworkSender::new(sender),
+            &Config::new(irys_types::NodeConfig::testing()),
+        )?;
+        Ok(Self(Arc::new(RwLock::new(inner))))
+    }
+
     pub fn from_peers(
         peers: Vec<(Address, PeerListItem)>,
         peer_network: PeerNetworkSender,
@@ -116,6 +129,15 @@ impl PeerList {
     pub fn decrease_peer_score(&self, mining_addr: &Address, reason: ScoreDecreaseReason) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         inner.decrease_peer_score(mining_addr, reason);
+    }
+
+    pub fn set_is_online(&self, mining_addr: &Address, is_online: bool) {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        if let Some(peer) = inner.persistent_peers_cache.get_mut(mining_addr) {
+            peer.is_online = is_online;
+        } else if let Some(peer) = inner.unstaked_peer_purgatory.get_mut(mining_addr) {
+            peer.is_online = is_online;
+        }
     }
 
     /// Get a peer from any cache (persistent or purgatory)
@@ -142,6 +164,10 @@ impl PeerList {
     pub fn persistable_peers(&self) -> HashMap<Address, PeerListItem> {
         let guard = self.read();
         guard.persistent_peers_cache.clone()
+    }
+
+    pub fn temporary_peers(&self) -> LruCache<Address, PeerListItem> {
+        self.read().unstaked_peer_purgatory.clone()
     }
 
     pub fn contains_api_address(&self, api_address: &SocketAddr) -> bool {
@@ -178,7 +204,7 @@ impl PeerList {
         }
     }
 
-    pub fn trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn all_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
         let guard = self.read();
 
         let mut peers: Vec<(Address, PeerListItem)> = Vec::new();
@@ -209,6 +235,12 @@ impl PeerList {
         peers.reverse();
 
         peers
+    }
+
+    pub fn online_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+        let mut trusted_peers = self.all_trusted_peers();
+        trusted_peers.retain(|(_miner_address, peer)| peer.is_online);
+        trusted_peers
     }
 
     pub fn trusted_peer_addresses(&self) -> HashSet<SocketAddr> {
@@ -253,6 +285,29 @@ impl PeerList {
         if let Some(truncate) = limit {
             peers.truncate(truncate);
         }
+
+        peers
+    }
+
+    pub fn all_peers_sorted_by_score(&self) -> Vec<(Address, PeerListItem)> {
+        let guard = self.read();
+
+        // Create a chained iterator that combines both peer sources
+        let persistent_peers = guard
+            .persistent_peers_cache
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let purgatory_peers = guard
+            .unstaked_peer_purgatory
+            .iter()
+            .map(|(key, value)| (*key, value.clone()));
+
+        let all_peers = persistent_peers.chain(purgatory_peers);
+        let mut peers: Vec<(Address, PeerListItem)> = all_peers.collect();
+
+        peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
+        peers.reverse();
 
         peers
     }
@@ -374,6 +429,13 @@ impl PeerList {
         let guard = self.read();
         guard.trusted_peers_api_addresses.contains(api_address)
     }
+
+    /// Initiate a handshake with a peer by its API address. If force is set to true, the networking
+    /// service will attempt to handshake even if the previous handshake was successful.
+    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+        let guard = self.read();
+        guard.initiate_handshake(api_address, force);
+    }
 }
 
 impl PeerListDataInner {
@@ -453,6 +515,15 @@ impl PeerListDataInner {
         }
     }
 
+    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+        if let Err(send_error) = self
+            .peer_network_service_sender
+            .initiate_handshake(api_address, force)
+        {
+            error!("Failed to send a force announce message: {:?}", send_error);
+        }
+    }
+
     pub fn increase_score(&mut self, mining_addr: &Address, reason: ScoreIncreaseReason) {
         if let Some(peer) = self.persistent_peers_cache.get_mut(mining_addr) {
             match reason {
@@ -463,8 +534,10 @@ impl PeerListDataInner {
                     peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    // Limited increase for data requests to prevent farming
-                    peer.reputation_score.increase_limited(1);
+                    peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::TimelyResponse => {
+                    peer.reputation_score.increase();
                 }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(mining_addr) {
@@ -477,8 +550,10 @@ impl PeerListDataInner {
                     peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    // Limited increase for data requests to prevent farming
-                    peer.reputation_score.increase_limited(1);
+                    peer.reputation_score.increase();
+                }
+                ScoreIncreaseReason::TimelyResponse => {
+                    peer.reputation_score.increase();
                 }
             }
 
@@ -505,6 +580,12 @@ impl PeerListDataInner {
                     peer_item.reputation_score.decrease_bogus_data();
                 }
                 ScoreDecreaseReason::Offline => {
+                    peer_item.reputation_score.decrease_offline();
+                }
+                ScoreDecreaseReason::SlowResponse => {
+                    peer_item.reputation_score.decrease();
+                }
+                ScoreDecreaseReason::NoResponse => {
                     peer_item.reputation_score.decrease_offline();
                 }
             }
@@ -546,6 +627,7 @@ impl PeerListDataInner {
                 true
             } else if handshake_cooldown_expired {
                 debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
+                address_updater(self, mining_addr, peer_address);
                 true
             } else {
                 debug!("Peer address is the same, no update needed");
@@ -792,6 +874,157 @@ mod tests {
         PeerList(Arc::new(RwLock::new(peer_list_data)))
     }
 
+    mod peer_list_scoring_tests {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(ScoreDecreaseReason::BogusData, 45)]
+        #[case(ScoreDecreaseReason::Offline, 47)]
+        #[case(ScoreDecreaseReason::SlowResponse, 49)]
+        #[case(ScoreDecreaseReason::NoResponse, 47)]
+        fn test_decrease_peer_score_persistent_cache(
+            #[case] reason: ScoreDecreaseReason,
+            #[case] expected_score: u16,
+        ) {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.decrease_peer_score(&addr, reason);
+            let updated_peer = peer_list.get_peer(&addr).unwrap();
+            assert_eq!(updated_peer.reputation_score.get(), expected_score);
+        }
+
+        #[test]
+        fn test_multiple_decreases_cumulative() {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                45
+            );
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                42
+            );
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::SlowResponse);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                41
+            );
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::NoResponse);
+            assert_eq!(
+                peer_list.get_peer(&addr).unwrap().reputation_score.get(),
+                38
+            );
+        }
+
+        #[test]
+        fn test_decrease_score_removes_inactive_from_known_peers() {
+            let peer_list = create_test_peer_list();
+            let (addr, mut peer) = create_test_peer(1);
+            peer.reputation_score = PeerScore::new(25);
+
+            peer_list.add_or_update_peer(addr, peer.clone(), true);
+            assert!(peer_list.all_known_peers().contains(&peer.address));
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            let updated_peer = peer_list.get_peer(&addr);
+
+            if let Some(p) = updated_peer {
+                if !p.reputation_score.is_active() {
+                    assert!(!peer_list.all_known_peers().contains(&peer.address));
+                }
+            }
+        }
+
+        #[test]
+        fn test_decrease_score_unstaked_peer_removal() {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer.clone(), false);
+            assert!(peer_list.get_peer(&addr).is_some());
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            assert!(peer_list.get_peer(&addr).is_none());
+            assert!(!peer_list.all_known_peers().contains(&peer.address));
+        }
+
+        #[rstest]
+        #[case(ScoreIncreaseReason::ValidData, 51)]
+        #[case(ScoreIncreaseReason::Online, 51)]
+        #[case(ScoreIncreaseReason::DataRequest, 51)]
+        #[case(ScoreIncreaseReason::TimelyResponse, 51)]
+        fn test_increase_peer_score(
+            #[case] reason: ScoreIncreaseReason,
+            #[case] expected_score: u16,
+        ) {
+            let peer_list = create_test_peer_list();
+            let (addr, peer) = create_test_peer(1);
+
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.increase_peer_score(&addr, reason);
+            let updated_peer = peer_list.get_peer(&addr).unwrap();
+            assert_eq!(updated_peer.reputation_score.get(), expected_score);
+        }
+
+        #[test]
+        fn test_score_transitions_across_thresholds() {
+            let peer_list = create_test_peer_list();
+            let (addr, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            let updated_peer = peer_list.get_peer(&addr).unwrap();
+
+            assert_eq!(updated_peer.reputation_score.get(), 19);
+            assert!(!updated_peer.reputation_score.is_active());
+
+            peer_list.increase_peer_score(&addr, ScoreIncreaseReason::Online);
+            let final_peer = peer_list.get_peer(&addr).unwrap();
+            assert_eq!(final_peer.reputation_score.get(), 20);
+            assert!(final_peer.reputation_score.is_active());
+        }
+
+        #[test]
+        fn test_unstaked_peer_operations() {
+            let peer_list = create_test_peer_list();
+            let (addr, mut peer) = create_test_peer(1);
+
+            peer.reputation_score = PeerScore::new(50);
+            peer_list.add_or_update_peer(addr, peer, false);
+
+            let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            assert_eq!(initial_score, 50);
+
+            peer_list.increase_peer_score(&addr, ScoreIncreaseReason::ValidData);
+            let after_increase_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            assert_eq!(after_increase_score, 51);
+
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+
+            let final_peer = peer_list.get_peer(&addr);
+            assert!(
+                final_peer.is_none(),
+                "Unstaked peer should be removed after any decrease operation"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_all_methods_treat_staked_unstaked_peers_equally_except_persistable() {
         let peer_list = create_test_peer_list();
@@ -915,7 +1148,7 @@ mod tests {
                 .trusted_peers_api_addresses
                 .insert(unstaked_peer.address.api);
         }
-        let trusted_peers = peer_list.trusted_peers();
+        let trusted_peers = peer_list.all_trusted_peers();
         let trusted_contains_staked = trusted_peers.iter().any(|(addr, _)| addr == &staked_addr);
         let trusted_contains_unstaked =
             trusted_peers.iter().any(|(addr, _)| addr == &unstaked_addr);

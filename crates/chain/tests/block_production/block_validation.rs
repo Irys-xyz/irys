@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
-use irys_types::{NodeConfig, U256};
+use irys_types::{NodeConfig, H256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
@@ -12,8 +12,9 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     use crate::utils::solution_context;
     use irys_actors::{
-        async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
-        BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+        async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+        reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy,
+        BlockProducerInner, ProductionStrategy,
     };
     use irys_domain::EmaSnapshot;
     use irys_types::{
@@ -52,13 +53,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            solution_hash: H256,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(
@@ -69,6 +65,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     data_txs_with_proofs,
                     reward_amount,
                     self.invalid_timestamp,
+                    solution_hash,
                     expired_ledger_fees,
                 )
                 .await

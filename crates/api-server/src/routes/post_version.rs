@@ -1,3 +1,4 @@
+use rand::prelude::SliceRandom as _;
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,11 +8,11 @@ use actix_web::{
     web::{self, Json},
     HttpRequest, HttpResponse,
 };
-
 use irys_types::{
     parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
     RejectedResponse, RejectionReason, VersionRequest,
 };
+use reth::revm::primitives::alloy_primitives::private::rand;
 use semver::Version;
 
 pub async fn post_version(
@@ -71,6 +72,8 @@ pub async fn post_version(
 
     // Fetch peers and handle potential errors
     let mut peers = state.get_known_peers();
+    // Shuffle peers to provide randomness
+    peers.shuffle(&mut rand::rng());
     // Cap the number of peers returned using configured limit
     peers = cap_peers(
         peers,

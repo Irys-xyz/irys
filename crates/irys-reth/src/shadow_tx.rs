@@ -38,11 +38,13 @@ pub static SHADOW_TX_DESTINATION_ADDR: LazyLock<Address> =
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 #[non_exhaustive]
 pub enum ShadowTransaction {
-    /// Version 1 shadow transaction format
+    /// Version 1 shadow transaction format with solution hash support
     ///
     V1 {
         /// The actual shadow transaction packet.
         packet: TransactionPacket,
+        /// Solution hash for validation
+        solution_hash: FixedBytes<32>,
     },
 }
 
@@ -64,6 +66,8 @@ pub enum TransactionPacket {
     TermFeeReward(BalanceIncrement),
     /// Ingress proof reward payment to providers who submitted valid proofs (balance increment).
     IngressProofReward(BalanceIncrement),
+    /// Permanent fee refund to users whose transactions were not promoted before ledger expiry (balance increment).
+    PermFeeRefund(BalanceIncrement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -91,6 +95,7 @@ impl TransactionPacket {
             },
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
+            Self::PermFeeRefund(inc) => Some(inc.target),
         }
     }
 }
@@ -115,13 +120,18 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_TERM_FEE_REWARD").0);
     pub static INGRESS_PROOF_REWARD: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD").0);
+    pub static PERM_FEE_REFUND: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND").0);
 }
 
 impl ShadowTransaction {
-    /// Create a new V1 shadow transaction
+    /// Create a new V1 shadow transaction with solution hash
     #[must_use]
-    pub fn new_v1(packet: TransactionPacket) -> Self {
-        Self::V1 { packet }
+    pub fn new_v1(packet: TransactionPacket, solution_hash: FixedBytes<32>) -> Self {
+        Self::V1 {
+            packet,
+            solution_hash,
+        }
     }
 
     /// Get the version of this shadow transaction
@@ -181,6 +191,7 @@ impl TransactionPacket {
             Self::Unpledge(_) => (*UNPLEDGE).into(),
             Self::TermFeeReward(_) => (*TERM_FEE_REWARD).into(),
             Self::IngressProofReward(_) => (*INGRESS_PROOF_REWARD).into(),
+            Self::PermFeeRefund(_) => (*PERM_FEE_REFUND).into(),
         }
     }
 }
@@ -194,6 +205,7 @@ pub const PLEDGE_ID: u8 = 0x05;
 pub const UNPLEDGE_ID: u8 = 0x06;
 pub const TERM_FEE_REWARD_ID: u8 = 0x07;
 pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
+pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -202,9 +214,14 @@ pub const EITHER_DECREMENT_ID: u8 = 0x02;
 impl BorshSerialize for ShadowTransaction {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         match self {
-            Self::V1 { packet } => {
+            Self::V1 {
+                packet,
+                solution_hash,
+            } => {
                 writer.write_all(&[SHADOW_TX_VERSION_V1])?;
-                packet.serialize(writer)
+                packet.serialize(writer)?;
+                writer.write_all(solution_hash.as_slice())?;
+                Ok(())
             }
         }
     }
@@ -217,7 +234,13 @@ impl BorshDeserialize for ShadowTransaction {
         match version[0] {
             SHADOW_TX_VERSION_V1 => {
                 let packet = TransactionPacket::deserialize_reader(reader)?;
-                Ok(Self::V1 { packet })
+                let mut hash_buf = [0_u8; 32];
+                reader.read_exact(&mut hash_buf)?;
+                let solution_hash = FixedBytes::<32>::from_slice(&hash_buf);
+                Ok(Self::V1 {
+                    packet,
+                    solution_hash,
+                })
             }
             _ => Err(borsh::io::Error::new(
                 borsh::io::ErrorKind::InvalidData,
@@ -262,6 +285,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[INGRESS_PROOF_REWARD_ID])?;
                 inner.serialize(writer)
             }
+            Self::PermFeeRefund(inner) => {
+                writer.write_all(&[PERM_FEE_REFUND_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -282,6 +309,9 @@ impl BorshDeserialize for TransactionPacket {
             }
             INGRESS_PROOF_REWARD_ID => {
                 Self::IngressProofReward(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            PERM_FEE_REFUND_ID => {
+                Self::PermFeeRefund(BalanceIncrement::deserialize_reader(reader)?)
             }
             _ => {
                 return Err(borsh::io::Error::new(
@@ -466,6 +496,7 @@ impl BorshDeserialize for BalanceIncrement {
     // manual Borsh impls below
     arbitrary::Arbitrary,
 )]
+
 pub struct BlockRewardIncrement {
     /// Amount to increment to the beneficiary account.
     pub amount: U256,
@@ -477,7 +508,6 @@ impl BorshSerialize for BlockRewardIncrement {
         Ok(())
     }
 }
-
 impl BorshDeserialize for BlockRewardIncrement {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
         let mut amount_buf = [0_u8; 32];
@@ -496,14 +526,19 @@ mod tests {
     /// the borsh encoding stays stable.
     #[test]
     fn block_reward_roundtrip() {
-        let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-            amount: U256::from(123_u64),
-        }));
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xbb; 32]);
+        let tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: U256::from(123_u64),
+            }),
+            solution_hash,
+        );
         let mut buf = Vec::new();
         tx.serialize(&mut buf).unwrap();
         let expected = hex!(
             "01" "02"
             "000000000000000000000000000000000000000000000000000000000000007b"
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         );
         assert_eq!(buf, expected);
         let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
@@ -514,11 +549,15 @@ mod tests {
     /// serialization and deserialization.
     #[test]
     fn stake_roundtrip() {
-        let tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-            amount: U256::from(123456789_u64),
-            target: Address::repeat_byte(0x22),
-            irys_ref: FixedBytes::<32>::from_slice(&[0xaa; 32]),
-        }));
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xcc; 32]);
+        let tx = ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: U256::from(123456789_u64),
+                target: Address::repeat_byte(0x22),
+                irys_ref: FixedBytes::<32>::from_slice(&[0xaa; 32]),
+            }),
+            solution_hash,
+        );
         let mut buf = Vec::new();
         tx.serialize(&mut buf).unwrap();
         let expected = hex!(
@@ -526,6 +565,7 @@ mod tests {
             "00000000000000000000000000000000000000000000000000000000075bcd15"
             "2222222222222222222222222222222222222222"
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         );
         assert_eq!(buf, expected, "encoding mismatch");
         let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
@@ -536,12 +576,149 @@ mod tests {
     /// can be decoded via `decode_prefixed`.
     #[test]
     fn decode_prefixed_roundtrip() {
-        let tx = ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-            amount: U256::from(1_u64),
-        }));
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xdd; 32]);
+        let tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: U256::from(1_u64),
+            }),
+            solution_hash,
+        );
         let mut buf = Vec::from(IRYS_SHADOW_EXEC.as_slice());
         tx.serialize(&mut buf).unwrap();
         let decoded = ShadowTransaction::decode(&mut &buf[..]).unwrap();
         assert_eq!(decoded, tx, "decoding mismatch");
+    }
+
+    /// Check that `PermFeeRefund` packets roundtrip correctly through borsh
+    /// serialization and deserialization.
+    #[test]
+    fn perm_fee_refund_roundtrip() {
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xdd; 32]);
+        let tx = ShadowTransaction::new_v1(
+            TransactionPacket::PermFeeRefund(BalanceIncrement {
+                amount: U256::from(500000_u64),
+                target: Address::repeat_byte(0x33),
+                irys_ref: FixedBytes::<32>::from_slice(&[0xbb; 32]),
+            }),
+            solution_hash,
+        );
+        let mut buf = Vec::new();
+        tx.serialize(&mut buf).unwrap();
+        // Version (01) + Discriminant (09) + Amount (32 bytes) + Target (20 bytes) + IrysRef (32 bytes) + SolutionHash (32 bytes)
+        let expected = hex!(
+            "01" "09"
+            "000000000000000000000000000000000000000000000000000000000007a120"
+            "3333333333333333333333333333333333333333"
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        );
+        assert_eq!(buf, expected, "encoding mismatch");
+        let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
+        assert_eq!(decoded, tx, "decoding mismatch");
+    }
+
+    /// Verify that `PermFeeRefund` has the correct topic
+    #[test]
+    fn perm_fee_refund_topic() {
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xee; 32]);
+        let tx = ShadowTransaction::new_v1(
+            TransactionPacket::PermFeeRefund(BalanceIncrement {
+                amount: U256::from(1000_u64),
+                target: Address::repeat_byte(0x44),
+                irys_ref: FixedBytes::<32>::from_slice(&[0xcc; 32]),
+            }),
+            solution_hash,
+        );
+        let topic = tx.topic();
+        let expected_topic = keccak256("SHADOW_TX_PERM_FEE_REFUND");
+        assert_eq!(topic, expected_topic, "topic mismatch");
+    }
+
+    /// Test all transaction packet types with solution hash roundtrip
+    #[test]
+    fn all_packet_types_with_solution_hash_roundtrip() {
+        let solution_hash = FixedBytes::<32>::from_slice(&[0xee; 32]);
+        let test_address = Address::repeat_byte(0x33);
+        let test_ref = FixedBytes::<32>::from_slice(&[0xff; 32]);
+
+        let packets = vec![
+            TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: U256::from(100_u64),
+            }),
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: U256::from(200_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: U256::from(300_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::Unstake(EitherIncrementOrDecrement::BalanceIncrement(
+                BalanceIncrement {
+                    amount: U256::from(400_u64),
+                    target: test_address,
+                    irys_ref: test_ref,
+                },
+            )),
+            TransactionPacket::Unpledge(EitherIncrementOrDecrement::BalanceDecrement(
+                BalanceDecrement {
+                    amount: U256::from(500_u64),
+                    target: test_address,
+                    irys_ref: test_ref,
+                },
+            )),
+            TransactionPacket::StorageFees(BalanceDecrement {
+                amount: U256::from(600_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::IngressProofReward(BalanceIncrement {
+                amount: U256::from(700_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::TermFeeReward(BalanceIncrement {
+                amount: U256::from(800_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::PermFeeRefund(BalanceIncrement {
+                amount: U256::from(900_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+        ];
+
+        for packet in packets {
+            let tx = ShadowTransaction::new_v1(packet.clone(), solution_hash);
+            let mut buf = Vec::new();
+            tx.serialize(&mut buf).unwrap();
+
+            let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
+            assert_eq!(decoded, tx, "Packet {:?} failed roundtrip", packet);
+
+            // Verify solution hash is preserved
+            let ShadowTransaction::V1 {
+                solution_hash: decoded_hash,
+                ..
+            } = decoded;
+            assert_eq!(decoded_hash, solution_hash, "Solution hash mismatch");
+        }
+    }
+
+    /// Test backward compatibility detection - old format without solution hash should fail
+    #[test]
+    fn reject_old_format_without_solution_hash() {
+        // Create a buffer with V1 marker but old format (no solution hash)
+        let mut buf = vec![SHADOW_TX_VERSION_V1];
+
+        // Add a block reward packet in old format
+        buf.push(0x02); // BlockReward discriminant
+        buf.extend_from_slice(&[0_u8; 32]); // amount
+
+        let result = ShadowTransaction::decode(&mut &buf[..]);
+        assert!(result.is_err(), "should fail with missing solution hash");
     }
 }

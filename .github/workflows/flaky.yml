@@ -1,0 +1,170 @@
+name: Flaky Test Detection
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Daily at 3 AM UTC
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of iterations to run'
+        required: false
+        default: '5'
+        type: string
+      tolerable_failures:
+        description: 'Number of tolerable failures'
+        required: false
+        default: '5'
+        type: string
+
+# Only run scheduled jobs on master branch
+# Manual workflow_dispatch can run on any branch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flaky-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ITERATIONS: ${{ github.event.inputs.iterations || '5' }}
+  TOLERABLE_FAILURES: ${{ github.event.inputs.tolerable_failures || '5' }}
+  RETENTION_DAYS: 10
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  # keep build artifacts contained to this repo's workspace on the self-hosted runner
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.target
+
+jobs:
+  flaky-tests:
+    runs-on: [self-hosted, test-runner]
+    timeout-minutes: 300
+    # Only run scheduled jobs on master branch, but allow manual dispatch on any branch
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.ref == 'refs/heads/master')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true  # Always start with clean workspace
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+        
+      - name: Build xtask
+        shell: bash
+        run: |
+          cargo build -p xtask --release
+
+      - name: Create results directory
+        run: mkdir -p flaky-test-results
+
+      - name: Run flaky test detection (with timing)
+        shell: bash
+        run: |
+          # Use available cores (Linux/macOS fallback)
+          export RUST_TEST_THREADS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+          
+          START_TIME=$(date +%s)
+          set +e
+          cargo xtask flaky --clean --save -i ${{ env.ITERATIONS }} -f ${{ env.TOLERABLE_FAILURES }}
+          EXIT_CODE=$?
+          END_TIME=$(date +%s)
+          
+          # Copy the timestamped output file to results directory
+          if ls target/flaky-test-output-*.txt 1> /dev/null 2>&1; then
+            cp target/flaky-test-output-*.txt flaky-test-results/flaky-test-output.txt
+          else
+            echo "No flaky output file found in target directory" > flaky-test-results/flaky-test-output.txt
+          fi
+          
+          echo $EXIT_CODE > flaky-test-results/exit_code.txt
+          echo "Duration: $((END_TIME - START_TIME)) seconds" > flaky-test-results/duration.txt
+        continue-on-error: true
+
+      - name: Generate summary report
+        if: always()
+        shell: bash
+        run: |
+          # Read duration if available
+          DURATION=$(cat flaky-test-results/duration.txt 2>/dev/null || echo "n/a")
+          
+          {
+            echo "# Flaky Test Detection Report"
+            echo "**Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "**Commit:** ${{ github.sha }}"
+            echo "**Runner:** ${{ runner.name }}"
+            echo "**Tool:** cargo xtask flaky"
+            echo "**Iterations:** ${{ env.ITERATIONS }}"
+            echo "**Tolerable Failures:** ${{ env.TOLERABLE_FAILURES }}"
+            echo "**Clean Workspace:** Yes"
+            echo "**Output Saved:** Yes (timestamped file in target/)"
+            echo "**Duration:** $DURATION"
+            echo
+            echo "## Results"
+            if grep -Eiq 'Found.*failing test|flaky|intermittent' flaky-test-results/flaky-test-output.txt; then
+              echo "### Flaky Tests Detected"
+              echo
+              echo '```text'
+              # Show matching lines with line numbers (top 200 for brevity)
+              grep -Ein 'Found.*failing test|flaky|intermittent' flaky-test-results/flaky-test-output.txt | head -n 200 || true
+              echo '```'
+            else
+              echo "### No Flaky Tests Detected"
+            fi
+            echo
+            echo "### Exit Code"
+            echo '```text'
+            cat flaky-test-results/exit_code.txt 2>/dev/null || echo "n/a"
+            echo '```'
+          } > flaky-test-results/summary.md
+
+      - name: Parse flaky test details
+        id: parse
+        if: always()
+        shell: bash
+        run: |
+          # Extract test names and failure counts
+          grep -E "^test:.*stdout" flaky-test-results/flaky-test-output.txt | \
+            awk '{print $2, $3}' | \
+            sort | uniq > flaky-test-results/flaky-tests-list.txt || true
+          
+          # Count for metrics
+          FLAKY_COUNT=$(wc -l < flaky-test-results/flaky-tests-list.txt 2>/dev/null || echo 0)
+          echo "flaky_count=$FLAKY_COUNT" >> "$GITHUB_OUTPUT"
+          
+          # Add count to summary
+          echo "" >> flaky-test-results/summary.md
+          echo "### Flaky Test Count: $FLAKY_COUNT" >> flaky-test-results/summary.md
+
+      - name: Compress results
+        if: always()
+        shell: bash
+        run: |
+          # Create a tar.gz of everything except summary.md
+          cd flaky-test-results
+          tar -czf compressed-results.tar.gz \
+            --exclude=summary.md \
+            --exclude=compressed-results.tar.gz \
+            *.txt 2>/dev/null || true
+          cd ..
+
+      - name: Upload flaky test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-test-results-${{ github.run_number }}
+          path: |
+            flaky-test-results/summary.md
+            flaky-test-results/compressed-results.tar.gz
+            target/flaky-test-output-*.txt
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Post to job summary
+        if: always()
+        run: |
+          if [ -f flaky-test-results/summary.md ]; then
+            cat flaky-test-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+

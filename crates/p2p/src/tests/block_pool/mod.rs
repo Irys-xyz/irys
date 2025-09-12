@@ -4,6 +4,7 @@ use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{
     data_handler_stub, BlockDiscoveryStub, FakeGossipServer, MempoolStub, MockRethServiceActor,
 };
+use crate::types::GossipResponse;
 use crate::{BlockStatusProvider, GetPeerListGuard};
 use actix::Actor as _;
 use irys_actors::services::ServiceSenders;
@@ -20,6 +21,7 @@ use irys_types::{
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -101,6 +103,7 @@ struct MockedServices {
     execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
     service_senders: ServiceSenders,
+    is_vdf_mining_enabled: Arc<AtomicBool>,
 }
 
 impl MockedServices {
@@ -144,13 +147,13 @@ impl MockedServices {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);
 
-        let vdf_state_stub =
+        let vdf_state_readonly =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
         let (service_senders, service_receivers) = ServiceSenders::new();
 
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
-        let vdf_state = vdf_state_stub;
+        let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
@@ -185,6 +188,7 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             service_senders,
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -201,6 +205,7 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -294,6 +299,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -356,6 +362,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_pool.clone(),
         data_handler,
         None,
+        is_vdf_mining_enabled,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -364,11 +371,11 @@ async fn should_process_block_with_intermediate_block_in_api() {
         tokio::runtime::Handle::current(),
     );
 
-    // Set the fake server to mimic get_data -> gossip_service sends message to block pool
+    // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = block2.clone();
     let pool_for_server = block_pool.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
-        GossipDataRequest::ExecutionPayload(_) => None,
+        GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
         GossipDataRequest::Block(block_hash) => {
             let block = block_for_server.clone();
             let block_for_response = block.clone();
@@ -380,13 +387,10 @@ async fn should_process_block_with_intermediate_block_in_api() {
                     .await
                     .expect("to process block");
             });
-            Some(GossipData::Block(Arc::new(block_for_response)))
+            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
         }
-        GossipDataRequest::Chunk(_) => None,
+        GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
     });
-    // gossip_server.set_on_block_data_request(move |block_hash| {
-    //
-    // });
 
     let block2 = Arc::new(block2.clone());
     let block3 = Arc::new(block3.clone());
@@ -429,6 +433,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -486,10 +491,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         .await;
 
     assert!(res.is_err());
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
 #[actix_rt::test]
@@ -504,6 +506,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -572,6 +575,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_pool.clone(),
         data_handler,
         None,
+        is_vdf_mining_enabled,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -638,10 +642,10 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                     debug!("Block processed successfully");
                 }
             });
-            true
+            GossipResponse::Accepted(true)
         } else {
             debug!("Block not found");
-            false
+            GossipResponse::Accepted(false)
         }
     });
 
@@ -657,10 +661,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     sync_service_handle.shutdown_signal.fire();
 
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
 #[actix_rt::test]
@@ -675,6 +676,7 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service

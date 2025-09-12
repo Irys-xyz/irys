@@ -7,6 +7,7 @@ use actix_web::{
 
 use irys_types::{ChunkFormat, DataLedger, H256};
 use serde::Deserialize;
+use tracing::debug;
 
 #[derive(Deserialize)]
 pub struct LedgerChunkApiPath {
@@ -32,6 +33,10 @@ pub async fn get_chunk_by_ledger_offset(
             .json(ChunkFormat::Packed(chunk))),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
         Err(e) => {
+            debug!(
+                "Error retrieving chunk: ledger_id:{} chunk_offset: {} {}",
+                path.ledger_id, path.ledger_offset, e
+            );
             Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
         }
     }

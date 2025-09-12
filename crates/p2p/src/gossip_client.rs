@@ -2,12 +2,13 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResult};
+use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
+use crate::GossipCache;
 use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, BlockHash, GossipData, GossipDataRequest, GossipRequest, IrysBlockHeader, PeerAddress,
-    PeerListItem, PeerNetworkError,
+    Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
+    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -15,7 +16,13 @@ use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
+
+/// Response time threshold for fast responses (deserving extra reward)
+const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// Response time threshold for normal responses (standard reward)
+const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum GossipClientError {
@@ -82,11 +89,12 @@ impl GossipClient {
         peer: &(Address, PeerListItem),
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
-    ) -> GossipResult<bool> {
+    ) -> GossipResult<GossipResponse<bool>> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
-
-        let res = self.send_data_internal(url, &requested_data, false).await;
-        Self::handle_score(peer_list, &res, &peer.0);
+        let start_time = std::time::Instant::now();
+        let res = self.send_data_internal(url, &requested_data).await;
+        let response_time = start_time.elapsed();
+        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
         res
     }
 
@@ -97,15 +105,20 @@ impl GossipClient {
         peer: &(Address, PeerListItem),
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
-    ) -> GossipResult<Option<GossipData>> {
+    ) -> GossipResult<GossipResponse<Option<GossipData>>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
-
-        let res = self.send_data_internal(url, &requested_data, false).await;
-        Self::handle_score(peer_list, &res, &peer.0);
+        let start_time = std::time::Instant::now();
+        let res = self.send_data_internal(url, &requested_data).await;
+        let response_time = start_time.elapsed();
+        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
         res
     }
 
-    pub async fn check_health(&self, peer: PeerAddress) -> Result<bool, GossipClientError> {
+    pub async fn check_health(
+        &self,
+        peer: PeerAddress,
+        peer_list: &PeerList,
+    ) -> Result<bool, GossipClientError> {
         let url = format!("http://{}/gossip/health", peer.gossip);
         let peer_addr = peer.gossip.to_string();
 
@@ -120,9 +133,25 @@ impl GossipClient {
             return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
         }
 
-        response.json().await.map_err(|error| {
+        let response: GossipResponse<bool> = response.json().await.map_err(|error| {
             GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
-        })
+        })?;
+
+        match response {
+            GossipResponse::Accepted(val) => Ok(val),
+            GossipResponse::Rejected(reason) => {
+                warn!("Health check rejected with reason: {:?}", reason);
+                match reason {
+                    RejectionReason::HandshakeRequired => {
+                        peer_list.initiate_handshake(peer.api, true);
+                    }
+                    RejectionReason::GossipDisabled => {
+                        return Ok(false);
+                    }
+                };
+                Ok(true)
+            }
+        }
     }
 
     /// Send data to a peer
@@ -130,14 +159,16 @@ impl GossipClient {
     /// # Errors
     ///
     /// If the peer is offline or the request fails, an error is returned.
-    async fn send_data(&self, peer: &PeerListItem, data: &GossipData) -> GossipResult<()> {
-        Self::check_if_peer_is_online(peer)?;
+    async fn send_data(
+        &self,
+        peer: &PeerListItem,
+        data: &GossipData,
+    ) -> GossipResult<GossipResponse<()>> {
         match data {
             GossipData::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
-                    true,
                 )
                 .await
             }
@@ -145,7 +176,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
-                    true,
                 )
                 .await
             }
@@ -153,7 +183,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/commitment_tx", peer.address.gossip),
                     commitment_tx,
-                    true,
                 )
                 .await
             }
@@ -161,7 +190,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
-                    true,
                 )
                 .await
             }
@@ -169,7 +197,6 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/execution_payload", peer.address.gossip),
                     &execution_payload,
-                    true,
                 )
                 .await
             }
@@ -177,26 +204,17 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/ingress_proof", peer.address.gossip),
                     &ingress_proof,
-                    true,
                 )
                 .await
             }
         }
     }
 
-    fn check_if_peer_is_online(peer: &PeerListItem) -> GossipResult<()> {
-        if !peer.is_online {
-            return Err(GossipError::InvalidPeer("Peer is offline".into()));
-        }
-        Ok(())
-    }
-
     async fn send_data_internal<T, R>(
         &self,
         url: String,
         data: &T,
-        empty_response_allowed: bool,
-    ) -> GossipResult<R>
+    ) -> GossipResult<GossipResponse<R>>
     where
         T: Serialize + ?Sized,
         for<'de> R: Deserialize<'de>,
@@ -226,17 +244,7 @@ impl GossipClient {
                 })?;
 
                 if text.trim().is_empty() {
-                    return if empty_response_allowed {
-                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
-                        Ok(serde_json::from_str("null").map_err(|e| {
-                            GossipError::Network(format!(
-                                "Failed to parse an empty JSON response from {}: {}",
-                                url, e
-                            ))
-                        })?)
-                    } else {
-                        Err(GossipError::Network(format!("Empty response from {}", url)))
-                    };
+                    return Err(GossipError::Network(format!("Empty response from {}", url)));
                 }
 
                 let body = serde_json::from_str(&text).map_err(|e| {
@@ -249,22 +257,6 @@ impl GossipClient {
             }
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
-                // It seems like heavy_fork_recovery_epoch_test expects 403 error to be
-                //  handled like this; I can't figure out a reason why, but it doesn't pass
-                //  if we actually return an error if this happens
-                if error_text.trim().is_empty() {
-                    return if empty_response_allowed {
-                        // Serde won't treat empty string as valid JSON - the only valid "empty" JSON is `null`
-                        Ok(serde_json::from_str("null").map_err(|e| {
-                            GossipError::Network(format!(
-                                "Failed to parse an empty JSON response from {}: {}",
-                                url, e
-                            ))
-                        })?)
-                    } else {
-                        Err(GossipError::Network(format!("Empty response from {}", url)))
-                    };
-                }
                 Err(GossipError::Network(format!(
                     "API request failed with status: {} - {}",
                     status, error_text
@@ -275,17 +267,53 @@ impl GossipClient {
 
     fn handle_score<T>(
         peer_list: &PeerList,
-        result: &GossipResult<T>,
+        result: &GossipResult<GossipResponse<T>>,
         peer_miner_address: &Address,
     ) {
         match &result {
             Ok(_) => {
                 // Successful send, increase score for data request
                 peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
+                peer_list.set_is_online(peer_miner_address, true);
             }
-            Err(_) => {
+            Err(err) => {
+                if let GossipError::Network(_message) = err {
+                    peer_list.set_is_online(peer_miner_address, false);
+                }
                 // Failed to send, decrease score
                 peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
+            }
+        }
+    }
+
+    /// Handle scoring for data retrieval operations based on response time and success
+    fn handle_data_retrieval_score<T>(
+        peer_list: &PeerList,
+        result: &GossipResult<T>,
+        peer_miner_address: &Address,
+        response_time: Duration,
+    ) {
+        match result {
+            Ok(_) => {
+                // Successful response - reward based on speed
+                if response_time <= FAST_RESPONSE_THRESHOLD {
+                    // Fast response deserves extra reward
+                    peer_list.increase_peer_score(
+                        peer_miner_address,
+                        ScoreIncreaseReason::TimelyResponse,
+                    );
+                } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
+                    // Normal response gets standard reward
+                    peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online);
+                } else {
+                    // Slow but successful response gets minimal penalty
+                    peer_list
+                        .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::SlowResponse);
+                }
+            }
+            Err(_) => {
+                // Failed to respond - severe penalty
+                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::NoResponse);
             }
         }
     }
@@ -296,6 +324,8 @@ impl GossipClient {
         peer: (&Address, &PeerListItem),
         data: Arc<GossipData>,
         peer_list: &PeerList,
+        cache: Arc<GossipCache>,
+        gossip_cache_key: GossipCacheKey,
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();
@@ -311,7 +341,9 @@ impl GossipClient {
                 )
                 .await
             {
-                error!("Error sending data to peer: {}", e);
+                error!("Error sending data to peer: {:?}", e);
+            } else if let Err(err) = cache.record_seen(peer_miner_address, gossip_cache_key) {
+                error!("Error recording seen data in cache: {:?}", err);
             }
         });
     }
@@ -406,13 +438,32 @@ impl GossipClient {
             .pull_data_and_update_the_score(peer, data_request, peer_list)
             .await
         {
-            Ok(Some(data)) => {
-                let header = Self::block(data)?;
-                Ok((peer.0, header))
-            }
-            Ok(None) => Err(PeerNetworkError::FailedToRequestData(
-                "Peer did not have the requested block".to_string(),
-            )),
+            Ok(response) => match response {
+                GossipResponse::Accepted(maybe_data) => match maybe_data {
+                    Some(data) => {
+                        let header = Self::block(data)?;
+                        Ok((peer.0, header))
+                    }
+                    None => Err(PeerNetworkError::FailedToRequestData(
+                        "Peer did not have the requested block".to_string(),
+                    )),
+                },
+                GossipResponse::Rejected(reason) => {
+                    warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
+                    match reason {
+                        RejectionReason::HandshakeRequired => {
+                            peer_list.initiate_handshake(peer.1.address.api, true)
+                        }
+                        RejectionReason::GossipDisabled => {
+                            peer_list.set_is_online(&peer.0, false);
+                        }
+                    }
+                    Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {:?} rejected the request: {:?}",
+                        peer.0, reason
+                    )))
+                }
+            },
             Err(err) => match err {
                 GossipError::PeerNetwork(e) => Err(e),
                 other => Err(PeerNetworkError::FailedToRequestData(other.to_string())),
@@ -448,7 +499,7 @@ impl GossipClient {
         map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
     ) -> Result<(Address, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
-            peer_list.trusted_peers()
+            peer_list.online_trusted_peers()
         } else {
             // Get the top 10 most active peers
             peer_list.top_active_peers(Some(10), None)
@@ -463,38 +514,79 @@ impl GossipClient {
             return Err(PeerNetworkError::NoPeersAvailable);
         }
 
-        // Try up to 5 iterations over the peer list to get the block
+        // Try up to DATA_REQUEST_RETRIES rounds across peers; only retry peers on transient errors.
         let mut last_error = None;
 
-        for attempt in 1..=5 {
-            for peer in &peers {
+        // Track peers eligible for retry across rounds (transient failures only)
+        let mut retryable_peers = peers.clone();
+
+        for attempt in 1..=DATA_REQUEST_RETRIES {
+            // If no peers remain to try, stop early
+            if retryable_peers.is_empty() {
+                break;
+            }
+
+            // Iterate over a snapshot to allow mutation of retryable_peers
+            let current_round = retryable_peers.clone();
+            for peer in &current_round {
                 let address = &peer.0;
                 debug!(
-                    "Attempting to fetch {:?} from peer {} (attempt {}/5)",
-                    data_request, address, attempt
+                    "Attempting to fetch {:?} from peer {} (attempt {}/{})",
+                    data_request, address, attempt, DATA_REQUEST_RETRIES
                 );
 
                 match self
                     .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
                     .await
                 {
-                    Ok(Some(data)) => {
-                        info!(
-                            "Successfully requested {:?} from peer {}",
-                            data_request, address
-                        );
-                        match map_data(data) {
-                            Ok(data) => return Ok((*address, data)),
-                            Err(err) => {
-                                warn!("Failed to map data from peer {}: {}", address, err);
+                    Ok(response) => {
+                        match response {
+                            GossipResponse::Accepted(maybe_data) => match maybe_data {
+                                Some(data) => match map_data(data) {
+                                    Ok(data) => return Ok((*address, data)),
+                                    Err(err) => {
+                                        warn!("Failed to map data from peer {}: {}", address, err);
+                                        // Not retriable: remove peer from future rounds
+                                        retryable_peers.retain(|p| p.0 != *address);
+                                        continue;
+                                    }
+                                },
+                                None => {
+                                    // Peer doesn't have this data; keep for future rounds to allow re-gossip
+                                    debug!("Peer {} doesn't have {:?}", address, data_request);
+                                    continue;
+                                }
+                            },
+                            GossipResponse::Rejected(reason) => {
+                                warn!(
+                                    "Peer {} reject the request: {:?}: {:?}",
+                                    address, data_request, reason
+                                );
+                                match reason {
+                                    RejectionReason::HandshakeRequired => {
+                                        peer_list.initiate_handshake(peer.1.address.api, true);
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {:?} requires a handshake",
+                                                address
+                                            )),
+                                        ));
+                                    }
+                                    RejectionReason::GossipDisabled => {
+                                        peer_list.set_is_online(&peer.0, false);
+                                        last_error = Some(GossipError::from(
+                                            PeerNetworkError::FailedToRequestData(format!(
+                                                "Peer {:?} has gossip disabled",
+                                                address
+                                            )),
+                                        ));
+                                    }
+                                }
+                                // Do not retry the same peer on rejection; remove from future rounds
+                                retryable_peers.retain(|p| p.0 != *address);
                                 continue;
                             }
-                        };
-                    }
-                    Ok(None) => {
-                        // Peer doesn't have this block, try another peer
-                        debug!("Peer {} doesn't have {:?}", address, data_request);
-                        continue;
+                        }
                     }
                     Err(err) => {
                         last_error = Some(err);
@@ -506,18 +598,42 @@ impl GossipClient {
                             last_error.as_ref().unwrap()
                         );
 
-                        // Move on to the next peer
+                        // Transient failure: keep peer for next round
                         continue;
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // don't add a delay after the final attempt
+            if attempt != DATA_REQUEST_RETRIES {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
 
         Err(PeerNetworkError::FailedToRequestData(format!(
-            "Failed to fetch {:?} after trying 5 peers: {:?}",
+            "Failed to pull {:?} after trying 5 peers: {:?}",
             data_request, last_error
         )))
+    }
+
+    pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
+        debug!("Hydrating peers online status");
+        let peers = peer_list.all_peers_sorted_by_score();
+        for peer in peers {
+            match self.check_health(peer.1.address, peer_list).await {
+                Ok(is_healthy) => {
+                    debug!("Peer {} is healthy: {}", peer.0, is_healthy);
+                    peer_list.set_is_online(&peer.0, is_healthy);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to check the health of peer {}: {}, setting offline status",
+                        peer.0, err
+                    );
+                    peer_list.set_is_online(&peer.0, false);
+                }
+            }
+        }
     }
 
     pub async fn stake_and_pledge_whitelist(
@@ -704,6 +820,41 @@ mod tests {
             }
         }
 
+        fn new_with_delay(status_code: u16, body: &str, content_type: &str, delay_ms: u64) -> Self {
+            let port = get_free_port();
+            let body = body.to_string();
+            let content_type = content_type.to_string();
+
+            let handle = thread::spawn(move || {
+                let listener =
+                    TcpListener::bind(format!("127.0.0.1:{}", port)).expect("Failed to bind");
+
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buffer = [0; 1024];
+                    let _ = stream.read(&mut buffer);
+
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+                        status_code,
+                        Self::status_text(status_code),
+                        content_type,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+
+            std::thread::sleep(Duration::from_millis(50));
+
+            Self {
+                port,
+                handle: Some(handle),
+            }
+        }
+
         fn status_text(code: u16) -> &'static str {
             match code {
                 200 => "OK",
@@ -734,8 +885,9 @@ mod tests {
             let fixture = TestFixture::new();
             let unreachable_port = get_free_port();
             let peer = create_peer_address("127.0.0.1", unreachable_port);
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -756,8 +908,9 @@ mod tests {
             let fixture = TestFixture::with_timeout(Duration::from_millis(1));
             // Use a non-routable IP address
             let peer = create_peer_address("192.0.2.1", 8080);
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -777,8 +930,9 @@ mod tests {
             let server = MockHttpServer::new_with_response(status_code, "", "text/plain");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -814,8 +968,9 @@ mod tests {
                 MockHttpServer::new_with_response(200, "invalid json {", "application/json");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -843,14 +998,286 @@ mod tests {
             );
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
+            let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer).await;
+            let result = fixture.client.check_health(peer, &mock_list).await;
 
             assert!(result.is_err());
             assert!(matches!(
                 result.unwrap_err(),
                 GossipClientError::GetJsonResponsePayload(_, _)
             ));
+        }
+    }
+
+    mod data_retrieval_scoring_tests {
+        use super::*;
+        use irys_primitives::Address;
+        use irys_types::{PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn create_test_peer(id: u8) -> (Address, PeerListItem) {
+            let mining_addr = Address::from([id; 20]);
+            let peer_address = PeerAddress {
+                gossip: SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)),
+                    8000 + id as u16,
+                ),
+                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)), 9000 + id as u16),
+                execution: RethPeerInfo::default(),
+            };
+            let peer = PeerListItem {
+                address: peer_address,
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 100,
+                is_online: true,
+                last_seen: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            };
+            (mining_addr, peer)
+        }
+
+        #[test]
+        fn test_handle_data_retrieval_score_success_cases() {
+            let test_cases = vec![
+                (Duration::from_millis(300), true),
+                (Duration::from_millis(499), true),
+                (Duration::from_millis(500), true),
+                (Duration::from_millis(1500), true),
+                (Duration::from_millis(1999), true),
+                (Duration::from_millis(2000), true),
+            ];
+
+            for (response_time, should_increase) in test_cases {
+                let peer_list = PeerList::test_mock().expect("to create peer list mock");
+                let (addr, peer) = create_test_peer(1);
+                peer_list.add_or_update_peer(addr, peer, true);
+
+                let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+
+                GossipClient::handle_data_retrieval_score(
+                    &peer_list,
+                    &Ok(()),
+                    &addr,
+                    response_time,
+                );
+
+                let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                if should_increase {
+                    assert!(
+                        updated_score > initial_score,
+                        "Response time {:?} should increase score from {} to {}",
+                        response_time,
+                        initial_score,
+                        updated_score
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_handle_data_retrieval_score_slow_response() {
+            const EXPECTED_DECREASE_OF_ONE: u16 = 1;
+            let test_cases = vec![
+                (Duration::from_secs(3), EXPECTED_DECREASE_OF_ONE),
+                (Duration::from_secs(5), EXPECTED_DECREASE_OF_ONE),
+                (Duration::from_secs(10), EXPECTED_DECREASE_OF_ONE),
+            ];
+
+            for (response_time, expected_decrease) in test_cases {
+                let peer_list = PeerList::test_mock().expect("to create peer list mock");
+                let (addr, peer) = create_test_peer(1);
+                peer_list.add_or_update_peer(addr, peer, true);
+
+                let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+
+                GossipClient::handle_data_retrieval_score(
+                    &peer_list,
+                    &Ok(()),
+                    &addr,
+                    response_time,
+                );
+
+                let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                assert_eq!(
+                    updated_score,
+                    initial_score - expected_decrease,
+                    "Slow response {:?} should decrease score by {}",
+                    response_time,
+                    expected_decrease
+                );
+            }
+        }
+
+        #[test]
+        fn test_handle_data_retrieval_score_failed_response() {
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let (addr, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            let response_time = Duration::from_millis(500);
+
+            GossipClient::handle_data_retrieval_score::<()>(
+                &peer_list,
+                &Err(GossipError::Network("timeout".to_string())),
+                &addr,
+                response_time,
+            );
+
+            let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            assert_eq!(
+                updated_score,
+                initial_score - 3,
+                "Failed response should decrease by 3"
+            );
+        }
+
+        #[test]
+        fn test_multiple_score_updates_in_sequence() {
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let (addr, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            let operations = vec![
+                (Duration::from_millis(100), Ok(()), 51),
+                (Duration::from_millis(1500), Ok(()), 52),
+                (Duration::from_secs(3), Ok(()), 51),
+                (
+                    Duration::from_millis(500),
+                    Err(GossipError::Network("error".to_string())),
+                    48,
+                ),
+            ];
+
+            for (response_time, result, expected_score) in operations {
+                match result {
+                    Ok(()) => {
+                        GossipClient::handle_data_retrieval_score(
+                            &peer_list,
+                            &Ok(()),
+                            &addr,
+                            response_time,
+                        );
+                    }
+                    Err(e) => {
+                        GossipClient::handle_data_retrieval_score::<()>(
+                            &peer_list,
+                            &Err(e),
+                            &addr,
+                            response_time,
+                        );
+                    }
+                }
+
+                let current_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                assert_eq!(
+                    current_score, expected_score,
+                    "After response time {:?}, score should be {}",
+                    response_time, expected_score
+                );
+            }
+        }
+    }
+
+    mod integration_timing_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_mock_server_with_delay_functionality() {
+            // Test that new_with_delay creates servers with appropriate delays
+            let fast_server = MockHttpServer::new_with_delay(200, "test", "text/plain", 100);
+            let slow_server = MockHttpServer::new_with_delay(200, "test", "text/plain", 2000);
+
+            let client = reqwest::Client::new();
+
+            // Test fast server
+            let start_time = std::time::Instant::now();
+            let fast_url = format!("http://127.0.0.1:{}/", fast_server.port());
+            let fast_response = client.get(&fast_url).send().await;
+            let fast_duration = start_time.elapsed();
+
+            assert!(fast_response.is_ok(), "Fast server should respond");
+            assert!(
+                fast_duration >= Duration::from_millis(100),
+                "Fast server should have at least 100ms delay"
+            );
+            assert!(
+                fast_duration < Duration::from_millis(500),
+                "Fast server should respond quickly"
+            );
+
+            // Test slow server
+            let start_time = std::time::Instant::now();
+            let slow_url = format!("http://127.0.0.1:{}/", slow_server.port());
+            let slow_response = client.get(&slow_url).send().await;
+            let slow_duration = start_time.elapsed();
+
+            assert!(slow_response.is_ok(), "Slow server should respond");
+            assert!(
+                slow_duration >= Duration::from_secs(2),
+                "Slow server should have at least 2s delay"
+            );
+        }
+    }
+
+    mod concurrent_scoring_tests {
+        use super::*;
+        use irys_primitives::Address;
+        use irys_types::{PeerListItem, PeerScore};
+        use std::sync::Arc;
+        use tokio::task::JoinSet;
+
+        #[tokio::test]
+        async fn test_concurrent_score_updates() {
+            let peer_list = Arc::new(PeerList::test_mock().expect("to create peer list mock"));
+            let addr = Address::from([1_u8; 20]);
+            let peer = PeerListItem::default();
+            peer_list.add_or_update_peer(addr, peer, true);
+
+            let mut join_set = JoinSet::new();
+
+            for i in 0..20 {
+                let peer_list_clone = peer_list.clone();
+                let addr_copy = addr;
+
+                join_set.spawn(async move {
+                    let response_time = if i % 3 == 0 {
+                        Duration::from_millis(300)
+                    } else if i % 3 == 1 {
+                        Duration::from_millis(1500)
+                    } else {
+                        Duration::from_secs(3)
+                    };
+
+                    if i % 4 == 0 {
+                        GossipClient::handle_data_retrieval_score::<()>(
+                            &peer_list_clone,
+                            &Err(GossipError::Network("test".to_string())),
+                            &addr_copy,
+                            response_time,
+                        );
+                    } else {
+                        GossipClient::handle_data_retrieval_score(
+                            &peer_list_clone,
+                            &Ok(()),
+                            &addr_copy,
+                            response_time,
+                        );
+                    }
+                });
+            }
+
+            while (join_set.join_next().await).is_some() {}
+
+            let final_peer = peer_list.get_peer(&addr);
+            assert!(final_peer.is_some());
+            let final_score = final_peer.unwrap().reputation_score.get();
+            // Score should be within valid bounds
+            assert!(final_score <= PeerScore::MAX);
         }
     }
 }
