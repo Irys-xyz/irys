@@ -1,0 +1,15 @@
+[jobs.xtask-test]
+command = ["cargo", "xtask", "test"]
+need_stdout = false
+allow_warnings = false
+background = true
+
+[jobs.flaky-test]
+command = ["cargo", "xtask", "flaky", "-c", "-i", "2", "-f", "3"]
+need_stdout = false
+allow_warnings = false
+background = true
+
+[keybindings]
+x = "job:xtask-test"
+f = "job:flaky-test"
