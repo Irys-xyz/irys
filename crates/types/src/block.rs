@@ -1229,15 +1229,15 @@ mod tests {
     #[test]
     fn test_ledger_index_item_serialization() {
         let ledger_item = LedgerIndexItem {
-            max_chunk_offset: u64::MAX,
+            total_chunks: u64::MAX,
             ..Default::default()
         };
 
         let json = serde_json::to_string(&ledger_item).unwrap();
-        assert!(json.contains(&format!("\"maxChunkOffset\":\"{}\"", u64::MAX)));
+        assert!(json.contains(&format!("\"totalChunks\":\"{}\"", u64::MAX)));
 
         let deserialized: LedgerIndexItem = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.max_chunk_offset, u64::MAX);
+        assert_eq!(deserialized.total_chunks, u64::MAX);
     }
 
     #[test]
