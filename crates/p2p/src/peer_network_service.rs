@@ -989,7 +989,7 @@ where
                     return Err(PeerListServiceError::NoPeersAvailable);
                 }
 
-                // Try up to 5 iterations over the peer list to get the block
+                // Try up to sample_size iterations over the peer list to get the block
                 let mut last_error = None;
 
                 // Cycle through peers per attempt; keep only peers that failed transiently
@@ -1096,8 +1096,8 @@ where
                 }
 
                 Err(PeerListServiceError::FailedToRequestData(format!(
-                    "Failed to fetch {:?} after trying 5 peers: {:?}",
-                    data_request, last_error
+                    "Failed to fetch {:?} after trying {} peers: {:?}",
+                    data_request, sample_size, last_error
                 )))
             }
             .into_actor(self),
