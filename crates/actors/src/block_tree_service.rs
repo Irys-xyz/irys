@@ -880,11 +880,15 @@ impl BlockTreeServiceInner {
         // Broadcast difficulty update to miners if tip difficulty changed from parent
         let parent_diff_changed = {
             let cache = self.cache.read().expect("cache read lock poisoned");
-            if let Some(parent_block) = cache.get_block(&arc_block.previous_block_hash) {
-                parent_block.diff != arc_block.diff
-            } else {
-                false
-            }
+            let parent_block = cache
+                .get_block(&arc_block.previous_block_hash)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "parent block {} not found in cache while broadcasting difficulty update",
+                        arc_block.previous_block_hash
+                    )
+                });
+            parent_block.diff != arc_block.diff
         };
         if parent_diff_changed {
             // Ensure we are in the Actix system context before accessing the registry
