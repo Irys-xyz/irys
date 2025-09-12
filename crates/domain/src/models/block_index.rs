@@ -3,8 +3,8 @@
 use actix::dev::MessageResponse;
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerIndexItem,
-    NodeConfig, H256,
+    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
+    LedgerIndexItem, NodeConfig, H256,
 };
 use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -130,8 +130,8 @@ impl BlockIndex {
                     );
                 }
                 (
-                    prev_block.ledgers[DataLedger::Publish].max_chunk_offset + pub_chunks_added,
-                    prev_block.ledgers[DataLedger::Submit].max_chunk_offset + sub_chunks_added,
+                    prev_block.ledgers[DataLedger::Publish].total_chunks + pub_chunks_added,
+                    prev_block.ledgers[DataLedger::Submit].total_chunks + sub_chunks_added,
                 )
             } else {
                 eyre::bail!(
@@ -147,11 +147,11 @@ impl BlockIndex {
             num_ledgers: 2,
             ledgers: vec![
                 LedgerIndexItem {
-                    max_chunk_offset: max_publish_chunks,
+                    total_chunks: max_publish_chunks,
                     tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
                 },
                 LedgerIndexItem {
-                    max_chunk_offset: max_submit_chunks,
+                    total_chunks: max_submit_chunks,
                     tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
                 },
             ],
@@ -165,14 +165,14 @@ impl BlockIndex {
     pub fn get_block_bounds(
         &self,
         ledger: DataLedger,
-        chunk_offset: u64,
+        chunk_offset: LedgerChunkOffset,
     ) -> eyre::Result<BlockBounds> {
         let mut block_bounds = BlockBounds {
             ledger,
             ..Default::default()
         };
 
-        let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset)?;
+        let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset.into())?;
         let previous_item = self
             .get_item(block_height.saturating_sub(1))
             .ok_or_else(|| {
@@ -180,8 +180,8 @@ impl BlockIndex {
             })?;
 
         let ledger_index = usize::try_from(ledger)?;
-        block_bounds.start_chunk_offset = previous_item.ledgers[ledger_index].max_chunk_offset;
-        block_bounds.end_chunk_offset = found_item.ledgers[ledger_index].max_chunk_offset;
+        block_bounds.start_chunk_offset = previous_item.ledgers[ledger_index].total_chunks;
+        block_bounds.end_chunk_offset = found_item.ledgers[ledger_index].total_chunks;
         block_bounds.tx_root = found_item.ledgers[ledger_index].tx_root;
         block_bounds.height = block_height as u128;
 
@@ -195,7 +195,7 @@ impl BlockIndex {
         chunk_offset: u64,
     ) -> Result<(u64, &BlockIndexItem)> {
         if let Some(last_item) = self.items.last() {
-            let last_max = last_item.ledgers[ledger as usize].max_chunk_offset;
+            let last_max = last_item.ledgers[ledger as usize].total_chunks;
             eyre::ensure!(
                 chunk_offset < last_max,
                 "chunk_offset {} beyond last block's max_chunk_offset {}, last block height {}",
@@ -207,7 +207,7 @@ impl BlockIndex {
 
         let ledger_index = usize::try_from(ledger)?;
         let result = self.items.binary_search_by(|item| {
-            if chunk_offset < item.ledgers[ledger_index].max_chunk_offset {
+            if chunk_offset < item.ledgers[ledger_index].total_chunks {
                 std::cmp::Ordering::Greater
             } else {
                 std::cmp::Ordering::Less
@@ -343,25 +343,11 @@ mod tests {
                 num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
-                        max_chunk_offset: 100,
+                        total_chunks: 100,
                         tx_root: H256::random(),
                     },
                     LedgerIndexItem {
-                        max_chunk_offset: 1000,
-                        tx_root: H256::random(),
-                    },
-                ],
-            },
-            BlockIndexItem {
-                block_hash: H256::random(),
-                num_ledgers: 2,
-                ledgers: vec![
-                    LedgerIndexItem {
-                        max_chunk_offset: 200,
-                        tx_root: H256::random(),
-                    },
-                    LedgerIndexItem {
-                        max_chunk_offset: 2000,
+                        total_chunks: 1000,
                         tx_root: H256::random(),
                     },
                 ],
@@ -371,11 +357,25 @@ mod tests {
                 num_ledgers: 2,
                 ledgers: vec![
                     LedgerIndexItem {
-                        max_chunk_offset: 300,
+                        total_chunks: 200,
                         tx_root: H256::random(),
                     },
                     LedgerIndexItem {
-                        max_chunk_offset: 3000,
+                        total_chunks: 2000,
+                        tx_root: H256::random(),
+                    },
+                ],
+            },
+            BlockIndexItem {
+                block_hash: H256::random(),
+                num_ledgers: 2,
+                ledgers: vec![
+                    LedgerIndexItem {
+                        total_chunks: 300,
+                        tx_root: H256::random(),
+                    },
+                    LedgerIndexItem {
+                        total_chunks: 3000,
                         tx_root: H256::random(),
                     },
                 ],
@@ -395,7 +395,8 @@ mod tests {
         assert_eq!(*block_index.get_item(2).unwrap(), block_items[2]);
 
         // check an invalid byte offset causes get_block_bounds to return an error
-        let invalid_block_bounds = block_index.get_block_bounds(DataLedger::Publish, 300);
+        let invalid_block_bounds =
+            block_index.get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(300));
         assert!(
             invalid_block_bounds.is_err(),
             "expected invalid block bound to generate an error"
@@ -403,7 +404,7 @@ mod tests {
 
         // check valid block bound
         let block_bounds = block_index
-            .get_block_bounds(DataLedger::Publish, 150)
+            .get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(150))
             .expect("expected valid block bounds");
         assert_eq!(
             block_bounds,
@@ -417,7 +418,7 @@ mod tests {
         );
 
         let block_bounds = block_index
-            .get_block_bounds(DataLedger::Submit, 1000)
+            .get_block_bounds(DataLedger::Submit, LedgerChunkOffset::from(1000))
             .expect("expected valid block bounds");
         assert_eq!(
             block_bounds,
