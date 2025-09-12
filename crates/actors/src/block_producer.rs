@@ -38,7 +38,7 @@ use irys_types::{
     VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
-use ledger_expiry::LedgerExpiryBalanceDiff;
+use ledger_expiry::LedgerExpiryBalanceDelta;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -472,7 +472,7 @@ pub trait BlockProdStrategy {
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
         solution_hash: H256,
-        ledger_expiry_balance_diff: LedgerExpiryBalanceDiff,
+        ledger_expiry_balance_diff: LedgerExpiryBalanceDelta,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -930,7 +930,7 @@ pub trait BlockProdStrategy {
         Vec<CommitmentTransaction>,
         Vec<DataTransactionHeader>,
         PublishLedgerWithTxs,
-        LedgerExpiryBalanceDiff,
+        LedgerExpiryBalanceDelta,
     )> {
         let config = &self.inner().config;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1024,10 +1024,7 @@ pub trait BlockProdStrategy {
             };
             // IMPORTANT: Commitment txs get billed on regular blocks
             commitment_txs_to_bill = mempool_txs.commitment_tx;
-            aggregated_miner_fees = LedgerExpiryBalanceDiff {
-                miner_balance_increment: BTreeMap::new(),
-                user_perm_fee_refunds: Vec::new(),
-            };
+            aggregated_miner_fees = LedgerExpiryBalanceDelta::default();
         };
         let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
             vec![system_transaction_ledger]
@@ -1106,7 +1103,7 @@ pub trait BlockProdStrategy {
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
-    ) -> eyre::Result<LedgerExpiryBalanceDiff> {
+    ) -> eyre::Result<LedgerExpiryBalanceDelta> {
         ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
             block_height,

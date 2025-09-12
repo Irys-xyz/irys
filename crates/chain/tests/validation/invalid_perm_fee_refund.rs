@@ -2,7 +2,7 @@
 // They verify that blocks are rejected when they contain inappropriate refunds.
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDiff,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
@@ -62,7 +62,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            LedgerExpiryBalanceDiff,
+            LedgerExpiryBalanceDelta,
         )> {
             // Include the data transaction in submit ledger
             let data_ledger = SystemTransactionLedger {
@@ -81,7 +81,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDiff {
+                LedgerExpiryBalanceDelta {
                     miner_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds,
                 },
@@ -183,7 +183,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            LedgerExpiryBalanceDiff,
+            LedgerExpiryBalanceDelta,
         )> {
             let user_perm_fee_refunds = vec![self.invalid_refund];
 
@@ -195,7 +195,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDiff {
+                LedgerExpiryBalanceDelta {
                     miner_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds, // But we have a refund!
                 },

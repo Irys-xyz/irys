@@ -94,7 +94,7 @@ pub async fn calculate_expired_ledger_fees(
     mempool_sender: UnboundedSender<MempoolServiceMessage>,
     db: DatabaseProvider,
     expect_txs_to_be_promoted: bool,
-) -> eyre::Result<LedgerExpiryBalanceDiff> {
+) -> eyre::Result<LedgerExpiryBalanceDelta> {
     // Step 1: Collect expired partitions
     let expired_slots =
         collect_expired_partitions(parent_epoch_snapshot, block_height, ledger_type)?;
@@ -112,7 +112,7 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             block_height
         );
-        return Ok(LedgerExpiryBalanceDiff {
+        return Ok(LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         });
@@ -124,7 +124,7 @@ pub async fn calculate_expired_ledger_fees(
         None => {
             // Check to see if there were no chunks uploaded to this ledger slot!
             // If there wasn't, there aren't any fees to distribute
-            return Ok(LedgerExpiryBalanceDiff {
+            return Ok(LedgerExpiryBalanceDelta {
                 miner_balance_increment: BTreeMap::new(),
                 user_perm_fee_refunds: Vec::new(),
             });
@@ -614,7 +614,8 @@ async fn process_middle_blocks(
 /// This struct tracks two types of balance adjustments:
 /// - Miner rewards for storing expired data (term fees distributed to storage providers)
 /// - User refunds for permanent fees when transactions were not promoted to permanent storage
-pub struct LedgerExpiryBalanceDiff {
+#[derive(Debug, Default)]
+pub struct LedgerExpiryBalanceDelta {
     /// Rewards for miners who stored the expired data, mapped by miner address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
     pub miner_balance_increment: BTreeMap<Address, (U256, RollingHash)>,
@@ -630,8 +631,8 @@ fn aggregate_balance_diff(
     tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<Address>>>,
     config: &Config,
     expect_txs_to_be_promoted: bool,
-) -> eyre::Result<LedgerExpiryBalanceDiff> {
-    let mut balance_diff = LedgerExpiryBalanceDiff {
+) -> eyre::Result<LedgerExpiryBalanceDelta> {
+    let mut balance_diff = LedgerExpiryBalanceDelta {
         miner_balance_increment: BTreeMap::new(),
         user_perm_fee_refunds: Vec::new(),
     };

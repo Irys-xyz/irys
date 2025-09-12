@@ -3,7 +3,7 @@ use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDiff,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     mempool_service::TxIngressError, reth_ethereum_primitives,
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
@@ -1073,7 +1073,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-            expired_ledger_fees: LedgerExpiryBalanceDiff,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
             let mut submit_txs = submit_txs.to_vec();
@@ -1426,7 +1426,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             _solution_hash: H256,
-            expired_ledger_fees: LedgerExpiryBalanceDiff,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Deliberately use an incorrect solution hash (all zeros)
             // This should cause the block to be rejected during validation

@@ -12,7 +12,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     use crate::utils::solution_context;
     use irys_actors::{
-        async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDiff,
+        async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
         reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy,
         BlockProducerInner, ProductionStrategy,
     };
@@ -54,7 +54,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
             solution_hash: H256,
-            expired_ledger_fees: LedgerExpiryBalanceDiff,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(

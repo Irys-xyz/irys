@@ -11,7 +11,7 @@ use irys_types::{
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
 
-use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDiff;
+use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 
 /// Structure holding publish ledger transactions with their proofs
 #[derive(Debug, Clone)]
@@ -129,7 +129,7 @@ impl<'a> ShadowTxGenerator<'a> {
         submit_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a mut PublishLedgerWithTxs,
         initial_treasury_balance: U256,
-        ledger_expiry_balance_diff: &'a LedgerExpiryBalanceDiff,
+        ledger_expiry_balance_diff: &'a LedgerExpiryBalanceDelta,
     ) -> Result<Self> {
         // Sort publish ledger transactions by id for deterministic processing
         publish_ledger.txs.sort();
@@ -220,7 +220,7 @@ impl<'a> ShadowTxGenerator<'a> {
     // Static helper methods for initialization
     fn create_expired_ledger_shadow_txs(
         &self,
-        balance_diff: &LedgerExpiryBalanceDiff,
+        balance_diff: &LedgerExpiryBalanceDelta,
     ) -> Result<Vec<ShadowMetadata>> {
         let mut shadow_txs = Vec::new();
 
@@ -782,7 +782,7 @@ mod tests {
             transaction_fee: 0,
         }];
 
-        let empty_fees = LedgerExpiryBalanceDiff {
+        let empty_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
@@ -910,7 +910,7 @@ mod tests {
             },
         ];
 
-        let empty_fees = LedgerExpiryBalanceDiff {
+        let empty_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
@@ -990,7 +990,7 @@ mod tests {
             },
         ];
 
-        let empty_fees = LedgerExpiryBalanceDiff {
+        let empty_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
@@ -1175,7 +1175,7 @@ mod tests {
             },
         ];
 
-        let empty_fees = LedgerExpiryBalanceDiff {
+        let empty_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
@@ -1233,7 +1233,7 @@ mod tests {
         miner_balance_increment.insert(miner2, (miner2_reward, miner2_hash));
         miner_balance_increment.insert(miner3, (miner3_reward, miner3_hash));
 
-        let expired_fees = LedgerExpiryBalanceDiff {
+        let expired_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment,
             user_perm_fee_refunds: Vec::new(),
         };
@@ -1332,7 +1332,7 @@ mod tests {
         ];
         user_perm_fee_refunds.sort_by_key(|(tx_id, _, _)| *tx_id);
 
-        let expired_fees = LedgerExpiryBalanceDiff {
+        let expired_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds,
         };
@@ -1411,7 +1411,7 @@ mod tests {
         let initial_treasury = U256::from(10_000_000);
 
         // Empty expired fees
-        let expired_fees = LedgerExpiryBalanceDiff {
+        let expired_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
             user_perm_fee_refunds: Vec::new(),
         };
