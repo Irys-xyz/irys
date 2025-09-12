@@ -648,9 +648,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0.25)] // Exactly at 25% min threshold (fast blocks)
-    #[case(0.24)] // Just below threshold (should not adjust)
-    #[case(0.26)] // Just above threshold (should adjust)
+    #[case(0.75)]  // Exactly at 25% threshold (blocks 25% faster than target)
+#[case(0.76)]  // Just above threshold (24% faster, should NOT adjust)
+#[case(0.74)]  // Just below threshold (26% faster, should adjust)
     fn test_fast_blocks_boundary_conditions(
         default_difficulty_config: DifficultyAdjustmentConfig,
         #[case] time_fraction: f64,
