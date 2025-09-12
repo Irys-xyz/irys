@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta, reth_ethereum_primitives,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
 use irys_types::{
     storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
@@ -36,13 +37,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
 
@@ -197,13 +192,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let mut submit_txs = submit_txs.to_vec();
             submit_txs.push(self.extra_tx.clone());
@@ -296,13 +285,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let mut submit_txs = submit_txs.to_vec();
             // NOTE: We reverse the order of txs, this means

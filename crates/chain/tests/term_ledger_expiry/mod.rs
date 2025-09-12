@@ -1,3 +1,5 @@
+mod perm_refund;
+
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;
 use alloy_genesis::GenesisAccount;

@@ -8,7 +8,7 @@ use core::time::Duration;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
-    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
+    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -514,15 +514,25 @@ impl GossipClient {
             return Err(PeerNetworkError::NoPeersAvailable);
         }
 
-        // Try up to 5 iterations over the peer list to get the block
+        // Try up to DATA_REQUEST_RETRIES rounds across peers; only retry peers on transient errors.
         let mut last_error = None;
 
-        for attempt in 1..=5 {
-            for peer in &peers {
+        // Track peers eligible for retry across rounds (transient failures only)
+        let mut retryable_peers = peers.clone();
+
+        for attempt in 1..=DATA_REQUEST_RETRIES {
+            // If no peers remain to try, stop early
+            if retryable_peers.is_empty() {
+                break;
+            }
+
+            // Iterate over a snapshot to allow mutation of retryable_peers
+            let current_round = retryable_peers.clone();
+            for peer in &current_round {
                 let address = &peer.0;
                 debug!(
-                    "Attempting to fetch {:?} from peer {} (attempt {}/5)",
-                    data_request, address, attempt
+                    "Attempting to fetch {:?} from peer {} (attempt {}/{})",
+                    data_request, address, attempt, DATA_REQUEST_RETRIES
                 );
 
                 match self
@@ -535,15 +545,14 @@ impl GossipClient {
                                 Some(data) => match map_data(data) {
                                     Ok(data) => return Ok((*address, data)),
                                     Err(err) => {
-                                        warn!(
-                                            "Failed to map data from peer {:?}: {:?}",
-                                            address, err
-                                        );
+                                        warn!("Failed to map data from peer {}: {}", address, err);
+                                        // Not retriable: remove peer from future rounds
+                                        retryable_peers.retain(|p| p.0 != *address);
                                         continue;
                                     }
                                 },
                                 None => {
-                                    // Peer doesn't have this block, try another peer
+                                    // Peer doesn't have this data; keep for future rounds to allow re-gossip
                                     debug!("Peer {} doesn't have {:?}", address, data_request);
                                     continue;
                                 }
@@ -573,6 +582,8 @@ impl GossipClient {
                                         ));
                                     }
                                 }
+                                // Do not retry the same peer on rejection; remove from future rounds
+                                retryable_peers.retain(|p| p.0 != *address);
                                 continue;
                             }
                         }
@@ -587,12 +598,16 @@ impl GossipClient {
                             last_error.as_ref().unwrap()
                         );
 
-                        // Move on to the next peer
+                        // Transient failure: keep peer for next round
                         continue;
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // don't add a delay after the final attempt
+            if attempt != DATA_REQUEST_RETRIES {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
 
         Err(PeerNetworkError::FailedToRequestData(format!(

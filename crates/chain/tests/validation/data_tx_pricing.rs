@@ -1,8 +1,8 @@
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, block_tree_service::BlockTreeServiceMessage,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_types::storage_pricing::Amount;
@@ -56,13 +56,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
             Vec<CommitmentTransaction>,
             Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            LedgerExpiryBalanceDelta,
         )> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
             Ok((
@@ -73,7 +67,10 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                     txs: vec![],
                     proofs: None,
                 }, // No Publish ledger txs
-                std::collections::BTreeMap::new(), // No expired ledger fees
+                LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                }, // No expired ledger fees
             ))
         }
     }

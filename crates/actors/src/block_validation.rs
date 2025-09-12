@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use eyre::{ensure, OptionExt as _};
+use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
 use irys_domain::{
@@ -45,7 +45,7 @@ use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1085,11 +1085,12 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
             block_index,
             service_senders.mempool.clone(),
             db.clone(),
+            true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally
         )
         .in_current_span()
         .await?
     } else {
-        BTreeMap::new()
+        ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
@@ -1104,7 +1105,8 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
-    );
+    )
+    .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {

@@ -60,7 +60,7 @@
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_service::MempoolServiceMessage;
 use crate::shadow_tx_generator::RollingHash;
-use eyre::OptionExt as _;
+use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
@@ -93,7 +93,8 @@ pub async fn calculate_expired_ledger_fees(
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
     mempool_sender: UnboundedSender<MempoolServiceMessage>,
     db: DatabaseProvider,
-) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
+    expect_txs_to_be_promoted: bool,
+) -> eyre::Result<LedgerExpiryBalanceDelta> {
     // Step 1: Collect expired partitions
     let expired_slots =
         collect_expired_partitions(parent_epoch_snapshot, block_height, ledger_type)?;
@@ -111,7 +112,7 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             block_height
         );
-        return Ok(BTreeMap::new());
+        return Ok(LedgerExpiryBalanceDelta::default());
     }
 
     // Step 2: Find block ranges
@@ -120,7 +121,7 @@ pub async fn calculate_expired_ledger_fees(
         None => {
             // Check to see if there were no chunks uploaded to this ledger slot!
             // If there wasn't, there aren't any fees to distribute
-            return Ok(BTreeMap::new());
+            return Ok(LedgerExpiryBalanceDelta::default());
         }
     };
 
@@ -224,15 +225,21 @@ pub async fn calculate_expired_ledger_fees(
             .len()
     );
 
-    let fees = aggregate_miner_fees(transactions, &tx_to_miners, config)?;
+    let fees = aggregate_balance_deltas(
+        transactions,
+        &tx_to_miners,
+        config,
+        expect_txs_to_be_promoted,
+    )?;
 
     let total_fees = fees
+        .miner_balance_increment
         .values()
         .fold(U256::from(0), |acc, (fee, _)| acc.saturating_add(*fee));
 
     tracing::info!(
         "Calculated fees for {} miners, total fees: {}",
-        fees.len(),
+        fees.miner_balance_increment.len(),
         total_fees
     );
 
@@ -596,43 +603,88 @@ async fn process_middle_blocks(
     Ok(tx_to_miners)
 }
 
+/// Represents balance changes resulting from ledger expiry at epoch boundaries.
+///
+/// This struct tracks two types of balance adjustments:
+/// - Miner rewards for storing expired data (term fees distributed to storage providers)
+/// - User refunds for permanent fees when transactions were not promoted to permanent storage
+#[derive(Debug, Default)]
+pub struct LedgerExpiryBalanceDelta {
+    /// Rewards for miners who stored the expired data, mapped by miner address.
+    /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
+    pub miner_balance_increment: BTreeMap<Address, (U256, RollingHash)>,
+
+    /// Refunds of permanent fees for users whose transactions were not promoted.
+    /// Sorted by transaction ID. Each tuple contains (transaction_id, refund_amount, user_address).
+    pub user_perm_fee_refunds: Vec<(IrysTransactionId, U256, Address)>,
+}
+
 /// Calculates and aggregates fees for each miner
-fn aggregate_miner_fees(
+fn aggregate_balance_deltas(
     mut transactions: Vec<DataTransactionHeader>,
     tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<Address>>>,
     config: &Config,
-) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
-    let mut aggregated_miner_fees = BTreeMap::<Address, (U256, RollingHash)>::new();
-    transactions.sort();
+    expect_txs_to_be_promoted: bool,
+) -> eyre::Result<LedgerExpiryBalanceDelta> {
+    let mut balance_delta = LedgerExpiryBalanceDelta::default();
+    transactions.sort(); // This ensures refunds will be sorted by tx_id
 
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners
             .get(&data_tx.id)
-            .expect("guaranteed to have the miner list");
+            .ok_or_else(|| eyre!("Missing miner list for transaction {}", data_tx.id))?;
 
-        // Deduplicate miners - each address should only get one share
-        let unique_miners: Vec<Address> = miners_that_stored_this_tx
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        // process miner balance increments for storing the term tx
+        {
+            // Deduplicate miners - each address should only get one share
+            let unique_miners: Vec<Address> = miners_that_stored_this_tx
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
 
-        let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
-        let fee_distribution_per_miner = fee_charges.distribution_on_expiry(&unique_miners)?;
+            let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
+            let fee_distribution_per_miner = fee_charges.distribution_on_expiry(&unique_miners)?;
 
-        for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
-            aggregated_miner_fees
-                .entry(*miner)
-                .and_modify(|(current_fee, hash)| {
-                    *current_fee = current_fee.saturating_add(fee);
-                    hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
-                })
-                .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
+            for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
+                balance_delta
+                    .miner_balance_increment
+                    .entry(*miner)
+                    .and_modify(|(current_fee, hash)| {
+                        *current_fee = current_fee.saturating_add(fee);
+                        hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
+                    })
+                    .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
+            }
+        }
+
+        if !expect_txs_to_be_promoted {
+            continue;
+        }
+
+        // process refunds of perm fee if the tx was not promoted
+        {
+            if data_tx.promoted_height.is_none() {
+                // Only process refund if perm_fee exists (should always be present if tx is expected to be promoted)
+                let perm_fee = data_tx
+                    .perm_fee
+                    .ok_or_eyre("unpromoted tx should have the prem fee present")?;
+                // Add refund to the vector (already sorted by tx_id due to transaction sorting)
+                balance_delta
+                    .user_perm_fee_refunds
+                    .push((data_tx.id, perm_fee, data_tx.signer));
+            } else {
+                tracing::debug!(
+                    id = ?data_tx.id,
+                    promoted_height = ?data_tx.promoted_height,
+                    "Tx was promoted, no refund needed",
+                );
+            }
         }
     }
 
-    Ok(aggregated_miner_fees)
+    Ok(balance_delta)
 }
 
 /// Represents a slot index in the partition system
@@ -717,7 +769,8 @@ mod tests {
         tx_to_miners.insert(tx2.id, Arc::new(tx2_miners));
 
         // Call aggregate_miner_fees
-        let result = aggregate_miner_fees(vec![tx1, tx2], &tx_to_miners, &config).unwrap();
+        let result =
+            aggregate_balance_deltas(vec![tx1, tx2], &tx_to_miners, &config, false).unwrap();
 
         // Calculate expected fees
         // For tx1: term_fee = 1000, treasury = 950 (95%)
@@ -735,18 +788,19 @@ mod tests {
         let miner2_total = tx1_fee_per_miner + tx2_fee_per_miner;
 
         assert_eq!(
-            result.get(&miner1).unwrap().0,
+            result.miner_balance_increment.get(&miner1).unwrap().0,
             miner1_total,
             "Miner1 should receive correct deduplicated fee"
         );
         assert_eq!(
-            result.get(&miner2).unwrap().0,
+            result.miner_balance_increment.get(&miner2).unwrap().0,
             miner2_total,
             "Miner2 should receive correct fee"
         );
 
         // Verify total fees distributed equals treasury amounts
         let total_distributed: U256 = result
+            .miner_balance_increment
             .values()
             .map(|(fee, _)| *fee)
             .fold(U256::from(0), |acc, fee| acc + fee);
