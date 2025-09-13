@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use eyre::{ensure, OptionExt as _};
+use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
 use irys_domain::{
@@ -23,7 +23,6 @@ use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTIN
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
-use irys_types::get_ingress_proofs;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
 use irys_types::BlockHash;
@@ -35,6 +34,7 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
+use irys_types::{get_ingress_proofs, LedgerChunkOffset};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -45,7 +45,7 @@ use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -806,7 +806,7 @@ pub fn poa_is_valid(
 
         let bb = block_index_guard
             .read()
-            .get_block_bounds(ledger, ledger_chunk_offset)
+            .get_block_bounds(ledger, LedgerChunkOffset::from(ledger_chunk_offset))
             .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
         if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
@@ -1085,11 +1085,12 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
             block_index,
             service_senders.mempool.clone(),
             db.clone(),
+            true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally
         )
         .in_current_span()
         .await?
     } else {
-        BTreeMap::new()
+        ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
@@ -1104,7 +1105,8 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
-    );
+    )
+    .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
@@ -2278,7 +2280,7 @@ mod tests {
                     ledger_id: DataLedger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List(Vec::new()),
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     expires: None,
                     proofs: None,
                     required_proof_count: Some(1),
@@ -2288,7 +2290,7 @@ mod tests {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
                     tx_ids: H256List(data_tx_ids.clone()),
-                    max_chunk_offset: 9,
+                    total_chunks: 9,
                     expires: Some(1622543200),
                     proofs: None,
                     required_proof_count: None,
@@ -2338,7 +2340,10 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .get_block_bounds(
+                DataLedger::Submit,
+                LedgerChunkOffset::from(ledger_chunk_offset),
+            )
             .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 
@@ -2534,7 +2539,7 @@ mod tests {
                     ledger_id: DataLedger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List(Vec::new()),
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     expires: None,
                     proofs: None,
                     required_proof_count: Some(1),
@@ -2544,7 +2549,7 @@ mod tests {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
                     tx_ids: H256List(data_tx_ids.clone()),
-                    max_chunk_offset: 9,
+                    total_chunks: 9,
                     expires: Some(1622543200),
                     proofs: None,
                     required_proof_count: None,
@@ -2593,7 +2598,10 @@ mod tests {
         // ledger data -> block
         let bb = block_index_guard
             .read()
-            .get_block_bounds(DataLedger::Submit, ledger_chunk_offset)
+            .get_block_bounds(
+                DataLedger::Submit,
+                LedgerChunkOffset::from(ledger_chunk_offset),
+            )
             .expect("expected valid block bounds");
         info!("block bounds: {:?}", bb);
 

@@ -220,12 +220,12 @@ async fn add_slots_test() {
     );
 
     let mut mock_header = IrysBlockHeader::new_mock_header();
-    mock_header.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+    mock_header.data_ledgers[DataLedger::Submit].total_chunks = 0;
 
     // Now create a new epoch block & give the Submit ledger enough size to add one slot
     let mut new_epoch_block = mock_header.clone();
     new_epoch_block.height = num_blocks_in_epoch;
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = num_chunks_in_partition / 2;
 
     // Post the new epoch block to the service and let it perform_epoch_tasks()
     let _ = epoch_snapshot.perform_epoch_tasks(
@@ -251,9 +251,9 @@ async fn add_slots_test() {
     new_epoch_block.height = num_blocks_in_epoch * 2;
 
     // Increase the Submit ledger by 3 slots  and the Publish ledger by 2 slots
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
         (num_chunks_in_partition as f64 * 2.5) as u64;
-    new_epoch_block.data_ledgers[DataLedger::Publish as usize].max_chunk_offset =
+    new_epoch_block.data_ledgers[DataLedger::Publish as usize].total_chunks =
         (num_chunks_in_partition as f64 * 0.75) as u64;
 
     let _ = epoch_snapshot.perform_epoch_tasks(&previous_epoch_block, &new_epoch_block, Vec::new());
@@ -557,18 +557,18 @@ async fn partition_expiration_and_repacking_test() {
         new_epoch_block.height = num_blocks_in_epoch + num_blocks_in_epoch * i;
 
         if i == 3 {
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
                 num_chunks_in_partition / 3;
         }
 
         if i == 5 {
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
                 num_chunks_in_partition / 2;
         }
 
         debug!(
             "Epoch Block: Submit.max_chunk_offset = {}",
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks
         );
 
         let result =
@@ -836,7 +836,7 @@ async fn epoch_blocks_reinitialization_test() {
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = 0;
 
     let mut epoch_block_data: Vec<EpochBlockData> = Vec::new();
     let epochs_in_term = config.consensus.epoch.submit_ledger_epoch_length;
@@ -848,7 +848,7 @@ async fn epoch_blocks_reinitialization_test() {
 
         // For the second to last epoch block in the term, have it resize the submit ledger
         if i == epochs_in_term - 1 {
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
                 num_chunks_in_partition / 2;
         }
 
@@ -998,8 +998,8 @@ async fn partitions_assignment_determinism_test() {
     let total_epoch_messages = 6;
     let mut epoch_num = 1;
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition;
-    new_epoch_block.data_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks_in_partition;
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = num_chunks_in_partition;
+    new_epoch_block.data_ledgers[DataLedger::Publish].total_chunks = num_chunks_in_partition;
 
     let mut previous_epoch_block = genesis_block.clone();
 
