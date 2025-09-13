@@ -6,6 +6,7 @@ use irys_types::{
 };
 
 use std::sync::{Arc, RwLock};
+use eyre::eyre;
 use tracing::{error, warn};
 
 /// Retrieve a read only reference to the ledger partition assignments
@@ -106,10 +107,10 @@ impl BlockIndexService {
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<DataTransactionHeader>>,
-    ) {
+    ) -> eyre::Result<()> {
         if self.block_index.is_none() {
             error!("block_index service not initialized");
-            return;
+            return Err(eyre!("block_index service not initialized"));
         }
 
         let chunk_size = self.chunk_size;
@@ -118,9 +119,8 @@ impl BlockIndexService {
             .clone()
             .expect("block_index must be initialized")
             .write()
-            .expect("block_index write lock poisoned")
-            .push_block(block, all_txs, chunk_size)
-            .expect("expect to add the block to the index");
+            .map_err(|_| eyre!("block_index write lock poisoned"))?
+            .push_block(block, all_txs, chunk_size)?;
 
         // Block log tracking
         self.block_log.push(BlockLogEntry {
@@ -154,6 +154,8 @@ impl BlockIndexService {
         //         prev_entry = Some(entry);
         //     }
         // }
+
+        Ok(())
     }
 }
 
@@ -167,9 +169,9 @@ impl Handler<BlockMigrationMessage> for BlockIndexService {
         if let Some((previous_height, previous_hash)) = &self.last_received_block {
             if block.height != previous_height + 1 {
                 error!("BlockMigrationMessage received out of order or with a gap. Previous block height: {}, hash: {:x}. Current block height: {}, hash: {:x}", previous_height, previous_hash, block.height, block.block_hash);
-                // TODO: the tree disregards any errors in the handler right now, so we just panic
-                // return Err(eyre::eyre!("BlockMigrationMessage received out of order or with a gap"));
-                panic!("BlockMigrationMessage received out of order or with a gap");
+                return Err(eyre!(
+                    "BlockMigrationMessage received out of order or with a gap"
+                ));
             }
         } else {
             warn!(
@@ -180,7 +182,7 @@ impl Handler<BlockMigrationMessage> for BlockIndexService {
         self.last_received_block = Some((block.height, block.block_hash));
 
         // migrate the block
-        self.migrate_block(&block, &all_txs);
+        self.migrate_block(&block, &all_txs)?;
 
         Ok(())
     }
