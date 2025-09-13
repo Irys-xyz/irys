@@ -5,8 +5,8 @@ use irys_types::{
     BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256, U256,
 };
 
-use std::sync::{Arc, RwLock};
 use eyre::eyre;
+use std::sync::{Arc, RwLock};
 use tracing::{error, warn};
 
 /// Retrieve a read only reference to the ledger partition assignments
