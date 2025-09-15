@@ -21,7 +21,7 @@ use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
-use tracing::Instrument as _;
+use tracing::{warn, Instrument as _};
 
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
@@ -91,7 +91,15 @@ pub async fn run_node(
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
-    unwind_to(&node_config, chainspec.clone(), latest_block).await?;
+    if let Err(e) = unwind_to(&node_config, chainspec.clone(), latest_block).await {
+        // hack to ignore trying to unwind future blocks
+        // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
+        if e.to_string().starts_with("Target block number") {
+            warn!("Error unwinding - Reth/Irys head block mismatch {}", &e)
+        } else {
+            return Err(e);
+        }
+    }
 
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
