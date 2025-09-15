@@ -721,34 +721,24 @@ impl GossipClient {
                 Self::handle_score(peer_list, &res, &peer.0);
 
                 match res {
-                    Ok(response) => {
-                        match response {
-                            GossipResponse::Accepted(addresses) => {
-                                return Ok(addresses)
+                    Ok(response) => match response {
+                        GossipResponse::Accepted(addresses) => return Ok(addresses),
+                        GossipResponse::Rejected(reason) => match reason {
+                            RejectionReason::HandshakeRequired => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} requires a handshake", peer.0),
+                                    )));
+                                peer_list.initiate_handshake(peer.1.address.api, true);
                             }
-                            GossipResponse::Rejected(reason) => {
-                                match reason {
-                                    RejectionReason::HandshakeRequired => {
-                                        last_error = Some(GossipError::from(
-                                            PeerNetworkError::FailedToRequestData(format!(
-                                                "Peer {:?} requires a handshake",
-                                                peer.0
-                                            )),
-                                        ));
-                                        peer_list.initiate_handshake(peer.1.address.api, true);
-                                    }
-                                    RejectionReason::GossipDisabled => {
-                                        last_error = Some(GossipError::from(
-                                            PeerNetworkError::FailedToRequestData(format!(
-                                                "Peer {:?} has gossip disabled",
-                                                peer.0
-                                            )),
-                                        ));
-                                        peer_list.set_is_online(&peer.0, false);
-                                    }
-                                }
+                            RejectionReason::GossipDisabled => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} has gossip disabled", peer.0),
+                                    )));
+                                peer_list.set_is_online(&peer.0, false);
                             }
-                        }
+                        },
                     },
                     Err(err) => {
                         last_error = Some(err);
