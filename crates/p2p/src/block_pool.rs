@@ -699,23 +699,21 @@ where
                         err_text,
                     )));
                 }
-            } else {
-                if let Err(send_err) =
-                    sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
-                        evm_block_hash,
-                        use_trusted_peers_only,
-                        response: response_sender,
-                    })
-                {
-                    let err_text = format!(
-                        "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
-                        send_err
-                    );
-                    error!(err_text);
-                    return Err(GossipError::Internal(InternalGossipError::Unknown(
-                        err_text,
-                    )));
-                }
+            } else if let Err(send_err) =
+                sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
+                    evm_block_hash,
+                    use_trusted_peers_only,
+                    response: response_sender,
+                })
+            {
+                let err_text = format!(
+                    "BlockPool: Failed to send PullPayloadFromTheNetwork message: {:?}",
+                    send_err
+                );
+                error!(err_text);
+                return Err(GossipError::Internal(InternalGossipError::Unknown(
+                    err_text,
+                )));
             }
 
             response_receiver.await.map_err(|recv_err| {
