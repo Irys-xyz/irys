@@ -7,7 +7,7 @@ use irys_types::{
 
 use eyre::eyre;
 use std::sync::{Arc, RwLock};
-use tracing::{error, warn};
+use tracing::{error, instrument, warn};
 
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
@@ -161,6 +161,7 @@ impl BlockIndexService {
 
 impl Handler<BlockMigrationMessage> for BlockIndexService {
     type Result = eyre::Result<()>;
+    #[instrument(skip_all, err, target = "BlockIndexService::BlockMigrationMessage" fields(height = %msg.block_header.height, hash = %msg.block_header.block_hash))]
     fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Collect working variables to move into the closure
         let block = msg.block_header;
@@ -168,9 +169,9 @@ impl Handler<BlockMigrationMessage> for BlockIndexService {
 
         if let Some((previous_height, previous_hash)) = &self.last_received_block {
             if block.height != previous_height + 1 {
-                error!("BlockMigrationMessage received out of order or with a gap. Previous block height: {}, hash: {:x}. Current block height: {}, hash: {:x}", previous_height, previous_hash, block.height, block.block_hash);
+                // `instrument` will log this for us
                 return Err(eyre!(
-                    "BlockMigrationMessage received out of order or with a gap"
+                    "BlockMigrationMessage received out of order or with a gap. Previous block height: {}, hash: {:x}. Current block height: {}, hash: {:x}", previous_height, previous_hash, block.height, block.block_hash
                 ));
             }
         } else {
