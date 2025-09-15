@@ -350,7 +350,12 @@ impl BlockTreeServiceInner {
             block_header: arc_block.clone(),
             all_txs: arc_all_txs,
         };
-        block_index.do_send(block_finalized_message);
+        // Send and await result so errors propagate to the sender and can panic here
+        match block_index.send(block_finalized_message).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("BlockIndexService error during migration: {e:?}"),
+            Err(e) => panic!("Failed to send BlockMigrationMessage: {e:?}"),
+        }
 
         // Let the chunk_migration_service know about the block migration
         self.service_senders

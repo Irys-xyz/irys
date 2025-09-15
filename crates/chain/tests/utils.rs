@@ -71,9 +71,12 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
-use tracing::{debug, debug_span, error, info, instrument};
+use tracing::{debug, error, error_span, info, instrument};
 
 pub async fn capacity_chunk_solution(
     miner_addr: Address,
@@ -336,7 +339,7 @@ impl IrysNodeTest<()> {
 
     fn get_span(&self) -> tracing::Span {
         match &self.name {
-            Some(name) => debug_span!("NODE", name = %name),
+            Some(name) => error_span!("NODE", name = %name),
             None => tracing::Span::none(),
         }
     }
@@ -355,7 +358,7 @@ impl IrysNodeTest<()> {
         log_name: &str,
         seconds_to_wait: usize,
     ) -> IrysNodeTest<IrysNodeCtx> {
-        let span = debug_span!("NODE", name = %log_name);
+        let span = error_span!("NODE", name = %log_name);
         let _enter = span.enter();
         let node = self.start().await;
         node.wait_for_packing(seconds_to_wait).await;
@@ -593,11 +596,21 @@ impl IrysNodeTest<IrysNodeCtx> {
             let latest_block = canonical_chain.0.last().unwrap();
 
             if latest_block.height >= target_height {
-                info!(
-                    "reached height {} after {} retries",
-                    target_height, &retries
-                );
-                return Ok(latest_block.block_hash);
+                // Get the specific block at target height, not the latest
+                if let Some(target_block) =
+                    canonical_chain.0.iter().find(|b| b.height == target_height)
+                {
+                    info!(
+                        "reached height {} after {} retries",
+                        target_height, &retries
+                    );
+                    return Ok(target_block.block_hash);
+                } else {
+                    return Err(eyre::eyre!(
+                        "Block at height {} not found in canonical chain",
+                        target_height
+                    ));
+                }
             }
 
             eyre::ensure!(
@@ -609,6 +622,96 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             sleep(Duration::from_secs(1)).await;
             retries += 1;
+        }
+    }
+
+    /// Wait for a specific block at the given height using event subscription
+    /// This eliminates polling and race conditions by listening to BlockStateUpdated events
+    #[tracing::instrument(skip_all)]
+    pub async fn wait_for_block_at_height(
+        &self,
+        target_height: u64,
+        max_seconds: usize,
+    ) -> eyre::Result<H256> {
+        // Subscribe to block state updates
+        let mut block_state_rx = self
+            .node_ctx
+            .service_senders
+            .subscribe_block_state_updates();
+
+        // Set timeout
+        let timeout = Duration::from_secs(max_seconds as u64);
+        let deadline = Instant::now() + timeout;
+
+        // First check if we already have the block
+        let canonical_chain = get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+
+        // Look for the exact block at target height
+        if let Some(block) = canonical_chain.0.iter().find(|b| b.height == target_height) {
+            // Check if it's part of canonical chain (not discarded)
+            let tree = self.node_ctx.block_tree_guard.read();
+            let (canonical_entries, _) = tree.get_canonical_chain();
+            if canonical_entries
+                .iter()
+                .any(|b| b.block_hash == block.block_hash)
+            {
+                info!("Block at height {} already available", target_height);
+                return Ok(block.block_hash);
+            }
+        }
+
+        // Wait for events
+        loop {
+            // Check timeout
+            if Instant::now() > deadline {
+                return Err(eyre::eyre!(
+                    "Timeout waiting for block at height {} after {} seconds",
+                    target_height,
+                    max_seconds
+                ));
+            }
+
+            // Wait for next block state update with timeout
+            match tokio::time::timeout_at(deadline.into(), block_state_rx.recv()).await {
+                Ok(Ok(event)) => {
+                    // Check if this is the block we're waiting for
+                    if event.height == target_height && !event.discarded {
+                        // Verify it's canonical
+                        let tree = self.node_ctx.block_tree_guard.read();
+                        let (canonical_entries, _) = tree.get_canonical_chain();
+                        if canonical_entries
+                            .iter()
+                            .any(|b| b.block_hash == event.block_hash)
+                        {
+                            info!("Received block at height {} via event", target_height);
+                            return Ok(event.block_hash);
+                        }
+                    }
+                    // Also check after reorgs if our target block is now canonical
+                    if event.height > target_height {
+                        let canonical_chain =
+                            get_canonical_chain(self.node_ctx.block_tree_guard.clone()).await?;
+                        if let Some(block) =
+                            canonical_chain.0.iter().find(|b| b.height == target_height)
+                        {
+                            info!(
+                                "Block at height {} became canonical after reorg",
+                                target_height
+                            );
+                            return Ok(block.block_hash);
+                        }
+                    }
+                }
+                Ok(Err(_)) => {
+                    return Err(eyre::eyre!("Block state channel closed"));
+                }
+                Err(_) => {
+                    return Err(eyre::eyre!(
+                        "Timeout waiting for block at height {}",
+                        target_height
+                    ));
+                }
+            }
         }
     }
 
@@ -1710,11 +1813,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         }
 
-        // Deliver block header
-        BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(irys_block_header.clone()), false)
-            .await
-            .map_err(|e| eyre::eyre!("{e:?}"))?;
+        // IMPORTANT: Add execution payload to cache BEFORE sending block header
+        // This prevents a race condition where validation starts before the payload is available
 
         // Send execution payload if available
         if let Some(evm_block) = self
@@ -1731,6 +1831,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         } else {
             panic!("Full block cannot be sent to peer. Execution payload not available locally.");
         }
+
+        // Deliver block header (this triggers validation)
+        BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
+            .handle_block(Arc::new(irys_block_header.clone()), false)
+            .await
+            .map_err(|e| eyre::eyre!("{e:?}"))?;
 
         Ok(())
     }
