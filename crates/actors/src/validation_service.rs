@@ -271,12 +271,21 @@ impl ValidationService {
 
                 // Periodic pipeline state logging
                 _ = pipeline_log_interval.tick() => {
-                    let vdf_running = coordinator.vdf_scheduler.current.is_some();
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
 
-                    error!(
-                        vdf_running = if vdf_running { 1 } else { 0 },
+                    // Extract VDF task details if running
+                    let (vdf_running, vdf_block_hash, vdf_block_height) =
+                        if let Some(current_vdf) = &coordinator.vdf_scheduler.current {
+                            (1, Some(current_vdf.hash), Some(current_vdf.block.height))
+                        } else {
+                            (0, None, None)
+                        };
+
+                    info!(
+                        vdf_running,
+                        vdf_block_hash = ?vdf_block_hash,
+                        vdf_block_height = ?vdf_block_height,
                         vdf_pending,
                         concurrent_active,
                         "Validation pipeline status"

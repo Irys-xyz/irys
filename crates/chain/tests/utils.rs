@@ -360,11 +360,8 @@ impl IrysNodeTest<()> {
     ) -> IrysNodeTest<IrysNodeCtx> {
         let span = error_span!("NODE", name = %log_name);
         let _enter = span.enter();
-        tracing::error!("starting node");
         let node = self.start().await;
-        tracing::error!("waiting for packing");
         node.wait_for_packing(seconds_to_wait).await;
-        tracing::error!("packed");
         node
     }
 }
