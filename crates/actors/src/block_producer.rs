@@ -61,6 +61,38 @@ mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
 
+/// Result of checking parent validity and solution compatibility
+#[derive(Debug)]
+pub(crate) enum ParentCheckResult {
+    /// Parent is still the best canonical block - keep current block
+    ParentStillBest,
+    /// Parent changed but solution is valid - must rebuild on new parent
+    MustRebuild {
+        new_parent: H256,
+    },
+    /// Solution is completely invalid and must be discarded
+    SolutionInvalid {
+        new_parent: H256,
+        reason: InvalidReason,
+    },
+}
+
+/// Reason why a solution is completely invalid
+#[derive(Debug)]
+pub(crate) enum InvalidReason {
+    /// Solution VDF step is at or before the new parent's VDF step
+    VdfTooOld {
+        parent_vdf_step: u64,
+        solution_vdf_step: u64,
+    },
+    /// Solution hash doesn't meet the new parent's difficulty requirement
+    DifficultyNotMet {
+        parent_difficulty: U256,
+        solution_value: U256,
+    },
+}
+
+
 /// Commands that can be sent to the block producer service
 #[derive(Debug)]
 pub enum BlockProducerCommand {
@@ -341,13 +373,55 @@ pub trait BlockProdStrategy {
             .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
     }
 
-    /// Checks if the given parent block is still the best canonical block.
-    /// Returns (is_still_best, current_best_hash)
-    async fn is_parent_still_best(&self, parent_hash: &H256) -> (bool, H256) {
+    /// Checks parent validity and determines if the solution is still valid.
+    /// Returns a descriptive result indicating the required action.
+    async fn check_parent_and_solution_validity(
+        &self,
+        parent_hash: &H256,
+        solution: &SolutionContext,
+    ) -> ParentCheckResult {
         let tree = self.inner().block_tree_guard.read();
         let (_max_difficulty, current_best) = tree.get_max_cumulative_difficulty_block();
-        let is_still_best = current_best == *parent_hash;
-        (is_still_best, current_best)
+
+        // Check if parent is still the best
+        if current_best == *parent_hash {
+            return ParentCheckResult::ParentStillBest;
+        }
+
+        // Parent changed - get new parent's info
+        let (new_parent_vdf_step, new_parent_difficulty) = tree
+            .get_block(&current_best)
+            .map(|b| (b.vdf_limiter_info.global_step_number, b.diff))
+            .unwrap_or((0, U256::zero()));
+
+        // Check if solution is too old (at or before new parent's VDF step)
+        if solution.vdf_step <= new_parent_vdf_step {
+            return ParentCheckResult::SolutionInvalid {
+                new_parent: current_best,
+                reason: InvalidReason::VdfTooOld {
+                    parent_vdf_step: new_parent_vdf_step,
+                    solution_vdf_step: solution.vdf_step,
+                },
+            };
+        }
+
+        // Check difficulty requirement
+        let solution_value = U256::from_little_endian(&solution.solution_hash.0);
+        if solution_value < new_parent_difficulty {
+            // Solution doesn't meet difficulty - cannot use it at all
+            return ParentCheckResult::SolutionInvalid {
+                new_parent: current_best,
+                reason: InvalidReason::DifficultyNotMet {
+                    parent_difficulty: new_parent_difficulty,
+                    solution_value,
+                },
+            };
+        }
+
+        // Parent changed but solution is valid - must rebuild on new parent
+        ParentCheckResult::MustRebuild {
+            new_parent: current_best,
+        }
     }
 
     /// Core block production logic that can be used for both initial production and rebuilds.
@@ -484,18 +558,57 @@ pub trait BlockProdStrategy {
         // Check if we need to rebuild on a new parent
         while let Some((ref block, _, _)) = result {
             let parent_hash = &block.previous_block_hash;
-            let (is_still_best, _current_best) = self.is_parent_still_best(parent_hash).await;
 
-            if is_still_best {
-                // Parent is still the best, we can proceed
-                break;
+            match self.check_parent_and_solution_validity(parent_hash, &solution).await {
+                ParentCheckResult::ParentStillBest => {
+                    // Parent is still the best, keep the current block
+                    break;
+                }
+
+                ParentCheckResult::MustRebuild { new_parent } => {
+                    info!(
+                        solution_hash = %solution.solution_hash,
+                        solution_vdf_step = solution.vdf_step,
+                        new_parent = %new_parent,
+                        rebuild_attempt = rebuild_attempts + 1,
+                        "Parent changed but solution is valid - rebuilding on new parent"
+                    );
+
+                    // Rebuild the block on the new parent
+                    result = self
+                        .fully_produce_new_block_without_gossip(&solution)
+                        .await?;
+                    rebuild_attempts += 1;
+                }
+
+                ParentCheckResult::SolutionInvalid { new_parent, reason } => {
+                    // Log the specific reason why solution is invalid
+                    match &reason {
+                        InvalidReason::VdfTooOld { parent_vdf_step, solution_vdf_step } => {
+                            warn!(
+                                solution_hash = %solution.solution_hash,
+                                solution_vdf_step,
+                                new_parent = %new_parent,
+                                parent_vdf_step,
+                                "Solution is too old for new parent (vdf_step {} <= {}), discarding",
+                                solution_vdf_step,
+                                parent_vdf_step
+                            );
+                        }
+                        InvalidReason::DifficultyNotMet { parent_difficulty, solution_value } => {
+                            warn!(
+                                solution_hash = %solution.solution_hash,
+                                solution_value = %solution_value,
+                                new_parent = %new_parent,
+                                parent_difficulty = %parent_difficulty,
+                                "Solution doesn't meet new parent's difficulty, discarding"
+                            );
+                        }
+                    }
+                    // Solution is completely invalid, cannot produce a block
+                    return Ok(None);
+                }
             }
-
-            // Parent is not the best, we need to rebuild
-            result = self
-                .fully_produce_new_block_without_gossip(&solution)
-                .await?;
-            rebuild_attempts += 1;
         }
 
         let Some((block, stats, eth_built_payload)) = result else {
