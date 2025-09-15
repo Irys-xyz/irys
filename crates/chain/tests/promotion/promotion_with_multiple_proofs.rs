@@ -44,7 +44,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    genesis_node.start_mining().await;
+    genesis_node.start_mining();
 
     genesis_node.wait_until_height(1, seconds_to_wait).await?;
 
@@ -56,6 +56,19 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
             vec![peer1_stake_tx.id, peer2_stake_tx.id],
             seconds_to_wait,
         )
+        .await?;
+
+    // Mine blocks to include the stake commitments in a confirmed block, then wait for peers to catch up.
+    let height_before_commitments = genesis_node.get_canonical_chain_height().await;
+    genesis_node
+        .wait_until_height_confirmed(height_before_commitments + 1, seconds_to_wait)
+        .await?;
+    // Ensure peers see the same height so their snapshots include the new stakes
+    peer1_node
+        .wait_until_height(height_before_commitments + 1, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height(height_before_commitments + 1, seconds_to_wait)
         .await?;
 
     // Post a transaction and it's chunks to all 3
@@ -104,7 +117,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     assert_matches!(res, Ok(()));
 
     let height = genesis_node.get_canonical_chain_height().await;
-    genesis_node.start_mining().await;
+    genesis_node.start_mining();
     genesis_node
         .wait_until_height_confirmed(height + 1, seconds_to_wait)
         .await?;

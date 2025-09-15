@@ -4,7 +4,7 @@ use crate::{
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, RollingHash, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use actix::prelude::*;
 use alloy_consensus::{
@@ -32,12 +32,13 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
+    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
+    H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
+use ledger_expiry::LedgerExpiryBalanceDelta;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -50,7 +51,6 @@ use reth::{
 };
 use reth_transaction_pool::EthPooledTransaction;
 use std::{
-    collections::BTreeMap,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -384,6 +384,7 @@ pub trait BlockProdStrategy {
                 &mut publish_txs,
                 block_reward,
                 current_timestamp,
+                solution.solution_hash,
                 expired_ledger_fees,
             )
             .await?;
@@ -539,7 +540,8 @@ pub trait BlockProdStrategy {
         publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
-        expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>,
+        solution_hash: H256,
+        ledger_expiry_balance_delta: LedgerExpiryBalanceDelta,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -553,13 +555,14 @@ pub trait BlockProdStrategy {
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
+            &solution_hash,
             &self.inner().config.consensus,
             commitment_txs_to_bill,
             submit_txs,
             publish_txs,
             initial_treasury_balance,
-            &expired_ledger_fees,
-        );
+            &ledger_expiry_balance_delta,
+        )?;
 
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {
@@ -720,9 +723,8 @@ pub trait BlockProdStrategy {
         // Publish Ledger Transactions
         let publish_chunks_added =
             calculate_chunks_added(&publish_txs.txs, self.inner().config.consensus.chunk_size);
-        let publish_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Publish]
-            .max_chunk_offset
-            + publish_chunks_added;
+        let publish_total_chunks =
+            prev_block_header.data_ledgers[DataLedger::Publish].total_chunks + publish_chunks_added;
         let opt_proofs = publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
@@ -791,9 +793,8 @@ pub trait BlockProdStrategy {
         }
         let submit_chunks_added =
             calculate_chunks_added(&submit_txs, self.inner().config.consensus.chunk_size);
-        let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit]
-            .max_chunk_offset
-            + submit_chunks_added;
+        let submit_total_chunks =
+            prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
         // build a new block header
         let mut irys_block = IrysBlockHeader {
@@ -821,7 +822,7 @@ pub trait BlockProdStrategy {
                     ledger_id: DataLedger::Publish.into(),
                     tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs.txs).0,
                     tx_ids: H256List(publish_txs.txs.iter().map(|t| t.id).collect::<Vec<_>>()),
-                    max_chunk_offset: publish_max_chunk_offset,
+                    total_chunks: publish_total_chunks,
                     expires: None,
                     proofs: opt_proofs,
                     required_proof_count: Some(
@@ -837,7 +838,7 @@ pub trait BlockProdStrategy {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
                     tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
-                    max_chunk_offset: submit_max_chunk_offset,
+                    total_chunks: submit_total_chunks,
                     expires: Some(
                         self.inner()
                             .config
@@ -996,7 +997,7 @@ pub trait BlockProdStrategy {
         Vec<CommitmentTransaction>,
         Vec<DataTransactionHeader>,
         PublishLedgerWithTxs,
-        BTreeMap<Address, (U256, RollingHash)>,
+        LedgerExpiryBalanceDelta,
     )> {
         let config = &self.inner().config;
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1033,7 +1034,7 @@ pub trait BlockProdStrategy {
                 (epoch, commit)
             };
 
-            tracing::error!("about to calculate fees");
+            tracing::debug!("about to calculate fees");
             // Calculate fees for expired ledgers
             aggregated_miner_fees = self
                 .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
@@ -1090,7 +1091,7 @@ pub trait BlockProdStrategy {
             };
             // IMPORTANT: Commitment txs get billed on regular blocks
             commitment_txs_to_bill = mempool_txs.commitment_tx;
-            aggregated_miner_fees = BTreeMap::new();
+            aggregated_miner_fees = LedgerExpiryBalanceDelta::default();
         };
         let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
             vec![system_transaction_ledger]
@@ -1169,7 +1170,7 @@ pub trait BlockProdStrategy {
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
-    ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
+    ) -> eyre::Result<LedgerExpiryBalanceDelta> {
         ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
             block_height,
@@ -1178,6 +1179,7 @@ pub trait BlockProdStrategy {
             Arc::clone(&self.inner().block_index),
             self.inner().service_senders.mempool.clone(),
             self.inner().db.clone(),
+            true, // we expect the txs to be promoted otherwise return perm fee
         )
         .in_current_span()
         .await

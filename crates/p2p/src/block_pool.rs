@@ -53,6 +53,8 @@ pub enum BlockPoolError {
     ForkChoiceFailed(String),
     #[error("Previous block {0:?} not found")]
     PreviousBlockNotFound(BlockHash),
+    #[error("Block {0:?} is a part of a pruned fork")]
+    ForkedBlock(BlockHash),
 }
 
 impl From<PeerNetworkError> for BlockPoolError {
@@ -170,14 +172,6 @@ impl BlockCacheGuard {
             .await
             .requested_blocks
             .contains(block_hash)
-    }
-
-    /// Internal crate method to clear cache
-    pub(crate) async fn clear(&self) {
-        let mut guard = self.inner.write().await;
-        guard.orphaned_blocks_by_parent.clear();
-        guard.requested_blocks.clear();
-        guard.blocks.clear();
     }
 
     async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
@@ -513,6 +507,17 @@ where
             current_block_hash, previous_block_status
         );
 
+        if previous_block_status.is_a_part_of_pruned_fork() {
+            error!(
+                "Block pool: Parent block ({:?}) for block {:?} is a part of a pruned fork, removing block from the pool",
+                prev_block_hash, current_block_hash
+            );
+            self.blocks_cache
+                .remove_block(&block_header.block_hash)
+                .await;
+            return Err(BlockPoolError::ForkedBlock(block_header.block_hash));
+        }
+
         if !previous_block_status.is_processed() {
             self.blocks_cache
                 .change_block_processing_status(block_header.block_hash, false)
@@ -764,11 +769,6 @@ where
                 .is_processed()
     }
 
-    /// Internal method for the p2p services to get direct access to the cache
-    pub(crate) fn block_cache_guard(&self) -> BlockCacheGuard {
-        self.blocks_cache.clone()
-    }
-
     /// Inserts an execution payload into the internal cache so that it can be
     /// retrieved by the [`ExecutionPayloadProvider`].
     pub async fn add_execution_payload_to_cache(
@@ -872,6 +872,13 @@ fn check_block_status(
                     block_hash,
                 );
             Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
+        }
+        BlockStatus::PartOfAPrunedFork => {
+            debug!(
+                "Block pool: Block {:?} (height {}) is part of a pruned fork",
+                block_hash, block_height,
+            );
+            Err(BlockPoolError::ForkedBlock(block_hash))
         }
     }
 }

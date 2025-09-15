@@ -49,7 +49,7 @@ impl IrysChainSpecBuilder {
                     ledger_id: 0,
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     expires: None,
                     proofs: None,
                     required_proof_count: Some(
@@ -60,7 +60,7 @@ impl IrysChainSpecBuilder {
                     ledger_id: 1,
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
-                    max_chunk_offset: 0,
+                    total_chunks: 0,
                     expires: None,
                     proofs: None,
                     required_proof_count: None,

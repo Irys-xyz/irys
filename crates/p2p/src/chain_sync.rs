@@ -110,6 +110,8 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     reth_service_actor: Option<Addr<RethServiceActor>>,
+    /// An atomic bool to enable or disable VDF mining when sync is in progress
+    is_vdf_mining_enabled: Arc<AtomicBool>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -155,6 +157,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self::new_with_client(
             sync_state,
@@ -165,6 +168,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             block_pool,
             gossip_data_handler,
             reth_service_actor,
+            is_vdf_mining_enabled,
         )
     }
 }
@@ -179,6 +183,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
         reth_service_actor: Option<Addr<RethServiceActor>>,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sync_state,
@@ -190,11 +195,12 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
             reth_service_actor,
+            is_vdf_mining_enabled,
         }
     }
 
     /// Perform a sync operation
-    async fn spawn_chain_sync_task(
+    fn spawn_chain_sync_task(
         &self,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
         is_initial_sync: bool,
@@ -218,8 +224,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let start_sync_from_height = self.block_index.read().latest_height();
-        // Clear any pending blocks from the cache
-        self.block_pool.block_cache_guard().clear().await;
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
@@ -229,6 +233,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
         let reth_service_addr = self.reth_service_actor.clone();
+        let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
 
         tokio::spawn(
             async move {
@@ -236,6 +241,15 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     .gossip_client
                     .hydrate_peers_online_status(&peer_list)
                     .await;
+
+                debug!("Sync task: Disabling VDF mining before starting sync");
+                let was_mining_enabled_before_sync = is_vdf_mining_enabled.load(Ordering::Relaxed);
+                // Disable VDF mining when sync is in progress
+                if was_mining_enabled_before_sync {
+                    is_vdf_mining_enabled.store(false, Ordering::Relaxed);
+                } else {
+                    debug!("Sync task: VDF mining was already disabled before sync, not sending disable signal");
+                }
 
                 if let Err(err) = block_pool
                     .repair_missing_payloads_if_any(reth_service_addr)
@@ -258,6 +272,13 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     gossip_data_handler,
                 )
                 .await;
+
+                debug!("Sync task: Enabling VDF mining after sync");
+                if was_mining_enabled_before_sync {
+                    is_vdf_mining_enabled.store(was_mining_enabled_before_sync, Ordering::Relaxed);
+                } else {
+                    debug!("Sync task: VDF mining was disabled before sync, not sending enable signal");
+                }
 
                 is_sync_task_spawned.store(false, Ordering::Relaxed);
 
@@ -461,8 +482,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
                 self.inner
-                    .spawn_chain_sync_task(Some(response_sender), true)
-                    .await;
+                    .spawn_chain_sync_task(Some(response_sender), true);
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
                 self.handle_periodic_sync_check().await;
@@ -545,7 +565,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         {
             Ok(true) => {
                 info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None, false).await;
+                self.inner.spawn_chain_sync_task(None, false);
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");

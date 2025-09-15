@@ -611,12 +611,7 @@ impl Inner {
         tx.inner.commit()?;
 
         // stage 2: move submit transactions from tree to index
-        let submit_tx_ids: Vec<H256> = data_ledger_txs
-            .get(&DataLedger::Submit)
-            .unwrap()
-            .iter()
-            .copied()
-            .collect();
+        let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
         {
             let mut_tx = self
                 .irys_db
@@ -652,12 +647,7 @@ impl Inner {
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
-        let publish_tx_ids: Vec<H256> = data_ledger_txs
-            .get(&DataLedger::Publish)
-            .unwrap()
-            .iter()
-            .copied()
-            .collect();
+        let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
         {
             let mut_tx = self
                 .irys_db

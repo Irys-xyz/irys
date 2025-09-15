@@ -290,7 +290,7 @@ pub struct HttpConfig {
 
 /// P2P handshake configuration with sensible defaults
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct P2PHandshakeConfig {
     pub max_concurrent_handshakes: usize,
     pub max_peers_per_response: usize,
@@ -317,7 +317,7 @@ impl Default for P2PHandshakeConfig {
 
 /// P2P gossip/broadcast configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct P2PGossipConfig {
     /// Maximum peers to target per broadcast step
     pub broadcast_batch_size: usize,
@@ -336,7 +336,7 @@ impl Default for P2PGossipConfig {
 
 /// P2P pull/request configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct P2PPullConfig {
     /// How many top active peers to consider before random sampling
     pub top_active_window: usize,
@@ -433,6 +433,19 @@ impl NodeConfig {
             ConsensusOptions::Testing => ConsensusConfig::testing(),
             ConsensusOptions::Custom(consensus_config) => consensus_config.clone(),
         }
+    }
+
+    pub fn with_consensus<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut ConsensusConfig),
+    {
+        f(self.consensus.get_mut());
+        self
+    }
+
+    pub fn with_genesis_peer_discovery_timeout(mut self, timeout_millis: u64) -> Self {
+        self.genesis_peer_discovery_timeout_millis = timeout_millis;
+        self
     }
 
     pub fn miner_address(&self) -> Address {

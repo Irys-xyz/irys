@@ -5,6 +5,7 @@ use crate::{
         BlockMigratedEvent, BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent,
     },
     cache_service::CacheServiceAction,
+    chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
@@ -16,7 +17,7 @@ use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
 };
 
 // Only contains senders, thread-safe to clone and share
@@ -55,8 +56,8 @@ impl ServiceSenders {
 #[derive(Debug)]
 pub struct ServiceReceivers {
     pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
+    pub chunk_migration: UnboundedReceiver<ChunkMigrationServiceMessage>,
     pub mempool: UnboundedReceiver<MempoolServiceMessage>,
-    pub vdf_mining: Receiver<bool>,
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
@@ -74,8 +75,8 @@ pub struct ServiceReceivers {
 #[derive(Debug)]
 pub struct ServiceSendersInner {
     pub chunk_cache: UnboundedSender<CacheServiceAction>,
+    pub chunk_migration: UnboundedSender<ChunkMigrationServiceMessage>,
     pub mempool: UnboundedSender<MempoolServiceMessage>,
-    pub vdf_mining: Sender<bool>,
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
@@ -94,10 +95,9 @@ impl ServiceSendersInner {
     #[must_use]
     pub fn init() -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
-
+        let (chunk_migration_sender, chunk_migration_receiver) =
+            unbounded_channel::<ChunkMigrationServiceMessage>();
         let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
-        // enabling/disabling VDF mining thread
-        let (vdf_mining_sender, vdf_mining_receiver) = channel::<bool>(1);
         // vdf channel for fast forwarding steps during node sync
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
@@ -122,8 +122,8 @@ impl ServiceSendersInner {
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
+            chunk_migration: chunk_migration_sender,
             mempool: mempool_sender,
-            vdf_mining: vdf_mining_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
             storage_modules: sm_sender,
             data_sync: ds_sender,
@@ -139,8 +139,8 @@ impl ServiceSendersInner {
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
+            chunk_migration: chunk_migration_receiver,
             mempool: mempool_receiver,
-            vdf_mining: vdf_mining_receiver,
             vdf_fast_forward: vdf_fast_forward_receiver,
             storage_modules: sm_receiver,
             data_sync: ds_receiver,
