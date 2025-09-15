@@ -1732,7 +1732,8 @@ pub async fn data_txs_are_valid(
                         u32::try_from(i).expect("Value exceeds u32::MAX"),
                     );
 
-                    let maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                    // Try local cache first
+                    let mut maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
                         &ro_tx,
                         tx_header.data_root,
                         tx_chunk_offset,
@@ -1740,6 +1741,113 @@ pub async fn data_txs_are_valid(
                     .map_err(|e| PreValidationError::DatabaseError {
                         error: e.to_string(),
                     })?;
+
+                    // If missing locally, attempt fetch-on-miss from peers and ingest
+                    if maybe_chunk.is_none() {
+                        // Ask DataSync service for active peers
+                        let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
+                        let _ = service_senders
+                            .data_sync
+                            .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+
+                        // Small timeout budget per peer-list request
+                        if let Ok(Ok(active_peers)) =
+                            tokio::time::timeout(std::time::Duration::from_millis(1000), peers_rx)
+                                .await
+                        {
+                            // Take up to 5 API addresses now to avoid holding the lock across awaits
+                            let api_addrs: Vec<_> = {
+                                let guard = active_peers.read().unwrap();
+                                guard
+                                    .iter()
+                                    .take(5)
+                                    .map(|(_addr, pbm)| pbm.peer_address.api)
+                                    .collect()
+                            };
+                            for api_addr in api_addrs {
+                                // Build data_root/offset fetch URL using peer API address
+                                let url = format!(
+                                    "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                    api_addr,
+                                    publish_ledger.ledger_id,
+                                    tx_header.data_root,
+                                    u32::try_from(i).expect("Value exceeds u32::MAX")
+                                );
+
+                                // Fetch with short timeout
+                                let client = reqwest::Client::new();
+                                let resp = tokio::time::timeout(
+                                    std::time::Duration::from_millis(1500),
+                                    client.get(&url).send(),
+                                )
+                                .await;
+
+                                let Ok(Ok(resp)) = resp else {
+                                    continue;
+                                };
+                                if !resp.status().is_success() {
+                                    continue;
+                                }
+
+                                // Parse ChunkFormat and convert to UnpackedChunk
+                                let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
+                                else {
+                                    continue;
+                                };
+
+                                let unpacked = match chunk_format {
+                                    irys_types::ChunkFormat::Unpacked(u) => u,
+                                    irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
+                                        &p,
+                                        config.consensus.entropy_packing_iterations,
+                                        config.consensus.chunk_size as usize,
+                                        config.consensus.chain_id,
+                                    ),
+                                };
+
+                                // Basic sanity checks before ingest
+                                if unpacked.data_root != tx_header.data_root
+                                    || *unpacked.tx_offset
+                                        != u32::try_from(i).expect("Value exceeds u32::MAX")
+                                {
+                                    continue;
+                                }
+
+                                // Ingest via mempool to persist and validate
+                                let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
+                                let _ = service_senders.mempool.send(
+                                    crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx),
+                                );
+
+                                // Wait briefly for ingest to complete
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_millis(1500),
+                                    ing_rx,
+                                )
+                                .await;
+
+                                // Re-open a fresh read tx to observe the write
+                                let ro_tx2 =
+                                    db.tx().map_err(|e| PreValidationError::DatabaseError {
+                                        error: e.to_string(),
+                                    })?;
+                                maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                                    &ro_tx2,
+                                    tx_header.data_root,
+                                    tx_chunk_offset,
+                                )
+                                .map_err(|e| {
+                                    PreValidationError::DatabaseError {
+                                        error: e.to_string(),
+                                    }
+                                })?;
+
+                                if maybe_chunk.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
                     let (_meta, cached_chunk) =
                         maybe_chunk.ok_or_else(|| PreValidationError::InvalidIngressProof {
