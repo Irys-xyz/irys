@@ -1714,6 +1714,71 @@ pub async fn data_txs_are_valid(
                     })?;
             }
 
+            // Enforce data availability by verifying ingress proofs with the actual chunks
+            {
+                // Collect all chunks for this transaction from the DB (by tx-relative offset)
+                let expected_chunk_count =
+                    tx_header.data_size.div_ceil(config.consensus.chunk_size);
+
+                let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
+                    error: e.to_string(),
+                })?;
+
+                let mut chunks: Vec<irys_types::ChunkBytes> =
+                    Vec::with_capacity(expected_chunk_count as usize);
+
+                for i in 0..expected_chunk_count {
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(
+                        u32::try_from(i).expect("Value exceeds u32::MAX"),
+                    );
+
+                    let maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                        &ro_tx,
+                        tx_header.data_root,
+                        tx_chunk_offset,
+                    )
+                    .map_err(|e| PreValidationError::DatabaseError {
+                        error: e.to_string(),
+                    })?;
+
+                    let (_meta, cached_chunk) =
+                        maybe_chunk.ok_or_else(|| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!(
+                                "Data unavailable: missing chunk at offset {} for data_root {:?}",
+                                i, tx_header.data_root
+                            ),
+                        })?;
+
+                    let chunk_bytes = cached_chunk.chunk.ok_or_else(|| {
+                        PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: "Missing chunk body bytes".to_string(),
+                        }
+                    })?;
+                    chunks.push(chunk_bytes.0);
+                }
+
+                // Verify each ingress proof against the actual chunks
+                for proof in tx_proofs.iter().cloned() {
+                    let ok = irys_types::ingress::verify_ingress_proof(
+                        proof,
+                        chunks.clone().into_iter().map(Ok),
+                        config.consensus.chain_id,
+                    )
+                    .map_err(|e| PreValidationError::InvalidIngressProof {
+                        tx_id: tx_header.id,
+                        reason: e.to_string(),
+                    })?;
+
+                    if !ok {
+                        return Err(PreValidationError::IngressProofMismatch {
+                            tx_id: tx_header.id,
+                        });
+                    }
+                }
+            }
+
             if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
                 return Err(PreValidationError::IngressProofCountMismatch {
                     expected: config.consensus.number_of_ingress_proofs_total as usize,
