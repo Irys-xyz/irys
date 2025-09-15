@@ -6,9 +6,11 @@ use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
-    partition::PartitionHash, resolve_proofs, string_u128, u64_stringify, Arbitrary, Base64,
-    Compact, Config, DataRootLeave, DataTransactionHeader, H256List, IngressProofsList,
-    IrysSignature, Proof, H256, U256,
+    partition::PartitionHash,
+    resolve_proofs,
+    serialization::{optional_string_u64, string_u64},
+    string_u128, u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave,
+    DataTransactionHeader, H256List, IngressProofsList, IrysSignature, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
@@ -46,6 +48,7 @@ pub struct VDFLimiterInfo {
     /// The output of the latest step - the source of the entropy for the mining nonces.
     pub output: H256,
     /// The global sequence number of the nonce limiter step at which the block was found.
+    #[serde(with = "string_u64")]
     pub global_step_number: u64,
     /// The hash of the latest block mined below the current reset line.
     pub seed: H256,
@@ -181,6 +184,7 @@ pub struct IrysBlockHeader {
     pub signature: IrysSignature,
 
     /// The block height.
+    #[serde(with = "string_u64")]
     pub height: u64,
 
     /// Difficulty threshold used to produce the current block.
@@ -456,7 +460,11 @@ pub struct DataTransactionLedger {
     #[serde(default, with = "u64_stringify")]
     pub total_chunks: u64,
     /// This ledger expires after how many epochs
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_string_u64"
+    )]
     pub expires: Option<u64>,
     /// When transactions are promoted they must include their ingress proofs
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -805,6 +813,7 @@ pub struct BlockIndexItem {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct LedgerIndexItem {
     /// The total number of chunks in this ledger since genesis
+    #[serde(with = "string_u64")]
     pub total_chunks: u64, // 8 bytes
     /// The merkle root of the TX that apply to this ledger in the current block
     pub tx_root: H256, // 32 bytes
@@ -1191,5 +1200,63 @@ mod tests {
 
     fn mock_header() -> IrysBlockHeader {
         IrysBlockHeader::new_mock_header()
+    }
+
+    #[test]
+    fn test_block_header_serialization() {
+        let header = IrysBlockHeader {
+            height: u64::MAX,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&header).unwrap();
+        assert!(json.contains(&format!("\"height\":\"{}\"", u64::MAX)));
+
+        let deserialized: IrysBlockHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.height, u64::MAX);
+    }
+
+    #[test]
+    fn test_vdf_limiter_info_serialization() {
+        let vdf_info = VDFLimiterInfo {
+            global_step_number: u64::MAX,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&vdf_info).unwrap();
+        assert!(json.contains(&format!("\"globalStepNumber\":\"{}\"", u64::MAX)));
+
+        let deserialized: VDFLimiterInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.global_step_number, u64::MAX);
+    }
+
+    #[test]
+    fn test_ledger_index_item_serialization() {
+        let ledger_item = LedgerIndexItem {
+            total_chunks: u64::MAX,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&ledger_item).unwrap();
+        assert!(json.contains(&format!("\"total_chunks\":\"{}\"", u64::MAX)));
+
+        let deserialized: LedgerIndexItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_chunks, u64::MAX);
+    }
+
+    #[test]
+    fn test_data_transaction_ledger_expires_serialization() {
+        use serde_json;
+
+        let ledger = DataTransactionLedger {
+            expires: Some(u64::MAX),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&ledger).unwrap();
+        assert!(json.contains(&format!("\"expires\":\"{}\"", u64::MAX)));
+
+        let deserialized: DataTransactionLedger = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.expires, Some(u64::MAX));
     }
 }
