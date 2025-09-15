@@ -85,7 +85,7 @@ where
     M: MempoolFacade,
 {
     /// Database provider for accessing transaction headers and related data.
-    db: DatabaseProvider,
+    pub(crate) db: DatabaseProvider,
 
     blocks_cache: BlockCacheGuard,
 
