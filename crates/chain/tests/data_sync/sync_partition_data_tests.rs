@@ -71,7 +71,7 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
 
     stake_and_pledge_signer(&genesis_node, &signer1, 3).await?;
     stake_and_pledge_signer(&genesis_node, &signer2, 3).await?;
-    tracing::error!("staged and pledged");
+    tracing::info!("staged and pledged");
 
     // 4. Mine epoch and validate capacity assignments
     genesis_node.mine_until_next_epoch().await?;
@@ -82,7 +82,7 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
     validate_partition_assignments(&epoch_snapshot, signer2.address(), 0, 0, 3);
 
     // Mine another epoch for final ledger assignments
-    tracing::error!("next epoch");
+    tracing::info!("next epoch");
     genesis_node.mine_until_next_epoch().await?;
     let epoch_snapshot = genesis_node.get_canonical_epoch_snapshot();
 
@@ -97,33 +97,33 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
             .await;
     }
 
-    tracing::error!("waiting for ingress proofs");
+    tracing::info!("waiting for ingress proofs");
     genesis_node
         .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
         .await?;
-    tracing::error!("got ingress proofs");
+    tracing::info!("got ingress proofs");
 
     //6. Start both the peer nodes and wait for them to sync the data
     let peer1_config = genesis_node.testing_peer_with_signer(&signer1);
     let peer2_config = genesis_node.testing_peer_with_signer(&signer2);
 
     // Start the peers: wait for them to pack so they can start syncing data
-    tracing::error!("start peer 1");
+    tracing::info!("start peer 1");
     let peer1_node = IrysNodeTest::new(peer1_config.clone())
         .start_and_wait_for_packing("PEER1", seconds_to_wait)
         .await;
-    tracing::error!("start peer 2");
+    tracing::info!("start peer 2");
 
     let peer2_node = IrysNodeTest::new(peer2_config.clone())
         .start_and_wait_for_packing("PEER2", seconds_to_wait)
         .await;
 
     // Mine a block and wait for all nodes to sync to the same height
-    tracing::error!("mining block");
+    tracing::info!("mining block");
     let latest_block = genesis_node.mine_block().await?;
 
     // Wait for all nodes to reach the same block height before checking data
-    tracing::error!("waiting for peers to sync");
+    tracing::info!("waiting for peers to sync");
     genesis_node
         .wait_until_height(latest_block.height, seconds_to_wait)
         .await?;
@@ -137,7 +137,7 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
     // Check data sync completion with simple polling
     let (mut genesis_synced, mut peer1_synced, mut peer2_synced) = (false, false, false);
 
-    tracing::error!("waiting for data to sync");
+    tracing::info!("waiting for data to sync");
     for attempt in 0..60 {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
