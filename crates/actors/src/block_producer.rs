@@ -964,7 +964,7 @@ pub trait BlockProdStrategy {
                 (epoch, commit)
             };
 
-            tracing::error!("about to calculate fees");
+            tracing::debug!("about to calculate fees");
             // Calculate fees for expired ledgers
             aggregated_miner_fees = self
                 .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
