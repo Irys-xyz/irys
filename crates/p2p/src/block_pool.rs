@@ -1,13 +1,14 @@
 use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
-use crate::{GossipError, GossipResult};
+use crate::{GossipDataHandler, GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::block_validation::shadow_transactions_are_valid;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
 use irys_actors::MempoolFacade;
+use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -282,10 +283,11 @@ where
         }
     }
 
-    async fn validate_and_submit_reth_payload(
+    async fn validate_and_submit_reth_payload<A: ApiClient>(
         &self,
         block_header: &IrysBlockHeader,
         reth_service: Option<Addr<RethServiceActor>>,
+        gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
         debug!(
             "Block pool: Validating and submitting execution payload for block {:?}",
@@ -332,6 +334,7 @@ where
             &self.sync_service_sender,
             block_header.evm_block_hash,
             false,
+            Some(Arc::clone(&gossip_data_handler)),
         )
         .await
         .map_err(|error| {
@@ -402,9 +405,10 @@ where
     }
 
     #[instrument(err, skip_all)]
-    pub async fn repair_missing_payloads_if_any(
+    pub async fn repair_missing_payloads_if_any<A: ApiClient>(
         &self,
         reth_service: Option<Addr<RethServiceActor>>,
+        gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
         if reth_service.is_none() {
             error!("Reth service is not available, skipping payload repair");
@@ -454,15 +458,19 @@ where
                 "Repairing a missing payload for the block {:?}",
                 block.block_hash
             );
-            self.validate_and_submit_reth_payload(&block, reth_service.clone())
-                .await?;
+            self.validate_and_submit_reth_payload(
+                &block,
+                reth_service.clone(),
+                Arc::clone(&gossip_data_handler),
+            )
+            .await?;
         }
 
         Ok(())
     }
 
     #[instrument(skip_all, target = "BlockPool")]
-    pub(crate) async fn process_block(
+    pub(crate) async fn process_block<A: ApiClient>(
         &self,
         block_header: Arc<IrysBlockHeader>,
         skip_validation_for_fast_track: bool,
@@ -571,11 +579,12 @@ where
 
         if skip_validation_for_fast_track {
             // Preemptively handle reth payload for the trusted sync path
-            if let Err(err) = Self::pull_and_seal_execution_payload(
+            if let Err(err) = Self::pull_and_seal_execution_payload::<A>(
                 &self.execution_payload_provider,
                 &self.sync_service_sender,
                 block_header.evm_block_hash,
                 skip_validation_for_fast_track,
+                None,
             )
             .await
             {
@@ -621,7 +630,7 @@ where
         if !skip_validation_for_fast_track {
             // If skip validation is true, we handle it preemptively above, if it isn't, it's a
             //  good idea to request it here
-            self.pull_and_seal_execution_payload_in_background(
+            self.pull_and_seal_execution_payload_in_background::<A>(
                 block_header.evm_block_hash,
                 skip_validation_for_fast_track,
             );
@@ -657,11 +666,12 @@ where
         Ok(ProcessBlockResult::Processed)
     }
 
-    pub(crate) async fn pull_and_seal_execution_payload(
+    pub(crate) async fn pull_and_seal_execution_payload<A: ApiClient>(
         execution_payload_provider: &ExecutionPayloadCache,
         sync_service_sender: &mpsc::UnboundedSender<SyncChainServiceMessage>,
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
+        gossip_data_handler: Option<Arc<GossipDataHandler<M, B, A>>>,
     ) -> GossipResult<()> {
         debug!(
             "Block pool: Forcing handling of execution payload for EVM block hash: {:?}",
@@ -674,7 +684,22 @@ where
             .await
         {
             debug!("BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network", evm_block_hash);
-            if let Err(send_err) =
+
+            if let Some(gossip_data_handler) = gossip_data_handler {
+                let result = gossip_data_handler
+                    .pull_and_add_execution_payload_to_cache(evm_block_hash, use_trusted_peers_only)
+                    .await;
+                if let Err(e) = response_sender.send(result) {
+                    let err_text = format!(
+                        "BlockPool: Failed to send response from pull_and_add_execution_payload_to_cache: {:?}",
+                        e
+                    );
+                    error!(err_text);
+                    return Err(GossipError::Internal(InternalGossipError::Unknown(
+                        err_text,
+                    )));
+                }
+            } else if let Err(send_err) =
                 sync_service_sender.send(SyncChainServiceMessage::PullPayloadFromTheNetwork {
                     evm_block_hash,
                     use_trusted_peers_only,
@@ -708,7 +733,7 @@ where
     /// Requests the execution payload for the given EVM block hash if it is not already stored
     /// locally. After that, it waits for the payload to arrive and broadcasts it.
     /// This function spawns a new task to fire the request without waiting for the response.
-    pub(crate) fn pull_and_seal_execution_payload_in_background(
+    pub(crate) fn pull_and_seal_execution_payload_in_background<A: ApiClient>(
         &self,
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
@@ -721,11 +746,12 @@ where
         let gossip_broadcast_sender = self.service_senders.gossip_broadcast.clone();
         let chain_sync_sender = self.sync_service_sender.clone();
         tokio::spawn(async move {
-            match Self::pull_and_seal_execution_payload(
+            match Self::pull_and_seal_execution_payload::<A>(
                 &execution_payload_provider,
                 &chain_sync_sender,
                 evm_block_hash,
                 use_trusted_peers_only,
+                None,
             )
             .await
             {

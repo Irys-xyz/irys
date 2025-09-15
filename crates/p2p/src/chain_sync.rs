@@ -256,7 +256,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 }
 
                 if let Err(err) = block_pool
-                    .repair_missing_payloads_if_any(reth_service_addr)
+                    .repair_missing_payloads_if_any(reth_service_addr, Arc::clone(&gossip_data_handler))
                     .await
                 {
                     error!(
@@ -326,7 +326,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
                 futures.push(async move {
                     block_pool
-                        .process_block(header, is_fast_tracking)
+                        .process_block::<A>(header, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
