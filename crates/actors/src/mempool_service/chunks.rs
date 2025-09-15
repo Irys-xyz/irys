@@ -292,23 +292,25 @@ impl Inner {
         // if we have, update it's expiry height
 
         //  TODO: hook into whatever manages ingress proofs
-        match read_tx
-            .get::<IngressProofs>(root_hash)
-            .map_err(|_| ChunkIngressError::DatabaseError)
-        {
+        let signer_addr = self.config.irys_signer().address();
+        match irys_database::ingress_proof_by_data_root_address(
+            &read_tx,
+            chunk.data_root,
+            signer_addr,
+        ) {
+            Ok(Some(_)) => {
+                info!(
+                    "Our ingress proof already exists for data root {}",
+                    &root_hash
+                );
+                return Ok(());
+            }
+            Ok(None) => {
+                // No proof by our signer exists; continue to check chunk completeness and potentially generate our proof.
+            }
             Err(e) => {
                 error!("Database error: {:?}", e);
-                return Err(e);
-            }
-            Ok(v) => {
-                if v.is_some() {
-                    info!(
-                        "We've already generated an ingress proof for data root {}",
-                        &root_hash
-                    );
-
-                    return Ok(());
-                };
+                return Err(ChunkIngressError::DatabaseError);
             }
         }
 
