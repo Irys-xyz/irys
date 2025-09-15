@@ -1318,12 +1318,12 @@ async fn update_reth_with_initial_block(
         .get_latest_item_cloned()
         .expect("a block index must have at least one entry at init");
     let latest_block = database::block_header_by_hash(
-            &irys_db.tx().unwrap(),
-            &latest_block_index.block_hash,
-            false,
-        )
-        .expect("database to be accessible during init")
-        .expect("at least the genesis block header must be in the database");
+        &irys_db.tx().unwrap(),
+        &latest_block_index.block_hash,
+        false,
+    )
+    .expect("database to be accessible during init")
+    .expect("at least the genesis block header must be in the database");
 
     // update reth service about the latest block data it must use
     if let Some(reth_service_addr) = reth_service_addr {
