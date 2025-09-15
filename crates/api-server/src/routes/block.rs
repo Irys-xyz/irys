@@ -54,8 +54,8 @@ pub async fn get_block(
                 .map(|b| b.block_hash)?
         }
         BlockParam::Finalized | BlockParam::Pending => {
-            return Err(ApiError::Internal {
-                err: String::from("Unsupported tag"),
+            return Err(ApiError::NotImplemented {
+                feature: format!("Block tag '{tag_param}' is not yet supported"),
             });
         }
         BlockParam::Hash(hash) => hash,
@@ -133,7 +133,7 @@ async fn get_block_by_hash(
     Ok(web::Json(cbh))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum BlockParam {
     Latest,

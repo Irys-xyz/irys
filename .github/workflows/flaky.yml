@@ -2,7 +2,7 @@ name: Flaky Test Detection
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Daily at 4 AM UTC
+    - cron: '0 3 * * *'  # Daily at 3 AM UTC
   workflow_dispatch:
     inputs:
       iterations:
@@ -32,16 +32,14 @@ env:
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # RUSTFLAGS: "-C link-arg=-fuse-ld=lld"  # Disabled for ubuntu-latest runner
   RUST_BACKTRACE: short
   # keep build artifacts contained to this repo's workspace on the self-hosted runner
   CARGO_TARGET_DIR: ${{ github.workspace }}/.target
 
 jobs:
   flaky-tests:
-    #runs-on: [self-hosted, test-runner]
-    runs-on: [ubuntu-latest]
-    timeout-minutes: 240
+    runs-on: [self-hosted, test-runner]
+    timeout-minutes: 300
     # Only run scheduled jobs on master branch, but allow manual dispatch on any branch
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.ref == 'refs/heads/master')
     steps:
@@ -51,6 +49,9 @@ jobs:
           fetch-depth: 1
           clean: true  # Always start with clean workspace
 
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+        
       - name: Build xtask
         shell: bash
         run: |

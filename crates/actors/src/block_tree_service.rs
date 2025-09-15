@@ -1,7 +1,9 @@
 use crate::{
     block_index_service::BlockIndexService,
     block_validation::PreValidationError,
-    broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
+    broadcast_mining_service::{
+        BroadcastDifficultyUpdate, BroadcastMiningService, BroadcastPartitionsExpiration,
+    },
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
@@ -874,6 +876,26 @@ impl BlockTreeServiceInner {
         }
 
         self.notify_services_of_block_confirmation(block_hash, &arc_block);
+
+        // Broadcast difficulty update to miners if tip difficulty changed from parent
+        let parent_diff_changed = {
+            let cache = self.cache.read().expect("cache read lock poisoned");
+            let parent_block = cache
+                .get_block(&arc_block.previous_block_hash)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "parent block {} not found in cache while broadcasting difficulty update",
+                        arc_block.previous_block_hash
+                    )
+                });
+            parent_block.diff != arc_block.diff
+        };
+        if parent_diff_changed {
+            // Ensure we are in the Actix system context before accessing the registry
+            System::set_current(self.system.clone());
+            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
+            mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(arc_block.clone()));
+        }
 
         // Handle block migration (move chunks to disk and add to block_index)
         self.try_notify_services_of_block_migration(&arc_block)
