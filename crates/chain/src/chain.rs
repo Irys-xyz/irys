@@ -847,13 +847,12 @@ impl IrysNode {
         let (service_senders, receivers) = ServiceSenders::new();
 
         // start block index service (tokio)
-        let _block_index_handle =
-            irys_actors::block_index_service::BlockIndexService::spawn_service(
-                receivers.block_index,
-                block_index.clone(),
-                &config.consensus,
-                runtime_handle.clone(),
-            );
+        let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
+            receivers.block_index,
+            block_index.clone(),
+            &config.consensus,
+            runtime_handle.clone(),
+        );
 
         // start reth service
         let (reth_service_actor, reth_arbiter) =
@@ -1272,6 +1271,7 @@ impl IrysNode {
             services.push(ArbiterEnum::TokioService(block_tree_handle));
 
             // 7. State management
+            services.push(ArbiterEnum::TokioService(block_index_handle));
             services.push(ArbiterEnum::TokioService(mempool_handle));
 
             // 7. Core infrastructure (shutdown last)

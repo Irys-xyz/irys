@@ -759,14 +759,12 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
-
     let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
     let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
         block_index_rx,
-        block_index.clone(),
+        Arc::new(RwLock::new(
+            BlockIndex::new(&config.node_config).await.unwrap(),
+        )),
         &config.consensus,
         tokio::runtime::Handle::current(),
     );

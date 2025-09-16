@@ -1958,7 +1958,7 @@ mod tests {
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
-        Signature, H256, U256,
+        Signature, TokioServiceHandle, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -1967,6 +1967,7 @@ mod tests {
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
         pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
+        pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
@@ -2022,7 +2023,7 @@ mod tests {
 
         // Spawn Tokio BlockIndex service
         let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _block_index_handle = BlockIndexService::spawn_service(
+        let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
             &consensus_config,
@@ -2069,6 +2070,7 @@ mod tests {
             TestContext {
                 block_index,
                 block_index_tx,
+                block_index_handle,
                 miner_address,
                 epoch_snapshot,
                 partition_hash,
