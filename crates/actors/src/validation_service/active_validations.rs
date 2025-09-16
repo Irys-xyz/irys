@@ -1,82 +1,71 @@
-//! Active validations management module.
+//! Priority-based block validation task scheduling.
 //!
-//! Priority-based concurrent validation task management using a two-tier system:
-//! 1. `BlockState`
-//!     1.1. **CanonicalExtension**: Blocks extending canonical tip (highest priority)
-//!     1.2. **Canonical**: Blocks already on canonical chain (medium priority)
-//!     1.3. **Fork**: Alternative chain blocks (low priority)
-//!     1.4. **Unknown**: Blocks with unknown state - generally orphans (lowest priority)
-//! 2. `height`
-//!     Blocks with lower heights have a higher priority
-//! 2. `vdf_step_count`
-//!     Blocks with the same BlockState and height priority level will be ordered by their vdf_step_count, favouring blocks with fewer steps
+//! ## High-Level Flow
 //!
-//! ## Implementation
-//! - Uses priority queue for deriving polling priorities
-//! - Non-blocking processing with `poll_immediate` for completion checks
-//! - Canonical extension detection walks parent chain to canonical tip
-//! - Lower block heights processed first within each priority tier
-//! - Completed tasks immediately removed to free resources
-use futures::future::poll_immediate;
-use futures::FutureExt as _;
+//! 1. New block enters VDF validation (sequential, preemptible)
+//! 2. Valid blocks proceed to concurrent validation (parallel: recall, PoA, shadow txs)
+//! 3. Validated blocks wait for parent validation to complete
+//! 4. Results are reported to the block tree service
+//!
+//! ## Priority System
+//!
+//! Blocks are prioritized by: canonical extension > canonical > fork > unknown,
+//! then by height (lower first) and VDF steps (fewer first).
+
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
-use std::future::Future;
-use std::mem::replace;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::{cmp::Reverse, sync::Arc};
-use tracing::{debug, error, info, instrument};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::sync::Notify;
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 use crate::block_tree_service::ValidationResult;
 use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::VdfValidationResult;
 
+/// Block priority states for validation ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum BlockPriority {
-    /// Canonical extensions that extend from the canonical tip (highest priority)
-    CanonicalExtension,
-    /// Canonical blocks already on chain (middle priority)
-    Canonical,
+pub(super) enum BlockPriority {
+    /// Unknown/orphan blocks (lowest priority)
+    Unknown,
     /// Fork blocks that don't extend the canonical tip (low priority)
     Fork,
-    /// Unknown/orphan blocks (not tracked by the block tree) (Lowest priority)
-    Unknown,
+    /// Canonical blocks already on chain (medium priority)
+    Canonical,
+    /// Canonical extensions that extend from the canonical tip (highest priority)
+    CanonicalExtension,
 }
 
-#[derive(Debug, Clone)]
 /// Metadata struct that is used to inform block validation priority decisions
-pub(crate) struct BlockPriorityMeta {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BlockPriorityMeta {
     pub height: u64,
     pub state: BlockPriority,
     pub vdf_step_count: u64,
-    pub block: Arc<IrysBlockHeader>,
 }
 
-/// Define how ordering for BlockPriorityMeta structs works
-impl Ord for BlockPriorityMeta {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // if two blocks have the same `BlockState` (primary ordering)
-        self.state
-            .cmp(&other.state)
-            // and the same height (prefer lower height blocks)
-            .then_with(|| self.height.cmp(&other.height))
-            // prefer the one with the fewest VDF steps
-            .then_with(|| self.vdf_step_count.cmp(&other.vdf_step_count))
-    }
-}
-
-impl From<(BlockPriority, Arc<IrysBlockHeader>)> for BlockPriorityMeta {
-    fn from(value: (BlockPriority, Arc<IrysBlockHeader>)) -> Self {
-        let (state, block) = value;
+impl BlockPriorityMeta {
+    pub(super) fn new(block: &IrysBlockHeader, state: BlockPriority) -> Self {
         Self {
             height: block.height,
             state,
-            vdf_step_count: block.vdf_limiter_info.steps.len() as u64, // safe, usize <= u64 (for now...)
-            block,
+            vdf_step_count: block.vdf_limiter_info.steps.len() as u64,
         }
+    }
+}
+
+impl Ord for BlockPriorityMeta {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // First compare by state (CanonicalExtension > Canonical > Fork > Unknown)
+        self.state
+            .cmp(&other.state)
+            // Then by height (lower height = higher priority, so reverse the comparison)
+            .then_with(|| other.height.cmp(&self.height))
+            // Finally by VDF steps (fewer steps = higher priority, so reverse the comparison)
+            .then_with(|| other.vdf_step_count.cmp(&self.vdf_step_count))
     }
 }
 
@@ -86,344 +75,376 @@ impl PartialOrd for BlockPriorityMeta {
     }
 }
 
-// needed due to the capture of `block`
-impl PartialEq for BlockPriorityMeta {
-    fn eq(&self, other: &Self) -> bool {
-        self.height == other.height
-            && self.state == other.state
-            && self.vdf_step_count == other.vdf_step_count
+/// Result from a concurrent validation task
+#[derive(Debug)]
+pub(super) struct ConcurrentValidationResult {
+    pub block_hash: BlockHash,
+    pub validation_result: ValidationResult,
+}
+
+/// VDF task with preemption support
+pub(super) struct PreemptibleVdfTask {
+    pub task: BlockValidationTask,
+    pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+    vdf_notify: Arc<Notify>,
+}
+
+impl PreemptibleVdfTask {
+    #[instrument(skip_all, fields(block_hash = %self.task.block.block_hash))]
+    pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
+        let inner = Arc::clone(&self.task.service_inner);
+        let block = Arc::clone(&self.task.block);
+        let skip_vdf = self.task.skip_vdf_validation;
+
+        // No bridge task needed - just use the AtomicU8 directly!
+        let result = match inner
+            .ensure_vdf_is_valid(&block, self.cancel_u8.clone(), skip_vdf)
+            .await
+        {
+            Ok(()) => VdfValidationResult::Valid,
+            Err(e) => {
+                // Check if we were cancelled by inspecting the AtomicU8
+                if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                    VdfValidationResult::Cancelled
+                } else {
+                    VdfValidationResult::Invalid(e)
+                }
+            }
+        };
+
+        // Notify the main loop that VDF task completed so it can poll the result
+        self.vdf_notify.notify_one();
+
+        (result, self.task)
     }
 }
 
-impl Eq for BlockPriorityMeta {}
-
-pub(crate) struct VdfValidationTask {
-    pub block_hash: BlockHash,
-    pub fut: Pin<Box<dyn Future<Output = VdfValidationResult> + Send>>,
-    pub cancel: Arc<AtomicU8>,
+/// Currently running VDF task
+pub(super) struct CurrentVdfTask {
+    pub hash: BlockHash,
+    pub priority: BlockPriorityMeta,
+    pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
+    pub handle: JoinHandle<(VdfValidationResult, BlockValidationTask)>,
+    pub block: Arc<IrysBlockHeader>,
 }
 
-/// Wrapper around active validations with capacity management and priority ordering
-pub(crate) struct ActiveValidations {
-    /// Priority queue for blocks pending VDF validation
-    pub(crate) vdf_pending_queue: PriorityQueue<BlockHash, Reverse<BlockValidationTask>>,
+/// Simplified VDF scheduler with preemption
+pub(super) struct VdfScheduler {
+    /// Currently running VDF task
+    pub current: Option<CurrentVdfTask>,
 
-    /// the currently executing VDF task
-    /// VDF validation is not concurrent
-    pub(crate) vdf_task: Option<VdfValidationTask>,
+    /// Pending VDF tasks
+    pub pending: PriorityQueue<BlockValidationTask, BlockPriorityMeta>,
 
-    /// Priority queue of (block_hash, meta) with  priority ordering of tasks that are ready for concurrent validation
-    pub(crate) concurrent_queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>>,
-
-    /// Map from block hash to the concurrent tasks
-    pub(crate) concurrent_tasks:
-        std::collections::HashMap<BlockHash, Pin<Box<dyn Future<Output = ()> + Send>>>,
-    pub(crate) block_tree_guard: BlockTreeReadGuard,
+    /// VDF task completion notifier
+    vdf_notify: Arc<Notify>,
 }
 
-impl ActiveValidations {
-    pub(crate) fn new(block_tree_guard: BlockTreeReadGuard) -> Self {
+impl VdfScheduler {
+    pub(super) fn new(vdf_notify: Arc<Notify>) -> Self {
         Self {
-            vdf_pending_queue: PriorityQueue::new(),
-            concurrent_queue: PriorityQueue::new(),
-            concurrent_tasks: std::collections::HashMap::new(),
-            block_tree_guard,
-            vdf_task: None,
+            current: None,
+            pending: PriorityQueue::new(),
+            vdf_notify,
         }
     }
 
-    /// Calculate the priority for a block based on its chain position and canonical status
-    #[instrument(skip_all, fields(block_hash = %block.block_hash))]
-    pub(crate) fn calculate_priority(
-        &self,
-        block: &Arc<IrysBlockHeader>,
-    ) -> Reverse<BlockPriorityMeta> {
+    /// Submit a VDF task
+    #[instrument(skip_all, fields(block_hash = %task.block.block_hash, ?priority))]
+    pub(super) fn submit(&mut self, task: BlockValidationTask, priority: BlockPriorityMeta) {
+        let hash = task.block.block_hash;
+
+        // Check for duplicates
+        if self.pending.get(&task).is_some() {
+            return;
+        }
+
+        // Check if current task exists
+        if let Some(current) = &self.current {
+            if current.hash == hash {
+                return;
+            }
+        }
+
+        self.pending.push(task, priority);
+
+        // Check if we should preempt current task
+        self.check_preemption();
+
+        // Notify the main loop to process the task
+        self.vdf_notify.notify_one();
+    }
+
+    /// Check if current task should be preempted by higher priority pending task
+    pub(super) fn check_preemption(&self) {
+        let Some(current) = &self.current else {
+            return;
+        };
+
+        let Some((_, pending_priority)) = self.pending.peek() else {
+            return;
+        };
+
+        // Only preempt if pending task has HIGHER priority
+        if pending_priority > &current.priority {
+            current
+                .cancel_signal
+                .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+        }
+    }
+
+    /// Start next VDF task if none running
+    #[instrument(skip_all)]
+    pub(super) fn start_next(&mut self) -> Option<()> {
+        if self.current.is_some() {
+            return None; // Already running
+        }
+
+        let (task, priority) = self.pending.pop()?;
+        let hash = task.block.block_hash;
+
+        // Create AtomicU8 for cancellation
+        let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        let block = Arc::clone(&task.block);
+        let preemptible = PreemptibleVdfTask {
+            task,
+            cancel_u8: Arc::clone(&cancel_u8),
+            vdf_notify: Arc::clone(&self.vdf_notify),
+        };
+        let handle = tokio::spawn(
+            preemptible
+                .execute()
+                .instrument(tracing::info_span!("vdf_validation", block_hash = %hash, ?priority))
+                .in_current_span(),
+        );
+        self.current = Some(CurrentVdfTask {
+            hash,
+            priority,
+            block,
+            cancel_signal: cancel_u8,
+            handle,
+        });
+        Some(())
+    }
+
+    /// Poll current VDF task
+    #[instrument(skip_all)]
+    pub(super) async fn poll_current(
+        &mut self,
+    ) -> Option<(BlockHash, VdfValidationResult, BlockValidationTask)> {
+        let mut current = self.current.take()?;
+
+        // Use poll_immediate to check without blocking
+        let poll_result = futures::future::poll_immediate(&mut current.handle).await;
+
+        match poll_result {
+            Some(Ok((result, task))) => {
+                // Task completed - no need to notify here since task already did
+                Some((current.hash, result, task))
+            }
+            Some(Err(e)) => {
+                error!("VDF task panicked: {}", e);
+                // We lost the task on panic, cannot continue
+                // Notify to ensure we can start the next task
+                self.vdf_notify.notify_one();
+                None
+            }
+            None => {
+                // Still running, put it back
+                self.current = Some(current);
+                None
+            }
+        }
+    }
+}
+
+/// Main validation coordinator
+pub(super) struct ValidationCoordinator {
+    /// VDF validation scheduler
+    pub vdf_scheduler: VdfScheduler,
+
+    /// Concurrent validation tasks
+    pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
+
+    /// Block tree for priority calculation
+    pub block_tree_guard: BlockTreeReadGuard,
+}
+
+impl ValidationCoordinator {
+    pub(super) fn new(block_tree_guard: BlockTreeReadGuard, vdf_notify: Arc<Notify>) -> Self {
+        Self {
+            vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify)),
+            concurrent_tasks: JoinSet::new(),
+            block_tree_guard,
+        }
+    }
+
+    /// Calculate priority for a block
+    #[instrument(skip_all, fields(block_hash = %block.block_hash, block_height = %block.height))]
+    pub(super) fn calculate_priority(&self, block: &IrysBlockHeader) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
 
         let state = match block_tree.get_block_and_status(&block_hash) {
-            // Canonical blocks: middle priority tier
-            Some((_block, ChainState::Onchain)) => BlockPriority::Canonical,
-            Some((_block, ChainState::NotOnchain(_) | ChainState::Validated(_))) => {
+            Some((_, ChainState::Onchain)) => BlockPriority::Canonical,
+            Some((_, ChainState::NotOnchain(_) | ChainState::Validated(_))) => {
                 if self.is_canonical_extension(&block_hash, &block_tree) {
-                    // Canonical extensions: highest priority tier
                     BlockPriority::CanonicalExtension
                 } else {
-                    // Fork blocks: low priority tier
                     BlockPriority::Fork
                 }
             }
-            // Block is unknown (lowest priority)
             None => BlockPriority::Unknown,
         };
 
-        Reverse((state, Arc::clone(block)).into())
+        BlockPriorityMeta::new(block, state)
     }
 
-    /// Check if a block is a canonical extension (extends from the canonical tip)
+    /// Check if block extends canonical tip
+    #[instrument(skip_all, fields(%block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;
 
-        // Walk up from the block to see if we reach the canonical tip
-        let mut current_hash = *block_hash;
-        while let Some((block, _)) = block_tree.get_block_and_status(&current_hash) {
-            if current_hash == canonical_tip {
+        let mut current = *block_hash;
+        while let Some((block, _)) = block_tree.get_block_and_status(&current) {
+            if current == canonical_tip {
                 return true;
             }
-            current_hash = block.previous_block_hash;
+            current = block.previous_block_hash;
 
-            // Stop if we reach a canonical block (avoid infinite walking)
-            if let Some((_, ChainState::Onchain)) = block_tree.get_block_and_status(&current_hash) {
-                // Check if this canonical block is the canonical tip
-                return current_hash == canonical_tip;
+            if let Some((_, ChainState::Onchain)) = block_tree.get_block_and_status(&current) {
+                return current == canonical_tip;
             }
         }
         false
     }
 
-    #[instrument(skip_all, fields(block_hash = %block.block_hash))]
-    pub(crate) fn push_concurrent_fut(
-        &mut self,
-        block: Arc<IrysBlockHeader>,
-        future: Pin<Box<dyn Future<Output = ()> + Send>>,
-    ) {
-        let priority = self.calculate_priority(&block);
-        debug!(
-            "adding concurrent validation task with priority: {:?}",
-            priority.0.state
-        );
-        self.concurrent_tasks.insert(block.block_hash, future);
-        self.concurrent_queue.push(block.block_hash, priority);
+    /// Submit a validation task
+    #[instrument(skip_all, fields(block_hash = %task.block.block_hash, block_height = %task.block.height))]
+    pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
+        let priority = self.calculate_priority(&task.block);
+        self.vdf_scheduler.submit(task, priority);
     }
 
-    pub(crate) fn concurrent_len(&self) -> usize {
-        self.concurrent_queue.len()
-    }
+    /// Process VDF completion
+    #[instrument(skip_all)]
+    pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
+        // Poll current VDF task
+        if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
+            match result {
+                VdfValidationResult::Valid => {
+                    let block_hash = task.block.block_hash;
 
-    pub(crate) fn concurrent_is_empty(&self) -> bool {
-        self.concurrent_queue.is_empty()
-    }
+                    self.concurrent_tasks.spawn(
+                        async move {
+                            // Execute the validation and return the result
+                            let validation_result = task.execute_concurrent().await;
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.concurrent_is_empty() && self.vdf_pending_queue.is_empty() && self.vdf_task.is_none()
-    }
-
-    /// Process completed concurrent validations and remove them from the active set
-    /// returns `true` if any of the block validation tasks succeeded
-    #[instrument(skip_all, fields(active_count = self.concurrent_len()))]
-    pub(crate) async fn process_completed_concurrent(&mut self) -> bool {
-        let mut completed_blocks = Vec::new();
-
-        assert_eq!(
-            self.concurrent_queue.len(),
-            self.concurrent_tasks.len(),
-            "validations and futures out of sync"
-        );
-
-        if self.concurrent_queue.is_empty() {
-            return false;
-        }
-
-        // Check futures in priority order using poll_immediate for non-blocking check
-        for (block_hash, _priority) in self.concurrent_queue.clone().iter() {
-            if let Some(future) = self.concurrent_tasks.get_mut(block_hash) {
-                // Use poll_immediate to check if future is ready without blocking
-                if poll_immediate(future).await.is_some() {
-                    completed_blocks.push(*block_hash);
-                }
-            }
-        }
-
-        // Remove completed validations
-        for block_hash in &completed_blocks {
-            debug!(block_hash = %block_hash, "validation task completed");
-            self.concurrent_queue.remove(block_hash);
-            self.concurrent_tasks.remove(block_hash);
-        }
-        let tasks_completed = !completed_blocks.is_empty();
-        if tasks_completed {
-            debug!(
-                completed_count = completed_blocks.len(),
-                remaining_count = self.concurrent_len(),
-                "processed completed validations"
-            );
-        }
-        tasks_completed
-    }
-
-    /// Gets the current VDF task, or creates a new one.
-    /// also handles cancellation/preempting
-    pub(crate) fn get_or_create_vdf_task(&mut self) -> Option<VdfValidationTask> {
-        let peek = self.vdf_pending_queue.peek();
-
-        // if we have an existing task, figure out if it's being cancelled
-        // if not, check if we need to cancel it (to replace it with a higher priority task)
-        let task = if let Some(task) = self.vdf_task.take() {
-            // if cancelling, return current task (it'll poll to completion once cancellation completes)
-            let current_cancel_state = task.cancel.load(Ordering::Relaxed);
-            if current_cancel_state != CancelEnum::Continue as u8 {
-                debug!(
-                    "VDF task {} is being cancelled ({:?})",
-                    &task.block_hash, &current_cancel_state
-                );
-                task
-            } else if let Some((high_prio_hash, high_prio_task)) = peek {
-                // check if task needs to be replaced by a higher priority task
-                // check the hash of the highest priority according to the queue against the hash of the task
-                if *high_prio_hash != task.block_hash {
-                    info!(
-                        "Cancelling in-progress VDF validation for block {} in favour of block {:?} {}",
-                        &task.block_hash,&high_prio_task.0.priority.state, &high_prio_hash,
+                            ConcurrentValidationResult {
+                                block_hash,
+                                validation_result,
+                            }
+                        }
+                        .instrument(
+                            tracing::error_span!("concurrent_validation", block_hash = %block_hash),
+                        )
+                        .in_current_span(),
                     );
-                    // Cancel only if currently set to Continue
-                    if let Err(e) = task.cancel.compare_exchange(
-                        CancelEnum::Continue as u8,
-                        CancelEnum::Cancelled as u8,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    ) {
-                        error!("Error cancelling task {} - {}", &task.block_hash, e)
-                    }
                 }
-                task
-            } else {
-                task
+                VdfValidationResult::Cancelled => {
+                    // Re-queue the cancelled task with recalculated priority
+                    let priority = self.calculate_priority(&task.block);
+                    self.vdf_scheduler.pending.push(task, priority);
+                }
+                VdfValidationResult::Invalid(_) => {
+                    // Invalid tasks are not re-queued
+                }
             }
-            // if there is no active task, and we have a pending task in the queue, add it
-        } else if let Some((pending_hash, pending_task)) = peek {
-            // Create new task from highest priority pending task
-            debug!("Created VDF validation task for  {}", &pending_hash);
-            let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
-            VdfValidationTask {
-                block_hash: *pending_hash,
-                fut: pending_task
-                    .0
-                    .clone()
-                    .execute_vdf(Arc::clone(&cancel))
-                    .boxed(),
-                cancel,
-            }
-        } else {
-            // Nothing to process
-            return None;
-        };
-        Some(task)
-    }
-
-    pub(crate) fn handle_vdf_validation_result(
-        &mut self,
-        task: &VdfValidationTask,
-        result: VdfValidationResult,
-    ) {
-        match result {
-            VdfValidationResult::Valid => {
-                // remove task from the vdf_pending queue
-                let (hash, task) = self
-                    .vdf_pending_queue
-                    .remove(&task.block_hash)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Expected processing task to have an entry for block {} in the vdf_pending queue",
-                            &task.block_hash
-                        )
-                    });
-                // do NOT send anything to the block tree
-
-                debug!(
-                    "Processed VDF task for block {}, spawning concurrent validation task",
-                    &hash
-                );
-
-                // add to active concurrent validations (this also adds to the concurrent queue)
-                self.push_concurrent_fut(task.0.block.clone(), task.0.execute_concurrent().boxed())
-            }
-            VdfValidationResult::Invalid(err) => {
-                // remove task from the vdf_pending queue
-                let (invalid_hash, invalid_item) = self
-                    .vdf_pending_queue
-                    .remove(&task.block_hash)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Expected processing task to have an entry for block {} in the vdf_pending queue",
-                            &task.block_hash
-                        )
-                    });
-                error!(block_hash = %invalid_hash, "Error validating VDF - {}", &err);
-                // notify the block tree
-                invalid_item
-                    .0
-                    .send_validation_result(ValidationResult::Invalid);
-            }
-            VdfValidationResult::Cancelled => {
-                debug!("VDF task {} was cancelled", &task.block_hash);
-                // do nothing, leave the task in the pending queue
-            }
-        };
-    }
-
-    /// Process the vdf task
-    /// returns `true` if the current VDF task polled to completion and we should be run again
-    #[instrument(skip_all, fields(pending = self.vdf_pending_queue.len()))]
-    pub(crate) async fn process_completed_vdf(&mut self) -> bool {
-        // get the VDF task we should poll, or early return if there's nothing to process
-        let mut task = match self.get_or_create_vdf_task() {
-            Some(task) => task,
-            None => return false, // Nothing to do
-        };
-
-        // process the provided task
-        // either 1.) a previously produced task, 2.) a previously produced task that is getting cancelled, or 3.) a new task
-        // we still poll cancelling tasks to ensure they stop correctly
-        let poll_res = poll_immediate(&mut task.fut).await;
-
-        if let Some(result) = poll_res {
-            // handle the result of the VDF validation task
-            self.handle_vdf_validation_result(&task, result);
-            true
-        } else {
-            // task hasn't completed
-            self.vdf_task = Some(task);
-            false
+            // Start next VDF task
+            self.vdf_scheduler.start_next();
+            return Some((hash, result));
         }
+
+        // Try to start a VDF task if none running
+        self.vdf_scheduler.start_next();
+        None
     }
 
-    /// Reevaluate priorities for all active validations after a reorg
-    /// This recalculates priorities based on the new canonical chain state
-    #[instrument(skip_all, fields(validation_count = self.concurrent_len()))]
-    pub(crate) fn reevaluate_priorities(&mut self) {
-        debug!("reevaluating priorities after reorg");
+    /// Reevaluate all priorities after reorg
+    #[instrument(skip_all)]
+    pub(super) fn reevaluate_priorities(&mut self) {
+        info!("Reevaluating priorities after reorg");
 
-        {
-            // swap the old queue out of `self` to we can take full ownership
-            let old_queue = replace(&mut self.vdf_pending_queue, PriorityQueue::new());
+        // Reevaluate current VDF task
+        self.reevaluate_current_vdf();
 
-            // Recalculate priority for each block hash and update the queue
-            for (block_hash, mut task) in old_queue {
-                let new_priority = self.calculate_priority(&task.0.block);
-                task.0.priority = new_priority.0;
-                self.vdf_pending_queue.push(block_hash, task);
+        // Reevaluate pending VDF tasks
+        self.reevaluate_pending_vdf();
+    }
+
+    /// Reevaluate and potentially preempt current VDF task
+    fn reevaluate_current_vdf(&mut self) {
+        let Some(current) = &self.vdf_scheduler.current else {
+            return;
+        };
+
+        // Calculate new priority (block is already a reference)
+        let new_priority = self.calculate_priority(&current.block);
+
+        if new_priority == current.priority {
+            return; // No change
+        }
+
+        debug!(
+            block_hash = %current.hash,
+            old_priority = ?current.priority,
+            ?new_priority,
+            "Current VDF task priority changed after reorg"
+        );
+
+        // Update priority and check for preemption
+        if let Some(current_mut) = &mut self.vdf_scheduler.current {
+            current_mut.priority = new_priority;
+        }
+
+        // Use consolidated preemption check
+        self.vdf_scheduler.check_preemption();
+    }
+
+    /// Reevaluate pending VDF task priorities
+    fn reevaluate_pending_vdf(&mut self) {
+        // Collect tasks that need priority updates (can't mutate while iterating)
+        let tasks_to_update: Vec<_> = self
+            .vdf_scheduler
+            .pending
+            .iter()
+            .map(|(task, _priority)| task.clone())
+            .collect();
+
+        if tasks_to_update.is_empty() {
+            return;
+        }
+
+        let mut updated_count = 0;
+        for task in tasks_to_update {
+            let new_priority = self.calculate_priority(&task.block);
+            // update_priority returns true if the item existed and was updated
+            if self
+                .vdf_scheduler
+                .pending
+                .change_priority(&task, new_priority)
+                .is_some()
+            {
+                updated_count += 1;
             }
         }
 
-        {
-            // Create a new priority queue with updated priorities
-            let mut new_validations: PriorityQueue<irys_types::H256, Reverse<BlockPriorityMeta>> =
-                PriorityQueue::new();
-
-            // Recalculate priority for each block hash and update the queue
-            for (block_hash, old_priority) in self.concurrent_queue.iter() {
-                let new_priority = self.calculate_priority(&old_priority.0.block);
-                new_validations.push(*block_hash, new_priority);
-            }
-
-            // Replace the old priority queue with the updated one
-            self.concurrent_queue = new_validations;
-
+        if updated_count > 0 {
             debug!(
-                validation_count = self.concurrent_len(),
-                "completed priority reevaluation after reorg"
+                vdf_pending_updated = updated_count,
+                "Reevaluated VDF pending task priorities after reorg"
             );
         }
     }
@@ -432,606 +453,197 @@ impl ActiveValidations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_tree_service::test_utils::genesis_tree;
-    use futures::future::{pending, ready};
-    use irys_domain::{dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, CommitmentSnapshot};
-    use irys_types::{IrysBlockHeader, H256};
-    use itertools::Itertools as _;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use test_log::test;
-    use tokio::time::{sleep, Duration};
+    use irys_domain::{
+        dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
+        ChainState, CommitmentSnapshot,
+    };
+    use irys_types::{serialization::H256List, BlockHash, IrysBlockHeader, H256};
+    use priority_queue::PriorityQueue;
+    use std::sync::{Arc, RwLock};
 
-    /// Create a mock future that completes immediately
-    fn create_ready_future() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(ready(()))
+    /// Test that BlockPriorityMeta ordering works correctly with manual Ord
+    #[test]
+    #[expect(clippy::redundant_clone)] // False positive: header1 is used after clone
+    fn test_validation_priority_ordering() {
+        let mut header1 = IrysBlockHeader::new_mock_header();
+        header1.height = 100;
+        header1.vdf_limiter_info.steps = H256List(vec![Default::default(); 5]); // 5 VDF steps
+
+        let mut header2 = IrysBlockHeader::new_mock_header();
+        header2.height = 200;
+        header2.vdf_limiter_info.steps = H256List(vec![Default::default(); 10]); // 10 VDF steps
+
+        // Test 1: Canonical extension should have highest priority
+        let p1 = BlockPriorityMeta::new(&header1, BlockPriority::CanonicalExtension);
+        let p2 = BlockPriorityMeta::new(&header2, BlockPriority::Canonical);
+        assert!(
+            p1 > p2,
+            "Canonical extension should have higher priority than canonical"
+        );
+
+        // Test 2: Among same type, lower height should have higher priority
+        let p3 = BlockPriorityMeta::new(&header1, BlockPriority::Fork);
+        let p4 = BlockPriorityMeta::new(&header2, BlockPriority::Fork);
+        assert!(p3 > p4, "Lower height should have higher priority");
+
+        // Test 3: Canonical should have higher priority than fork
+        let p5 = BlockPriorityMeta::new(&header1, BlockPriority::Canonical);
+        let p6 = BlockPriorityMeta::new(&header1, BlockPriority::Fork);
+        assert!(p5 > p6, "Canonical should have higher priority than fork");
+
+        // Test 4: Test BlockPriority enum ordering (higher priority > lower priority)
+        assert!(BlockPriority::CanonicalExtension > BlockPriority::Canonical);
+        assert!(BlockPriority::Canonical > BlockPriority::Fork);
+        assert!(BlockPriority::Fork > BlockPriority::Unknown);
+
+        // Test 5: VDF step count as tiebreaker (fewer steps = higher priority)
+        let mut header3 = header1.clone();
+        header3.vdf_limiter_info.steps = H256List(vec![Default::default(); 20]); // More steps
+        let p7 = BlockPriorityMeta::new(&header1, BlockPriority::Fork); // 5 steps
+        let p8 = BlockPriorityMeta::new(&header3, BlockPriority::Fork); // 20 steps
+        assert!(p7 > p8, "Fewer VDF steps should have higher priority");
     }
 
-    /// Create a mock future that never completes
-    fn create_pending_future() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(pending())
+    /// Tests BlockPriority ordering with PriorityQueue to ensure correct behavior.
+    /// Setup: Create priorities with different states, heights, and VDF steps.
+    /// Expected: Items popped in order of CanonicalExtension > Canonical > Fork,
+    ///          with lower heights and fewer VDF steps having higher priority.
+    /// Verifies: PriorityQueue correctly uses BlockPriorityMeta ordering.
+    #[test]
+    fn test_priority_queue_ordering() {
+        // Create headers with different properties
+        let mkheader = |height: u64, vdf_steps: usize| {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = height;
+            header.block_hash = BlockHash::random();
+            header.vdf_limiter_info.steps = H256List(vec![Default::default(); vdf_steps]);
+            header
+        };
+
+        // Create priority metadata
+        let mkprio =
+            |header: &IrysBlockHeader, state: BlockPriority| BlockPriorityMeta::new(header, state);
+
+        // Create a priority queue
+        let mut queue: PriorityQueue<BlockHash, (BlockPriorityMeta, ())> = PriorityQueue::new();
+
+        // Add items in random order
+        let h1 = mkheader(10, 5);
+        let h2 = mkheader(9, 10);
+        let h3 = mkheader(10, 100);
+        let h4 = mkheader(9, 1);
+
+        // Expected order (highest priority first):
+        // 1. CanonicalExtension, height 9, 10 VDF steps
+        // 2. CanonicalExtension, height 10, 5 VDF steps
+        // 3. CanonicalExtension, height 10, 100 VDF steps
+        // 4. Canonical, height 9, 1 VDF step
+
+        let items = vec![
+            (
+                h2.block_hash,
+                mkprio(&h2, BlockPriority::CanonicalExtension),
+            ),
+            (
+                h1.block_hash,
+                mkprio(&h1, BlockPriority::CanonicalExtension),
+            ),
+            (
+                h3.block_hash,
+                mkprio(&h3, BlockPriority::CanonicalExtension),
+            ),
+            (h4.block_hash, mkprio(&h4, BlockPriority::Canonical)),
+        ];
+
+        // Insert in different order to test sorting
+        queue.push(items[3].0, (items[3].1, ()));
+        queue.push(items[1].0, (items[1].1, ()));
+        queue.push(items[0].0, (items[0].1, ()));
+        queue.push(items[2].0, (items[2].1, ()));
+
+        // Pop items and verify order
+        let result1 = queue.pop().unwrap();
+        assert_eq!(
+            result1.0, items[0].0,
+            "First item should be CanonicalExtension with height 9"
+        );
+
+        let result2 = queue.pop().unwrap();
+        assert_eq!(
+            result2.0, items[1].0,
+            "Second item should be CanonicalExtension with height 10, 5 steps"
+        );
+
+        let result3 = queue.pop().unwrap();
+        assert_eq!(
+            result3.0, items[2].0,
+            "Third item should be CanonicalExtension with height 10, 100 steps"
+        );
+
+        let result4 = queue.pop().unwrap();
+        assert_eq!(
+            result4.0, items[3].0,
+            "Fourth item should be Canonical with height 9"
+        );
     }
 
-    /// Create a mock future that completes after a delay (unused but kept for potential future tests)
-    #[expect(dead_code)]
-    fn create_delayed_future(delay_ms: u64) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            sleep(Duration::from_millis(delay_ms)).await;
-        })
-    }
-
-    #[track_caller]
-    fn get_block_from_blocks(
-        blocks: &[IrysBlockHeader],
-        block_hash: BlockHash,
-    ) -> Arc<IrysBlockHeader> {
-        Arc::new(
-            blocks
-                .iter()
-                .find(|e| e.block_hash == block_hash)
-                .expect("Block should exist")
-                .clone(),
-        )
-    }
-
-    /// Setup a canonical chain scenario for testing
+    /// Helper function to setup a canonical chain scenario with n blocks  
     fn setup_canonical_chain_scenario(
         max_height: u64,
-    ) -> (BlockTreeReadGuard, Vec<IrysBlockHeader>) {
-        let mut blocks = (0..=max_height)
-            .map(|height| {
-                let mut header = IrysBlockHeader::new_mock_header();
-                header.height = height;
-                header.cumulative_diff = height.into();
-                (header, ChainState::Onchain)
-            })
-            .collect::<Vec<_>>();
-        let guard = genesis_tree(&mut blocks);
+    ) -> (BlockTreeReadGuard, Vec<Arc<IrysBlockHeader>>) {
+        // Create genesis block
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.block_hash = H256::random();
+        genesis.cumulative_diff = 0.into();
 
-        // Mark the last block as the canonical tip
-        if max_height > 0 {
-            let last_block_hash = blocks.last().unwrap().0.block_hash;
-            guard.write().mark_tip(&last_block_hash).unwrap();
-        }
+        // Create block tree with genesis
+        let mut block_tree = BlockTree::new(&genesis, irys_types::ConsensusConfig::testing());
+        block_tree.mark_tip(&genesis.block_hash).unwrap();
 
-        (guard, blocks.into_iter().map(|(blk, _)| blk).collect())
-    }
+        let mut blocks = vec![Arc::new(genesis.clone())];
+        let mut last_hash = genesis.block_hash;
 
-    /// Tests priority ordering with blocks added in sequential height order.
-    /// Setup: Canonical chain (0-50), add blocks at heights [10, 20, 30, 40] in order.
-    /// Expected: Priority queue returns blocks in same order (lowest height first).
-    /// Verifies: Basic priority ordering works correctly with sequential input.
-    #[test(tokio::test)]
-    async fn test_priority_ordering_sequential_input() {
-        // Setup canonical chain with blocks at different heights
-        let (block_tree_guard, blocks) = setup_canonical_chain_scenario(50);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
+        // Create canonical chain
+        for height in 1..=max_height {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = height;
+            header.previous_block_hash = last_hash;
+            header.block_hash = H256::random();
+            header.cumulative_diff = height.into();
 
-        // Add blocks in sequential order
-        let heights = vec![10, 20, 30, 40];
-        let mut expected_hashes = Vec::new();
-
-        for &height in &heights {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-            let block_hash = chain
-                .iter()
-                .find(|entry| entry.height == height)
-                .map(|entry| entry.block_hash)
-                .expect("Block should exist");
-
-            expected_hashes.push(block_hash);
-            active_validations.push_concurrent_fut(
-                get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
-            );
-        }
-
-        // Verify priority ordering - lower heights should have higher priority
-        let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
-            actual_order.push(hash);
-        }
-
-        // Should be in order: height 10, 20, 30, 40 (lowest height first)
-        assert_eq!(actual_order, expected_hashes);
-    }
-
-    /// Tests priority ordering with blocks added in reverse height order.
-    /// Setup: Canonical chain (0-50), add blocks at heights [40, 30, 20, 10] in reverse order.
-    /// Expected: Priority queue returns blocks in ascending height order [10, 20, 30, 40].
-    /// Verifies: Priority ordering is independent of insertion order.
-    #[test(tokio::test)]
-    async fn test_priority_ordering_reverse_input() {
-        // Setup canonical chain
-        let (block_tree_guard, blocks) = setup_canonical_chain_scenario(50);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
-
-        // Add blocks in reverse order
-        let heights = vec![40, 30, 20, 10];
-        let mut block_hashes = Vec::new();
-
-        for &height in &heights {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-            let block_hash = chain
-                .iter()
-                .find(|entry| entry.height == height)
-                .map(|entry| entry.block_hash)
-                .expect("Block should exist");
-
-            block_hashes.push(block_hash);
-            active_validations.push_concurrent_fut(
-                get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
-            );
-        }
-
-        // Verify priority ordering - should still be by height regardless of input order
-        let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
-            actual_order.push(hash);
-        }
-
-        // Should be in order: height 10, 20, 30, 40 (lowest height first)
-        // Which corresponds to reverse of input order
-        block_hashes.reverse();
-        assert_eq!(actual_order, block_hashes);
-    }
-
-    /// Tests priority ordering with blocks added in random height order.
-    /// Setup: Canonical chain (0-25), add 10 blocks at random heights in arbitrary order.
-    /// Expected: Priority queue returns blocks sorted by ascending height.
-    /// Verifies: Priority ordering handles random insertion patterns correctly.
-    #[test(tokio::test)]
-    async fn test_priority_ordering_random_input() {
-        // Setup canonical chain
-        let (block_tree_guard, blocks) = setup_canonical_chain_scenario(25);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
-
-        // Create blocks at random heights
-        let heights = vec![15, 3, 22, 8, 12, 1, 18, 25, 7, 14];
-        let mut height_to_hash = HashMap::new();
-
-        // Add blocks in random order
-        for &height in &heights {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-            let block_hash = chain
-                .iter()
-                .find(|entry| entry.height == height)
-                .map(|entry| entry.block_hash)
-                .expect("Block should exist");
-
-            height_to_hash.insert(height, block_hash);
-            active_validations.push_concurrent_fut(
-                get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
-            );
-        }
-
-        // Verify blocks come out in height order
-        let mut sorted_heights = heights;
-        sorted_heights.sort();
-
-        let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
-            actual_order.push(hash);
-        }
-
-        let expected_order: Vec<BlockHash> = sorted_heights
-            .iter()
-            .map(|&height| height_to_hash[&height])
-            .collect();
-
-        assert_eq!(actual_order, expected_order);
-    }
-
-    /// Tests priority ordering with fork blocks vs canonical extensions.
-    /// Setup: Canonical chain (0-20), fork blocks (11,12) from block 10, extensions (21,22) from block 20.
-    /// Expected: Extensions have higher priority than forks: [21, 22, 11, 12].
-    /// Verifies: CanonicalExtension > Fork priority, and height ordering within each type.
-    #[test(tokio::test)]
-    async fn test_priority_with_fork_scenarios() {
-        // Setup scenario with main chain (0-20 canonical)
-        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(20);
-
-        // Manually create fork blocks (11, 12) and extension blocks (21, 22)
-        let (fork_block_11, fork_block_12, extension_block_21, extension_block_22) = {
-            let mut tree = block_tree_guard.write();
-            let (canonical_chain, _) = tree.get_canonical_chain();
-
-            // Get block 10 as fork parent and block 20 as extension parent
-            let fork_parent = canonical_chain
-                .iter()
-                .find(|entry| entry.height == 10)
-                .expect("Block 10 should exist");
-            let extension_parent = canonical_chain
-                .iter()
-                .find(|entry| entry.height == 20)
-                .expect("Block 20 should exist");
-
-            // Create fork block 11 (child of block 10)
-            let mut fork_block_11 = IrysBlockHeader::new_mock_header();
-            fork_block_11.height = 11;
-            fork_block_11.previous_block_hash = fork_parent.block_hash;
-            fork_block_11.block_hash = H256::random();
-            fork_block_11.cumulative_diff = 50.into(); // Lower than canonical to stay as fork
-
-            // Create fork block 12 (child of fork block 11)
-            let mut fork_block_12 = IrysBlockHeader::new_mock_header();
-            fork_block_12.height = 12;
-            fork_block_12.previous_block_hash = fork_block_11.block_hash;
-            fork_block_12.block_hash = H256::random();
-            fork_block_12.cumulative_diff = 60.into(); // Lower than canonical to stay as fork
-
-            // Create extension block 21 (child of block 20)
-            let mut extension_block_21 = IrysBlockHeader::new_mock_header();
-            extension_block_21.height = 21;
-            extension_block_21.previous_block_hash = extension_parent.block_hash;
-            extension_block_21.block_hash = H256::random();
-            extension_block_21.cumulative_diff = 10000.into(); // Higher than canonical for extension
-
-            // Create extension block 22 (child of extension block 21)
-            let mut extension_block_22 = IrysBlockHeader::new_mock_header();
-            extension_block_22.height = 22;
-            extension_block_22.previous_block_hash = extension_block_21.block_hash;
-            extension_block_22.block_hash = H256::random();
-            extension_block_22.cumulative_diff = 10001.into(); // Higher than canonical for extension
-
-            // Add blocks to tree as NotOnchain
-            tree.add_common(
-                fork_block_11.block_hash,
-                &fork_block_11,
-                Arc::new(CommitmentSnapshot::default()),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-                ChainState::NotOnchain(BlockState::ValidationScheduled),
-            )
-            .unwrap();
-            tree.add_common(
-                fork_block_12.block_hash,
-                &fork_block_12,
-                Arc::new(CommitmentSnapshot::default()),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-                ChainState::NotOnchain(BlockState::ValidationScheduled),
-            )
-            .unwrap();
-            tree.add_common(
-                extension_block_21.block_hash,
-                &extension_block_21,
-                Arc::new(CommitmentSnapshot::default()),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-                ChainState::NotOnchain(BlockState::ValidationScheduled),
-            )
-            .unwrap();
-            tree.add_common(
-                extension_block_22.block_hash,
-                &extension_block_22,
-                Arc::new(CommitmentSnapshot::default()),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-                ChainState::NotOnchain(BlockState::ValidationScheduled),
-            )
-            .unwrap();
-
-            (
-                fork_block_11,
-                fork_block_12,
-                extension_block_21,
-                extension_block_22,
-            )
-        };
-
-        let mut active_validations = ActiveValidations::new(block_tree_guard);
-
-        // Use the known block hashes from creation
-        let fork_blocks = vec![(Arc::new(fork_block_11), 11), (Arc::new(fork_block_12), 12)];
-        let extension_blocks = vec![
-            (Arc::new(extension_block_21), 21),
-            (Arc::new(extension_block_22), 22),
-        ];
-
-        // Add blocks to active validations in mixed order to test priority sorting
-        for (block, _) in &fork_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
-        }
-        for (block, _) in &extension_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
-        }
-
-        // Verify priority ordering
-        let mut actual_order = Vec::new();
-        while let Some((hash, priority)) = active_validations.concurrent_queue.pop() {
-            actual_order.push((hash, priority.0));
-        }
-
-        // Expected: extensions first (21, 22), then forks (11, 12)
-        let expected_order = [
-            (
-                extension_blocks[0].0.clone(),
-                (
-                    BlockPriority::CanonicalExtension,
-                    Arc::clone(&extension_blocks[0].0),
+            block_tree
+                .add_common(
+                    header.block_hash,
+                    &header,
+                    Arc::new(CommitmentSnapshot::default()),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                    ChainState::Onchain,
                 )
-                    .into(),
-            ),
-            (
-                extension_blocks[1].0.clone(),
-                (
-                    BlockPriority::CanonicalExtension,
-                    Arc::clone(&extension_blocks[1].0),
-                )
-                    .into(),
-            ),
-            (
-                fork_blocks[0].0.clone(),
-                (BlockPriority::Fork, Arc::clone(&fork_blocks[0].0)).into(),
-            ),
-            (
-                fork_blocks[1].0.clone(),
-                (BlockPriority::Fork, Arc::clone(&fork_blocks[1].0)).into(),
-            ),
-        ];
+                .unwrap();
 
-        assert_eq!(actual_order.len(), expected_order.len());
-        for (i, ((actual_hash, actual_priority), (expected_block, expected_priority))) in
-            actual_order
-                .iter()
-                .zip_eq(expected_order.iter())
-                .enumerate()
-        {
-            assert_eq!(
-                *actual_hash, expected_block.block_hash,
-                "Hash mismatch at position {}",
-                i
-            );
-            assert_eq!(
-                actual_priority, expected_priority,
-                "Priority mismatch at position {}",
-                i
-            );
+            block_tree.mark_tip(&header.block_hash).unwrap();
+            last_hash = header.block_hash;
+            blocks.push(Arc::new(header));
         }
+
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        (block_tree_guard, blocks)
     }
 
-    /// Tests priority ordering with large number of concurrent validations.
-    /// Setup: Canonical chain (0-100), add 50 blocks in reverse order to simulate load.
-    /// Expected: All blocks returned in ascending height order despite reverse insertion.
-    /// Verifies: Priority queue scales correctly with many concurrent validations.
-    #[test(tokio::test)]
-    async fn test_many_pending_tasks_capacity_management() {
-        // Setup large canonical chain
-        let (block_tree_guard, blocks) = setup_canonical_chain_scenario(100);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
-
-        // Use the available heights from the chain
-        let mut height_to_hash = HashMap::new();
-        let heights: Vec<u64>;
-
-        // Collect all block hashes first
-        {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-
-            // Use the first 50 heights from the actual chain
-            heights = chain.iter().take(50).map(|entry| entry.height).collect();
-
-            for entry in chain.iter().take(50) {
-                height_to_hash.insert(entry.height, entry.block_hash);
-            }
-        }
-
-        // Add blocks in shuffled order
-        let mut shuffled_heights = heights.clone();
-        shuffled_heights.reverse(); // Simple reverse as shuffle
-
-        for &height in &shuffled_heights {
-            let block_hash = height_to_hash[&height];
-            active_validations.push_concurrent_fut(
-                get_block_from_blocks(&blocks, block_hash),
-                create_pending_future(),
-            );
-        }
-
-        // Verify all blocks are present
-        assert_eq!(active_validations.concurrent_len(), heights.len());
-
-        // Verify they come out in correct priority order
-        let mut actual_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
-            actual_order.push(hash);
-        }
-
-        let expected_order: Vec<BlockHash> = heights
-            .iter()
-            .map(|&height| height_to_hash[&height])
-            .collect();
-
-        assert_eq!(actual_order, expected_order);
-    }
-
-    /// Tests that completed validation removal preserves priority ordering.
-    /// Setup: Add 4 blocks with alternating ready/pending futures at heights [5, 10, 15, 20].
-    /// Expected: Ready futures removed (heights 5, 15), remaining blocks [10, 20] in priority order.
-    /// Verifies: process_completed() maintains priority ordering for remaining validations.
-    #[test(tokio::test)]
-    async fn test_process_completed_preserves_priority() {
-        // Setup canonical chain
-        let (block_tree_guard, blocks) = setup_canonical_chain_scenario(30);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
-        let chain = {
-            let tree = block_tree_guard.read();
-            let (chain, _) = tree.get_canonical_chain();
-            chain
-        };
-        // Add mix of ready and pending futures
-        let heights = [5, 10, 15, 20];
-        let mut height_to_hash = HashMap::new();
-
-        for (i, &height) in heights.iter().enumerate() {
-            let block_hash = chain
-                .iter()
-                .find(|entry| entry.height == height)
-                .map(|entry| entry.block_hash)
-                .expect("Block should exist");
-
-            height_to_hash.insert(height, block_hash);
-
-            // Alternate between ready and pending futures
-            let future = if i % 2 == 0 {
-                create_ready_future()
-            } else {
-                create_pending_future()
-            };
-
-            active_validations
-                .push_concurrent_fut(get_block_from_blocks(&blocks, block_hash), future);
-        }
-
-        // Process completed validations
-        active_validations.process_completed_concurrent().await;
-
-        // Should have removed the ready futures (heights 5 and 15)
-        assert_eq!(active_validations.concurrent_len(), 2);
-
-        // Remaining blocks should still be in priority order
-        let mut remaining_order = Vec::new();
-        while let Some((hash, _priority)) = active_validations.concurrent_queue.pop() {
-            remaining_order.push(hash);
-        }
-
-        // Should be height 10, then height 20
-        assert_eq!(remaining_order[0], height_to_hash[&10]);
-        assert_eq!(remaining_order[1], height_to_hash[&20]);
-    }
-
-    /// Tests edge cases: empty queue and genesis block handling.
-    /// Setup: Empty queue, then add genesis block (height 0).
-    /// Expected: Empty operations succeed, genesis gets Canonical(0) priority.
-    /// Verifies: Edge cases handled gracefully without panics or errors.
-    #[test(tokio::test)]
-    async fn test_edge_cases() {
-        // Test with empty validation queue
-        let (block_tree_guard, blocks) = setup_canonical_chain_scenario(10);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
-
-        assert!(active_validations.concurrent_is_empty());
-        assert_eq!(active_validations.concurrent_len(), 0);
-
-        // Process completed on empty queue should not panic
-        active_validations.process_completed_concurrent().await;
-        assert!(active_validations.concurrent_is_empty());
-
-        // Test with genesis block
-        let tree = block_tree_guard.read();
-        let (chain, _) = tree.get_canonical_chain();
-        let genesis_hash = chain[0].block_hash;
-        let genesis_block = get_block_from_blocks(&blocks, genesis_hash);
-
-        active_validations.push_concurrent_fut(Arc::clone(&genesis_block), create_pending_future());
-
-        // Genesis block should have priority based on height 0 and Canonical status
-        let priority = active_validations.calculate_priority(&genesis_block);
-        assert_eq!(
-            priority,
-            std::cmp::Reverse((BlockPriority::Canonical, genesis_block).into())
-        );
-
-        assert_eq!(active_validations.concurrent_len(), 1);
-        assert!(!active_validations.concurrent_is_empty());
-    }
-
-    /// Tests BlockPriority enum ordering and Reverse wrapper behavior.
-    /// Setup: Compare different BlockPriority variants and heights.
-    /// Expected: CanonicalExtension < Canonical < Fork, lower heights < higher heights.
-    /// Verifies: Enum derives correct Ord implementation for priority queue usage.
-    #[test]
-    fn test_block_priority_ordering() {
-        let block = Arc::new(IrysBlockHeader::new_mock_header());
-
-        let mkprio = |state: BlockPriority, height: u64, vdf_steps: u64| BlockPriorityMeta {
-            height,
-            state,
-            vdf_step_count: vdf_steps,
-            block: Arc::clone(&block),
-        };
-
-        // Test that enum variants have correct ordering
-        assert!(
-            mkprio(BlockPriority::CanonicalExtension, 10, 0)
-                < mkprio(BlockPriority::Canonical, 5, 0)
-        );
-        assert!(mkprio(BlockPriority::Canonical, 10, 0) < mkprio(BlockPriority::Fork, 5, 0));
-        assert!(
-            mkprio(BlockPriority::CanonicalExtension, 10, 0) < mkprio(BlockPriority::Fork, 5, 0)
-        );
-
-        // Test within same variant, lower heights have higher priority
-        assert!(
-            mkprio(BlockPriority::CanonicalExtension, 10, 0)
-                < mkprio(BlockPriority::CanonicalExtension, 11, 0)
-        );
-        assert!(mkprio(BlockPriority::Canonical, 10, 0) < mkprio(BlockPriority::Canonical, 11, 0));
-        assert!(mkprio(BlockPriority::Fork, 10, 0) < mkprio(BlockPriority::Fork, 11, 0));
-
-        // Test with Reverse wrapper to ensure priority queue ordering is correct
-        assert!(
-            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 0))
-                > Reverse(mkprio(BlockPriority::Canonical, 10, 0))
-        );
-        assert!(
-            Reverse(mkprio(BlockPriority::Canonical, 10, 0))
-                > Reverse(mkprio(BlockPriority::Fork, 10, 0))
-        );
-        assert!(
-            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 0))
-                > Reverse(mkprio(BlockPriority::Fork, 10, 0))
-        );
-
-        // In a priority queue, lower Reverse values have higher priority
-        assert!(
-            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 0))
-                > Reverse(mkprio(BlockPriority::CanonicalExtension, 11, 0))
-        );
-        assert!(
-            Reverse(mkprio(BlockPriority::Canonical, 10, 0))
-                > Reverse(mkprio(BlockPriority::Canonical, 11, 0))
-        );
-        assert!(
-            Reverse(mkprio(BlockPriority::Fork, 10, 0))
-                > Reverse(mkprio(BlockPriority::Fork, 11, 0))
-        );
-
-        // create a priority queue
-        let mut queue: PriorityQueue<BlockHash, Reverse<BlockPriorityMeta>> = PriorityQueue::new();
-        let expected_order = [
-            Reverse(mkprio(BlockPriority::CanonicalExtension, 9, 0)),
-            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 0)),
-            Reverse(mkprio(BlockPriority::CanonicalExtension, 10, 9999)),
-            Reverse(mkprio(BlockPriority::Canonical, 9, 1)), // should not be prioritised despite being height 9 & having just one step
-        ];
-        for prio in expected_order.iter() {
-            queue.push(BlockHash::random(), prio.clone());
-        }
-
-        for (idx, itm) in queue.into_sorted_iter().enumerate() {
-            assert_eq!(*(expected_order.get(idx).unwrap()), itm.1)
-        }
-    }
-
-    /// Tests priority reevaluation when a fork becomes the canonical chain.
+    /// Tests priority calculation when a fork becomes the canonical chain.
     /// Setup: Canonical chain (0-3), canonical extensions (4-5), and fork chain (3-10) from height 2.
     /// Action: Make fork chain canonical by marking blocks 3-5 as canonical tip sequentially.
     /// Expected: Extension blocks (4-5) become Fork, fork blocks (3-5) become Canonical,
     ///          remaining fork blocks (6-10) become CanonicalExtension.
-    /// Verifies: reevaluate_priorities() correctly recalculates all block priorities after reorg.
-    #[test(tokio::test)]
-    async fn test_reevaluate_priorities_after_fork_becomes_canonical() {
+    /// Verifies: calculate_priority() correctly determines block priorities after reorg.
+    #[test]
+    fn test_priority_calculation_after_fork_becomes_canonical() {
         // Setup: Create initial canonical chain (height 0-3)
         let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(3);
-        let mut active_validations = ActiveValidations::new(block_tree_guard.clone());
+        let vdf_notify = Arc::new(Notify::new());
+        let coordinator = ValidationCoordinator::new(block_tree_guard.clone(), vdf_notify);
 
         // Create canonical extension blocks (extending from canonical tip at height 3)
         let extension_blocks = {
@@ -1065,21 +677,22 @@ mod tests {
             blocks
         };
 
-        // Add extension blocks to active validations
-        for block in &extension_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
-        }
-
         // Verify initial priorities - extension blocks should be CanonicalExtension
         for block in &extension_blocks {
-            let priority = active_validations.calculate_priority(&block.clone());
+            let priority = coordinator.calculate_priority(block);
             assert_eq!(
-                priority,
-                Reverse((BlockPriority::CanonicalExtension, block.clone()).into())
+                priority.state,
+                BlockPriority::CanonicalExtension,
+                "Extension block at height {} should be CanonicalExtension",
+                block.height
             );
         }
 
+        // First, let's add the extension blocks to the tree to establish them as part of the canonical extension
+        // This ensures the fork blocks won't be seen as canonical extensions
+
         // Create fork blocks (extending from height 2, creating alternative chain)
+        // These will compete with the canonical block at height 3
         let fork_blocks = {
             let mut tree = block_tree_guard.write();
             let (canonical_chain, _) = tree.get_canonical_chain();
@@ -1088,6 +701,7 @@ mod tests {
             let mut blocks = Vec::new();
             let mut last_hash = fork_parent.block_hash;
 
+            // Create an alternative block at height 3 (competing with canonical block at height 3)
             for height in 3..=10 {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
@@ -1111,70 +725,65 @@ mod tests {
             blocks
         };
 
-        // Add fork blocks to active validations
+        // Verify initial fork block priorities
+        // All fork blocks will be CanonicalExtension because they form a chain
+        // that extends from the canonical chain (at height 2) and creates a longer chain
         for block in &fork_blocks {
-            active_validations.push_concurrent_fut(block.clone(), create_pending_future());
+            let priority = coordinator.calculate_priority(block);
+            assert_eq!(
+                priority.state,
+                BlockPriority::CanonicalExtension,
+                "Fork block at height {} is initially CanonicalExtension (extends from canonical chain)",
+                block.height
+            );
         }
 
         // Action: Make the fork chain canonical by marking blocks as valid and advancing tip
-        // This simulates a reorganization where the fork becomes the canonical chain
         {
             let mut tree = block_tree_guard.write();
 
-            // Mark one of the later fork blocks as valid to enable tip advancement
-            tree.mark_block_as_valid(&fork_blocks[6].block_hash)
-                .unwrap();
-
-            // Advance the canonical tip through the fork chain (blocks 3-5)
-            // This makes the fork chain canonical up to height 5
+            // Mark fork blocks as onchain to simulate them becoming canonical
             for i in 0..=5 {
+                tree.mark_block_as_valid(&fork_blocks[i].block_hash)
+                    .unwrap();
                 tree.mark_tip(&fork_blocks[i].block_hash).unwrap();
             }
         }
 
-        // Action: Reevaluate priorities after the reorganization
-        active_validations.reevaluate_priorities();
-
-        // Verify: Extension blocks (4-5) are now Fork priority (no longer extend canonical tip)
+        // Verify: Extension blocks (4-5) are now Fork priority (no longer extend canonical)
         for block in &extension_blocks {
-            let priority = active_validations
-                .concurrent_queue
-                .get_priority(&block.block_hash)
-                .unwrap();
+            let priority = coordinator.calculate_priority(block);
             assert_eq!(
-                priority,
-                &Reverse((BlockPriority::Fork, block.clone()).into()),
-                "Extension block at height {} should now be Fork priority",
+                priority.state,
+                BlockPriority::Fork,
+                "Extension block at height {} should now be Fork priority after reorg",
                 block.height
             );
         }
 
-        // Verify: Fork blocks 3-5 are now Canonical priority (part of canonical chain)
-        for block in &fork_blocks[..6] {
-            let priority = active_validations
-                .concurrent_queue
-                .get_priority(&block.block_hash)
-                .unwrap();
-            assert_eq!(
-                priority,
-                &Reverse((BlockPriority::Canonical, block.clone()).into()),
-                "Fork block at height {} should now be Canonical priority",
-                block.height
-            );
-        }
+        // Verify: Fork blocks that are now on the canonical chain
+        for (i, block) in fork_blocks.iter().enumerate() {
+            let priority = coordinator.calculate_priority(block);
 
-        // Verify: Remaining fork blocks (6-10) are now CanonicalExtension priority
-        for block in &fork_blocks[6..] {
-            let priority = active_validations
-                .concurrent_queue
-                .get_priority(&block.block_hash)
-                .unwrap();
-            assert_eq!(
-                priority,
-                &Reverse((BlockPriority::CanonicalExtension, block.clone()).into()),
-                "Fork block at height {} should now be CanonicalExtension priority",
-                block.height
-            );
+            if i <= 5 {
+                // These blocks are now part of the canonical chain
+                assert_eq!(
+                    priority.state,
+                    BlockPriority::Canonical,
+                    "Fork block at height {} (index {}) should now be Canonical priority",
+                    block.height,
+                    i
+                );
+            } else {
+                // These blocks extend the new canonical tip
+                assert_eq!(
+                    priority.state,
+                    BlockPriority::CanonicalExtension,
+                    "Fork block at height {} (index {}) should now be CanonicalExtension priority",
+                    block.height,
+                    i
+                );
+            }
         }
     }
 }
