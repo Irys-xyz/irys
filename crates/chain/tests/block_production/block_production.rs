@@ -17,7 +17,7 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    block_production::SolutionContext, irys::IrysSigner, storage_pricing::Amount,
+    irys::IrysSigner, storage_pricing::Amount,
     CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, IrysTransactionCommon as _,
     NodeConfig, H256,
 };

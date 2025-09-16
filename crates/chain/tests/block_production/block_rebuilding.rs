@@ -69,10 +69,6 @@ impl BlockProdStrategy for TrackingStrategy {
     }
 }
 
-// ============================================================================
-// Test: VDF Too Old
-// ============================================================================
-
 /// Test that solutions are discarded when VDF becomes too old.
 ///
 /// This test verifies that when the parent chain advances and the solution's
@@ -126,11 +122,42 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Wait for production to pause
     pause_rx.await?;
 
-    // Mine many blocks with node2 while paused
-    for _ in 1..=10 {
+    // Mine blocks until solution becomes invalid (solution.vdf_step <= parent.vdf_step)
+    // Get initial VDF by mining a block and checking its parent
+    let initial_block = node2.mine_block().await?;
+    node2.wait_until_height(initial_block.height, 10).await?;
+    let mut node2_latest_vdf = initial_block.vdf_limiter_info.global_step_number;
+    let mut block_count = 1;
+
+    while node2_latest_vdf < solution.vdf_step {
         let block = node2.mine_block().await?;
+        node2_latest_vdf = block.vdf_limiter_info.global_step_number;
+        block_count += 1;
+
+        info!(
+            "Node2 mined block {} - VDF: {} (need >= {} to invalidate solution)",
+            block_count, node2_latest_vdf, solution.vdf_step
+        );
+
         node2.wait_until_height(block.height, 10).await?;
+
+        // Safety limit to prevent infinite loop in case of test issues
+        if block_count >= 50 {
+            panic!("Mining took too many blocks ({}), test may have issue", block_count);
+        }
     }
+
+    // Verify we've reached the invalidation point
+    assert!(
+        node2_latest_vdf >= solution.vdf_step,
+        "Should have mined until VDF {} >= solution VDF {}",
+        node2_latest_vdf,
+        solution.vdf_step
+    );
+    info!(
+        "Successfully mined {} blocks to invalidate solution (VDF {} >= solution VDF {})",
+        block_count, node2_latest_vdf, solution.vdf_step
+    );
 
     // Resume block production
     resume_tx.send(()).unwrap();
@@ -152,143 +179,6 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Test that solutions are discarded when parent VDF advances too far (explicit tracking).
-///
-/// This test explicitly tracks VDF steps at each stage to ensure deterministic behavior.
-#[test_log::test(actix::test)]
-async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<()> {
-    info!("=== Starting test: solution discarded when VDF advances too far ===");
-
-    // Setup
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().chunk_size = 32;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
-
-    let peer_signer = config.new_random_signer();
-    config.fund_genesis_accounts(vec![&peer_signer]);
-
-    // Start nodes
-    let node1 = IrysNodeTest::new_genesis(config.clone()).start().await;
-    let node2 = node1.testing_peer_with_assignments(&peer_signer).await?;
-
-    let mut last_block = None;
-    for i in 1..=2 {
-        let block = node1.mine_block().await?;
-        node1.wait_until_height(block.height, 10).await?;
-        node2.wait_until_height(block.height, 10).await?;
-        last_block = Some(block);
-    }
-
-    let baseline_vdf = last_block.unwrap().vdf_limiter_info.global_step_number;
-    info!("Baseline VDF step: {}", baseline_vdf);
-
-    // Create tracking strategy
-    let (pause_tx, pause_rx) = oneshot::channel();
-    let (resume_tx, resume_rx) = oneshot::channel();
-
-    let tracking_strategy = Arc::new(TrackingStrategy {
-        prod: ProductionStrategy {
-            inner: node1.node_ctx.block_producer_inner.clone(),
-        },
-        pause_signal: Mutex::new(Some(pause_tx)),
-        resume_signal: Mutex::new(Some(resume_rx)),
-        solution_hash_tracked: Arc::new(Mutex::new(None)),
-        solution_vdf_tracked: Arc::new(Mutex::new(None)),
-        solution_used: Arc::new(Mutex::new(None)),
-    });
-
-    // Generate solution at current VDF step
-    let solution = solution_context(&node1.node_ctx).await?;
-    let solution_vdf = solution.vdf_step;
-    info!("Generated solution with VDF step: {}", solution_vdf);
-
-    // Start block production (will pause)
-    let strategy_clone = tracking_strategy.clone();
-    let sol_clone = solution.clone();
-    let handle =
-        tokio::spawn(async move { strategy_clone.fully_produce_new_block(sol_clone).await });
-
-    // Wait for production to pause
-    pause_rx.await?;
-    info!("Node1 paused, node2 will mine blocks to advance VDF");
-
-    // Node2 mines blocks until VDF advances beyond solution
-    let mut final_vdf = baseline_vdf;
-    let mut block_count = 0;
-
-    // Keep mining until we've advanced VDF beyond the solution
-    while final_vdf <= solution_vdf && block_count < 50 {
-        // Safety limit of 50 blocks
-        block_count += 1;
-        let block = node2.mine_block().await?;
-        final_vdf = block.vdf_limiter_info.global_step_number;
-
-        info!(
-            "Node2 block {} - height: {}, VDF step: {} (solution VDF: {}, need to exceed it)",
-            block_count, block.height, final_vdf, solution_vdf
-        );
-
-        // Ensure node2 sees its own block
-        node2.wait_until_height(block.height, 10).await?;
-    }
-
-    // Sync final state to node1
-    info!("Syncing final block to node1");
-    let final_height = node2.get_canonical_chain_height().await;
-    node1.wait_until_height(final_height, 10).await?;
-
-    // Verify VDF has advanced beyond solution
-    assert!(
-        final_vdf >= solution_vdf,
-        "Parent VDF {} should be >= solution VDF {}",
-        final_vdf,
-        solution_vdf
-    );
-    info!(
-        "VDF advancement complete: parent VDF {} {} solution VDF {}",
-        final_vdf,
-        if final_vdf > solution_vdf { ">" } else { "=" },
-        solution_vdf
-    );
-
-    // Resume node1's block production
-    info!("Resuming node1 block production");
-    resume_tx.send(()).unwrap();
-
-    // Get the result
-    let result = handle.await??;
-
-    // Verify solution was tracked
-    let tracked_vdf = tracking_strategy.solution_vdf_tracked.lock().await;
-    assert_eq!(
-        *tracked_vdf,
-        Some(solution_vdf),
-        "Solution VDF should have been tracked"
-    );
-
-    // Verify solution was discarded
-    let was_used = tracking_strategy.solution_used.lock().await;
-    assert_eq!(
-        *was_used,
-        Some(false),
-        "Solution should have been discarded (used=false)"
-    );
-
-    assert!(
-        result.is_none(),
-        "Block production should return None when VDF too old. Solution VDF: {}, Final parent VDF: {}",
-        solution_vdf,
-        final_vdf
-    );
-
-    info!("SUCCESS: Solution correctly discarded when VDF advanced too far");
-
-    // Cleanup
-    node1.stop().await;
-    node2.stop().await;
-
-    Ok(())
-}
 
 /// Test that solutions are reused when parent changes but remains valid.
 ///
