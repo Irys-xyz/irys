@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, Semaphore};
-use tracing::{debug, error, info_span, warn, Instrument};
+use tracing::{debug, error, info_span, warn, Instrument as _};
 
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
@@ -506,7 +506,6 @@ impl GossipClient {
         retry(backoff, operation)
             .instrument(span)
             .await
-            .map_err(|e| e)
     }
 
     fn handle_score<T>(
@@ -1117,7 +1116,7 @@ mod tests {
                             let _ = stream.write_all(response.as_bytes());
 
                             // For non-retriable errors like 404, handle one connection and exit
-                            if status_code < 500 && status_code >= 400 {
+                            if (400..500).contains(&status_code) {
                                 break;
                             }
                         }
