@@ -2,11 +2,12 @@ use crate::BlockMigrationMessage;
 use actix::prelude::*;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
-    BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256, U256,
+    BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256, U256,
 };
 
+use eyre::eyre;
 use std::sync::{Arc, RwLock};
-use tracing::error;
+use tracing::{error, instrument, warn};
 
 /// Retrieve a read only reference to the ledger partition assignments
 #[derive(Message, Debug)]
@@ -45,6 +46,7 @@ pub struct BlockIndexService {
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
     chunk_size: u64,
+    last_received_block: Option<(u64, BlockHash)>,
 }
 
 /// Allows this actor to live in the the local service registry
@@ -81,6 +83,7 @@ impl BlockIndexService {
             block_log: Vec::new(),
             num_blocks: 0,
             chunk_size: consensus_config.chunk_size,
+            last_received_block: None,
         }
     }
 
@@ -104,10 +107,10 @@ impl BlockIndexService {
         &mut self,
         block: &Arc<IrysBlockHeader>,
         all_txs: &Arc<Vec<DataTransactionHeader>>,
-    ) {
+    ) -> eyre::Result<()> {
         if self.block_index.is_none() {
             error!("block_index service not initialized");
-            return;
+            return Err(eyre!("block_index service not initialized"));
         }
 
         let chunk_size = self.chunk_size;
@@ -116,9 +119,8 @@ impl BlockIndexService {
             .clone()
             .expect("block_index must be initialized")
             .write()
-            .expect("block_index write lock poisoned")
-            .push_block(block, all_txs, chunk_size)
-            .expect("expect to add the block to the index");
+            .map_err(|_| eyre!("block_index write lock poisoned"))?
+            .push_block(block, all_txs, chunk_size)?;
 
         // Block log tracking
         self.block_log.push(BlockLogEntry {
@@ -152,18 +154,36 @@ impl BlockIndexService {
         //         prev_entry = Some(entry);
         //     }
         // }
+
+        Ok(())
     }
 }
 
 impl Handler<BlockMigrationMessage> for BlockIndexService {
     type Result = eyre::Result<()>;
+    #[instrument(skip_all, err, target = "BlockIndexService::BlockMigrationMessage" fields(height = %msg.block_header.height, hash = %msg.block_header.block_hash))]
     fn handle(&mut self, msg: BlockMigrationMessage, _: &mut Context<Self>) -> Self::Result {
         // Collect working variables to move into the closure
         let block = msg.block_header;
         let all_txs = msg.all_txs;
 
+        if let Some((previous_height, previous_hash)) = &self.last_received_block {
+            if block.height != previous_height + 1 {
+                // `instrument` will log this for us
+                return Err(eyre!(
+                    "BlockMigrationMessage received out of order or with a gap. Previous block height: {}, hash: {:x}. Current block height: {}, hash: {:x}", previous_height, previous_hash, block.height, block.block_hash
+                ));
+            }
+        } else {
+            warn!(
+                "Block index service received its first block: height {}, hash {:x}",
+                block.height, block.block_hash
+            );
+        }
+        self.last_received_block = Some((block.height, block.block_hash));
+
         // migrate the block
-        self.migrate_block(&block, &all_txs);
+        self.migrate_block(&block, &all_txs)?;
 
         Ok(())
     }
