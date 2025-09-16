@@ -1715,7 +1715,7 @@ pub async fn data_txs_are_valid(
             }
 
             // Enforce data availability by verifying ingress proofs with the actual chunks
-            {
+            if config.consensus.enable_full_ingress_proof_validation {
                 // Collect all chunks for this transaction from the DB (by tx-relative offset)
                 let expected_chunk_count =
                     tx_header.data_size.div_ceil(config.consensus.chunk_size);
