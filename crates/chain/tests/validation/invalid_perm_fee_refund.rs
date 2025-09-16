@@ -155,6 +155,14 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         "Block with refund for promoted transaction should be rejected"
     );
 
+    // Verify the block was NOT submitted to reth due to shadow validation failure
+    // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
+    let reth_block_result = genesis_node.get_evm_block_by_hash(block.evm_block_hash);
+    assert!(
+        reth_block_result.is_err(),
+        "Block should not exist in reth - shadow validation should have prevented submission"
+    );
+
     genesis_node.stop().await;
 
     Ok(())
@@ -248,6 +256,14 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         outcome,
         BlockValidationOutcome::Discarded,
         "Block with refund for non-existent transaction should be rejected"
+    );
+
+    // Verify the block was NOT submitted to reth due to shadow validation failure
+    // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
+    let reth_block_result = genesis_node.get_evm_block_by_hash(block.evm_block_hash);
+    assert!(
+        reth_block_result.is_err(),
+        "Block should not exist in reth - shadow validation should have prevented submission"
     );
 
     genesis_node.stop().await;
