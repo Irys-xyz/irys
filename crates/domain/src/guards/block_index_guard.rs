@@ -1,4 +1,3 @@
-use actix::MessageResponse;
 use irys_database::block_header_by_hash;
 use irys_types::DatabaseProvider;
 use reth_db::Database as _;
@@ -10,7 +9,7 @@ use crate::BlockIndex;
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 /// As soon as `block_index` is no longer an actix service this `MessageResponse` and the corresponding
 /// actix dependency in Cargo.toml can be dropped
-#[derive(Debug, Clone, MessageResponse)]
+#[derive(Debug, Clone)]
 pub struct BlockIndexReadGuard {
     block_index_data: Arc<RwLock<BlockIndex>>,
 }
