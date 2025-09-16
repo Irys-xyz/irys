@@ -17,7 +17,7 @@ use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, Production
 use irys_types::{block_production::SolutionContext, IrysBlockHeader, NodeConfig, H256};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::utils::{solution_context, IrysNodeTest};
 
@@ -25,9 +25,9 @@ use crate::utils::{solution_context, IrysNodeTest};
 struct TrackingStrategy {
     prod: ProductionStrategy,
     /// Signal when block production starts
-    pause_signal: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    pause_signal: Mutex<Option<oneshot::Sender<()>>>,
     /// Signal to resume block production
-    resume_signal: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    resume_signal: Mutex<Option<oneshot::Receiver<()>>>,
     /// Track the solution hash
     solution_hash_tracked: Arc<Mutex<Option<H256>>>,
     /// Track the solution VDF step
@@ -50,21 +50,13 @@ impl BlockProdStrategy for TrackingStrategy {
         *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
         *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);
 
-        error!(
-            "TrackingStrategy: Starting production with solution VDF step: {}",
-            solution.vdf_step
-        );
-
         // Signal that we're starting and wait for resume
-        if let Some(tx) = self.pause_signal.lock().await.take() {
-            error!("TrackingStrategy: Sending pause signal");
-            let _ = tx.send(());
+        if let Some(pause_tx) = self.pause_signal.lock().await.take() {
+            let _ = pause_tx.send(());
+        }
 
-            if let Some(rx) = self.resume_signal.lock().await.take() {
-                error!("TrackingStrategy: Waiting for resume signal");
-                let _ = rx.await;
-                error!("TrackingStrategy: Resumed, continuing production");
-            }
+        if let Some(resume_rx) = self.resume_signal.lock().await.take() {
+            let _ = resume_rx.await;
         }
 
         // Continue with normal production - this will check validity
@@ -72,12 +64,6 @@ impl BlockProdStrategy for TrackingStrategy {
 
         // Track whether solution was used (Some result) or discarded (None)
         *self.solution_used.lock().await = Some(result.is_some());
-
-        if result.is_some() {
-            error!("TrackingStrategy: Block produced successfully");
-        } else {
-            error!("TrackingStrategy: Solution discarded (returned None)");
-        }
 
         Ok(result)
     }
@@ -120,8 +106,8 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
         prod: ProductionStrategy {
             inner: node1.node_ctx.block_producer_inner.clone(),
         },
-        pause_signal: Arc::new(Mutex::new(Some(pause_tx))),
-        resume_signal: Arc::new(Mutex::new(Some(resume_rx))),
+        pause_signal: Mutex::new(Some(pause_tx)),
+        resume_signal: Mutex::new(Some(resume_rx)),
         solution_hash_tracked: Arc::new(Mutex::new(None)),
         solution_vdf_tracked: Arc::new(Mutex::new(None)),
         solution_used: Arc::new(Mutex::new(None)),
@@ -141,14 +127,9 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     pause_rx.await?;
 
     // Mine many blocks with node2 while paused
-    for i in 1..=10 {
+    for _ in 1..=10 {
         let block = node2.mine_block().await?;
         node2.wait_until_height(block.height, 10).await?;
-
-        // Don't wait for node1 to sync every block to avoid deadlock
-        if i == 10 {
-            node1.wait_until_height(block.height, 10).await?;
-        }
     }
 
     // Resume block production
@@ -176,12 +157,12 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// This test explicitly tracks VDF steps at each stage to ensure deterministic behavior.
 #[test_log::test(actix::test)]
 async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<()> {
-    error!("=== Starting test: solution discarded when VDF advances too far ===");
+    info!("=== Starting test: solution discarded when VDF advances too far ===");
 
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
-    config.consensus.get_mut().epoch.num_blocks_in_epoch = 10; // More blocks per epoch
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
 
     let peer_signer = config.new_random_signer();
     config.fund_genesis_accounts(vec![&peer_signer]);
@@ -190,22 +171,16 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
     let node1 = IrysNodeTest::new_genesis(config.clone()).start().await;
     let node2 = node1.testing_peer_with_assignments(&peer_signer).await?;
 
-    // Mine initial blocks to establish baseline
-    error!("Mining initial blocks to establish baseline");
     let mut last_block = None;
     for i in 1..=2 {
         let block = node1.mine_block().await?;
-        error!(
-            "Initial block {} mined - height: {}, VDF step: {}",
-            i, block.height, block.vdf_limiter_info.global_step_number
-        );
         node1.wait_until_height(block.height, 10).await?;
         node2.wait_until_height(block.height, 10).await?;
         last_block = Some(block);
     }
 
     let baseline_vdf = last_block.unwrap().vdf_limiter_info.global_step_number;
-    error!("Baseline VDF step: {}", baseline_vdf);
+    info!("Baseline VDF step: {}", baseline_vdf);
 
     // Create tracking strategy
     let (pause_tx, pause_rx) = oneshot::channel();
@@ -215,8 +190,8 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
         prod: ProductionStrategy {
             inner: node1.node_ctx.block_producer_inner.clone(),
         },
-        pause_signal: Arc::new(Mutex::new(Some(pause_tx))),
-        resume_signal: Arc::new(Mutex::new(Some(resume_rx))),
+        pause_signal: Mutex::new(Some(pause_tx)),
+        resume_signal: Mutex::new(Some(resume_rx)),
         solution_hash_tracked: Arc::new(Mutex::new(None)),
         solution_vdf_tracked: Arc::new(Mutex::new(None)),
         solution_used: Arc::new(Mutex::new(None)),
@@ -225,7 +200,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
     // Generate solution at current VDF step
     let solution = solution_context(&node1.node_ctx).await?;
     let solution_vdf = solution.vdf_step;
-    error!("Generated solution with VDF step: {}", solution_vdf);
+    info!("Generated solution with VDF step: {}", solution_vdf);
 
     // Start block production (will pause)
     let strategy_clone = tracking_strategy.clone();
@@ -235,7 +210,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
 
     // Wait for production to pause
     pause_rx.await?;
-    error!("Node1 paused, node2 will mine blocks to advance VDF");
+    info!("Node1 paused, node2 will mine blocks to advance VDF");
 
     // Node2 mines blocks until VDF advances beyond solution
     let mut final_vdf = baseline_vdf;
@@ -248,7 +223,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
         let block = node2.mine_block().await?;
         final_vdf = block.vdf_limiter_info.global_step_number;
 
-        error!(
+        info!(
             "Node2 block {} - height: {}, VDF step: {} (solution VDF: {}, need to exceed it)",
             block_count, block.height, final_vdf, solution_vdf
         );
@@ -258,7 +233,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
     }
 
     // Sync final state to node1
-    error!("Syncing final block to node1");
+    info!("Syncing final block to node1");
     let final_height = node2.get_canonical_chain_height().await;
     node1.wait_until_height(final_height, 10).await?;
 
@@ -269,7 +244,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
         final_vdf,
         solution_vdf
     );
-    error!(
+    info!(
         "VDF advancement complete: parent VDF {} {} solution VDF {}",
         final_vdf,
         if final_vdf > solution_vdf { ">" } else { "=" },
@@ -277,7 +252,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
     );
 
     // Resume node1's block production
-    error!("Resuming node1 block production");
+    info!("Resuming node1 block production");
     resume_tx.send(()).unwrap();
 
     // Get the result
@@ -306,7 +281,7 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
         final_vdf
     );
 
-    error!("SUCCESS: Solution correctly discarded when VDF advanced too far");
+    info!("SUCCESS: Solution correctly discarded when VDF advanced too far");
 
     // Cleanup
     node1.stop().await;
@@ -314,10 +289,6 @@ async fn serial_solution_discarded_when_vdf_advances_too_far() -> eyre::Result<(
 
     Ok(())
 }
-
-// ============================================================================
-// Test: Valid Solution Reuse
-// ============================================================================
 
 /// Test that solutions are reused when parent changes but remains valid.
 ///
@@ -355,8 +326,8 @@ async fn serial_solution_reused_when_parent_changes_but_valid() -> eyre::Result<
         prod: ProductionStrategy {
             inner: node1.node_ctx.block_producer_inner.clone(),
         },
-        pause_signal: Arc::new(Mutex::new(Some(pause_tx))),
-        resume_signal: Arc::new(Mutex::new(Some(resume_rx))),
+        pause_signal: Mutex::new(Some(pause_tx)),
+        resume_signal: Mutex::new(Some(resume_rx)),
         solution_hash_tracked: Arc::new(Mutex::new(None)),
         solution_vdf_tracked: Arc::new(Mutex::new(None)),
         solution_used: Arc::new(Mutex::new(None)),
