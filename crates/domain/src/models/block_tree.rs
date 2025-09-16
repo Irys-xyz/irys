@@ -2087,8 +2087,8 @@ mod tests {
         // Block tree state:
         //
         //                     [B13] cdiff=1, Validated(ValidBlock)
-        //                    /
-        //                   /     because B12 has same cdiff & was first
+        //                    / ⚠ not counted as onchain
+        //                   /
         //                  /
         // [B11] cdiff=0 --+-- [B12] cdiff=1, NotValidated (first added)
         // (genesis - tip).    ⚡ stays marked as tip but on longest chain

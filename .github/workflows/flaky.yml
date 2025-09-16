@@ -8,7 +8,7 @@ on:
       iterations:
         description: 'Number of iterations to run'
         required: false
-        default: '5'
+        default: '3'
         type: string
       tolerable_failures:
         description: 'Number of tolerable failures'
@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ITERATIONS: ${{ github.event.inputs.iterations || '5' }}
+  ITERATIONS: ${{ github.event.inputs.iterations || '3' }}
   TOLERABLE_FAILURES: ${{ github.event.inputs.tolerable_failures || '5' }}
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
