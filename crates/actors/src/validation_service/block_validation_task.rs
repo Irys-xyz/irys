@@ -330,7 +330,7 @@ impl BlockValidationTask {
             }
         };
 
-        // Shadow transaction validation
+        // Shadow transaction validation (includes reth submission after validation)
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
 
