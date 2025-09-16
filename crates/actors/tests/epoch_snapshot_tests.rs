@@ -1,4 +1,4 @@
-use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
+use actix::{actors::mocker::Mocker, Arbiter};
 use actix::{Actor as _, SystemService as _};
 
 use irys_actors::broadcast_mining_service::{
@@ -9,7 +9,6 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
     services::ServiceSenders,
-    BlockMigrationMessage,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
@@ -49,18 +48,13 @@ async fn genesis_test() {
         add_genesis_commitments(&mut genesis_block, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    // Create epoch service with random miner address
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
-
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
         genesis_block.clone(),
-        commitments.clone(),
+        commitments,
         &config,
     );
     let miner_address = config.node_config.miner_address();
