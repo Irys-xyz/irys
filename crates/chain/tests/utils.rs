@@ -1777,10 +1777,75 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTx(tx_header, tx))
+                .send(MempoolServiceMessage::IngestDataTx(tx_header.clone(), tx))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
+
+            // Transfer chunks for this tx to the peer so block validation can verify proofs
+            {
+                let chunk_size = self
+                    .node_ctx
+                    .config
+                    .node_config
+                    .consensus_config()
+                    .chunk_size;
+                let expected_chunks = tx_header.data_size.div_ceil(chunk_size);
+                for i in 0..expected_chunks {
+                    // Read chunk directly from sender's DB cache by data_root + tx-relative offset
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
+                    if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
+                        irys_database::cached_chunk_by_chunk_offset(
+                            tx,
+                            tx_header.data_root,
+                            tx_chunk_offset,
+                        )
+                    }) {
+                        if let Some(bytes) = cached_chunk.chunk {
+                            let unpacked = irys_types::UnpackedChunk {
+                                data_root: tx_header.data_root,
+                                data_size: tx_header.data_size,
+                                data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
+                                bytes,
+                                tx_offset: tx_chunk_offset,
+                            };
+                            let verify_data_root = unpacked.data_root;
+                            let verify_tx_offset = unpacked.tx_offset;
+
+                            let (ctx, crx) = tokio::sync::oneshot::channel();
+                            let _ = peer
+                                .node_ctx
+                                .service_senders
+                                .mempool
+                                .send(MempoolServiceMessage::IngestChunk(unpacked, ctx));
+                            let _ = crx.await;
+
+                            // Verify the chunk is present on the peer DB (small retry loop)
+                            {
+                                let mut attempts = 0_usize;
+                                loop {
+                                    let got = peer
+                                        .node_ctx
+                                        .db
+                                        .view_eyre(|tx| {
+                                            irys_database::cached_chunk_by_chunk_offset(
+                                                tx,
+                                                verify_data_root,
+                                                verify_tx_offset,
+                                            )
+                                        })
+                                        .unwrap_or(None);
+                                    if got.is_some() || attempts >= 5 {
+                                        break;
+                                    }
+                                    attempts += 1;
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Send commitment txs
