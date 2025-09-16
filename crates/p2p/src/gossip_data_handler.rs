@@ -592,7 +592,7 @@ where
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
-            .process_block(Arc::new(block_header), skip_block_validation)
+            .process_block::<A>(Arc::new(block_header), skip_block_validation)
             .await
             .map_err(GossipError::BlockPool)?;
         Ok(())
