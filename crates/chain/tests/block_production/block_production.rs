@@ -17,8 +17,9 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
+    block_production::SolutionContext, irys::IrysSigner, storage_pricing::Amount,
+    CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, IrysTransactionCommon as _,
+    NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -1695,7 +1696,13 @@ async fn heavy_block_prod_will_restart_block_build_loop_if_desired_parent_block_
         fn inner(&self) -> &BlockProducerInner {
             &self.prod.inner
         }
-        async fn is_parent_still_best(&self, parent_hash: &H256) -> (bool, H256) {
+        async fn check_parent_and_solution_validity(
+            &self,
+            parent_hash: &H256,
+            solution: &SolutionContext,
+        ) -> irys_actors::block_producer::ParentCheckResult {
+            use irys_actors::block_producer::ParentCheckResult;
+
             // notify the test we're waiting for peer 2 block
             self.awaiting_block_from_peer.send(()).await.unwrap();
             // only proceed once we know that peer 2 mined a new block
@@ -1703,14 +1710,24 @@ async fn heavy_block_prod_will_restart_block_build_loop_if_desired_parent_block_
             let peer_block = receiver.recv().await.unwrap();
             drop(receiver);
 
-            // assert that the desired parent block has changed
-            let res = self.prod.is_parent_still_best(parent_hash).await;
+            // check the real parent validity
+            let res = self.prod.check_parent_and_solution_validity(parent_hash, solution).await;
 
-            assert!(!res.0, "expect best parent block to have changed");
-            assert_eq!(
-                res.1, peer_block,
-                "expect the best parent block to be set to the peer_block"
-            );
+            // verify that parent has changed as expected
+            match &res {
+                ParentCheckResult::ParentStillBest => {
+                    panic!("expect best parent block to have changed");
+                }
+                ParentCheckResult::MustRebuild { new_parent } => {
+                    assert_eq!(
+                        *new_parent, peer_block,
+                        "expect the best parent block to be set to the peer_block"
+                    );
+                }
+                ParentCheckResult::SolutionInvalid { .. } => {
+                    // This is also valid if the solution is invalid for the new parent
+                }
+            }
 
             res
         }

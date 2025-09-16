@@ -63,7 +63,7 @@ pub use block_validation_tracker::BlockValidationTracker;
 
 /// Result of checking parent validity and solution compatibility
 #[derive(Debug)]
-pub(crate) enum ParentCheckResult {
+pub enum ParentCheckResult {
     /// Parent is still the best canonical block - keep current block
     ParentStillBest,
     /// Parent changed but solution is valid - must rebuild on new parent
@@ -79,7 +79,7 @@ pub(crate) enum ParentCheckResult {
 
 /// Reason why a solution is completely invalid
 #[derive(Debug)]
-pub(crate) enum InvalidReason {
+pub enum InvalidReason {
     /// Solution VDF step is at or before the new parent's VDF step
     VdfTooOld {
         parent_vdf_step: u64,
