@@ -143,7 +143,10 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
 
         // Safety limit to prevent infinite loop in case of test issues
         if block_count >= 50 {
-            panic!("Mining took too many blocks ({}), test may have issue", block_count);
+            panic!(
+                "Mining took too many blocks ({}), test may have issue",
+                block_count
+            );
         }
     }
 
@@ -178,7 +181,6 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     node2.stop().await;
     Ok(())
 }
-
 
 /// Test that solutions are reused when parent changes but remains valid.
 ///

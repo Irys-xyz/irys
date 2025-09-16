@@ -67,9 +67,7 @@ pub enum ParentCheckResult {
     /// Parent is still the best canonical block - keep current block
     ParentStillBest,
     /// Parent changed but solution is valid - must rebuild on new parent
-    MustRebuild {
-        new_parent: H256,
-    },
+    MustRebuild { new_parent: H256 },
     /// Solution is completely invalid and must be discarded
     SolutionInvalid {
         new_parent: H256,
@@ -86,7 +84,6 @@ pub enum InvalidReason {
         solution_vdf_step: u64,
     },
 }
-
 
 /// Commands that can be sent to the block producer service
 #[derive(Debug)]
@@ -541,7 +538,10 @@ pub trait BlockProdStrategy {
         while let Some((ref block, _, _)) = result {
             let parent_hash = &block.previous_block_hash;
 
-            match self.check_parent_and_solution_validity(parent_hash, &solution).await {
+            match self
+                .check_parent_and_solution_validity(parent_hash, &solution)
+                .await
+            {
                 ParentCheckResult::ParentStillBest => {
                     // Parent is still the best, keep the current block
                     break;
@@ -566,7 +566,10 @@ pub trait BlockProdStrategy {
                 ParentCheckResult::SolutionInvalid { new_parent, reason } => {
                     // Log the specific reason why solution is invalid
                     match &reason {
-                        InvalidReason::VdfTooOld { parent_vdf_step, solution_vdf_step } => {
+                        InvalidReason::VdfTooOld {
+                            parent_vdf_step,
+                            solution_vdf_step,
+                        } => {
                             warn!(
                                 solution_hash = %solution.solution_hash,
                                 solution_vdf_step,
