@@ -4,6 +4,7 @@ pub mod block_production;
 pub mod block_validation;
 mod difficulty_adjustment;
 mod reset_seed;
+mod test_block_rebuilding;
 pub mod test_double_spend;
 pub mod testing_primitives;
 pub mod treasury_tracking;

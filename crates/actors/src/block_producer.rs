@@ -85,11 +85,6 @@ pub enum InvalidReason {
         parent_vdf_step: u64,
         solution_vdf_step: u64,
     },
-    /// Solution hash doesn't meet the new parent's difficulty requirement
-    DifficultyNotMet {
-        parent_difficulty: U256,
-        solution_value: U256,
-    },
 }
 
 
@@ -388,11 +383,11 @@ pub trait BlockProdStrategy {
             return ParentCheckResult::ParentStillBest;
         }
 
-        // Parent changed - get new parent's info
-        let (new_parent_vdf_step, new_parent_difficulty) = tree
+        // Parent changed - get new parent's VDF step
+        let new_parent_vdf_step = tree
             .get_block(&current_best)
-            .map(|b| (b.vdf_limiter_info.global_step_number, b.diff))
-            .unwrap_or((0, U256::zero()));
+            .map(|b| b.vdf_limiter_info.global_step_number)
+            .unwrap_or(0);
 
         // Check if solution is too old (at or before new parent's VDF step)
         if solution.vdf_step <= new_parent_vdf_step {
@@ -401,19 +396,6 @@ pub trait BlockProdStrategy {
                 reason: InvalidReason::VdfTooOld {
                     parent_vdf_step: new_parent_vdf_step,
                     solution_vdf_step: solution.vdf_step,
-                },
-            };
-        }
-
-        // Check difficulty requirement
-        let solution_value = U256::from_little_endian(&solution.solution_hash.0);
-        if solution_value < new_parent_difficulty {
-            // Solution doesn't meet difficulty - cannot use it at all
-            return ParentCheckResult::SolutionInvalid {
-                new_parent: current_best,
-                reason: InvalidReason::DifficultyNotMet {
-                    parent_difficulty: new_parent_difficulty,
-                    solution_value,
                 },
             };
         }
@@ -593,15 +575,6 @@ pub trait BlockProdStrategy {
                                 "Solution is too old for new parent (vdf_step {} <= {}), discarding",
                                 solution_vdf_step,
                                 parent_vdf_step
-                            );
-                        }
-                        InvalidReason::DifficultyNotMet { parent_difficulty, solution_value } => {
-                            warn!(
-                                solution_hash = %solution.solution_hash,
-                                solution_value = %solution_value,
-                                new_parent = %new_parent,
-                                parent_difficulty = %parent_difficulty,
-                                "Solution doesn't meet new parent's difficulty, discarding"
                             );
                         }
                     }
