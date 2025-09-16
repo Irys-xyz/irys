@@ -633,11 +633,26 @@ impl BlockTree {
                     blocks_to_collect -= 1;
                 }
 
-                // For Validated or other NotOnchain states
-                ChainState::Validated(_) | ChainState::NotOnchain(_) => {
+                ChainState::Validated(_) => {
                     let chain_cache_entry = make_block_tree_entry(&entry.block);
                     pairs.push(chain_cache_entry);
+
                     not_onchain_count += 1;
+
+                    if blocks_to_collect == 0 {
+                        break;
+                    }
+                    blocks_to_collect -= 1;
+                }
+
+                ChainState::NotOnchain(block_state) => {
+                    let chain_cache_entry = make_block_tree_entry(&entry.block);
+                    pairs.push(chain_cache_entry);
+
+                    // We only count this as not onchain if it's validated
+                    if *block_state == BlockState::ValidBlock {
+                        not_onchain_count += 1;
+                    }
 
                     if blocks_to_collect == 0 {
                         break;
@@ -715,6 +730,13 @@ impl BlockTree {
 
         let block = block_entry.block.clone();
         let old_tip = self.tip;
+
+        let (canonical_diff, canonical_block_hash) = self.max_cumulative_difficulty;
+
+        if block.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
+            // "Cannot move tip away from canonical for another block with same cumulative_diff"
+            return Ok(false);
+        }
 
         // Recursively mark previous blocks
         self.mark_on_chain(&block)?;
@@ -2049,41 +2071,28 @@ mod tests {
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
 
-        // The tip does change here, even though it's not part of the longest
-        // chain, this seems like a bug
         println!("tip: {} after mark_tip()", cache.tip);
-        assert!(reorg);
+        // Verify the change doesn't switch tip to b13
+        assert!(!reorg);
 
-        assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
-        // Although b13 becomes the tip, it's not included in the longest_chain_cache.
-        // This is because the cache follows blocks from max_cumulative_difficulty, which
-        // was set to b12 when it was first added. When multiple blocks have the same
-        // cumulative difficulty, max_cumulative_difficulty preserves the first one seen.
-        // Since b13's difficulty equals b12's (rather than exceeds it), b12 remains the
-        // reference point for longest chain calculations.
-
+        assert_eq!(
+            cache
+                .get_earliest_not_onchain_in_longest_chain()
+                .unwrap()
+                .0
+                .block
+                .block_hash,
+            b12.block_hash
+        );
         // Block tree state:
         //
-        //                     [B13] cdiff=1, Validated
-        //                    /  ⚡ marked as tip but not in longest chain
+        //                     [B13] cdiff=1, Validated(ValidBlock)
+        //                    /
         //                   /     because B12 has same cdiff & was first
         //                  /
         // [B11] cdiff=0 --+-- [B12] cdiff=1, NotValidated (first added)
-        // (genesis - tip)       ⚠ not counted as onchain due to not being validated
-        //
-        // ▶ Longest chain contains: [B11]
-        // ▶ Not on chain count: 0
-        // ▶ First added wins longest_chain with equal cdiff
-
-        // DMac's Note:
-        // Issue: tip and longest chain can become misaligned when marking a tip that has
-        //   equal difficulty to an earlier block. The tip could point to b13 while the
-        //   longest chain contains b12, as b12 was seen first with same difficulty.
-        // Fix: mark_tip() should reject attempts to change tip to a block that has equal
-        //   (rather than greater) difficulty compared to the current max_difficulty block.
-        //   This would ensure tip always follows the longest chain. TBH the current behavior
-        //   is likely aligned with the local miners economic interest and why things
-        //   like "uncle" blocks exist on other chains.
+        // (genesis - tip).    ⚡ stays marked as tip but on longest chain
+        //                       because while B13 has same cdiff & was second
         assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
 
         // Extend the b13->b11 chain
@@ -2107,9 +2116,13 @@ mod tests {
             b14.block_hash
         );
         // by adding b14 we've now made the b13->b11 chain heavier and because
-        // b13 is already validated it is included in the longest chain
+        // b13 is isn't already validated so it counts towards not_onchain_count
         // b14 isn't validated so it doesn't count towards the not_onchain_count
-        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 1, &cache), Ok(()));
+
+        // Now mark b13 as the tip, it should succeed as b14 made it canonical
+        let reorg = cache.mark_tip(&b13.block_hash).unwrap();
+        assert!(reorg);
 
         // Try to mutate the state of the cache with some random validations
         assert_matches!(
@@ -2295,18 +2308,18 @@ mod tests {
             ),
             Ok(())
         );
-        let _b13 = extend_chain(random_block(U256::one()), &b11);
+        let b13 = extend_chain(random_block(U256::from(2)), &b12);
         println!("---");
-        assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
+        assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
-        // Verify the longest chain state isn't changed by b16 pending Vdf validation
-        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
+        // Verify the longest chain state isn't changed by adding b12
+        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
 
-        // Now add the subsequent block, but as awaitingValidation
+        // Now add the subsequent block, but as ValidationScheduled
         assert_matches!(
             cache.add_common(
-                b12.block_hash,
-                &b12,
+                b13.block_hash,
+                &b13,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2314,13 +2327,13 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13], 1, &cache), Ok(()));
 
         // When a locally produced block is added as validated "onchain" but it
         // hasn't yet been validated by the validation_service
         assert_matches!(
             check_earliest_not_onchain(
-                &b12.block_hash,
+                &b13.block_hash,
                 &ChainState::Validated(BlockState::ValidationScheduled),
                 &cache
             ),
@@ -2463,6 +2476,13 @@ mod tests {
     ) -> eyre::Result<()> {
         let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
         let actual_blocks: Vec<_> = canonical_blocks.iter().map(|e| e.block_hash).collect();
+
+        let expected = expected_blocks
+            .iter()
+            .map(|b| b.block_hash)
+            .collect::<Vec<_>>();
+
+        println!("actual: {:?}\nexpected: {:?}", actual_blocks, expected);
 
         ensure!(
             actual_blocks
