@@ -1274,7 +1274,7 @@ impl IrysNode {
             services.push(ArbiterEnum::TokioService(block_index_handle));
             services.push(ArbiterEnum::TokioService(mempool_handle));
 
-            // 7. Core infrastructure (shutdown last)
+            // 8. Core infrastructure (shutdown last)
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()),
             });
