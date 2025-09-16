@@ -1968,6 +1968,7 @@ mod tests {
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
         pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
+        #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
         pub epoch_snapshot: EpochSnapshot,
