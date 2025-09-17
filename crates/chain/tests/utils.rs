@@ -1445,7 +1445,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    pub async fn create_publish_data_tx(
+    pub async fn post_publish_data_tx(
         &self,
         account: &IrysSigner,
         data: Vec<u8>,
