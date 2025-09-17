@@ -105,8 +105,6 @@ impl BlockIndexServiceInner {
                     );
                 }
 
-                self.last_received_block = Some((block_header.height, block_header.block_hash));
-
                 // Perform the migration
                 let res = self.migrate_block(&block_header, &all_txs);
                 let _ = response.send(res);
@@ -142,6 +140,8 @@ impl BlockIndexServiceInner {
             .write()
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
+
+        self.last_received_block = Some((block.height, block.block_hash));
 
         // Track a small window of recent blocks for debugging
         self.block_log.push(BlockLogEntry {
