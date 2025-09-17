@@ -503,9 +503,7 @@ impl GossipClient {
 
         let span = info_span!("gossip_http_post", %url);
         let backoff = create_backoff();
-        retry(backoff, operation)
-            .instrument(span)
-            .await
+        retry(backoff, operation).instrument(span).await
     }
 
     fn handle_score<T>(
