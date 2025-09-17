@@ -1040,6 +1040,16 @@ impl EpochSnapshot {
                 "DVEZiYKq5cFxWoZBsxnwQEVDQuBrmitJETX8rBk22h67",
                 "DnWrWuAhFJFTSUXY7PFXRzvQQF5rdweDRUjkPaHPcSZw",
                 "Ga1oWyjEDc2kLbUVASz5pnq6XMqjL2GqkQFtM5Pt3Nhb",
+                // new genesis
+                "83rs4Pkz9o7udk8Xf6tz8hS4YvGNobHhfbHgvGkHurdC",
+                "pyik8Jv9f3YdUDzo6jQ6Z5ePmvb7nnak1R7o2EUd6uT",
+                "517dP1pw9WGBLFX3qNe8xLjdgV9HFP3Nf7AUK1V5RhLh",
+                "7LAt8hGx63eQVuMyqGxDctSTP5ZKWg9br2eg73qJgPo9",
+                "DdgxQ5BhUQ52tcFV6Pwq4AiDZtR44KypcepMhH2EB6B9",
+                "He9N44udjsXzAvfk1BFkX5UQWuzLsTS9EhAB9ouUCnf5",
+                "AexPMP3FUPURCVCQWwJNxcn5qbWRY5sP29ADC4JUcYBV",
+                "FvTgoKsp1AqRWXccHw7KajvvcTKFd34Fzux9XbPMFs9",
+                "5tMNMeVSjFcFf2m5RMa9pitVFyAe4wcg5JnBdsSBciuP",
             ]
             .map(H256::from_base58);
 
