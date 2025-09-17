@@ -91,13 +91,15 @@ pub async fn run_node(
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
-    if let Err(e) = unwind_to(&node_config, chainspec.clone(), latest_block).await {
-        // hack to ignore trying to unwind future blocks
-        // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
-        if e.to_string().starts_with("Target block number") {
-            warn!("Error unwinding - Reth/Irys head block mismatch {}", &e)
-        } else {
-            return Err(e);
+    if latest_block > 0 {
+        if let Err(e) = unwind_to(&node_config, chainspec.clone(), latest_block).await {
+            // hack to ignore trying to unwind future blocks
+            // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
+            if e.to_string().starts_with("Target block number") {
+                warn!("Error unwinding - Reth/Irys head block mismatch {}", &e)
+            } else {
+                return Err(e);
+            }
         }
     }
 
