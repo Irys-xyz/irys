@@ -1,42 +1,18 @@
 // These tests create malicious block producers that include invalid PermFeeRefund shadow transactions.
 // They verify that blocks are rejected when they contain inappropriate refunds.
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::validation::send_block_to_block_tree;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
-use irys_chain::IrysNodeCtx;
 use irys_primitives::Address;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, H256List, IrysBlockHeader,
     NodeConfig, SystemTransactionLedger, H256, U256,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
-
-// Helper function to send a block directly to the block tree service for validation
-async fn send_block_to_block_tree(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
-    skip_vdf_validation: bool,
-) -> eyre::Result<()> {
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    node_ctx
-        .service_senders
-        .block_tree
-        .send(BlockTreeServiceMessage::BlockPreValidated {
-            block,
-            commitment_txs: Arc::new(commitment_txs),
-            skip_vdf_validation,
-            response: response_tx,
-        })?;
-
-    response_rx.await??;
-    Ok(())
-}
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
 // for a transaction that was successfully promoted (and thus shouldn't get a refund).
@@ -102,9 +78,9 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // Mine initial blocks
-    genesis_node.mine_block().await?;
-    genesis_node.mine_block().await?;
+    // Spawn a peer node that will receive blocks via gossip
+    let peer_config = genesis_node.testing_peer_with_signer(&test_signer);
+    let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a data transaction that appears promoted
     let data_tx = DataTransactionHeader {
@@ -145,16 +121,36 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         .await?
         .unwrap();
 
-    // Send block directly to block tree service for validation
+    // Send block to the Genesis node for validation (not the genesis node)
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
-
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(
         outcome,
         BlockValidationOutcome::Discarded,
-        "Block with refund for promoted transaction should be rejected"
+        "Genesis should reject block with refund for promoted transaction"
     );
 
+    // Send block to the PEER node for validation (not the genesis node)
+    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), vec![], false).await?;
+
+    // Verify the PEER node rejected the block
+    let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
+    assert_eq!(
+        outcome,
+        BlockValidationOutcome::Discarded,
+        "Peer should reject block with refund for promoted transaction"
+    );
+
+    // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
+    // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
+    let reth_block_result = peer_node.get_evm_block_by_hash(block.evm_block_hash);
+    assert!(
+        reth_block_result.is_err(),
+        "Block should not exist in peer's reth - shadow validation should have prevented submission"
+    );
+
+    // Clean up both nodes
+    peer_node.stop().await;
     genesis_node.stop().await;
 
     Ok(())
@@ -216,9 +212,9 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // Mine initial blocks
-    genesis_node.mine_block().await?;
-    genesis_node.mine_block().await?;
+    // Spawn a peer node that will receive blocks via gossip
+    let peer_config = genesis_node.testing_peer_with_signer(&test_signer);
+    let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a phantom refund for a transaction that doesn't exist
     let phantom_tx_id = H256::random();
@@ -240,16 +236,36 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         .await?
         .unwrap();
 
-    // Send block directly to block tree service for validation
+    // Send block to the Genesis node for validation (not the genesis node)
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
-
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(
         outcome,
         BlockValidationOutcome::Discarded,
-        "Block with refund for non-existent transaction should be rejected"
+        "Genesis should reject block with refund for promoted transaction"
     );
 
+    // Send block to the PEER node for validation (not the genesis node)
+    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), vec![], false).await?;
+
+    // Verify the PEER node rejected the block
+    let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
+    assert_eq!(
+        outcome,
+        BlockValidationOutcome::Discarded,
+        "Peer should reject block with refund for promoted transaction"
+    );
+
+    // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
+    // The new shadow validation sequence should prevent submission of blocks with invalid shadow transactions
+    let reth_block_result = peer_node.get_evm_block_by_hash(block.evm_block_hash);
+    assert!(
+        reth_block_result.is_err(),
+        "Block should not exist in peer's reth - shadow validation should have prevented submission"
+    );
+
+    // Clean up both nodes
+    peer_node.stop().await;
     genesis_node.stop().await;
 
     Ok(())
