@@ -250,7 +250,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 cmd!(sh, "cargo build --workspace --tests").remove_and_run()?;
             }
 
-
             // Build command arguments
             let mut command_args = vec!["flake".to_string()];
 
@@ -312,31 +311,31 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 // Use script to preserve TTY behavior for progress bars
                 println!("Running cargo-flake to detect flaky tests");
                 println!("Streaming output to: {}", output_file);
-                
+
                 // Install cargo-flake first
                 cmd!(
                     sh,
                     "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
                 )
                 .remove_and_run()?;
-                
+
                 // Use script command to preserve TTY and tee to save output
                 // Handle different script syntax between platforms
                 let script_result = if cfg!(target_os = "macos") {
                     // macOS script syntax
                     let script_command = format!(
                         "script -q /dev/stdout cargo {} | tee -a '{}'",
-                        command_args.join(" "), 
+                        command_args.join(" "),
                         output_file
                     );
                     cmd!(sh, "bash -c {script_command}")
                         .env("RUST_BACKTRACE", "1")
                         .run()
                 } else if cfg!(target_os = "linux") {
-                    // Linux script syntax  
+                    // Linux script syntax
                     let script_command = format!(
                         "script -q -e -c 'cargo {}' /dev/stdout | tee -a '{}'",
-                        command_args.join(" "), 
+                        command_args.join(" "),
                         output_file
                     );
                     cmd!(sh, "bash -c {script_command}")
@@ -347,20 +346,22 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     eprintln!("Warning: script command may not be available on this platform, progress bars may not display correctly");
                     let tee_command = format!(
                         "cargo {} 2>&1 | tee -a '{}'",
-                        command_args.join(" "), 
+                        command_args.join(" "),
                         output_file
                     );
                     cmd!(sh, "bash -c {tee_command}")
                         .env("RUST_BACKTRACE", "1")
                         .run()
                 };
-                
+
                 // If script command fails, fallback to basic tee
                 if script_result.is_err() {
-                    eprintln!("Warning: script command failed, falling back to basic output capture");
+                    eprintln!(
+                        "Warning: script command failed, falling back to basic output capture"
+                    );
                     let tee_command = format!(
                         "cargo {} 2>&1 | tee -a '{}'",
-                        command_args.join(" "), 
+                        command_args.join(" "),
                         output_file
                     );
                     cmd!(sh, "bash -c {tee_command}")
@@ -372,14 +373,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             } else {
                 // Run command without file output - show output in terminal
                 println!("Running cargo-flake to detect flaky tests");
-                
+
                 // Install cargo-flake if not already installed
                 cmd!(
                     sh,
                     "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
                 )
                 .remove_and_run()?;
-                
+
                 cmd!(sh, "cargo {command_args...}")
                     .env("RUST_BACKTRACE", "1")
                     .run()?;
