@@ -47,7 +47,7 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
     let from_scratch_expected_count = 4;
 
     // so autopledge uses a different anchor
-    let blk = genesis_node.mine_block().await?;
+    let _ = genesis_node.mine_block().await?;
     let blk2 = genesis_node.mine_block().await?;
     genesis_node.wait_until_height(blk2.height, 10).await?;
 
