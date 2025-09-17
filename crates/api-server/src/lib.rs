@@ -118,6 +118,10 @@ pub fn routes() -> impl HttpServiceFactory {
             "/observability/ledger/publish/{node_id}/summary",
             web::get().to(observability::get_publish_ledger_summary),
         )
+        .route(
+            "/observability/chain/height",
+            web::get().to(observability::get_chain_height),
+        )
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {

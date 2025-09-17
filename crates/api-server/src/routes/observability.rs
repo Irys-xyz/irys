@@ -1,6 +1,7 @@
 use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::web::{Data, Json, Path};
+use irys_domain::get_canonical_chain;
 use irys_types::{parse_address, partition::PartitionAssignment, DataLedger};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +10,11 @@ pub struct LedgerSummary {
     node_id: String,
     ledger_type: DataLedger,
     assignment_count: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ChainHeight {
+    height: u64,
 }
 
 fn get_canonical_epoch_snapshot(
@@ -74,6 +80,20 @@ pub async fn get_publish_ledger_summary(
     app_state: Data<ApiState>,
 ) -> Result<Json<LedgerSummary>, ApiError> {
     get_ledger_summary(node_id, app_state, DataLedger::Publish).await
+}
+
+pub async fn get_chain_height(app_state: Data<ApiState>) -> Result<Json<ChainHeight>, ApiError> {
+    let canonical_chain = get_canonical_chain(app_state.block_tree.clone())
+        .await
+        .map_err(|e| ApiError::CanonicalChainError { err: e.to_string() })?;
+
+    let height = canonical_chain
+        .0
+        .last()
+        .map(|block| block.height)
+        .ok_or(ApiError::EmptyCanonicalChain)?;
+
+    Ok(Json(ChainHeight { height }))
 }
 
 #[cfg(test)]
@@ -240,6 +260,4 @@ mod tests {
             }
         }
     }
-
-
 }

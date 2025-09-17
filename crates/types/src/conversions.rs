@@ -32,7 +32,7 @@ mod tests {
             "not_an_address",
             "0xinvalid",
             "",
-            "0x123", // too short
+            "0x123",                                       // too short
             "0x1234567890abcdef1234567890abcdef123456789", // too long
         ]
     }
@@ -61,7 +61,10 @@ mod tests {
                     "Should have failed to parse invalid address: {}",
                     address_str
                 );
-                assert!(matches!(result.unwrap_err(), AddressParseError::InvalidFormat(_)));
+                assert!(matches!(
+                    result.unwrap_err(),
+                    AddressParseError::InvalidFormat(_)
+                ));
             }
         }
 
