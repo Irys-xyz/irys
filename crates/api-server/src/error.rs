@@ -1,6 +1,6 @@
 use actix_web::{body::BoxBody, HttpResponse, ResponseError};
-use serde::Serialize;
 use irys_types::{AddressParseError, DataLedger};
+use serde::Serialize;
 
 use awc::http::StatusCode;
 
@@ -15,7 +15,10 @@ pub enum ApiError {
     #[error("Node not found: {node_id}")]
     NodeNotFound { node_id: String },
     #[error("No {ledger_type} ledger assignments found for node: {node_id}")]
-    LedgerNotFound { node_id: String, ledger_type: DataLedger },
+    LedgerNotFound {
+        node_id: String,
+        ledger_type: DataLedger,
+    },
     #[error("Invalid address: {0}")]
     InvalidAddress(#[from] AddressParseError),
 }
@@ -37,11 +40,11 @@ impl ResponseError for ApiError {
         struct ErrorResponse {
             error: String,
         }
-        
+
         let error_response = ErrorResponse {
             error: self.to_string(),
         };
-        
+
         let body = serde_json::to_string(&error_response).unwrap();
         let res = HttpResponse::new(self.status_code());
         res.set_body(BoxBody::new(body))

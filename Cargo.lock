@@ -4861,6 +4861,7 @@ dependencies = [
  "irys-testing-utils",
  "irys-types",
  "reth",
+ "rstest",
  "semver 1.0.26",
  "serde",
  "serde_json",

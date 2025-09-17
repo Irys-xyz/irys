@@ -28,6 +28,8 @@ thiserror.workspace = true
 [dev-dependencies]
 irys-testing-utils.workspace = true
 test-log.workspace = true
+rstest.workspace = true
+actix-web = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true
