@@ -788,6 +788,15 @@ impl TryFrom<&str> for DataLedger {
     }
 }
 
+impl std::fmt::Display for DataLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Publish => write!(f, "publish"),
+            Self::Submit => write!(f, "submit"),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BlockIndexQuery {
