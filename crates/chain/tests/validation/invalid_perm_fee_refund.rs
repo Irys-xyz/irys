@@ -67,7 +67,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 
     // Configure a test network with accelerated epochs
     let num_blocks_in_epoch = 4;
-    let seconds_to_wait = 30; // Increased timeout for peer syncing
+    let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = 2;
@@ -201,7 +201,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
 
     // Configure a test network with accelerated epochs
     let num_blocks_in_epoch = 4;
-    let seconds_to_wait = 30; // Increased timeout for peer syncing
+    let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
     genesis_config.consensus.get_mut().block_migration_depth = 2;

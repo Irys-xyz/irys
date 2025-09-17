@@ -288,9 +288,9 @@ where
         reth_service: Option<Addr<RethServiceActor>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
-        // This function is only used for repairing missing payloads in the block index.
-        // The blocks have already been validated when they were accepted into the block tree,
-        // so we skip shadow transaction validation and directly submit to reth.
+        // This function repairs missing execution payloads for already-validated blocks.
+        // Since blocks have been validated when accepted into the block index, we
+        // presume that the block is valid and submit the payload to reth
         debug!(
             "Block pool: Repairing missing execution payload for block {:?}",
             block_header.block_hash
@@ -342,8 +342,7 @@ where
                 ))
             })?;
 
-        // Directly submit the payload to reth without re-validating shadow transactions
-        // (the block was already validated when it was accepted into the block tree)
+        // Directly submit the payload to reth
         irys_actors::block_validation::submit_payload_to_reth(
             block_header,
             adapter,
