@@ -388,7 +388,7 @@ where
             .data_handler
             .handle_get_stake_and_pledge_whitelist()
             .await;
-        HttpResponse::Ok().json(whitelist)
+        HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
     }
 
     fn handle_invalid_data(

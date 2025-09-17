@@ -227,8 +227,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         self.spawn_stake_and_pledge_update_task();
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
-        let start_sync_from_height = self.block_index.read().latest_height();
-
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
@@ -238,9 +236,12 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let block_pool = self.block_pool.clone();
         let reth_service_addr = self.reth_service_actor.clone();
         let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
+        let start_sync_from_height = self.block_index.read().latest_height();
 
         tokio::spawn(
             async move {
+                debug!("Starting sync from height: {}", start_sync_from_height);
+
                 gossip_data_handler
                     .gossip_client
                     .hydrate_peers_online_status(&peer_list)
@@ -711,7 +712,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     let block_index = match get_block_index(
         peer_list,
         &api_client,
-        sync_state.sync_target_height(),
+        // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
+        sync_state.sync_target_height() + 1,
         BLOCK_BATCH_SIZE,
         5,
         is_trusted_mode,
@@ -958,15 +960,19 @@ async fn pull_highest_blocks(
 ) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
     let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
-        debug!("Collecting highest blocks from trusted peers");
+        debug!("Post-sync: Collecting the highest blocks from trusted peers");
         peer_list.online_trusted_peers()
     } else {
         let limit = top_n.unwrap_or(10);
-        debug!("Collecting highest blocks from top {} active peers", limit);
+        debug!(
+            "Post-sync: Collecting the highest blocks from top {} active peers",
+            limit
+        );
         peer_list.top_active_peers(Some(limit), None)
     };
 
     if peers.is_empty() {
+        warn!("Post-sync: No peers available to pull the highest blocks from");
         return Err(ChainSyncError::Network(
             "No online peers available".to_string(),
         ));
@@ -979,7 +985,7 @@ async fn pull_highest_blocks(
         match api_client.node_info(peer.address.api).await {
             Ok(info) => {
                 let hash = info.block_hash;
-                let height = info.block_index_height;
+                let height = info.height;
                 let entry = peers_by_top_block_hash
                     .entry(hash)
                     .or_insert_with(|| (height, Vec::new()));
@@ -992,13 +998,13 @@ async fn pull_highest_blocks(
                     entry.1.push((miner_address, peer.clone()));
                 }
                 debug!(
-                    "Peer {:?} reported highest block hash {:?} (api: {})",
+                    "Post-sync: Peer {:?} reported highest block hash {:?} (api: {})",
                     miner_address, hash, peer.address.api
                 );
             }
             Err(err) => {
                 warn!(
-                    "Failed to fetch node info from peer {:?} (api: {}): {}",
+                    "Post-sync: Failed to fetch node info from peer {:?} (api: {}): {}",
                     miner_address, peer.address.api, err
                 );
             }
@@ -1027,6 +1033,12 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
 
     let mut futures = Vec::new();
     for (block_hash, (reported_height, peers)) in peers_by_top_block_hash {
+        debug!(
+            "Post-sync: Considering pull of block {:?} (height {}) reported by {} peer(s)",
+            block_hash,
+            reported_height,
+            peers.len()
+        );
         // Filter out blocks that are already processed or currently being processed
         if gossip_data_handler
             .block_pool

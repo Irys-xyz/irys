@@ -313,6 +313,7 @@ where
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
+        debug!("Pulling block {} from the network", block_hash);
         let (source_address, irys_block) = self
             .gossip_client
             .pull_block_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
@@ -327,6 +328,10 @@ where
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
+        debug!(
+            "Pulled block {} from peer {}, sending for processing",
+            block_hash, source_address
+        );
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,

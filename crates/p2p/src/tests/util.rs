@@ -285,6 +285,14 @@ impl ApiClient for ApiClientStub {
         Ok(())
     }
 
+    async fn post_commitment_transaction(
+        &self,
+        _peer: SocketAddr,
+        _transaction: CommitmentTransaction,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_transactions(
         &self,
         peer: SocketAddr,
@@ -313,6 +321,14 @@ impl ApiClient for ApiClientStub {
         &self,
         _peer: SocketAddr,
         _block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        Ok(None)
+    }
+
+    async fn get_block_by_height(
+        &self,
+        _peer: SocketAddr,
+        _block_height: u64,
     ) -> Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }
