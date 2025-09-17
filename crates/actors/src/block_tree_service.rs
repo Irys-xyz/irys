@@ -349,11 +349,9 @@ impl BlockTreeServiceInner {
                 all_txs: arc_all_txs.clone(),
                 response: tx,
             })?;
-        match rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => panic!("BlockIndexService error during migration: {e:?}"),
-            Err(e) => panic!("Failed to receive BlockIndexService response: {e:?}"),
-        }
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
+            .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
 
         // Let the chunk_migration_service know about the block migration
         self.service_senders
