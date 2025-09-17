@@ -21,10 +21,17 @@ pub enum ApiError {
     },
     #[error("Invalid address: {0}")]
     InvalidAddress(#[from] AddressParseError),
-    #[error("Failed to retrieve canonical chain: {err}")]
-    CanonicalChainError { err: String },
+    #[error("Failed to retrieve canonical chain: {0}")]
+    CanonicalChainError(String),
     #[error("Canonical chain is empty - no blocks found")]
     EmptyCanonicalChain,
+}
+
+impl ApiError {
+    /// Helper method for converting eyre errors to canonical chain errors
+    pub fn canonical_chain_error(err: impl std::fmt::Display) -> Self {
+        Self::CanonicalChainError(err.to_string())
+    }
 }
 
 impl ResponseError for ApiError {
@@ -36,7 +43,7 @@ impl ResponseError for ApiError {
             Self::NodeNotFound { .. } => StatusCode::NOT_FOUND,
             Self::LedgerNotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidAddress(_) => StatusCode::BAD_REQUEST,
-            Self::CanonicalChainError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::CanonicalChainError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::EmptyCanonicalChain => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
