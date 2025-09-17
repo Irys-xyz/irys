@@ -3,18 +3,15 @@
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use crate::validation::send_block_to_block_tree;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta, shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
-use irys_chain::IrysNodeCtx;
 use irys_primitives::Address;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, H256List, IrysBlockHeader,
     NodeConfig, SystemTransactionLedger, H256, U256,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
 // for a transaction that was successfully promoted (and thus shouldn't get a refund).

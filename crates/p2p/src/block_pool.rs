@@ -4,7 +4,6 @@ use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::block_validation::shadow_transactions_are_valid;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
 use irys_actors::MempoolFacade;
@@ -289,8 +288,11 @@ where
         reth_service: Option<Addr<RethServiceActor>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
+        // This function is only used for repairing missing payloads in the block index.
+        // The blocks have already been validated when they were accepted into the block tree,
+        // so we skip shadow transaction validation and directly submit to reth.
         debug!(
-            "Block pool: Validating and submitting execution payload for block {:?}",
+            "Block pool: Repairing missing execution payload for block {:?}",
             block_header.block_hash
         );
 
@@ -313,22 +315,6 @@ where
                 "Reth payload provider is not set".into(),
             ))?;
 
-        // Get parent epoch snapshot from block tree
-        let parent_epoch_snapshot = self
-            .block_status_provider
-            .block_tree_read_guard()
-            .read()
-            .get_epoch_snapshot(&block_header.previous_block_hash)
-            .ok_or_else(|| {
-                BlockPoolError::OtherInternal(format!(
-                    "Parent epoch snapshot isn't found for block {:?}",
-                    block_header.previous_block_hash
-                ))
-            })?;
-
-        // Get block index from the block status provider
-        let block_index = self.block_status_provider.block_index_read_guard().inner();
-
         Self::pull_and_seal_execution_payload(
             &self.execution_payload_provider,
             &self.sync_service_sender,
@@ -344,25 +330,20 @@ where
             ))
         })?;
 
-        // First validate shadow transactions and get the execution data
-        let execution_data = shadow_transactions_are_valid(
-            &self.config,
-            &self.service_senders,
-            block_header,
-            &self.db,
-            self.execution_payload_provider.clone(),
-            parent_epoch_snapshot,
-            block_index,
-        )
-        .await
-        .map_err(|err| {
-            BlockPoolError::OtherInternal(format!(
-                "Failed to validate shadow transactions for block {:?}: {:?}",
-                block_header.block_hash, err
-            ))
-        })?;
+        // Fetch the execution data that was already pulled and sealed
+        let execution_data = self
+            .execution_payload_provider
+            .wait_for_payload(&block_header.evm_block_hash)
+            .await
+            .ok_or_else(|| {
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to fetch execution payload for block {:?}",
+                    block_header.evm_block_hash
+                ))
+            })?;
 
-        // Shadow transactions are valid, now submit to reth using the same execution data
+        // Directly submit the payload to reth without re-validating shadow transactions
+        // (the block was already validated when it was accepted into the block tree)
         irys_actors::block_validation::submit_payload_to_reth(
             block_header,
             adapter,
@@ -376,7 +357,7 @@ where
             ))
         })?;
         debug!(
-            "Block pool: Execution payload for block {:?} validated and submitted",
+            "Block pool: Execution payload for block {:?} repaired and submitted",
             block_header.block_hash
         );
 
