@@ -95,8 +95,9 @@ impl BlockIndexServiceInner {
                             block_header.height,
                             block_header.block_hash
                         );
-                        let _ = response.send(Err(err));
-                        return Ok(());
+                        // notify caller, then exit service by returning Err
+                        let _ = response.send(Err(eyre!(err.to_string())));
+                        return Err(err);
                     }
                 } else {
                     info!(
@@ -105,10 +106,18 @@ impl BlockIndexServiceInner {
                     );
                 }
 
-                // Perform the migration
-                let res = self.migrate_block(&block_header, &all_txs);
-                let _ = response.send(res);
-                Ok(())
+                // Perform the migration; if it fails, notify caller and exit service
+                match self.migrate_block(&block_header, &all_txs) {
+                    Ok(()) => {
+                        let _ = response.send(Ok(()));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // notify caller, then exit service by returning Err
+                        let _ = response.send(Err(eyre!(e.to_string())));
+                        Err(e)
+                    }
+                }
             }
             BlockIndexServiceMessage::GetLatestBlockIndex { response } => {
                 let bi = self
