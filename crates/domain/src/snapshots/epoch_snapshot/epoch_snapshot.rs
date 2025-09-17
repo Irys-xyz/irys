@@ -1004,6 +1004,42 @@ impl EpochSnapshot {
                 "7zwUcgcynrqG7uMwjWw8SN888PYYXwftSspUit8UvytC",
                 "H9tKi9LXbdMpm33UEbDrXk7wECUP2BwqaMrJoffC44uA",
                 "HggC7vSAAY72u9vQdz4UbCwwtuhqC4CnstpTvku2McQZ",
+                // 4 (?)
+                "2owKvCvgZr4qGaAeccYpnW5w18WwwYusLRfHBwjFSGNQ",
+                "5vGQ93p4yS2pTvAEgeBpvBBMRSdkzZgjB7Jf8eNCaxDZ",
+                "8Me5N5E13LziHYWH7HHJwvWg5a18avDd42xovrBotMs5",
+                "8hqjqHtFKBHwG7Kh4K665Do54e7mwHJUGw7W75HNSPGG",
+                "BYcYN62VYSeY3TgAcY9i4otnCqxxEe5sRuyNFwCh8Exc",
+                "CHGY5aRqBcMgfMjQPd1GgJaEyRhshJXiUxZ6vhngxr6h",
+                "CvL2kiexFtzvcwdpsZu6kNJJeniztC6nQUFy3STkbbux",
+                "EHeQmQhdKqUCVng3T2HM2P4NqXXfVmSSA1TS5mrUekaK",
+                // 5 (?)
+                "hQ3LK3C3p9RqPDnjdM9h43ujRWMfpBxDn82v8b23bbp",
+                "3NJ1xeU4THy39mwQQmvdMerJephNk5akHnqaNGBonuMW",
+                "7AKhdRufwMpEUJWs9S53ZdcD8FAZqZLhs7NnKYtvhbNj",
+                "87jnLze5qyprmoPATVWiWetWLerfFv9QPZBxdKvpi1se",
+                "Bpc3ThhGeRkeAM1JVshf5rhVvqkdaZ1yHAP3yVS5ru3e",
+                "EMGgEm1HSxrYWpLVbaJcRQb1g3iu4e43hYhs38UNcbxk",
+                "Ea9Xo4hwpoWfqaUYtyD3P6YkgzzZYVccvNN4nB5FgXEw",
+                "FydMpm1PZddNDK312zDERbZuLrAtAVRE6YUgtQmZofV2",
+                // 6 (?)
+                "5LZFQJfupn8aUr2cnTJsj2YwL5vMHzSAoLxxjUX5UtPa",
+                "6gw9xoxWBVKzUBMPiwZophze52oGdLAymCqtt5wNtm1D",
+                "7JD8hjLcpaKwe8Qqm37CqQywuA8BDCLAyuF5jrs3HHf3",
+                "8H1pNoWZ8KHXPNHQn6ccML5xZ1fx8Nvst8kw6j8NWzu2",
+                "8aEU45BnanuUGY379rRYmbNjdenvMqdSVPVWmyPXXAw5",
+                "ACDDa8KQToPchsMrjPnxXYHQebh1AgXFSJsjSoeR2Wap",
+                "D2yipqvvUiF4692tS5WyQVEqvqEs93AX1UARZrPLuGf9",
+                "HtDLRd6uqJrZ2bib1U2Q9PXWKmGsSo8fFmV5vEH8r6K3",
+                // 7 (?)
+                "2ZTT15y9mQpaPU6XFPGpXeKuA39963mcU7iPan3ub7Y1",
+                "35EWT2k1BZoa9xq6Cu6HGSmcG1k3KxGMTsKQgNjMNDnR",
+                "6Tdi2SBn9sc7HwDoJJqej86zbtFHEaSRVF9g7CjDbgtE",
+                "7nQWwpTiF9Ui8gpcKKxuRWEFyohqYtrmHC8RVZKzQ9Wj",
+                "8LkCLc5KZGzraSNdVLSAAhMP74vMr5TFwnyNqbnq2ToJ",
+                "DVEZiYKq5cFxWoZBsxnwQEVDQuBrmitJETX8rBk22h67",
+                "DnWrWuAhFJFTSUXY7PFXRzvQQF5rdweDRUjkPaHPcSZw",
+                "Ga1oWyjEDc2kLbUVASz5pnq6XMqjL2GqkQFtM5Pt3Nhb",
             ]
             .map(H256::from_base58);
 
