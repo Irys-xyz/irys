@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 #[actix::test]
 async fn genesis_test() {
@@ -803,11 +803,9 @@ async fn epoch_blocks_reinitialization_test() {
             },
         )
         .expect("send migrate block");
-    match rx.await {
-        Ok(Ok(())) => info!("Genesis block indexed"),
-        Ok(Err(_)) => panic!("Failed to index genesis block"),
-        Err(_) => panic!("Failed to receive migration result"),
-    }
+    rx.await
+        .expect("Failed to receive migration result")
+        .expect("Failed to index genesis block");
 
     {
         let mut storage_modules: StorageModuleVec = Vec::new();

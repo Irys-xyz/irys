@@ -2055,11 +2055,9 @@ mod tests {
                 response: tx,
             })
             .expect("send migrate block");
-        match rx.await {
-            Ok(Ok(())) => info!("Genesis block indexed"),
-            Ok(Err(_)) => panic!("Failed to index genesis block"),
-            Err(_) => panic!("Failed to receive migration result"),
-        }
+        rx.await
+            .expect("Failed to receive migration result")
+            .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(partition_hash)
@@ -2320,11 +2318,10 @@ mod tests {
                 response: tx_migrate,
             })
             .expect("send migrate block");
-        match rx_migrate.await {
-            Ok(Ok(())) => info!("Second block indexed"),
-            Ok(Err(_)) => panic!("Failed to index second block"),
-            Err(_) => panic!("Failed to receive migration result"),
-        };
+        rx_migrate
+            .await
+            .expect("Failed to receive migration result")
+            .expect("Failed to index second block");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         context
@@ -2581,11 +2578,10 @@ mod tests {
                 response: tx_migrate,
             })
             .expect("send migrate block");
-        match rx_migrate.await {
-            Ok(Ok(())) => info!("Second block indexed"),
-            Ok(Err(_)) => panic!("Failed to index second block"),
-            Err(_) => panic!("Failed to receive migration result"),
-        };
+        rx_migrate
+            .await
+            .expect("Failed to receive migration result")
+            .expect("Failed to index second block");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         context
