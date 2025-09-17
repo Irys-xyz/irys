@@ -637,7 +637,7 @@ impl IrysNode {
                 &ctx.config,
                 ctx.block_tree_guard.clone(),
                 ctx.storage_modules_guard.clone(),
-                latest_hash,
+                latest_block.block_hash,
                 ctx.mempool_pledge_provider.clone(),
             )
             .await?;
