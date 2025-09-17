@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{debug, Instrument as _};
+use tracing::{debug, info, Instrument as _};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -222,6 +222,7 @@ impl ChunkOrchestrator {
         storage_capacity_remaining < (target_throughput / 10)
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn get_max_chunk_offset(&self) -> Option<(PartitionChunkOffset, LedgerChunkOffset)> {
         // Find the maximum LedgerRelativeOffset of this storage module
         let ledger_range = self
@@ -231,7 +232,7 @@ impl ChunkOrchestrator {
 
         // Fetch the most recently migrated block
         // We only want to download migrated chunks from other peers
-        let max_chunk_offset: u64 = {
+        let max_chunk_offset: Option<u64> = {
             let tree = self.block_tree.read();
             let (canonical, _) = tree.get_canonical_chain();
             let block_migration_depth =
@@ -250,10 +251,22 @@ impl ChunkOrchestrator {
                     .iter()
                     .find(|dl| dl.ledger_id == self.ledger_id)
                     .expect("should be able to look up data_ledger by id");
-                data_ledger.total_chunks.saturating_sub(1)
+
+                // info!("block: {:#?}", block);
+
+                if data_ledger.total_chunks == 0 {
+                    None
+                } else {
+                    Some(data_ledger.total_chunks.saturating_sub(1))
+                }
             } else {
-                0
+                None
             }
+        };
+
+        // If we couldn't find a valid max_chunk_offset return None
+        let Some(max_chunk_offset) = max_chunk_offset else {
+            return None;
         };
 
         // is the max chunk offset before the start of this storage module (can happen at head of chain)
