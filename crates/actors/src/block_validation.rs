@@ -898,25 +898,27 @@ pub fn poa_is_valid(
 }
 
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
-/// generated from the Irys block data.
+/// generated from the Irys block data. This is a pure validation function with no side effects.
+/// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
-    reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-) -> eyre::Result<()> {
-    // 1. Validate that the evm block is valid
+) -> eyre::Result<ExecutionData> {
+    // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
-    let engine_api_client = reth_adapter.inner.engine_http_client();
-    let ExecutionData { payload, sidecar } = execution_data;
+    let ExecutionData {
+        payload,
+        sidecar: _,
+    } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
@@ -935,41 +937,6 @@ pub async fn shadow_transactions_are_valid(
             "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
         );
 
-    let versioned_hashes = sidecar
-        .versioned_hashes()
-        .ok_or_eyre("version hashes must be present")?
-        .clone();
-    loop {
-        let payload_status = engine_api_client
-            .new_payload_v4(
-                payload_v3.clone(),
-                versioned_hashes.clone(),
-                block.previous_block_hash.into(),
-                RequestsOrHash::Requests(Requests::new(vec![])),
-            )
-            .await?;
-        match payload_status.status {
-            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error));
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                tracing::debug!(
-                    "syncing extra blocks to validate payload {:?}",
-                    payload_v3.payload_inner.payload_inner.block_num_hash()
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
-                tracing::info!("reth payload already known & is valid");
-                break;
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
-                tracing::info!("accepted a side-chain (fork) payload");
-                break;
-            }
-        }
-    }
     let evm_block: Block = payload_v3.try_into_block()?;
 
     // 2. Extract shadow transactions from the beginning of the block
@@ -1030,7 +997,70 @@ pub async fn shadow_transactions_are_valid(
     .await?;
 
     // 4. Validate they match
-    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
+
+    // 5. Return the execution data for reuse
+    Ok(execution_data)
+}
+
+/// Submits the EVM payload to reth for execution layer validation.
+/// This should only be called after all consensus layer validations have passed.
+#[tracing::instrument(skip_all, err, fields(
+    block_hash = %block.block_hash,
+    block_height = %block.height,
+    evm_block_hash = %block.evm_block_hash
+))]
+pub async fn submit_payload_to_reth(
+    block: &IrysBlockHeader,
+    reth_adapter: &IrysRethNodeAdapter,
+    execution_data: ExecutionData,
+) -> eyre::Result<()> {
+    let ExecutionData { payload, sidecar } = execution_data;
+
+    let ExecutionPayload::V3(payload_v3) = payload else {
+        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+    };
+
+    let versioned_hashes = sidecar
+        .versioned_hashes()
+        .ok_or_eyre("version hashes must be present")?
+        .clone();
+
+    // Submit to reth execution layer
+    let engine_api_client = reth_adapter.inner.engine_http_client();
+    loop {
+        let payload_status = engine_api_client
+            .new_payload_v4(
+                payload_v3.clone(),
+                versioned_hashes.clone(),
+                block.previous_block_hash.into(),
+                RequestsOrHash::Requests(Requests::new(vec![])),
+            )
+            .await?;
+        match payload_status.status {
+            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
+                return Err(eyre::Report::msg(validation_error));
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
+                tracing::debug!(
+                    "syncing extra blocks to validate payload {:?}",
+                    payload_v3.payload_inner.payload_inner.block_num_hash()
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
+                tracing::info!("reth payload already known & is valid");
+                break;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                tracing::info!("accepted a side-chain (fork) payload");
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
