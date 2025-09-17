@@ -337,9 +337,6 @@ impl BlockTreeServiceInner {
             &block_header.block_hash, &block_header.height
         );
 
-        // HACK
-        System::set_current(self.system.clone());
-
         let arc_block = Arc::new(block_header);
         let arc_all_txs = Arc::new(all_txs);
 
