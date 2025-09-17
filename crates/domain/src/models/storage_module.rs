@@ -378,8 +378,29 @@ impl StorageModule {
         }
 
         // Attempt to load a global set of intervals from the submodules
-        let loaded_intervals =
-            Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id);
+        let loaded_intervals: NoditMap<
+            PartitionChunkOffset,
+            Interval<PartitionChunkOffset>,
+            ChunkType,
+        > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id);
+
+        // validate that the loaded intervals span the correct range
+        let gaps = loaded_intervals
+            .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
+            .collect::<Vec<_>>();
+        let expected = vec![partition_chunk_offset_ii!(
+            TryInto::<u32>::try_into(config.consensus.num_chunks_in_partition)
+                .expect("Value exceeds u32::MAX"),
+            u32::MAX
+        )];
+
+        if gaps != expected {
+            return Err(eyre!(
+                "Invalid storage module config, expected range {:?}, got range {:?}",
+                &expected,
+                &gaps
+            ));
+        }
 
         Ok(Self {
             id: storage_module_info.id,
