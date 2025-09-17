@@ -5033,7 +5033,6 @@ dependencies = [
 name = "irys-domain"
 version = "0.1.0"
 dependencies = [
- "actix",
  "alloy-core",
  "alloy-rpc-types",
  "assert_matches",

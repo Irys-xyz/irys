@@ -1979,15 +1979,13 @@ fn process_block_ledgers_with_states(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        BlockMigrationMessage,
-    };
-    use actix::{prelude::*, SystemRegistry};
+    use crate::block_index_service::{BlockIndexService, BlockIndexServiceMessage};
+
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
+    use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
@@ -1999,7 +1997,9 @@ mod tests {
 
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
-        pub block_index_actor: Addr<BlockIndexService>,
+        pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
+        #[expect(dead_code)]
+        pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
@@ -2053,9 +2053,14 @@ mod tests {
                 .expect("Expected to create block index"),
         ));
 
-        let block_index_actor =
-            BlockIndexService::new(block_index.clone(), &consensus_config).start();
-        SystemRegistry::set(block_index_actor.clone());
+        // Spawn Tokio BlockIndex service
+        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
+        let block_index_handle = BlockIndexService::spawn_service(
+            block_index_rx,
+            block_index.clone(),
+            &consensus_config,
+            tokio::runtime::Handle::current(),
+        );
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
@@ -2072,16 +2077,17 @@ mod tests {
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
-        let msg = BlockMigrationMessage {
-            block_header: arc_genesis.clone(),
-            all_txs: Arc::new(vec![]),
-        };
-
-        let block_index_actor = BlockIndexService::from_registry();
-        match block_index_actor.send(msg).await {
-            Ok(_) => info!("Genesis block indexed"),
-            Err(_) => panic!("Failed to index genesis block"),
-        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        block_index_tx
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: arc_genesis.clone(),
+                all_txs: Arc::new(vec![]),
+                response: tx,
+            })
+            .expect("send migrate block");
+        rx.await
+            .expect("Failed to receive migration result")
+            .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(partition_hash)
@@ -2093,7 +2099,8 @@ mod tests {
             data_dir,
             TestContext {
                 block_index,
-                block_index_actor,
+                block_index_tx,
+                block_index_handle,
                 miner_address,
                 epoch_snapshot,
                 partition_hash,
@@ -2332,25 +2339,26 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: block.clone(),
-            all_txs: Arc::clone(&txs),
-        };
-
-        match context
-            .block_index_actor
-            .send(block_finalized_message.clone())
+        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: block.clone(),
+                all_txs: Arc::clone(&txs),
+                response: tx_migrate,
+            })
+            .expect("send migrate block");
+        rx_migrate
             .await
-        {
-            Ok(_) => info!("Second block indexed"),
-            Err(_) => panic!("Failed to index second block"),
-        };
+            .expect("Failed to receive migration result")
+            .expect("Failed to index second block");
 
-        let block_index_guard = context
-            .block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .expect("Failed to get block index guard");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
+            .expect("send get guard");
+        let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
             .partition_assignment
@@ -2591,25 +2599,26 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: block.clone(),
-            all_txs: Arc::clone(&txs),
-        };
-
-        match context
-            .block_index_actor
-            .send(block_finalized_message.clone())
+        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: block.clone(),
+                all_txs: Arc::clone(&txs),
+                response: tx_migrate,
+            })
+            .expect("send migrate block");
+        rx_migrate
             .await
-        {
-            Ok(_) => info!("Second block indexed"),
-            Err(_) => panic!("Failed to index second block"),
-        };
+            .expect("Failed to receive migration result")
+            .expect("Failed to index second block");
 
-        let block_index_guard = context
-            .block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .expect("Expected to get block index guard");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
+            .expect("send get guard");
+        let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
             .partition_assignment
