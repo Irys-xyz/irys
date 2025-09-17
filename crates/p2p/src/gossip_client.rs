@@ -5,7 +5,7 @@
 
 use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
 use crate::GossipCache;
-use backoff::{future::retry, ExponentialBackoff};
+use backon::{ExponentialBuilder, Retryable as _};
 use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
@@ -18,6 +18,7 @@ use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,8 +40,6 @@ const INITIAL_BACKOFF_INTERVAL: Duration = Duration::from_millis(150);
 /// Maximum backoff interval for retries  
 const MAX_BACKOFF_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Maximum elapsed time for retry attempts
-const MAX_RETRY_ELAPSED_TIME: Duration = Duration::from_secs(8);
 
 /// Maximum peers to query in parallel for data requests
 const MAX_PARALLEL_PEER_QUERIES: usize = 5;
@@ -134,9 +133,11 @@ struct DedupEntry {
     in_flight: bool,
 }
 
+type DedupKey = [u8; 32]; // SHA256 hash
+
 #[derive(Debug)]
 struct RequestDedupCache {
-    entries: Arc<RwLock<HashMap<String, DedupEntry>>>,
+    entries: Arc<RwLock<HashMap<DedupKey, DedupEntry>>>,
 }
 
 impl RequestDedupCache {
@@ -146,7 +147,7 @@ impl RequestDedupCache {
         }
     }
 
-    async fn should_proceed(&self, key: String) -> bool {
+    async fn should_proceed(&self, key: DedupKey) -> bool {
         let mut entries = self.entries.write().await;
 
         // Clean expired entries
@@ -168,7 +169,7 @@ impl RequestDedupCache {
         }
     }
 
-    async fn mark_completed(&self, key: &str) {
+    async fn mark_completed(&self, key: &DedupKey) {
         let mut entries = self.entries.write().await;
         if let Some(entry) = entries.get_mut(key) {
             entry.in_flight = false;
@@ -209,6 +210,27 @@ impl GossipClient {
 
     pub fn internal_client(&self) -> &Client {
         &self.client
+    }
+
+    fn compute_dedup_key(peer_address: &Address, requested_data: &GossipDataRequest) -> DedupKey {
+        let mut hasher = Sha256::new();
+        hasher.update(peer_address);
+        // Add discriminant to distinguish between different request types
+        match requested_data {
+            GossipDataRequest::Block(hash) => {
+                hasher.update([0_u8]);
+                hasher.update(hash.0);
+            }
+            GossipDataRequest::ExecutionPayload(hash) => {
+                hasher.update([1_u8]);
+                hasher.update(hash.as_slice());
+            }
+            GossipDataRequest::Chunk(hash) => {
+                hasher.update([2_u8]);
+                hasher.update(hash.0);
+            }
+        }
+        hasher.finalize().into()
     }
 
     async fn is_peer_available(&self, peer_address: &Address) -> bool {
@@ -279,8 +301,8 @@ impl GossipClient {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
 
         // Deduplication check
-        let dedup_key = format!("{}:{:?}", peer.0, requested_data);
-        if !self.dedup_cache.should_proceed(dedup_key.clone()).await {
+        let dedup_key = Self::compute_dedup_key(&peer.0, &requested_data);
+        if !self.dedup_cache.should_proceed(dedup_key).await {
             debug!(
                 "Request already in flight for peer {} data {:?}",
                 peer.0, requested_data
@@ -308,8 +330,8 @@ impl GossipClient {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
 
         // Deduplication check
-        let dedup_key = format!("{}:{:?}", peer.0, requested_data);
-        if !self.dedup_cache.should_proceed(dedup_key.clone()).await {
+        let dedup_key = Self::compute_dedup_key(&peer.0, &requested_data);
+        if !self.dedup_cache.should_proceed(dedup_key).await {
             debug!(
                 "Pull request already in flight for peer {} data {:?}",
                 peer.0, requested_data
@@ -337,33 +359,36 @@ impl GossipClient {
         // Use exponential backoff for health checks
         let op = || async {
             let response = self.internal_client().get(&url).send().await.map_err(|e| {
-                backoff::Error::transient(GossipClientError::GetRequest(
+                GossipClientError::GetRequest(
                     peer_addr.clone(),
                     e.to_string(),
-                ))
+                )
             })?;
 
             if !response.status().is_success() {
                 let err = GossipClientError::HealthCheck(peer_addr.clone(), response.status());
-                if is_status_retriable(response.status()) {
-                    return Err(backoff::Error::transient(err));
-                } else {
-                    return Err(backoff::Error::permanent(err));
-                }
+                return Err(err);
             }
 
             let parsed = response.json::<GossipResponse<bool>>().await.map_err(|e| {
-                backoff::Error::transient(GossipClientError::GetJsonResponsePayload(
+                GossipClientError::GetJsonResponsePayload(
                     peer_addr.clone(),
                     e.to_string(),
-                ))
+                )
             })?;
 
             Ok(parsed)
         };
 
-        let backoff = create_backoff();
-        let response = retry(backoff, op).await?;
+        let response = op.retry(create_backoff()).when(|e: &GossipClientError| {
+            match e {
+                GossipClientError::GetRequest(_, _) => true,
+                GossipClientError::GetJsonResponsePayload(_, _) => true,
+                GossipClientError::HealthCheck(_, status) => {
+                    status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                }
+            }
+        }).await?;
 
         match response {
             GossipResponse::Accepted(val) => Ok(val),
@@ -459,51 +484,53 @@ impl GossipClient {
                 .json(&req)
                 .send()
                 .await
-                .map_err(|e| backoff::Error::transient(GossipError::Network(e.to_string())))?;
+                .map_err(|e| GossipError::Network(e.to_string()))?;
 
             let status = response.status();
 
             match status {
                 StatusCode::OK => {
                     let text = response.text().await.map_err(|e| {
-                        backoff::Error::transient(GossipError::Network(e.to_string()))
+                        GossipError::Network(e.to_string())
                     })?;
 
                     if text.trim().is_empty() {
-                        return Err(backoff::Error::permanent(GossipError::Network(format!(
+                        return Err(GossipError::Network(format!(
                             "Empty response from {}",
                             url
-                        ))));
+                        )));
                     }
 
                     let body = serde_json::from_str(&text).map_err(|e| {
-                        backoff::Error::permanent(GossipError::Network(format!(
+                        GossipError::Network(format!(
                             "Failed to parse JSON: {} - Response: {}",
                             e, text
-                        )))
+                        ))
                     })?;
                     Ok(body)
                 }
                 _ => {
                     let error_text = response.text().await.unwrap_or_default();
-                    if is_status_retriable(status) {
-                        Err(backoff::Error::transient(GossipError::Network(format!(
-                            "API request failed with status: {} - {}",
-                            status, error_text
-                        ))))
-                    } else {
-                        Err(backoff::Error::permanent(GossipError::Network(format!(
-                            "API request failed with status: {} - {}",
-                            status, error_text
-                        ))))
-                    }
+                    Err(GossipError::Network(format!(
+                        "API request failed with status: {} - {}",
+                        status, error_text
+                    )))
                 }
             }
         };
 
         let span = info_span!("gossip_http_post", %url);
-        let backoff = create_backoff();
-        retry(backoff, operation).instrument(span).await
+        operation.retry(create_backoff()).when(|e: &GossipError| {
+            match e {
+                GossipError::Network(msg) => {
+                    // Retry on network errors, connection issues, and server errors
+                    msg.contains("status: 5") || msg.contains("status: 429") ||
+                    msg.contains("timeout") || msg.contains("connection") ||
+                    msg.contains("Connection refused") || msg.contains("tcp connect error")
+                }
+                _ => false,
+            }
+        }).instrument(span).await
     }
 
     fn handle_score<T>(
@@ -1006,27 +1033,20 @@ enum PeerResponseResult<T> {
     Skip,
 }
 
-fn create_backoff() -> ExponentialBackoff {
+fn create_backoff() -> ExponentialBuilder {
     if cfg!(test) {
-        ExponentialBackoff {
-            initial_interval: Duration::from_millis(5),
-            max_interval: Duration::from_millis(50),
-            max_elapsed_time: Some(Duration::from_millis(500)),
-            ..ExponentialBackoff::default()
-        }
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(5))
+            .with_max_delay(Duration::from_millis(50))
+            .with_max_times(10)
     } else {
-        ExponentialBackoff {
-            initial_interval: INITIAL_BACKOFF_INTERVAL,
-            max_interval: MAX_BACKOFF_INTERVAL,
-            max_elapsed_time: Some(MAX_RETRY_ELAPSED_TIME),
-            ..ExponentialBackoff::default()
-        }
+        ExponentialBuilder::default()
+            .with_min_delay(INITIAL_BACKOFF_INTERVAL)
+            .with_max_delay(MAX_BACKOFF_INTERVAL)
+            .with_max_times(5)
     }
 }
 
-fn is_status_retriable(status: StatusCode) -> bool {
-    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
-}
 
 #[cfg(test)]
 mod tests {

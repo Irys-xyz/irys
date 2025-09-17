@@ -32,7 +32,8 @@ moka.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 dashmap = "6.1.0"
-backoff = { version = "0.4", features = ["tokio"] }
+backon = "1.2"
+sha2 = "0.10"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
