@@ -122,6 +122,10 @@ pub fn routes() -> impl HttpServiceFactory {
             "/observability/chain/height",
             web::get().to(observability::get_chain_height),
         )
+        .route(
+            "/observability/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
+            web::get().to(observability::get_storage_intervals),
+        )
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
