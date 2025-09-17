@@ -189,7 +189,7 @@ impl BlockIndexService {
                     .await
                     .expect("BlockIndex service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+            .in_current_span(),
         );
 
         TokioServiceHandle {
