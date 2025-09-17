@@ -10,7 +10,7 @@ module.exports =     // ecosystem.js
             // "cron_restart": 0,
             "env": {
                 "kill_timeout": 5_000,
-                "RUST_LOG": "debug,jsonrpsee-server=off",
+                "RUST_LOG": "debug,jsonrpsee-server=off,irys::packing::progress=off",
                 "RUST_BACKTRACE": "full"
             }
         }
