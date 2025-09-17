@@ -8,6 +8,7 @@ pub mod network_config;
 pub mod peer_list;
 pub mod post_chunk;
 pub mod post_version;
+pub mod observability;
 pub mod price;
 pub mod proxy;
 pub mod tx;
