@@ -321,16 +321,54 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 .remove_and_run()?;
                 
                 // Use script command to preserve TTY and tee to save output
-                // script -q -e -c command outputs to stdout while preserving TTY behavior
-                let script_command = format!(
-                    "script -q -e -c 'cargo {}' /dev/stdout | tee -a '{}'",
-                    command_args.join(" "), 
-                    output_file
-                );
+                // Handle different script syntax between platforms
+                let script_result = if cfg!(target_os = "macos") {
+                    // macOS script syntax
+                    let script_command = format!(
+                        "script -q /dev/stdout cargo {} | tee -a '{}'",
+                        command_args.join(" "), 
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {script_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()
+                } else if cfg!(target_os = "linux") {
+                    // Linux script syntax  
+                    let script_command = format!(
+                        "script -q -e -c 'cargo {}' /dev/stdout | tee -a '{}'",
+                        command_args.join(" "), 
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {script_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()
+                } else {
+                    // Fallback for other platforms - try basic tee without script
+                    eprintln!("Warning: script command may not be available on this platform, progress bars may not display correctly");
+                    let tee_command = format!(
+                        "cargo {} 2>&1 | tee -a '{}'",
+                        command_args.join(" "), 
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {tee_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()
+                };
                 
-                cmd!(sh, "bash -c {script_command}")
-                    .env("RUST_BACKTRACE", "1")
-                    .run()?;
+                // If script command fails, fallback to basic tee
+                if script_result.is_err() {
+                    eprintln!("Warning: script command failed, falling back to basic output capture");
+                    let tee_command = format!(
+                        "cargo {} 2>&1 | tee -a '{}'",
+                        command_args.join(" "), 
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {tee_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()?;
+                } else {
+                    script_result?;
+                }
             } else {
                 // Run command without file output - show output in terminal
                 println!("Running cargo-flake to detect flaky tests");
