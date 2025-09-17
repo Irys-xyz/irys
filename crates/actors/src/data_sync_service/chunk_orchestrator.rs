@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{debug, info, Instrument as _};
+use tracing::{debug, Instrument as _};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -265,9 +265,7 @@ impl ChunkOrchestrator {
         };
 
         // If we couldn't find a valid max_chunk_offset return None
-        let Some(max_chunk_offset) = max_chunk_offset else {
-            return None;
-        };
+        let max_chunk_offset = max_chunk_offset?;
 
         // is the max chunk offset before the start of this storage module (can happen at head of chain)
         if ledger_range.start() > max_chunk_offset.into() {
