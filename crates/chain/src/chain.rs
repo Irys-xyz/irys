@@ -1362,9 +1362,32 @@ impl IrysNode {
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
 
+        let mut combined = epoch_snapshot
+            .partition_assignments
+            .capacity_partitions
+            .iter()
+            .collect::<Vec<_>>();
+
+        combined.extend(epoch_snapshot.partition_assignments.data_partitions.iter());
+
+        let red_data = combined.iter().fold(
+            Default::default(),
+            |mut acc: std::collections::BTreeMap<irys_types::Address, Vec<H256>>, c| {
+                acc.entry(c.1.miner_address)
+                    .or_default()
+                    .push(c.1.partition_hash);
+                acc
+            },
+        );
+
         error!(
-            "JESSEDEBUG PARTITION ASSIGNMENTS {:#?}\n COMMITMENTS {:#?}",
-            &epoch_snapshot.partition_assignments, &replay_data
+            "JESSEDEBUG PARTITION ASSIGNMENTS {:#?}", //\n COMMITMENTS {:#?}",
+            red_data // &epoch_snapshot.partition_assignments,    // &replay_data
+        );
+
+        error!(
+            "JESSEDEBUG REDATA {}",
+            serde_json::to_string_pretty(&red_data)?
         );
 
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
