@@ -48,7 +48,8 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
 
     // so autopledge uses a different anchor
     let blk = genesis_node.mine_block().await?;
-    genesis_node.wait_until_height(blk.height, 10).await?;
+    let blk2 = genesis_node.mine_block().await?;
+    genesis_node.wait_until_height(blk2.height, 10).await?;
 
     let config = genesis_node.node_ctx.config.consensus.clone();
 
@@ -99,14 +100,16 @@ async fn test_auto_stake_pledge(#[case] stake: bool, #[case] pledges: usize) -> 
         .await?;
 
     // Mine a block to get the stake commitment included
-    let irys_block2 = genesis_node.mine_block().await?;
-
-    peer_node.wait_until_height(irys_block2.height, 10).await?;
-
-    // Mine the epoch block
     let irys_block3 = genesis_node.mine_block().await?;
 
     peer_node.wait_until_height(irys_block3.height, 10).await?;
+
+    // Mine the epoch block
+    let _ = genesis_node.mine_block().await?;
+    let _ = genesis_node.mine_block().await?;
+    let irys_block6 = genesis_node.mine_block().await?;
+
+    peer_node.wait_until_height(irys_block6.height, 10).await?;
 
     // Get the genesis nodes view of the peers assignments
     let peer_assignments = genesis_node.get_partition_assignments(peer_signer.address());

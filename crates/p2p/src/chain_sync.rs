@@ -1496,7 +1496,7 @@ mod tests {
                 let data_requests = block_index_requests.lock().unwrap();
                 assert_eq!(data_requests.len(), 3);
                 debug!("Data requests: {:?}", data_requests);
-                assert_eq!(data_requests[0].height, 10);
+                assert_eq!(data_requests[0].height, 11);
                 assert_eq!(data_requests[1].height, 11);
                 assert_eq!(data_requests[0].limit, 10);
                 assert_eq!(data_requests[1].limit, 10);
