@@ -344,26 +344,37 @@ where
             ))
         })?;
 
-        match shadow_transactions_are_valid(
+        // First validate shadow transactions and get the execution data
+        let execution_data = shadow_transactions_are_valid(
             &self.config,
             &self.service_senders,
             block_header,
-            adapter,
             &self.db,
             self.execution_payload_provider.clone(),
             parent_epoch_snapshot,
             block_index,
         )
         .await
-        {
-            Ok(()) => {}
-            Err(err) => {
-                return Err(BlockPoolError::OtherInternal(format!(
-                    "Failed to validate and submit the execution payload for block {:?}: {:?}",
-                    block_header.block_hash, err
-                )));
-            }
-        }
+        .map_err(|err| {
+            BlockPoolError::OtherInternal(format!(
+                "Failed to validate shadow transactions for block {:?}: {:?}",
+                block_header.block_hash, err
+            ))
+        })?;
+
+        // Shadow transactions are valid, now submit to reth using the same execution data
+        irys_actors::block_validation::submit_payload_to_reth(
+            block_header,
+            adapter,
+            execution_data,
+        )
+        .await
+        .map_err(|err| {
+            BlockPoolError::OtherInternal(format!(
+                "Failed to submit payload to reth for block {:?}: {:?}",
+                block_header.block_hash, err
+            ))
+        })?;
         debug!(
             "Block pool: Execution payload for block {:?} validated and submitted",
             block_header.block_hash
