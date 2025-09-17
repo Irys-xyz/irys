@@ -99,7 +99,7 @@ impl BlockIndexServiceInner {
                         return Ok(());
                     }
                 } else {
-                    warn!(
+                    info!(
                         "BlockIndexService received its first block: height {}, hash {:x}",
                         block_header.height, block_header.block_hash
                     );
