@@ -256,7 +256,10 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     // Originally we should only allow account1 to stake/pledge
     config.initial_stake_and_pledge_whitelist = vec![account1.address()];
     let genesis_node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    let testing_peer_config = genesis_node.testing_peer();
+    let mut testing_peer_config = genesis_node.testing_peer();
+    // Check that even if the peer has an empty whitelist at the start, it still gets the correct
+    //  whitelist from the genesis node
+    testing_peer_config.initial_stake_and_pledge_whitelist = vec![];
     let peer = IrysNodeTest::new(testing_peer_config).start().await;
 
     // retrieve block_migration_depth for use later
