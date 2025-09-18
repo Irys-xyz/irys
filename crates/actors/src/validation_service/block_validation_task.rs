@@ -417,9 +417,9 @@ impl BlockValidationTask {
             data_txs_validation_task
         );
 
-        // Check shadow_tx_result first to extract ExecutionData and shadow tx count
-        let (execution_data, shadow_tx_count) = match shadow_tx_result {
-            Ok((data, count)) => (data, count),
+        // Check shadow_tx_result first to extract ExecutionData
+        let execution_data = match shadow_tx_result {
+            Ok(data) => data,
             Err(_) => {
                 tracing::debug!("Shadow transaction validation failed, not submitting to reth");
                 return Ok(ValidationResult::Invalid);
@@ -453,31 +453,8 @@ impl BlockValidationTask {
 
                 match reth_result {
                     Ok(()) => {
-                        // Now validate that all shadow transactions succeeded
-                        // Get the block hash to fetch receipts
-                        let validation_result = crate::block_validation::validate_shadow_tx_receipts_for_block(
-                            self.block.evm_block_hash,
-                            &self.service_inner.reth_node_adapter,
-                            shadow_tx_count,
-                        )
-                        .instrument(tracing::info_span!("shadow_tx_receipt_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
-                        .await;
-
-                        match validation_result {
-                            Ok(()) => {
-                                tracing::debug!(
-                                    "Reth execution layer and shadow tx validation successful"
-                                );
-                                Ok(ValidationResult::Valid)
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    ?err,
-                                    "Shadow transaction receipt validation failed"
-                                );
-                                Ok(ValidationResult::Invalid)
-                            }
-                        }
+                        tracing::debug!("Reth execution layer validation successful");
+                        Ok(ValidationResult::Valid)
                     }
                     Err(err) => {
                         tracing::error!(?err, "Reth execution layer validation failed");

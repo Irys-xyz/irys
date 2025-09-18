@@ -1223,11 +1223,13 @@ where
             ));
         };
         if new_account_info.info.balance < balance_decrement.amount {
-            tracing::warn!(?new_account_info.info.balance, ?balance_decrement.amount);
-            return Ok(Err(ExecutionResult::Revert {
-                gas_used: constants::SHADOW_TX_GAS_USED,
-                output: Bytes::new(),
-            }));
+            return Err(Self::create_internal_error(format!(
+                "Shadow transaction failed: insufficient balance for decrement. Target: {}, Required: {}, Available: {}, Reference: {:?}",
+                balance_decrement.target,
+                balance_decrement.amount,
+                new_account_info.info.balance,
+                balance_decrement.irys_ref
+            )));
         }
         // Apply the decrement amount to the balance
         new_account_info.info.balance = new_account_info

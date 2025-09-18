@@ -839,55 +839,6 @@ mod tests {
         Ok(())
     }
 
-    // test decrementing when account exists but not enough balance (expect failed tx receipt)
-    #[test_log::test(tokio::test)]
-    async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
-        let ctx = TestContext::new().await?;
-        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
-
-        let funded_balance = get_balance(&node.inner, ctx.normal_signer.address());
-
-        assert!(
-            funded_balance > U256::ZERO,
-            "Funded account should have nonzero balance"
-        );
-
-        // Create a shadow tx that tries to decrement more than the balance
-        let decrement_amount = funded_balance + U256::ONE;
-        let shadow_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Stake(BalanceDecrement {
-                amount: decrement_amount,
-                target: ctx.normal_signer.address(),
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-            alloy_primitives::FixedBytes::ZERO,
-        );
-        let shadow_tx =
-            sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let shadow_tx_hashes = vec![*shadow_tx.hash()];
-
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
-
-        // Verify the shadow transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &shadow_tx_hashes,
-            "Shadow transaction should be included in block",
-        );
-
-        // Verify the receipt for the shadow tx is a revert/failure
-        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
-        let receipts = block_execution.receipts;
-        let receipt = &receipts[1][0];
-        assert!(
-            !receipt.success,
-            "Expected a revert/failure receipt for shadow tx with insufficient balance"
-        );
-
-        Ok(())
-    }
-
     #[rstest::fixture]
     fn signer_b() -> Arc<dyn TxSigner<Signature> + Send + Sync> {
         let wallets = Wallet::new(2).wallet_gen();

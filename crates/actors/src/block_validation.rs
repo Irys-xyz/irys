@@ -8,10 +8,7 @@ use crate::{
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
 use alloy_consensus::Transaction as _;
-use alloy_eips::{
-    eip7685::{Requests, RequestsOrHash},
-    BlockHashOrNumber,
-};
+use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
@@ -42,8 +39,7 @@ use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use openssl::sha;
-use reth::providers::ReceiptProvider as _;
-use reth::revm::primitives::{FixedBytes, B256};
+use reth::revm::primitives::FixedBytes;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
@@ -903,7 +899,7 @@ pub fn poa_is_valid(
 
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
-/// Returns the ExecutionData and shadow transaction count on success to avoid re-fetching it for reth submission.
+/// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -912,7 +908,7 @@ pub async fn shadow_transactions_are_valid(
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-) -> eyre::Result<(ExecutionData, usize)> {
+) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
@@ -945,7 +941,6 @@ pub async fn shadow_transactions_are_valid(
 
     // 2. Extract shadow transactions from the beginning of the block
     let mut expect_shadow_txs = true;
-    let mut shadow_tx_count = 0_usize;
     let actual_shadow_txs = evm_block
         .body
         .transactions
@@ -978,9 +973,6 @@ pub async fn shadow_transactions_are_valid(
                     "Shadow tx signer is not the miner"
                 );
 
-                // Increment shadow tx count
-                shadow_tx_count += 1;
-
                 Ok(Some(shadow_tx))
             } else {
                 // ensure that no other shadow txs are present in the block
@@ -1008,63 +1000,8 @@ pub async fn shadow_transactions_are_valid(
     // 4. Validate they match
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
 
-    // 5. Return the execution data and shadow tx count for reuse
-    Ok((execution_data, shadow_tx_count))
-}
-
-/// Validates that all shadow transactions in a block succeeded by checking their receipts.
-///
-/// Fetches receipts for the given block and verifies that all shadow transactions
-/// have successful receipts. Shadow transactions are critical for protocol operations
-/// and must not fail during execution.
-///
-/// # Arguments
-/// * `block_hash` - The EVM block hash to validate
-/// * `reth_adapter` - The Reth node adapter to fetch receipts from
-///
-/// # Returns
-/// * `Ok(())` if all shadow transactions succeeded
-/// * `Err` if any shadow transaction failed or receipts cannot be fetched
-#[tracing::instrument(skip(reth_adapter), fields(block_hash = %block_hash, shadow_tx_count))]
-pub async fn validate_shadow_tx_receipts_for_block(
-    block_hash: B256,
-    reth_adapter: &IrysRethNodeAdapter,
-    shadow_tx_count: usize,
-) -> eyre::Result<()> {
-    // Fetch receipts for the block
-    let receipts = reth_adapter
-        .inner
-        .provider
-        .receipts_by_block(BlockHashOrNumber::Hash(block_hash))?
-        .ok_or_else(|| eyre!("No receipts found for block {}", block_hash))?;
-
-    // Only validate the first shadow_tx_count receipts (shadow transactions)
-    // Regular EVM transactions that come after can and should be allowed to fail
-    for (idx, receipt) in receipts.iter().take(shadow_tx_count).enumerate() {
-        if !receipt.success {
-            // Log detailed error information
-            error!(
-                receipt_index = idx,
-                block_hash = %block_hash,
-                cumulative_gas_used = receipt.cumulative_gas_used,
-                "Shadow transaction failed in validated block"
-            );
-
-            return Err(eyre!(
-                "Shadow transaction at index {} failed in block {}. This should never happen as shadow txs must be valid",
-                idx,
-                block_hash
-            ));
-        }
-    }
-
-    debug!(
-        block_hash = %block_hash,
-        receipt_count = receipts.len(),
-        "All shadow transactions validated successfully"
-    );
-
-    Ok(())
+    // 5. Return the execution data for reuse
+    Ok(execution_data)
 }
 
 /// Submits the EVM payload to reth for execution layer validation.
