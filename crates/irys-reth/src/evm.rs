@@ -922,7 +922,7 @@ where
         &mut self,
         target: Address,
         fee: U256,
-        tx_hash: &FixedBytes<32>,
+        _tx_hash: &FixedBytes<32>,
     ) -> Result<Account, <Self as Evm>::Error> {
         // Load target account
         let target_state = self.load_account(target)?;
@@ -933,13 +933,11 @@ where
                 target = %target,
                 "Target account does not exist, cannot deduct priority fee"
             );
-            return Err(Self::create_invalid_tx_error(
-                *tx_hash,
-                InvalidTransaction::LackOfFundForMaxFee {
-                    fee: Box::new(fee),
-                    balance: Box::new(U256::ZERO),
-                },
-            ));
+            return Err(Self::create_internal_error(format!(
+                "Shadow transaction priority fee failed: target account does not exist. Target: {}, Required fee: {}",
+                target,
+                fee
+            )));
         };
 
         // Validate sufficient balance
@@ -950,13 +948,12 @@ where
                 required_fee = %fee,
                 "Target has insufficient balance for priority fee"
             );
-            return Err(Self::create_invalid_tx_error(
-                *tx_hash,
-                InvalidTransaction::LackOfFundForMaxFee {
-                    fee: Box::new(fee),
-                    balance: Box::new(account.info.balance),
-                },
-            ));
+            return Err(Self::create_internal_error(format!(
+                "Shadow transaction priority fee failed: insufficient balance. Target: {}, Required fee: {}, Available balance: {}",
+                target,
+                fee,
+                account.info.balance
+            )));
         }
 
         // Deduct fee
