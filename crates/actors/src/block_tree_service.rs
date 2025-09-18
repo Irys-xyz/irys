@@ -1,5 +1,5 @@
 use crate::{
-    block_index_service::BlockIndexService,
+    block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
     broadcast_mining_service::{
         BroadcastDifficultyUpdate, BroadcastMiningService, BroadcastPartitionsExpiration,
@@ -9,7 +9,7 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockMigrationMessage, StorageModuleServiceMessage,
+    StorageModuleServiceMessage,
 };
 use actix::prelude::*;
 use eyre::eyre;
@@ -337,25 +337,21 @@ impl BlockTreeServiceInner {
             &block_header.block_hash, &block_header.height
         );
 
-        // HACK
-        System::set_current(self.system.clone());
-
         let arc_block = Arc::new(block_header);
         let arc_all_txs = Arc::new(all_txs);
 
-        // Let block_index know about the migrated block
-        // TODO: Make block index a tokio service
-        let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: arc_block.clone(),
-            all_txs: arc_all_txs,
-        };
-        // Send and await result so errors propagate to the sender and can panic here
-        match block_index.send(block_finalized_message).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => panic!("BlockIndexService error during migration: {e:?}"),
-            Err(e) => panic!("Failed to send BlockMigrationMessage: {e:?}"),
-        }
+        // Let block_index know about the migrated block (Tokio service)
+        let (tx, rx) = oneshot::channel();
+        self.service_senders
+            .block_index
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: arc_block.clone(),
+                all_txs: arc_all_txs.clone(),
+                response: tx,
+            })?;
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
+            .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
 
         // Let the chunk_migration_service know about the block migration
         self.service_senders

@@ -523,7 +523,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
-    match node.create_publish_data_tx(account, data_bytes).await {
+    match node.post_publish_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);
         }
