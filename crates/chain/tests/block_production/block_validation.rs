@@ -73,7 +73,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 
         async fn produce_block_without_broadcasting(
             &self,
-            solution: SolutionContext,
+            solution: &SolutionContext,
             prev_block_header: &IrysBlockHeader,
             submit_txs: Vec<DataTransactionHeader>,
             publish_txs: PublishLedgerWithTxs,
@@ -132,7 +132,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -207,7 +207,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
     let (block, _adjustment_stats, _eth_payload) = prod
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 

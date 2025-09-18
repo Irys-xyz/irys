@@ -11,7 +11,6 @@ use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
 use irys_actors::pledge_provider::MempoolPledgeProvider;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacadeImpl,
-    block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
     block_producer::BlockProducerCommand,
     block_tree_service::BlockTreeService,
     broadcast_mining_service::BroadcastMiningService,
@@ -674,7 +673,6 @@ impl IrysNode {
                 move || {
                     System::new().block_on(async move {
                         let block_index = Arc::new(RwLock::new(block_index));
-                        let block_index_service_actor = Self::init_block_index_service(&config, &block_index);
 
                         // start the rest of the services
                         let (irys_node, actix_server, vdf_thread,  gossip_service_handle, service_set) = Self::init_services(
@@ -685,7 +683,6 @@ impl IrysNode {
                                 block_index,
                                 latest_block,
                                 irys_provider.clone(),
-                                block_index_service_actor,
                                 &task_exec,
                                 http_listener,
                                 irys_db,
@@ -827,7 +824,6 @@ impl IrysNode {
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
         irys_provider: IrysRethProvider,
-        block_index_service_actor: Addr<BlockIndexService>,
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
@@ -850,6 +846,14 @@ impl IrysNode {
         // start service senders/receivers
         let (service_senders, receivers) = ServiceSenders::new();
 
+        // start block index service (tokio)
+        let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
+            receivers.block_index,
+            block_index.clone(),
+            &config.consensus,
+            runtime_handle.clone(),
+        );
+
         // start reth service
         let (reth_service_actor, reth_arbiter) =
             init_reth_service(&irys_db, reth_node_adapter.clone(), service_senders.clone());
@@ -870,9 +874,14 @@ impl IrysNode {
 
         let config = Config::new(node_config);
 
-        let block_index_guard = block_index_service_actor
-            .send(GetBlockIndexGuardMessage)
-            .await?;
+        let (block_index_tx, block_index_rx) = oneshot::channel();
+        service_senders
+            .block_index
+            .send(irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard { response: block_index_tx })
+            .expect("BlockIndex service should be running");
+        let block_index_guard = block_index_rx
+            .await
+            .expect("to receive BlockIndexReadGuard from BlockIndex service");
 
         // start the broadcast mining service
         let span = Span::current();
@@ -1159,7 +1168,6 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 packing: packing_actor_addr,
-                block_index: block_index_service_actor,
                 reth: reth_service_actor,
             },
             reward_curve,
@@ -1263,9 +1271,10 @@ impl IrysNode {
             services.push(ArbiterEnum::TokioService(block_tree_handle));
 
             // 7. State management
+            services.push(ArbiterEnum::TokioService(block_index_handle));
             services.push(ArbiterEnum::TokioService(mempool_handle));
 
-            // 7. Core infrastructure (shutdown last)
+            // 8. Core infrastructure (shutdown last)
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()),
             });
@@ -1560,16 +1569,6 @@ impl IrysNode {
         }
 
         Ok(Arc::new(RwLock::new(storage_modules)))
-    }
-
-    fn init_block_index_service(
-        config: &Config,
-        block_index: &Arc<RwLock<BlockIndex>>,
-    ) -> actix::Addr<BlockIndexService> {
-        let block_index_service = BlockIndexService::new(block_index.clone(), &config.consensus);
-        let block_index_service_actor = block_index_service.start();
-        SystemRegistry::set(block_index_service_actor.clone());
-        block_index_service_actor
     }
 
     fn init_sync_service(

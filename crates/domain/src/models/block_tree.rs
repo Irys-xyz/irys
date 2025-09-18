@@ -1453,7 +1453,7 @@ mod tests {
         EmaSnapshot::genesis(&genesis_header)
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn test_block_cache() {
         let b1 = random_block(U256::from(0));
 
