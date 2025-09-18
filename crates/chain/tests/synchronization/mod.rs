@@ -3,7 +3,10 @@ use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
-use irys_types::{irys::IrysSigner, NodeConfig};
+use irys_api_client::ApiClient as _;
+use irys_chain::IrysNodeCtx;
+use irys_primitives::CommitmentType;
+use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig, H256};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -206,4 +209,253 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     );
 
     Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()>
+{
+    // settings
+    let max_seconds = 10;
+
+    //setup config
+    let mut config = NodeConfig::testing();
+    let account1 = IrysSigner::random_signer(&config.consensus_config());
+    let account2 = IrysSigner::random_signer(&config.consensus_config());
+    let account3 = IrysSigner::random_signer(&config.consensus_config());
+    let main_address = config.miner_address();
+    config.consensus.extend_genesis_accounts(vec![
+        (
+            main_address,
+            GenesisAccount {
+                balance: alloy_core::primitives::U256::from(100000000000000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            account1.address(),
+            GenesisAccount {
+                balance: alloy_core::primitives::U256::from(100000000000000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            account2.address(),
+            GenesisAccount {
+                balance: alloy_core::primitives::U256::from(100000000000000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+        (
+            account3.address(),
+            GenesisAccount {
+                balance: alloy_core::primitives::U256::from(100000000000000000000000000_u128),
+                ..Default::default()
+            },
+        ),
+    ]);
+    // Originally we should only allow account1 to stake/pledge
+    config.initial_stake_and_pledge_whitelist = vec![account1.address()];
+    let genesis_node = IrysNodeTest::new_genesis(config.clone()).start().await;
+    let mut testing_peer_config = genesis_node.testing_peer();
+    // Check that even if the peer has an empty whitelist at the start, it still gets the correct
+    //  whitelist from the genesis node
+    testing_peer_config.initial_stake_and_pledge_whitelist = vec![];
+    let peer = IrysNodeTest::new(testing_peer_config).start().await;
+
+    // retrieve block_migration_depth for use later
+    let mut consensus = genesis_node.cfg.consensus.clone();
+    let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
+
+    wait_for_packing(
+        genesis_node.node_ctx.actor_addresses.packing.clone(),
+        Some(Duration::from_secs(10)),
+    )
+    .await?;
+
+    // Wait a little for a peer to connect
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let genesis_peers = genesis_node.node_ctx.peer_list.all_known_peers();
+    assert_eq!(genesis_peers.len(), 1);
+    let peer_socket_address = genesis_peers[0].api;
+
+    let api_client = irys_api_client::IrysApiClient::new();
+
+    // mine first block on node
+    info!("Commitment whitelist test: mining first block");
+    let first_block = genesis_node.mine_block().await?;
+    info!(
+        "Commitment whitelist test: waiting for a block {} to appear on peer",
+        first_block.height
+    );
+    peer.wait_until_height(first_block.height, max_seconds)
+        .await?;
+
+    info!("Commitment whitelist test: getting block 1 from peer");
+    // Check that the peer has the block mined on the genesis node
+    let block_1 = api_client
+        .get_block_by_height(peer_socket_address, first_block.height)
+        .await?
+        .expect("block to be accessible");
+
+    let stake_tx = create_stake_tx(&peer, &account1, block_1.irys.block_hash).await;
+    api_client
+        .post_commitment_transaction(peer_socket_address, stake_tx.clone())
+        .await
+        .expect("post commitment tx should succeed");
+    debug!(
+        "Commitment whitelist test: Response from posting stake tx: {:?}",
+        ()
+    );
+    genesis_node
+        .wait_for_mempool_commitment_txs(vec![stake_tx.id], max_seconds)
+        .await?;
+    info!("Commitment whitelist test: stake tx from a whitelisted account accepted");
+
+    let stake_tx2 =
+        CommitmentTransaction::new_stake(&config.consensus_config(), block_1.irys.block_hash);
+    let stake_tx2 = account2.sign_commitment(stake_tx2)?;
+    let response2 = api_client
+        .post_commitment_transaction(peer_socket_address, stake_tx2.clone())
+        .await;
+    assert!(
+        response2.is_err(),
+        "Posting a stake tx from a non-whitelisted account should fail"
+    );
+    let err_string = response2.err().unwrap().to_string();
+    if err_string.contains("ForbiddenSigner") {
+        debug!("Received expected ForbiddenSigner error");
+    } else {
+        panic!("Expected ForbiddenSigner error, got: {}", err_string);
+    }
+
+    let blocks_to_be_mined = block_migration_depth + 2;
+    // Add enough blocks on top to move block 1 to index
+    genesis_node
+        .mine_blocks(blocks_to_be_mined.try_into()?)
+        .await?;
+    let mut block_to_wait_for = first_block.height + blocks_to_be_mined;
+    info!(
+        "Commitment whitelist test: waiting for block {} to appear on genesis",
+        block_to_wait_for
+    );
+    genesis_node
+        .wait_until_height(block_to_wait_for, max_seconds)
+        .await?;
+    info!(
+        "Commitment whitelist test: waiting for block {} to appear on peer",
+        block_to_wait_for
+    );
+    peer.wait_until_height(block_to_wait_for, max_seconds)
+        .await?;
+
+    let genesis_peers = genesis_node.node_ctx.peer_list.all_known_peers();
+    assert_eq!(genesis_peers.len(), 1);
+    // Since the peer was unstaked, it's going to be removed from the peer list when the node restarts
+    // so we save the address here to use later
+    let genesis_peer_address = genesis_peers[0];
+    // restarting the node means we lose blocks in mempool
+    info!("Commitment whitelist test: Restarting node");
+    let mut stopped_genesis = genesis_node.stop().await;
+
+    stopped_genesis.cfg.initial_stake_and_pledge_whitelist = vec![
+        account1.address(),
+        account2.address(), // Now we add account2 to the whitelist
+    ];
+    stopped_genesis.cfg.trusted_peers = vec![genesis_peer_address];
+
+    info!("Commitment whitelist test: Restarting genesis node with a new whitelist");
+    let genesis_node = stopped_genesis.start().await;
+    info!("Commitment whitelist test: Restarted genesis");
+
+    info!(
+        "Commitment whitelist test: waiting for block {} to appear on genesis",
+        block_to_wait_for
+    );
+    genesis_node
+        .wait_until_height(block_to_wait_for, max_seconds)
+        .await?;
+
+    // mine a couple blocks
+    info!("Commitment whitelist test: mining blocks to propagate a new whitelist");
+    genesis_node.mine_blocks(2).await?;
+    block_to_wait_for += 2;
+
+    info!(
+        "Commitment whitelist test: waiting for block {} to appear on peer",
+        block_to_wait_for
+    );
+    peer.wait_until_height(block_to_wait_for, max_seconds)
+        .await?;
+
+    let another_anchor_block = api_client
+        .get_block_by_height(peer_socket_address, block_to_wait_for)
+        .await?
+        .expect("block to be accessible");
+
+    let new_stake_tx2 = CommitmentTransaction::new_stake(
+        &config.consensus_config(),
+        another_anchor_block.irys.block_hash,
+    );
+    let new_stake_tx2 = account2.sign_commitment(new_stake_tx2)?;
+    let new_response2 = api_client
+        .post_commitment_transaction(peer_socket_address, new_stake_tx2.clone())
+        .await;
+    assert!(new_response2.is_ok());
+    debug!(
+        "Response from posting stake tx from a newly whitelisted account: {:?}",
+        new_response2
+    );
+    peer.wait_for_mempool_commitment_txs(vec![new_stake_tx2.id], max_seconds)
+        .await?;
+
+    let stake_tx3 = CommitmentTransaction::new_stake(
+        &config.consensus_config(),
+        another_anchor_block.irys.block_hash,
+    );
+    let stake_tx3 = account3.sign_commitment(stake_tx3)?;
+    let response3 = api_client
+        .post_commitment_transaction(peer_socket_address, stake_tx3.clone())
+        .await;
+    debug!(
+        "Response from posting stake tx from a non-whitelisted account: {:?}",
+        response3
+    );
+    assert!(
+        response3.is_err(),
+        "Posting a stake tx from a non-whitelisted account should fail"
+    );
+    let err_string = response3.err().unwrap().to_string();
+    if err_string.contains("ForbiddenSigner") {
+        debug!("Received expected ForbiddenSigner error");
+    } else {
+        panic!("Expected ForbiddenSigner error, got: {}", err_string);
+    }
+
+    tokio::join!(genesis_node.stop(), peer.stop(),);
+
+    Ok(())
+}
+
+async fn create_stake_tx(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    signer: &IrysSigner,
+    anchor: H256,
+) -> CommitmentTransaction {
+    // Get stake price from API
+    let price_info = node
+        .get_stake_price()
+        .await
+        .expect("Failed to get stake price from API");
+
+    let consensus = &node.node_ctx.config.consensus;
+    let stake_tx = CommitmentTransaction {
+        commitment_type: CommitmentType::Stake,
+        anchor,
+        fee: price_info.fee.try_into().expect("fee should fit in u64"),
+        value: price_info.value,
+        ..CommitmentTransaction::new(consensus)
+    };
+
+    info!("Created stake_tx with value: {:?}", stake_tx.value);
+    signer.sign_commitment(stake_tx).unwrap()
 }

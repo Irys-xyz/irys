@@ -383,6 +383,14 @@ where
         }
     }
 
+    async fn handle_stake_and_pledge_whitelist(server: Data<Self>) -> HttpResponse {
+        let whitelist = server
+            .data_handler
+            .handle_get_stake_and_pledge_whitelist()
+            .await;
+        HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
+    }
+
     fn handle_invalid_data(
         peer_miner_address: &Address,
         error: &GossipError,
@@ -510,7 +518,11 @@ where
                         )
                         .route("/get_data", web::post().to(Self::handle_data_request))
                         .route("/pull_data", web::post().to(Self::handle_pull_data))
-                        .route("/health", web::get().to(Self::handle_health_check)),
+                        .route("/health", web::get().to(Self::handle_health_check))
+                        .route(
+                            "/stake_and_pledge_whitelist",
+                            web::get().to(Self::handle_stake_and_pledge_whitelist),
+                        ),
                 )
         })
         .shutdown_timeout(5)

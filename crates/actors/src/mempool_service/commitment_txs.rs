@@ -4,8 +4,8 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    Address, CommitmentTransaction, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256,
+    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
+    IrysTransactionCommon as _, IrysTransactionId, H256,
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
@@ -18,6 +18,16 @@ impl Inner {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
+
+        // Check stake/pledge whitelist early - reject if address is not whitelisted
+        let whitelist = &self.stake_and_pledge_whitelist;
+        if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
+            warn!(
+                "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
+                commitment_tx.id, commitment_tx.signer
+            );
+            return Err(CommitmentValidationError::ForbiddenSigner.into());
+        }
 
         let mempool_state_guard = self.mempool_state.read().await;
 

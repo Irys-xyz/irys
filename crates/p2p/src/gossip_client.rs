@@ -642,6 +642,123 @@ impl GossipClient {
             }
         }
     }
+
+    pub async fn stake_and_pledge_whitelist(
+        &self,
+        peer_list: &PeerList,
+    ) -> Result<Vec<Address>, PeerNetworkError> {
+        // Work only with trusted peers
+        let mut peers = peer_list.online_trusted_peers();
+        peers.shuffle(&mut rand::thread_rng());
+
+        if peers.is_empty() {
+            warn!("The node has no trusted peers to fetch stake_and_pledge_whitelist from");
+            return Err(PeerNetworkError::NoPeersAvailable);
+        }
+
+        // Retry strategy similar to other network pulls: up to 5 attempts across trusted peers
+        let mut last_error: Option<GossipError> = None;
+        for attempt in 1..=5 {
+            for peer in &peers {
+                debug!(
+                    "Attempting to fetch stake_and_pledge_whitelist from peer {} (attempt {}/5)",
+                    peer.0, attempt
+                );
+                let url = format!(
+                    "http://{}/gossip/stake_and_pledge_whitelist",
+                    peer.1.address.gossip
+                );
+
+                let response = self
+                    .client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|response_error| {
+                        PeerNetworkError::FailedToRequestData(format!(
+                            "Failed to get the stake/pledge whitelist {}: {:?}",
+                            url, response_error
+                        ))
+                    })?;
+
+                let status = response.status();
+
+                let res: GossipResult<GossipResponse<Vec<Address>>> = match status {
+                    StatusCode::OK => {
+                        let text = response.text().await.map_err(|e| {
+                            PeerNetworkError::FailedToRequestData(format!(
+                                "Failed to read response from {}: {}",
+                                url, e
+                            ))
+                        })?;
+
+                        if text.trim().is_empty() {
+                            return Err(PeerNetworkError::FailedToRequestData(format!(
+                                "Empty response from {}",
+                                url
+                            )));
+                        }
+
+                        let gossip_response = serde_json::from_str(&text).map_err(|e| {
+                            PeerNetworkError::FailedToRequestData(format!(
+                                "Failed to parse JSON: {} - Response: {}",
+                                e, text
+                            ))
+                        })?;
+                        Ok(gossip_response)
+                    }
+                    _ => {
+                        let error_text = response.text().await.unwrap_or_default();
+                        Err(PeerNetworkError::FailedToRequestData(format!(
+                            "API request failed with status: {} - {}",
+                            status, error_text
+                        ))
+                        .into())
+                    }
+                };
+
+                // Update score for the peer based on the result
+                Self::handle_score(peer_list, &res, &peer.0);
+
+                match res {
+                    Ok(response) => match response {
+                        GossipResponse::Accepted(addresses) => return Ok(addresses),
+                        GossipResponse::Rejected(reason) => match reason {
+                            RejectionReason::HandshakeRequired => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} requires a handshake", peer.0),
+                                    )));
+                                peer_list.initiate_handshake(peer.1.address.api, true);
+                            }
+                            RejectionReason::GossipDisabled => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} has gossip disabled", peer.0),
+                                    )));
+                                peer_list.set_is_online(&peer.0, false);
+                            }
+                        },
+                    },
+                    Err(err) => {
+                        last_error = Some(err);
+                        continue;
+                    }
+                }
+            }
+            // Small backoff before retrying the whole set again
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Map the last error into a PeerNetworkError
+        Err(match last_error {
+            Some(GossipError::PeerNetwork(e)) => e,
+            Some(other) => PeerNetworkError::FailedToRequestData(other.to_string()),
+            None => PeerNetworkError::FailedToRequestData(
+                "Failed to fetch stake and pledge whitelist".to_string(),
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
