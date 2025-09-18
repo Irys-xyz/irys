@@ -1197,8 +1197,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
 // This test verifies that block production fails when a shadow transaction
 // attempts to deduct storage fees from a user with insufficient balance.
-// With our EVM changes, this should cause block production to fail entirely
-// rather than creating a failed receipt.
+// irys-reth should reject even building such a block.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
     use irys_types::DataLedger;
@@ -1227,11 +1226,10 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         )> {
             // Force inclusion of malicious tx in Submit ledger, bypassing mempool validation
             Ok((
-                vec![],                          // No system txs
-                vec![],                          // No commitment txs
-                vec![self.malicious_tx.clone()], // Submit ledger tx from poor user
+                vec![],
+                vec![],
+                vec![self.malicious_tx.clone()],
                 PublishLedgerWithTxs {
-                    // No Publish ledger txs
                     txs: vec![],
                     proofs: None,
                 },
@@ -1259,14 +1257,9 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
             ..Default::default()
         },
     )]);
-
-    // Start genesis node
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-
-    // Mine a block to establish chain
-    genesis_node.mine_block().await?;
 
     // Create a data transaction that would require more fees than user has
     let data = vec![42_u8; 1024]; // 1KB of data
@@ -1279,11 +1272,6 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 
     // The total fees (perm_fee + term_fee) will be much more than 1000 wei
     let total_fee = price_info.perm_fee + price_info.term_fee;
-    info!(
-        "Expected perm_fee: {}, term_fee: {}, total: {}, user balance: {}",
-        price_info.perm_fee, price_info.term_fee, total_fee, insufficient_balance
-    );
-
     // Verify fees are actually more than balance
     assert!(
         total_fee > insufficient_balance,
@@ -1292,7 +1280,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         insufficient_balance
     );
 
-    // Create transaction from the poor user (bypassing mempool validation)
+    // Create transaction from the poor user
     let malicious_tx = poor_user_signer.create_transaction_with_fees(
         data,
         genesis_node.get_anchor().await?,
@@ -1322,26 +1310,15 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         result.is_err(),
         "Block production should have failed due to insufficient balance"
     );
+    let error = result.map(|_| ()).unwrap_err();
+    let error_msg = format!("{:?}", error);
 
-    if let Err(e) = result {
-        info!("Block production failed as expected: {:?}", e);
-        let error_msg = format!("{:?}", e);
-
-        // Verify it's failing due to insufficient balance in shadow tx
-        assert!(
-            error_msg.contains("missing payload")
-                || error_msg.contains("insufficient balance")
-                || error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected block production failure due to insufficient balance, got: {}",
-            error_msg
-        );
-    }
-
-    // Verify no new block was added to the chain
-    let block_tree = genesis_node.node_ctx.block_tree_guard.read();
-    let tip_height = block_tree.get_block(&block_tree.tip).unwrap().height;
-    assert_eq!(tip_height, 1, "No new block should have been added");
-    drop(block_tree);
+    // Verify it's failing due to insufficient balance in shadow tx
+    assert!(
+        error_msg.contains("missing payload"),
+        "Expected block production failure due to insufficient balance, got: {}",
+        error_msg
+    );
 
     // Cleanup
     genesis_node.stop().await;

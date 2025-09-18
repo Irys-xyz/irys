@@ -972,7 +972,6 @@ pub async fn shadow_transactions_are_valid(
                     block.miner_address == tx_signer,
                     "Shadow tx signer is not the miner"
                 );
-
                 Ok(Some(shadow_tx))
             } else {
                 // ensure that no other shadow txs are present in the block

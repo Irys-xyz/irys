@@ -853,9 +853,7 @@ mod tests {
 
         let error_msg = format!("{:?}", err);
         assert!(
-            error_msg.contains("Shadow transaction priority fee failed")
-                || error_msg.contains("target account does not exist")
-                || error_msg.contains("EVM"),
+            error_msg.contains("Shadow transaction priority fee failed"),
             "Expected shadow transaction priority fee failure for non-existent account, got: {}",
             error_msg
         );
@@ -1793,9 +1791,7 @@ mod tests {
 
         let error_msg = format!("{:?}", err);
         assert!(
-            error_msg.contains("Shadow transaction priority fee failed")
-                || error_msg.contains("target account does not exist")
-                || error_msg.contains("EVM"),
+            error_msg.contains("Shadow transaction priority fee failed"),
             "Expected shadow transaction priority fee failure for non-existent account, got: {}",
             error_msg
         );
@@ -1880,9 +1876,7 @@ mod tests {
 
         let error_msg = format!("{:?}", err);
         assert!(
-            error_msg.contains("Shadow transaction priority fee failed")
-                || error_msg.contains("target account does not exist")
-                || error_msg.contains("EVM"),
+            error_msg.contains("Shadow transaction priority fee failed"),
             "Expected shadow transaction priority fee failure for non-existent account, got: {}",
             error_msg
         );
