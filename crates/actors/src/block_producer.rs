@@ -592,7 +592,7 @@ pub trait BlockProdStrategy {
         };
 
         if rebuild_attempts > 0 {
-            warn!(
+            info!(
                 solution_hash = %solution.solution_hash,
                 final_parent = %block.previous_block_hash,
                 block_height = block.height,
