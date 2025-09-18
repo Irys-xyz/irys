@@ -1318,7 +1318,10 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         .await;
 
     // The block production should fail entirely with an error
-    assert!(result.is_err(), "Block production should have failed due to insufficient balance");
+    assert!(
+        result.is_err(),
+        "Block production should have failed due to insufficient balance"
+    );
 
     if let Err(e) = result {
         info!("Block production failed as expected: {:?}", e);

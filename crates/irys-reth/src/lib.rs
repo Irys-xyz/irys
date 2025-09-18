@@ -1787,7 +1787,9 @@ mod tests {
         // Verify the payload build failed with an error
         let err = result
             .expect("Expected Some result from best_payload")
-            .expect_err("Block production should have failed due to non-existent account for unpledge");
+            .expect_err(
+                "Block production should have failed due to non-existent account for unpledge",
+            );
 
         let error_msg = format!("{:?}", err);
         assert!(
@@ -1872,7 +1874,9 @@ mod tests {
         // Verify the payload build failed with an error
         let err = result
             .expect("Expected Some result from best_payload")
-            .expect_err("Block production should have failed due to non-existent account for pledge");
+            .expect_err(
+                "Block production should have failed due to non-existent account for pledge",
+            );
 
         let error_msg = format!("{:?}", err);
         assert!(
