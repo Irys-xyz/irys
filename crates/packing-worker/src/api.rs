@@ -2,23 +2,24 @@ use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
     middleware,
-    web::{self, Json, JsonConfig},
+    web::{self, Data, Json, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
 use futures::StreamExt as _;
 use irys_packing::{PackingType, PACKING_TYPE};
 use serde::{Deserialize, Serialize};
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::TcpListener;
 use tracing::{debug, info};
 
-use crate::worker::{PackingWorkerState, RemotePackingRequest};
+use crate::types::RemotePackingRequest;
+use crate::worker::PackingWorkerState;
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope("v1")
         .wrap(middleware::Logger::default())
         .route("/pack", web::post().to(process_packing_job))
-        .route("/", web::get().to(info_route))
+        .route("/info", web::get().to(info_route))
 }
 
 pub fn run_server(state: PackingWorkerState, listener: TcpListener) -> Server {
@@ -28,7 +29,7 @@ pub fn run_server(state: PackingWorkerState, listener: TcpListener) -> Server {
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::new("%r %s %D ms"))
-            .app_data(state.clone())
+            .app_data(Data::new(state.clone()))
             .app_data(
                 JsonConfig::default()
                     .limit(1024 * 1024) // Set JSON payload limit to 1MB
@@ -38,6 +39,8 @@ pub fn run_server(state: PackingWorkerState, listener: TcpListener) -> Server {
                             .into()
                     }),
             )
+            // not a permanent redirect, so we can redirect to the highest API version
+            .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
         // .wrap(Cors::permissive())
     })
@@ -46,24 +49,6 @@ pub fn run_server(state: PackingWorkerState, listener: TcpListener) -> Server {
     .listen(listener)
     .unwrap()
     .run()
-}
-
-// Adapted from /actix-web-4.9.0/src/server.rs create_listener
-// This is required as we need to access the TcpListener directly to figure out what port we've been assigned
-// if randomisation (requested port 0) is used.
-pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let backlog = 1024;
-    let domain = Domain::for_address(addr);
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    // need this so application restarts can pick back up the same port without suffering from time-wait
-    socket.set_reuse_address(true)?;
-    socket.bind(&addr.into())?;
-    // clamp backlog to max u32 that fits in i32 range
-    let backlog = core::cmp::min(backlog, i32::MAX as u32) as i32;
-    socket.listen(backlog)?;
-    let listener = TcpListener::from(socket);
-    Ok(listener)
 }
 
 pub async fn process_packing_job(

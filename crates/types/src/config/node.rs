@@ -277,7 +277,8 @@ pub struct RemotePackingConfig {
 
     pub secret: String,
 
-    pub timeout: Duration,
+    // This is the read (max time between streamed chunks) and connection timeout
+    pub timeout: Option<Duration>,
 
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,

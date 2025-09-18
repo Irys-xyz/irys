@@ -9,7 +9,8 @@ use irys_packing::capacity_pack_range_cuda_c;
 #[cfg(feature = "nvidia")]
 use irys_types::split_interval;
 
-use crate::worker::{PackingType, PackingWorkerState, RemotePackingRequest, PACKING_TYPE};
+use crate::types::RemotePackingRequest;
+use crate::worker::{PackingType, PackingWorkerState, PACKING_TYPE};
 
 impl PackingWorkerState {
     pub fn pack(
@@ -41,13 +42,13 @@ impl PackingWorkerState {
                 async move {
                     let _permit = semaphore.acquire_owned().await?;
                     // Log progress
-                    if i % 1000 == 0 {
+                    // if i % 1000 == 0 {
                         debug!(
                             target: "irys::packing::update",
                             "CPU Packed chunks {} / {} for partition_hash {:?} mining_address {:?} iterations {}",
                             i, end_value,  partition_hash, mining_address, entropy_packing_iterations
                         );
-                    }
+                    // }
 
                     // Spawn blocking task
                     let result = runtime_handle.spawn_blocking(move || {

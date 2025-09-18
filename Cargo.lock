@@ -5121,6 +5121,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-packing-worker"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "clap",
+ "eyre",
+ "futures",
+ "futures-util",
+ "irys-packing",
+ "irys-testing-utils",
+ "irys-types",
+ "irys-utils",
+ "reqwest 0.12.15",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "irys-price-oracle"
 version = "0.1.0"
 dependencies = [
@@ -5338,6 +5358,7 @@ name = "irys-utils"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "socket2",
  "tokio",
  "tracing",
 ]
@@ -6641,26 +6662,6 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "packing-worker"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "clap",
- "eyre",
- "futures",
- "futures-util",
- "irys-packing",
- "irys-testing-utils",
- "irys-types",
- "irys-utils",
- "serde",
- "socket2",
- "tokio",
- "toml",
- "tracing",
 ]
 
 [[package]]

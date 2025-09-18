@@ -1456,8 +1456,8 @@ impl IrysNode {
     ) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
-        let packing_config = PackingConfig::new(config);
-        let packing_actor = PackingActor::new(sm_ids, packing_config);
+        let config = Arc::new(config.clone());
+        let packing_actor = PackingActor::new(sm_ids, config);
         let packing_controller_handles = packing_actor.spawn_packing_controllers(runtime_handle);
         let packing_actor_addr = packing_actor.start();
         (

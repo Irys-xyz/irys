@@ -1,6 +1,20 @@
 use std::num::NonZeroU8;
 
+use irys_primitives::Address;
 use serde::{Deserialize, Serialize};
+
+use crate::{PartitionChunkRange, H256};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePackingRequest {
+    pub mining_address: Address,
+    pub partition_hash: H256,
+    pub chunk_range: PartitionChunkRange,
+    pub chain_id: u64,
+    pub chunk_size: u64,
+    pub entropy_packing_iterations: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

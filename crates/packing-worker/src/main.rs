@@ -1,15 +1,17 @@
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{command, Parser, Subcommand};
 use eyre::Context as _;
 use irys_testing_utils::initialize_tracing;
+use irys_utils::listener::create_listener;
+use tokio::sync::mpsc::channel;
 use tracing::debug;
 
-use crate::{config::PackingWorkerConfig, worker::start_worker};
+use crate::{types::PackingWorkerConfig, worker::start_worker};
 
 pub mod api;
-pub mod config;
 pub mod packing;
+pub mod types;
 pub mod worker;
 
 #[derive(Debug, Parser, Clone)]
@@ -46,7 +48,13 @@ async fn main() -> eyre::Result<()> {
             format!("Unable to read packing worker config file from {config_path:?}")
         })?;
     match cli.command {
-        Commands::Start {} => start_worker(config).await?,
+        Commands::Start {} => {
+            let (_tx, rx) = channel(1);
+            let addr: SocketAddr =
+                format!("{}:{}", &config.bind_addr, &config.bind_port).parse()?;
+            let listener = create_listener(addr)?;
+            start_worker(config, listener, rx).await?
+        }
         Commands::Bench {} => {
             todo!()
         }
