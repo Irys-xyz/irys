@@ -1127,7 +1127,6 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // now we gossip B3 back to A
     // it shouldn't reorg, and should accept the block
     // as well as overriding the ingress proof it has locally with the one from the block
-
     b_node.send_full_block(&a_node, &b_blk3).await?;
 
     a_node
@@ -1158,8 +1157,6 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height, Some(b_blk3.height));
-
-    // tada!
 
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);
@@ -1322,7 +1319,6 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     let a_blk1 = a_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
-
     assert_eq!(
         a_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
         vec![a_blk1_tx1.id]
