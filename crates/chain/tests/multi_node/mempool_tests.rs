@@ -963,9 +963,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         b_blk1_tx1
     };
 
-    b_node.mine_block().await?;
-
-    let b_blk1 = b_node.get_block_by_height(network_height).await?;
+    let b_blk1 = {
+        b_node.mine_block().await?;
+        b_node.get_block_by_height(network_height).await?
+    };
 
     assert_eq!(
         b_blk1.data_ledgers[DataLedger::Submit].tx_ids,
@@ -988,10 +989,12 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         )
         .await;
 
-    b_node.mine_block().await?;
-    network_height += 1;
+    let b_blk2 = {
+        b_node.mine_block().await?;
+        network_height += 1;
+        b_node.get_block_by_height(network_height).await?
+    };
 
-    let b_blk2 = b_node.get_block_by_height(network_height).await?;
     assert_eq!(
         b_blk2.data_ledgers[DataLedger::Submit].tx_ids,
         vec![b_blk2_tx1.header.id]
@@ -1051,6 +1054,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
+
     assert_eq!(
         a1_b2_reorg_mempool_txs.publish_tx.txs,
         vec![a_blk1_tx1_published]
