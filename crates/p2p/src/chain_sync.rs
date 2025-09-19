@@ -2,14 +2,16 @@ use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::reth_service::RethServiceActor;
+use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
+use irys_database::database;
+use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
-    PeerListItem, SyncMode, TokioServiceHandle,
+    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, DatabaseProvider, EvmBlockHash,
+    NodeMode, PeerListItem, SyncMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
@@ -178,7 +180,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         sync_state: ChainSyncState,
         api_client: A,
         peer_list: PeerList,
-        config: irys_types::Config,
+        config: Config,
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
@@ -232,8 +234,9 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
-        let reth_service_addr = self.reth_service_actor.clone();
+        let mut reth_service_addr = self.reth_service_actor.clone();
         let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
+        let block_index = self.block_index.clone();
 
         tokio::spawn(
             async move {
@@ -252,13 +255,21 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 }
 
                 if let Err(err) = block_pool
-                    .repair_missing_payloads_if_any(reth_service_addr, Arc::clone(&gossip_data_handler))
+                    .repair_missing_payloads_if_any(reth_service_addr.clone(), Arc::clone(&gossip_data_handler))
                     .await
                 {
                     error!(
                         "Sync task: Failed to repair missing payloads before starting sync: {:?}",
                         err
                     );
+                }
+
+                if is_initial_sync {
+                    update_reth_with_initial_block(
+                        &block_index,
+                        &block_pool.db,
+                        &mut reth_service_addr,
+                    ).await;
                 }
 
                 let res = sync_chain(
@@ -1293,6 +1304,39 @@ async fn is_local_index_is_behind_trusted_peers(
         Err(ChainSyncError::Network(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),
         ))
+    }
+}
+
+// Sends a fork choice update message to the Reth service actor with the latest block from the block index
+async fn update_reth_with_initial_block(
+    block_index: &BlockIndexReadGuard,
+    irys_db: &DatabaseProvider,
+    reth_service_addr: &mut Option<Addr<RethServiceActor>>,
+) {
+    // Read the latest from the block index; if no entries, panic
+    let latest_block_index = block_index
+        .get_latest_item_cloned()
+        .expect("a block index must have at least one entry at init");
+    let latest_block = database::block_header_by_hash(
+        &irys_db.tx().unwrap(),
+        &latest_block_index.block_hash,
+        false,
+    )
+    .expect("database to be accessible during init")
+    .expect("at least the genesis block header must be in the database");
+
+    // update reth service about the latest block data it must use
+    if let Some(reth_service_addr) = reth_service_addr {
+        reth_service_addr
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
+                confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
+                finalized_hash: None,
+            })
+            .await
+            .expect("reth service actor to be alive at init")
+            .expect("reth service actor to process the fork choice update message at init");
+        debug!("Reth Service Actor updated about fork choice");
     }
 }
 

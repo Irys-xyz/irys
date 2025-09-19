@@ -1,5 +1,5 @@
 use irys_database::block_header_by_hash;
-use irys_types::DatabaseProvider;
+use irys_types::{BlockIndexItem, DatabaseProvider};
 use reth_db::Database as _;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
@@ -72,6 +72,16 @@ impl BlockIndexReadGuard {
                 error!("Block index and height do not match!");
             }
         }
+    }
+
+    pub fn get_latest_item_cloned(&self) -> Option<BlockIndexItem> {
+        let rg = self.read();
+        rg.get_latest_item().cloned()
+    }
+
+    pub fn latest_height(&self) -> u64 {
+        let rg = self.read();
+        rg.latest_height()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
