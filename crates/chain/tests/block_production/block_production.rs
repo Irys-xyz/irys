@@ -1121,12 +1121,12 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // Seed at least two Submit-ledger txs so reversing their order tampers the EVM payload
     let data_tx1 = node
-        .post_data_tx(irys_types::H256::zero(), vec![1_u8; 64], &peer_signer)
+        .post_data_tx(node.get_anchor().await?, vec![1_u8; 64], &peer_signer)
         .await;
     node.wait_for_mempool(data_tx1.header.id, seconds_to_wait)
         .await?;
     let data_tx2 = node
-        .post_data_tx(irys_types::H256::zero(), vec![2_u8; 64], &peer_signer)
+        .post_data_tx(node.get_anchor().await?, vec![2_u8; 64], &peer_signer)
         .await;
     node.wait_for_mempool(data_tx2.header.id, seconds_to_wait)
         .await?;

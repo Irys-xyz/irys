@@ -539,7 +539,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Post a transaction that should be gossiped to all peers
     let shared_tx = genesis_node
         .post_data_tx(
-            H256::zero(),
+            genesis_node.get_anchor().await?,
             data3,
             &genesis_node.node_ctx.config.irys_signer(),
         )
@@ -554,10 +554,10 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
-        .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
+        .post_data_tx_without_gossip(peer1_node.get_anchor().await?, data1, &peer1_signer)
         .await;
     let peer2_tx = peer2_node
-        .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
+        .post_data_tx_without_gossip(peer2_node.get_anchor().await?, data2, &peer2_signer)
         .await;
 
     // Mine mine blocks on both peers in parallel
@@ -919,7 +919,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     let a_blk1_tx1 = a_node
         .post_data_tx(
-            H256::zero(),
+            a_node.get_anchor().await?,
             [[1; 32], [1; 32], [1; 32]].concat(),
             &a_signer,
         )
@@ -949,7 +949,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let b_blk1_tx1 = {
         let b_blk1_tx1 = b_node
             .post_data_tx(
-                H256::zero(),
+                b_node.get_anchor().await?,
                 [[2; 32], [2; 32], [2; 32]].concat(),
                 &b_signer,
             )
@@ -982,7 +982,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // don't upload chunks, we want this in the submit ledger
     let b_blk2_tx1 = b_node
         .post_data_tx(
-            H256::zero(),
+            b_node.get_anchor().await?,
             [[3; 32], [3; 32], [3; 32]].concat(),
             &b_signer,
         )
@@ -1707,8 +1707,10 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let chunks = [[40; 32], [50; 32], [60; 32]];
     let data: Vec<u8> = chunks.concat();
 
+    // Anchor this storage transaction to the actual genesis block hash instead of H256::zero()
+    // Using H256::zero() encodes to base58 "1111.." which is now rejected as an invalid anchor.
     let _peer2_tx = peer2
-        .post_data_tx_without_gossip(H256::zero(), data, &recipient2)
+        .post_data_tx_without_gossip(peer2.node_ctx.genesis_hash, data, &recipient2)
         .await;
 
     // call get best txs from the mempool
@@ -2191,7 +2193,8 @@ async fn stake_tx_fee_and_value_validation_test(
     let required_value = config.stake_value.amount;
 
     // Create stake transaction and apply the modifier
-    let mut stake_tx = CommitmentTransaction::new_stake(config, H256::zero());
+    let mut stake_tx =
+        CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
     let stake_tx = signer.sign_commitment(stake_tx)?;
 
@@ -2262,9 +2265,13 @@ async fn pledge_tx_fee_validation_test(
     let required_fee = config.mempool.commitment_fee;
 
     // Create pledge transaction with modifications
-    let mut pledge_tx =
-        CommitmentTransaction::new_pledge(config, H256::zero(), &pledge_count, signer.address())
-            .await;
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
+        config,
+        genesis_node.get_anchor().await?,
+        &pledge_count,
+        signer.address(),
+    )
+    .await;
 
     // Apply the modification (fee or value)
     tx_modifier(&mut pledge_tx, config, pledge_count, required_fee);
@@ -2310,11 +2317,17 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
-        CommitmentType::Stake => CommitmentTransaction::new_stake(config, H256::zero()),
+        CommitmentType::Stake =>
+            CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?),
         CommitmentType::Pledge {
             pledge_count_before_executing: count,
         } => {
-            CommitmentTransaction::new_pledge(config, H256::zero(), &{ count }, signer.address())
+            CommitmentTransaction::new_pledge(
+                config,
+                genesis_node.get_anchor().await?,
+                &{ count },
+                signer.address(),
+            )
                 .await
         }
         _ => unreachable!(),

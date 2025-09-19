@@ -28,7 +28,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     // create and submit a data transaction
     let tx_data = vec![1_u8; 64];
-    let anchor = H256::zero();
+    let anchor = node.get_anchor().await?;
     let tx_for_migration = node.post_data_tx(anchor, tx_data, &signer).await;
     let txid = tx_for_migration.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
@@ -79,7 +79,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // create and submit a data transaction
     let tx_data = vec![1_u8; 64];
 
-    let tx_for_mempool = node.post_data_tx(H256::zero(), tx_data, &signer).await;
+    let tx_for_mempool = node.post_data_tx(node.get_anchor().await?, tx_data, &signer).await;
     let txid = tx_for_mempool.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
 

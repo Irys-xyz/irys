@@ -307,7 +307,8 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 
     // Create a stake commitment
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut stake = CommitmentTransaction::new_stake(consensus_config, H256::zero());
+    let mut stake =
+        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     stake.signer = test_signer.address();
     stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
     let stake = test_signer.sign_commitment(stake)?;
@@ -316,7 +317,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     let _pledge_count = 0;
     let pledge = CommitmentTransaction::new_pledge(
         consensus_config,
-        H256::zero(),
+        genesis_node.get_anchor().await?,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
         test_signer.address(),
     )
@@ -422,7 +423,8 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 
     // Create a different commitment that's NOT in the snapshot
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut wrong_commitment = CommitmentTransaction::new_stake(consensus_config, H256::zero());
+    let mut wrong_commitment =
+        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     wrong_commitment.signer = test_signer.address();
     let wrong_commitment = test_signer.sign_commitment(wrong_commitment)?;
     genesis_node.mine_block().await?;
