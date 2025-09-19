@@ -476,6 +476,13 @@ impl IrysNode {
             .expect("Must be able to read genesis commitment tx from trusted peer");
 
         // Validate the fetched genesis block
+        if !genesis_block.is_signature_valid() {
+            panic!(
+                "FATAL: Invalid genesis block signature from trusted peer. Block hash: {} miner: {}",
+                genesis_block.block_hash,
+                genesis_block.miner_address
+            );
+        }
         if genesis_block.block_hash != expected_genesis_hash {
             panic!(
                 "FATAL: Genesis block hash mismatch!\nExpected: {}\nReceived: {}\nCannot join network - wrong genesis block",
