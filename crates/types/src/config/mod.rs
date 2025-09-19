@@ -629,7 +629,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert_eq!(config.node_mode, NodeMode::Peer);
+        assert!(matches!(config.node_mode, NodeMode::Peer { .. }));
 
         // Check consensus config fields
         let consensus = config.consensus_config();
