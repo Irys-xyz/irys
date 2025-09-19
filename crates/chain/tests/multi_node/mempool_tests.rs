@@ -1139,8 +1139,13 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         b_node.get_block_by_height(network_height).await?
     );
 
-    // assert that a_blk1_tx1 is no longer present in the mempool
-    // (nothing should be in the mempool)
+    // Wait for the mempool to settle: no submit, no publish, no commitment candidates.
+    // i.e. a_blk1_tx1, nor anything else is present in the mempool
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
+
+    // (a second check) assert that nothing is in the mempool
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
