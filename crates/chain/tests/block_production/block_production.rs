@@ -1195,6 +1195,137 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
     Ok(())
 }
 
+// This test verifies that block production fails when a shadow transaction
+// attempts to deduct storage fees from a user with insufficient balance.
+// irys-reth should reject even building such a block.
+#[test_log::test(actix_web::test)]
+async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
+    use irys_types::DataLedger;
+
+    // Evil strategy that forces inclusion of a transaction from underfunded user
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub malicious_tx: DataTransactionHeader,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+        ) -> eyre::Result<(
+            Vec<irys_types::SystemTransactionLedger>,
+            Vec<CommitmentTransaction>,
+            Vec<DataTransactionHeader>,
+            PublishLedgerWithTxs,
+            LedgerExpiryBalanceDelta,
+        )> {
+            // Force inclusion of malicious tx in Submit ledger, bypassing mempool validation
+            Ok((
+                vec![],
+                vec![],
+                vec![self.malicious_tx.clone()],
+                PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                LedgerExpiryBalanceDelta {
+                    // No expired ledger fees
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+            ))
+        }
+    }
+
+    // Configure test network
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+
+    let poor_user_signer = genesis_config.new_random_signer();
+    let insufficient_balance = irys_types::U256::from(1);
+
+    // Add the underfunded user to genesis
+    genesis_config.consensus.extend_genesis_accounts(vec![(
+        poor_user_signer.address(),
+        GenesisAccount {
+            balance: insufficient_balance.into(), // Convert to alloy U256
+            ..Default::default()
+        },
+    )]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Create a data transaction that would require more fees than user has
+    let data = vec![42_u8; 1024]; // 1KB of data
+    let data_size = data.len() as u64;
+
+    // Get the expected price from the API
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data_size)
+        .await?;
+
+    // The total fees (perm_fee + term_fee) will be much more than 1000 wei
+    let total_fee = price_info.perm_fee + price_info.term_fee;
+    // Verify fees are actually more than balance
+    assert!(
+        total_fee > insufficient_balance,
+        "Test setup error: fees ({}) should exceed balance ({})",
+        total_fee,
+        insufficient_balance
+    );
+
+    // Create transaction from the poor user
+    let malicious_tx = poor_user_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::Publish,
+        price_info.term_fee,
+        Some(price_info.perm_fee),
+    )?;
+    let malicious_tx = poor_user_signer.sign_transaction(malicious_tx)?;
+
+    // Create evil block production strategy to force inclusion
+    let evil_strategy = EvilBlockProdStrategy {
+        malicious_tx: malicious_tx.header.clone(),
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    // Now attempt to mine a block - this should FAIL at Reth level
+    // because when the shadow tx generator creates the StorageFees shadow transaction,
+    // it will try to deduct more than the user has
+    let result = evil_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await;
+
+    // The block production should fail entirely with an error
+    assert!(
+        result.is_err(),
+        "Block production should have failed due to insufficient balance"
+    );
+    let error = result.map(|_| ()).unwrap_err();
+    let error_msg = format!("{:?}", error);
+
+    // Verify it's failing due to insufficient balance in shadow tx
+    assert!(
+        error_msg.contains("missing payload"),
+        "Expected block production failure due to insufficient balance, got: {}",
+        error_msg
+    );
+
+    // Cleanup
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
 #[test_log::test(actix::test)]
 async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // Define the OptimisticBlockMiningStrategy that mines blocks without waiting for validation
