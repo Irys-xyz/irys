@@ -67,13 +67,13 @@ mod tests {
     };
     use irys_utils::listener::create_listener;
     use std::{net::SocketAddr, num::NonZero};
-    use tokio::{sync::mpsc::channel, time::sleep};
+    use tokio::sync::mpsc::channel;
     use tracing::debug;
 
     use crate::{api::PackingWorkerInfo, worker::start_worker};
 
     #[tokio::test]
-    async fn heavy_packing_worker_test() -> eyre::Result<()> {
+    async fn heavy_packing_worker_standalone_test() -> eyre::Result<()> {
         initialize_tracing();
         let config = PackingWorkerConfig {
             bind_port: 0,

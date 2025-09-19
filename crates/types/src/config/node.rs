@@ -279,12 +279,6 @@ pub struct RemotePackingConfig {
 
     // This is the read (max time between streamed chunks) and connection timeout
     pub timeout: Option<Duration>,
-
-    /// Number of CPU threads to use for data packing operations
-    pub cpu_packing_concurrency: u16,
-
-    /// Batch size for GPU-accelerated packing operations
-    pub gpu_packing_batch_size: u32,
 }
 
 /// # Cache Configuration

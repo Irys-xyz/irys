@@ -58,6 +58,7 @@ irys-p2p = { path = "./crates/p2p" }
 irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
+irys-packing-worker = { path = "./crates/packing-worker" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -428,11 +429,11 @@ rust.unused_imports = "warn"
 complexity = { priority = -2, level = "deny" }
 perf = { priority = -3, level = "deny" }
 correctness = { priority = -4, level = "deny" }
-restriction = { priority = -5, level = "allow" } # cherry pick
+restriction = { priority = -5, level = "allow" }      # cherry pick
 style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
-pedantic = { priority = -8, level = "allow" }    # cherry pick
-nursery = { priority = -9, level = "allow" }     # cherry pick
+pedantic = { priority = -8, level = "allow" }         # cherry pick
+nursery = { priority = -9, level = "allow" }          # cherry pick
 float_arithmetic = { priority = -10, level = "deny" }
 
 module_inception = "allow"

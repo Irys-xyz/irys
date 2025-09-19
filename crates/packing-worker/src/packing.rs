@@ -34,9 +34,7 @@ impl PackingWorkerState {
         match PACKING_TYPE {
             PackingType::CPU => {
                 let cpu_packing_concurrency = self.0.config.cpu_packing_concurrency;
-
-                Ok(stream::iter(start_value..=end_value)
-            .map(move  |i| {
+                Ok(stream::iter(start_value..=end_value).map(move  |i| {
                 let runtime_handle = runtime_handle.clone();
                 let semaphore = semaphore.clone();
                 async move {

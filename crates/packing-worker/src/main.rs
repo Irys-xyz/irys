@@ -2,17 +2,12 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{command, Parser, Subcommand};
 use eyre::Context as _;
+use irys_packing_worker::worker::start_worker;
 use irys_testing_utils::initialize_tracing;
+use irys_types::remote_packing::PackingWorkerConfig;
 use irys_utils::listener::create_listener;
 use tokio::sync::mpsc::channel;
 use tracing::debug;
-
-use crate::{types::PackingWorkerConfig, worker::start_worker};
-
-pub mod api;
-pub mod packing;
-pub mod types;
-pub mod worker;
 
 #[derive(Debug, Parser, Clone)]
 pub struct IrysCli {

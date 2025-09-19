@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "irys-packing-worker"
+path = "src/main.rs"
+
 [dependencies]
 tokio.workspace = true
 clap.workspace = true
@@ -18,9 +22,7 @@ tracing.workspace = true
 toml.workspace = true
 futures-util.workspace = true
 futures.workspace = true
-
 irys-packing.workspace = true
-# irys-packing = { workspace = true, features = ["nvidia"] }
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-testing-utils.workspace = true
 irys-utils.workspace = true

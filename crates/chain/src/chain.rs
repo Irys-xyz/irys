@@ -18,7 +18,7 @@ use irys_actors::{
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining::{MiningControl, PartitionMiningActor},
-    packing::{PackingActor, PackingConfig, PackingRequest},
+    packing::{PackingActor, PackingRequest},
     reth_service::{
         BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
     },

@@ -4919,6 +4919,7 @@ dependencies = [
  "irys-domain",
  "irys-p2p",
  "irys-packing",
+ "irys-packing-worker",
  "irys-price-oracle",
  "irys-primitives",
  "irys-reth-node-bridge",
