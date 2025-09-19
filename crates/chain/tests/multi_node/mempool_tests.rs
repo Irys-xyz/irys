@@ -1007,6 +1007,9 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     b_node
         .wait_until_height(network_height, seconds_to_wait)
         .await?;
+    b_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+        .await?;
 
     // send B1&2 to A, causing a reorg
     let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
@@ -1023,17 +1026,22 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // wait for a reorg event
-
     let _a1_b2_reorg = a1_b2_reorg_fut.await?;
-
     a_node
         .wait_until_height(network_height, seconds_to_wait)
         .await?;
-
     assert_eq!(
         a_node.get_block_by_height(network_height).await?,
         b_node.get_block_by_height(network_height).await?
     );
+
+    // ensure mempool has settled to expected shape for submit/publish
+    a_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+        .await?;
+    a_node
+        .wait_for_mempool_best_txs_shape(1, 1, 0, seconds_to_wait.try_into()?)
+        .await?;
 
     // assert that a_blk1_tx1 is back in a's mempool
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
