@@ -22,6 +22,7 @@ members = [
   "crates/utils/utils",
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
+  "crates/packing-worker",
 ]
 resolver = "2"
 
@@ -57,6 +58,7 @@ irys-p2p = { path = "./crates/p2p" }
 irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
+irys-packing-worker = { path = "./crates/packing-worker" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
@@ -125,6 +127,9 @@ async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
 priority-queue = "2.5"
 moka = "0.12.10"
+socket2 = "0.5"
+async-stream = "0.3"
+
 
 # Reth & Alloy deps
 # These should be kept in lockstep with the Reth dependencies - for compatability and built times
@@ -424,11 +429,11 @@ rust.unused_imports = "warn"
 complexity = { priority = -2, level = "deny" }
 perf = { priority = -3, level = "deny" }
 correctness = { priority = -4, level = "deny" }
-restriction = { priority = -5, level = "allow" } # cherry pick
+restriction = { priority = -5, level = "allow" }      # cherry pick
 style = { priority = -6, level = "deny" }
 suspicious = { priority = -7, level = "deny" }
-pedantic = { priority = -8, level = "allow" }    # cherry pick
-nursery = { priority = -9, level = "allow" }     # cherry pick
+pedantic = { priority = -8, level = "allow" }         # cherry pick
+nursery = { priority = -9, level = "allow" }          # cherry pick
 float_arithmetic = { priority = -10, level = "deny" }
 
 module_inception = "allow"

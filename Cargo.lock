@@ -4919,6 +4919,7 @@ dependencies = [
  "irys-domain",
  "irys-p2p",
  "irys-packing",
+ "irys-packing-worker",
  "irys-price-oracle",
  "irys-primitives",
  "irys-reth-node-bridge",
@@ -5117,6 +5118,27 @@ dependencies = [
  "irys-c",
  "irys-types",
  "rand 0.8.5",
+ "serde",
+]
+
+[[package]]
+name = "irys-packing-worker"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "clap",
+ "eyre",
+ "futures",
+ "futures-util",
+ "irys-packing",
+ "irys-testing-utils",
+ "irys-types",
+ "irys-utils",
+ "reqwest 0.12.15",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -5337,6 +5359,7 @@ name = "irys-utils"
 version = "0.1.0"
 dependencies = [
  "eyre",
+ "socket2",
  "tokio",
  "tracing",
 ]
