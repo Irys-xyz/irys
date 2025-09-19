@@ -1,6 +1,6 @@
 use clap::{command, Parser, Subcommand};
 use irys_chain::utils::load_config;
-use irys_config::chain::chainspec::IrysChainSpecBuilder;
+use irys_config::chain::chainspec::build_reth_chainspec;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
@@ -63,8 +63,7 @@ async fn main() -> eyre::Result<()> {
             Ok(())
         }
         Commands::InitState { state_path } => {
-            let (chain_spec, _) =
-                IrysChainSpecBuilder::from_config(&Config::new(node_config.clone())).build();
+            let chain_spec = build_reth_chainspec(&Config::new(node_config.clone()))?;
             init_state(node_config, chain_spec.into(), state_path).await
         }
         Commands::RollbackBlocks { count } => {

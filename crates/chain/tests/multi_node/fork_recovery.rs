@@ -119,7 +119,7 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Post a transaction that should be gossiped to all peers
     let shared_tx = genesis_node
         .post_data_tx(
-            H256::zero(),
+            genesis_node.get_anchor().await?,
             data3,
             &genesis_node.node_ctx.config.irys_signer(),
         )
@@ -132,10 +132,10 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
-        .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
+        .post_data_tx_without_gossip(peer1_node.get_anchor().await?, data1, &peer1_signer)
         .await;
     let peer2_tx = peer2_node
-        .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
+        .post_data_tx_without_gossip(peer2_node.get_anchor().await?, data2, &peer2_signer)
         .await;
 
     // Mine mine blocks on both peers in parallel

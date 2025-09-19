@@ -1,4 +1,4 @@
-node_mode = "Peer"
+node_mode = { Peer = { expected_genesis_hash = "11111111111111111111111111111111" } }
 sync_mode = "Full"
 base_directory = ""
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
@@ -65,7 +65,6 @@ parallel_verification_thread_limit = 4
 [consensus.Custom]
 chain_id = 1270
 token_price_safe_range = 1.0
-genesis_price = 1.0
 # Storage economics: Based on 0.01 USD/GB/year target
 annual_cost_per_gb = 0.01                   # $0.01 USD/GB/year
 decay_rate = 0.01                  # 1% annual decay per year
@@ -92,6 +91,7 @@ miner_address = "0x0000000000000000000000000000000000000000"
 reward_address = "0x0000000000000000000000000000000000000000"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
+genesis_price = 1.0
 # Optional: if omitted, defaults to vdf_seed
 # vdf_next_seed = "22222222222222222222222222222222"
 

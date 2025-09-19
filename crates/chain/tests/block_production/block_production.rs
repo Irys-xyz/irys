@@ -1121,12 +1121,12 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // Seed at least two Submit-ledger txs so reversing their order tampers the EVM payload
     let data_tx1 = node
-        .post_data_tx(irys_types::H256::zero(), vec![1_u8; 64], &peer_signer)
+        .post_data_tx(node.get_anchor().await?, vec![1_u8; 64], &peer_signer)
         .await;
     node.wait_for_mempool(data_tx1.header.id, seconds_to_wait)
         .await?;
     let data_tx2 = node
-        .post_data_tx(irys_types::H256::zero(), vec![2_u8; 64], &peer_signer)
+        .post_data_tx(node.get_anchor().await?, vec![2_u8; 64], &peer_signer)
         .await;
     node.wait_for_mempool(data_tx2.header.id, seconds_to_wait)
         .await?;
@@ -1530,8 +1530,9 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
         .start()
         .await;
 
-    // create and post stake commitment tx
-    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
+    // create and post stake commitment tx with a valid anchor
+    let stake_anchor = genesis_node.get_anchor().await?;
+    let stake_tx = new_stake_tx(&stake_anchor, &signer, &genesis_config.consensus_config());
     genesis_node.post_commitment_tx(&stake_tx).await?;
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
     for _ in 0..11 {

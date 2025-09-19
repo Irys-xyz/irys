@@ -25,7 +25,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     }
 
     // Then post the tx and wait for it to arrive
-    let anchor = H256::zero(); // Genesis block
+    // Use a valid network anchor instead of H256::zero()
+    let anchor = node.get_anchor().await?;
     let data_tx = node.post_data_tx(anchor, data, &signer).await;
     let tx = data_tx.header.clone();
     let txid = tx.id;
@@ -63,7 +64,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
     let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default());
+    let stake_tx = CommitmentTransaction::new_stake(consensus, node.get_anchor().await?);
 
     // Post the stake commitment and await it in the mempool
     let stake_tx = signer.sign_commitment(stake_tx).unwrap();
