@@ -1050,25 +1050,11 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
     a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
-    // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (ID present, ignore other candidates/state)
-    // Note: Right after the reorg, Node A’s mempool sometimes shows two Publish candidates: the intended orphaned A tx and B’s tx.
-    //       This happens when `send_full_block` ingests B’s published header via `IngestDataTx` before A processes the
-    //       BlockConfirmed event; `IngestDataTx` currently normalizes `promoted_height` to None, so B’s tx briefly looks eligible
-    //       as a publish candidate (it has proofs), until BlockConfirmed sets promoted_height again.
-    {
-        let publish_ids: Vec<_> = a1_b2_reorg_mempool_txs
-            .publish_tx
-            .txs
-            .iter()
-            .map(|h| h.id)
-            .collect();
-        assert!(
-            publish_ids.contains(&a_blk1_tx1.header.id),
-            "expected orphaned tx {} to be present in publish candidates; got {:?}",
-            a_blk1_tx1.header.id,
-            publish_ids
-        );
-    }
+    // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.publish_tx.txs,
+        vec![a_blk1_tx1_published]
+    );
 
     let a_blk1_tx1_mempool = {
         let (tx, rx) = oneshot::channel();
