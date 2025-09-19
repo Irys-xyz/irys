@@ -360,7 +360,7 @@ impl PackingActor {
                     );
 
                     for chunk_range_split in
-                        split_interval(&current_chunk_range, self.config.max_chunks)
+                        split_interval(&current_chunk_range, self.packing_config.max_chunks)
                             .unwrap()
                             .iter()
                     {
@@ -378,7 +378,7 @@ impl PackingActor {
                         // wait for the permit before spawning the thread
                         let permit = semaphore.clone().acquire_owned().await.unwrap();
                         let storage_module_clone = storage_module.clone();
-                        let chain_id = self.config.chain_id;
+                        let chain_id = self.packing_config.chain_id;
                         let entropy_iterations =
                             storage_module.config.consensus.entropy_packing_iterations;
                         let runtime_handle_clone = runtime_handle.clone();
@@ -394,10 +394,9 @@ impl PackingActor {
                                         mining_address,
                                         start as u64,
                                         partition_hash,
-                                        Some(entropy_iterations),
-                                        &mut out,
                                         entropy_iterations,
                                         chain_id,
+                                        &mut out,
                                     );
                                     out
                                 })
