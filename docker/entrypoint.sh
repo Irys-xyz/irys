@@ -13,4 +13,9 @@ if command -v ufw >/dev/null 2>&1; then
   ufw --force enable || true
 fi
 
-exec /app/irys "$@"
+# If no arguments provided, use default config
+if [ $# -eq 0 ]; then
+  exec /app/irys --config /app/config.toml
+else
+  exec /app/irys "$@"
+fi
