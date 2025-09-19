@@ -12,7 +12,6 @@ pub fn build_unsigned_irys_genesis_block(
     evm_block_hash: B256,
     number_of_ingress_proofs_total: u64,
 ) -> IrysBlockHeader {
-    
     IrysBlockHeader {
         block_hash: H256::zero(),
         signature: IrysSignature::default(), // Empty signature to be replaced by actual signing
