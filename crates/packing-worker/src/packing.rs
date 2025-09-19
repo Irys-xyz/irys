@@ -2,6 +2,7 @@ use futures::{
     stream::{self, BoxStream},
     StreamExt as _,
 };
+use irys_packing::PackingType;
 use tracing::debug;
 
 #[cfg(feature = "nvidia")]
@@ -10,7 +11,7 @@ use irys_packing::capacity_pack_range_cuda_c;
 use irys_types::split_interval;
 
 use crate::types::RemotePackingRequest;
-use crate::worker::{PackingType, PackingWorkerState, PACKING_TYPE};
+use crate::worker::{PackingWorkerState, PACKING_TYPE};
 
 impl PackingWorkerState {
     pub fn pack(

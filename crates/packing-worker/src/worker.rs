@@ -1,3 +1,4 @@
+use irys_packing::PackingType;
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
 use std::{net::TcpListener, sync::Arc};
 use tokio::{
@@ -16,13 +17,6 @@ pub struct PackingWorkerStateInner {
 
 #[derive(Clone)]
 pub struct PackingWorkerState(pub Arc<PackingWorkerStateInner>);
-
-#[derive(PartialEq, Debug)]
-pub enum PackingType {
-    CPU,
-    CUDA,
-    // AMD,
-}
 
 #[cfg(not(feature = "nvidia"))]
 pub const PACKING_TYPE: PackingType = PackingType::CPU;
