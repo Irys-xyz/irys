@@ -1127,8 +1127,12 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // as well as overriding the ingress proof it has locally with the one from the block
     b_node.send_full_block(&a_node, &b_blk3).await?;
 
+    // wait for height and index on node a
     a_node
         .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+    a_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     assert_eq!(
