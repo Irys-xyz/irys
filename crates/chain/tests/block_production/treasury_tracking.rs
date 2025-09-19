@@ -3,7 +3,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    CommitmentTransaction, NodeConfig, H256,
+    CommitmentTransaction, NodeConfig,
 };
 use tracing::info;
 

@@ -4,7 +4,6 @@ use irys_types::{
     IrysBlockHeader, IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
 };
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
-use tracing::debug;
 
 use super::chain::IRYS_TESTNET;
 
@@ -13,7 +12,8 @@ pub fn build_unsigned_irys_genesis_block(
     evm_block_hash: B256,
     number_of_ingress_proofs_total: u64,
 ) -> IrysBlockHeader {
-    let mut genesis = IrysBlockHeader {
+    
+    IrysBlockHeader {
         block_hash: H256::zero(),
         signature: IrysSignature::default(), // Empty signature to be replaced by actual signing
         height: 0,
@@ -74,8 +74,7 @@ pub fn build_unsigned_irys_genesis_block(
         oracle_irys_price: config.genesis_price,
         ema_irys_price: config.genesis_price,
         treasury: U256::zero(), // Treasury will be set when genesis commitments are added
-    };
-    genesis
+    }
 }
 
 pub fn build_reth_chainspec(config: &Config) -> eyre::Result<ChainSpec> {

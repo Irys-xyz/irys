@@ -388,7 +388,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config.reward_address = peer_signer.address();
 
         // Set expected genesis hash directly in node mode for network consensus
-        peer_config.node_mode = NodeMode::Peer { expected_genesis_hash: self.node_ctx.genesis_hash };
+        peer_config.node_mode = NodeMode::Peer {
+            expected_genesis_hash: self.node_ctx.genesis_hash,
+        };
 
         // Make sure this peer does port randomization instead of copying the genesis ports
         peer_config.http.bind_port = 0;

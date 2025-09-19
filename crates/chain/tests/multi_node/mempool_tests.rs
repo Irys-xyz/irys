@@ -1990,7 +1990,8 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     //
 
     // create valid and invalid stake commitment tx
-    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
+    let stake_anchor = genesis_node.get_anchor().await?;
+    let stake_tx = new_stake_tx(&stake_anchor, &signer, &genesis_config.consensus_config());
     let mut stake_tx_invalid = stake_tx.clone();
     let mut bytes = stake_tx_invalid.id.to_fixed_bytes();
     bytes[0] ^= 0x01;
@@ -2019,7 +2020,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used to check mempool ingress
     let pledge_tx = new_pledge_tx(
-        &H256::zero(),
+        &stake_anchor,
         &signer,
         &genesis_config.consensus_config(),
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2193,8 +2194,7 @@ async fn stake_tx_fee_and_value_validation_test(
     let required_value = config.stake_value.amount;
 
     // Create stake transaction and apply the modifier
-    let mut stake_tx =
-        CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
+    let mut stake_tx = CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
     let stake_tx = signer.sign_commitment(stake_tx)?;
 
@@ -2317,8 +2317,9 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
-        CommitmentType::Stake =>
-            CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?),
+        CommitmentType::Stake => {
+            CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
+        }
         CommitmentType::Pledge {
             pledge_count_before_executing: count,
         } => {
@@ -2328,7 +2329,7 @@ async fn commitment_tx_valid_higher_fee_test(
                 &{ count },
                 signer.address(),
             )
-                .await
+            .await
         }
         _ => unreachable!(),
     };

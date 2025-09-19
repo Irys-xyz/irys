@@ -4,7 +4,7 @@ use crate::{
         phantoms::{IrysPrice, Usd},
         Amount,
     },
-    ConsensusConfig, H256, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig,
+    ConsensusConfig, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
 };
 use crate::{serde_utils, ConsensusOptions};
 use alloy_genesis::GenesisAccount;
@@ -618,7 +618,9 @@ impl NodeConfig {
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
         Self {
-            node_mode: NodeMode::Peer { expected_genesis_hash: H256::zero() },
+            node_mode: NodeMode::Peer {
+                expected_genesis_hash: H256::zero(),
+            },
             sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
