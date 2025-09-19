@@ -5,6 +5,7 @@ pub mod commitment;
 pub mod get_chunk;
 pub mod index;
 pub mod network_config;
+pub mod observability;
 pub mod peer_list;
 pub mod post_chunk;
 pub mod post_version;

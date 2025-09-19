@@ -15,8 +15,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
-    post_version, price, proxy::proxy, tx,
+    block, block_index, commitment, get_chunk, index, network_config, observability, peer_list,
+    post_chunk, post_version, price, proxy::proxy, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -107,6 +107,23 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
+        // Observability endpoints
+        .route(
+            "/observability/ledger/submit/{node_id}/summary",
+            web::get().to(observability::get_submit_ledger_summary),
+        )
+        .route(
+            "/observability/ledger/publish/{node_id}/summary",
+            web::get().to(observability::get_publish_ledger_summary),
+        )
+        .route(
+            "/observability/chain/height",
+            web::get().to(observability::get_chain_height),
+        )
+        .route(
+            "/observability/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
+            web::get().to(observability::get_storage_intervals),
+        )
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
