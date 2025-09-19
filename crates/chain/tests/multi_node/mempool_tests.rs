@@ -963,9 +963,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         b_blk1_tx1
     };
 
-    b_node.mine_block().await?;
-
-    let b_blk1 = b_node.get_block_by_height(network_height).await?;
+    let b_blk1 = {
+        b_node.mine_block().await?;
+        b_node.get_block_by_height(network_height).await?
+    };
 
     assert_eq!(
         b_blk1.data_ledgers[DataLedger::Submit].tx_ids,
@@ -988,10 +989,12 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         )
         .await;
 
-    b_node.mine_block().await?;
-    network_height += 1;
+    let b_blk2 = {
+        b_node.mine_block().await?;
+        network_height += 1;
+        b_node.get_block_by_height(network_height).await?
+    };
 
-    let b_blk2 = b_node.get_block_by_height(network_height).await?;
     assert_eq!(
         b_blk2.data_ledgers[DataLedger::Submit].tx_ids,
         vec![b_blk2_tx1.header.id]
@@ -1003,6 +1006,9 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     b_node
         .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+    b_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     // send B1&2 to A, causing a reorg
@@ -1020,17 +1026,22 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // wait for a reorg event
-
     let _a1_b2_reorg = a1_b2_reorg_fut.await?;
-
     a_node
         .wait_until_height(network_height, seconds_to_wait)
         .await?;
-
     assert_eq!(
         a_node.get_block_by_height(network_height).await?,
         b_node.get_block_by_height(network_height).await?
     );
+
+    // ensure mempool has settled to expected shape for submit/publish
+    a_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+        .await?;
+    a_node
+        .wait_for_mempool_best_txs_shape(1, 1, 0, seconds_to_wait.try_into()?)
+        .await?;
 
     // assert that a_blk1_tx1 is back in a's mempool
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
@@ -1051,6 +1062,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
+
     assert_eq!(
         a1_b2_reorg_mempool_txs.publish_tx.txs,
         vec![a_blk1_tx1_published]
@@ -1113,11 +1125,14 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // now we gossip B3 back to A
     // it shouldn't reorg, and should accept the block
     // as well as overriding the ingress proof it has locally with the one from the block
-
     b_node.send_full_block(&a_node, &b_blk3).await?;
 
+    // wait for height and index on node a
     a_node
         .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+    a_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     assert_eq!(
@@ -1125,8 +1140,13 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         b_node.get_block_by_height(network_height).await?
     );
 
-    // assert that a_blk1_tx1 is no longer present in the mempool
-    // (nothing should be in the mempool)
+    // Wait for the mempool to settle: no submit, no publish, no commitment candidates.
+    // i.e. a_blk1_tx1, nor anything else is present in the mempool
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
+
+    // (a second check) assert that nothing is in the mempool
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
@@ -1139,8 +1159,6 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height, Some(b_blk3.height));
-
-    // tada!
 
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);
@@ -1303,7 +1321,6 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     let a_blk1 = a_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
-
     assert_eq!(
         a_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
         vec![a_blk1_tx1.id]
