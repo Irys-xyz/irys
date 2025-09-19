@@ -552,8 +552,6 @@ impl IrysNode {
         let config = &self.config;
         let node_mode = &config.node_config.node_mode;
 
-        // No-op
-
         // In all startup modes, irys_db and block_index are prerequisites
         let irys_db = init_irys_db(config).expect("could not open irys db");
         let mut block_index = BlockIndex::new(&config.node_config)
