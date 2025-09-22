@@ -19,9 +19,7 @@ use irys_actors::{
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
-    reth_service::{
-        BlockHashType, ForkChoiceUpdateMessage, GetPeeringInfoMessage, RethServiceActor,
-    },
+    reth_service::{GetPeeringInfoMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationService,
 };
@@ -1066,24 +1064,6 @@ impl IrysNode {
             chain_sync_tx.clone(),
         )?;
 
-        // repair any missing payloads before triggering an FCU
-        block_pool
-            .repair_missing_payloads_if_any(
-                Some(reth_service_actor.clone()),
-                Arc::clone(&gossip_data_handler),
-            )
-            .await?;
-
-        // update reth service about the latest block data it must use
-        reth_service_actor
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
-                confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
-                finalized_hash: None,
-            })
-            .await??;
-        debug!("Reth Service Actor updated about fork choice");
-
         // set up the price oracle
         let price_oracle = Self::init_price_oracle(&config);
 
@@ -1095,7 +1075,7 @@ impl IrysNode {
             &service_senders,
             &block_tree_guard,
             &vdf_state_readonly,
-            block_discovery_facade.clone(),
+            block_discovery_facade,
             broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
@@ -1298,7 +1278,7 @@ impl IrysNode {
                     .http_url()
                     .expect("Missing reth rpc url!"),
                 sync_state,
-                mempool_pledge_provider: mempool_pledge_provider.clone(),
+                mempool_pledge_provider,
             },
             http_listener,
         );
