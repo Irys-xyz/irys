@@ -891,10 +891,7 @@ impl IrysNode {
             config.node_config.miner_address(),
         ));
 
-        let p2p_service = P2PService::new(
-            receivers.gossip_broadcast,
-            Arc::clone(&gossip_client),
-        );
+        let p2p_service = P2PService::new(receivers.gossip_broadcast, Arc::clone(&gossip_client));
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
