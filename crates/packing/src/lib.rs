@@ -8,6 +8,7 @@ use irys_types::{
 
 #[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
+use serde::{Deserialize, Serialize};
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
 /// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
@@ -115,16 +116,14 @@ pub fn capacity_pack_range_cuda_c(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
-    iterations: Option<u32>,
-    entropy: &mut Vec<u8>,
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
+    entropy: &mut Vec<u8>,
 ) -> u32 {
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let iterations = iterations.unwrap_or(entropy_packing_iterations);
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
 
@@ -149,7 +148,7 @@ pub fn capacity_pack_range_cuda_c(
             partition_hash,
             partition_hash_len,
             entropy_ptr,
-            iterations,
+            entropy_packing_iterations,
         );
 
         entropy.set_len(entropy.capacity());
@@ -164,7 +163,6 @@ pub fn capacity_pack_range_with_data_cuda_c(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
-    iterations: Option<u32>,
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
 ) {
@@ -177,17 +175,16 @@ pub fn capacity_pack_range_with_data_cuda_c(
         mining_address,
         chunk_offset,
         partition_hash,
-        iterations,
-        &mut entropy,
         entropy_packing_iterations,
         irys_chain_id,
+        &mut entropy,
     );
 
     // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
     xor_vec_u8_arrays_in_place(data, &entropy);
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PackingType {
     CPU,
     CUDA,
@@ -420,10 +417,9 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            Some(iterations),
-            &mut c_chunk_cuda,
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
+            &mut c_chunk_cuda,
         );
 
         println!("CUDA result: {}", result);
@@ -562,7 +558,6 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            iterations,
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
         );

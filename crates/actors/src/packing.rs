@@ -1,18 +1,24 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, RwLock},
-    time::Duration,
-};
-
 use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
-
 use eyre::eyre;
+use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
-
-use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange};
+use irys_types::{
+    ii, partition_chunk_offset_ii, remote_packing::RemotePackingRequest, Config,
+    PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
+};
+use reth::revm::primitives::bytes::{Bytes, BytesMut};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
+    time::Duration,
+};
 use tokio::{sync::Semaphore, task::yield_now, time::sleep};
-use tracing::{debug, warn};
+use tracing::{debug, error, span, warn, Level};
+
 #[cfg(feature = "nvidia")]
 use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
 
@@ -35,8 +41,12 @@ pub struct PackingActor {
     pending_jobs: PackingJobsBySM,
     /// semaphore to control concurrency -- sm_id => semaphore
     semaphore: PackingSemaphore,
+    /// Atomic counter of the number of active workers - used primarily to determine when packing has finished
+    active_workers: Arc<AtomicUsize>,
     /// packing process configuration
-    config: PackingConfig,
+    packing_config: PackingConfig,
+    /// Top level config
+    config: Arc<Config>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,33 +60,41 @@ pub struct PackingConfig {
     pub max_chunks: u32,
     /// Irys chain id
     pub chain_id: u64,
+    /// Configuration for remote packing hosts
+    pub remotes: Vec<RemotePackingConfig>,
 }
 
 impl PackingConfig {
     pub fn new(config: &Config) -> Self {
         Self {
             poll_duration: Duration::from_millis(1000),
-            concurrency: config.node_config.packing.cpu_packing_concurrency,
+            concurrency: config.node_config.packing.local.cpu_packing_concurrency,
             chain_id: config.consensus.chain_id,
             #[cfg(feature = "nvidia")]
-            max_chunks: config.node_config.packing.gpu_packing_batch_size,
+            max_chunks: config.node_config.packing.local.gpu_packing_batch_size,
+            remotes: config.node_config.packing.remote.clone(),
         }
     }
 }
 
+// log every 1000 chunks
+const LOG_PER_CHUNKS: u32 = 1000;
+
 impl PackingActor {
     /// creates a new packing actor
-    pub fn new(storage_module_ids: Vec<usize>, config: PackingConfig) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.concurrency.into()));
+    pub fn new(storage_module_ids: Vec<usize>, config: Arc<Config>) -> Self {
+        let packing_config = PackingConfig::new(&config);
+        let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
         let pending_jobs = storage_module_ids
             .iter()
             .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
             .collect();
-
         Self {
             pending_jobs,
             semaphore,
+            packing_config,
             config,
+            active_workers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -85,33 +103,43 @@ impl PackingActor {
         pending_jobs: AtomicPackingJobQueue,
         runtime_handle: tokio::runtime::Handle,
     ) {
-        loop {
+        let mut was_active = false;
+        'main: loop {
+            if was_active {
+                // basic atomic counter so we can keep track of the number of active workers
+                self.active_workers.fetch_sub(1, Ordering::Relaxed);
+                was_active = false
+            }
             // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
             let front = {
-                let pending_read_guard = pending_jobs.read().unwrap();
-                pending_read_guard.front().cloned()
+                let mut pending_write_guard = pending_jobs
+                    .write()
+                    .expect("Unable to acquire pending jobs write lock");
+                pending_write_guard.pop_front()
             };
 
             let next_range = match front {
                 Some(v) => v,
                 None => {
                     // debug!("no packing requests in queue, sleeping...");
-                    tokio::time::sleep(self.config.poll_duration).await;
+                    tokio::time::sleep(self.packing_config.poll_duration).await;
                     continue;
                 }
             };
 
+            self.active_workers.fetch_add(1, Ordering::Relaxed);
+            was_active = true;
+
             // TODO: should we be validating if the requested range is valid?
             let PackingRequest {
                 storage_module,
-                chunk_range,
+                chunk_range: job_chunk_range,
             } = next_range;
 
             let assignment = match storage_module.partition_assignment() {
                 Some(v) => v,
                 None => {
-                    warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.id, &chunk_range);
-                    pending_jobs.write().unwrap().pop_front();
+                    warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.id, &job_chunk_range);
                     continue;
                 }
             };
@@ -120,10 +148,12 @@ impl PackingActor {
             let partition_hash = assignment.partition_hash;
             let storage_module_id = storage_module.id;
             let semaphore = self.semaphore.clone();
+            let chunk_size = self.config.consensus.chunk_size as usize;
 
-            let start_value = *chunk_range.0.start();
-            let end_value = *chunk_range.0.end();
-            let short_writes_before_sync: u32 = (storage_module
+            let mut range_start = *job_chunk_range.0.start();
+            let range_end = *job_chunk_range.0.end();
+
+            let short_writes_before_sync: u32 = (self
                 .config
                 .node_config
                 .storage
@@ -131,9 +161,147 @@ impl PackingActor {
                 .div_ceil(2))
             .try_into()
             .expect("Should be able to convert min_writes_before_sync to u32");
+
+            // TODO: double-check that the requested job is still valid (i.e check the range hasn't been packed already - if it has, fragment it as required into smaller jobs and resubmit them)
+
+            // try to use a remote packing service
+            'outer: for remote in &self.packing_config.remotes {
+                // recompute this so we account for partial completions from other packing remotes
+                let current_chunk_range =
+                    PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
+
+                let RemotePackingConfig { url, timeout } = remote;
+
+                let v1_url = format!("{}/v1", &url);
+                // try to connect
+
+                let _span = span!(
+                    Level::DEBUG,
+                    "remote_packing",
+                    url = v1_url,
+                    target = "irys::packing::remote"
+                );
+
+                // let mut headers = HeaderMap::new();
+                // // TODO: actual auth, don't just send the secret in the headers (at least hash it with a nonce)
+                // headers.append(
+                //     "X-Irys-Packing-Auth-Secret",
+                //     HeaderValue::from_str(secret)
+                //         .expect("packing secret must be a valid header value"),
+                // );
+                // let mut client = reqwest::Client::builder().default_headers(headers);
+
+                let mut client = reqwest::Client::builder();
+
+                if let Some(timeout) = timeout {
+                    client = client.connect_timeout(*timeout).read_timeout(*timeout);
+                };
+
+                let client = client
+                    .build()
+                    .expect("Building the reqwest client should not fail");
+
+                debug!("Attempting to connect to remote packing host {}", &v1_url);
+                if let Err(e) = client.get(format!("{}/info", &v1_url)).send().await {
+                    // skip this client
+                    // TODO: add some exponential backoff/global removal
+                    warn!("Unable to connect to remote packing host {} - {}", url, e);
+                    continue;
+                };
+
+                // now produce the packing request
+                let request = RemotePackingRequest {
+                    mining_address,
+                    partition_hash,
+                    chunk_range: current_chunk_range,
+                    chain_id: self.packing_config.chain_id,
+                    chunk_size: chunk_size as u64,
+                    entropy_packing_iterations: self.config.consensus.entropy_packing_iterations,
+                };
+
+                let response = match client
+                    .post(format!("{}/pack", &v1_url))
+                    .json(&request)
+                    .send()
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(e) => {
+                        error!("Error sending packing request to {} - {}", &v1_url, &e);
+                        continue;
+                    }
+                };
+
+                let mut stream = response.bytes_stream();
+
+                let mut buffer = BytesMut::with_capacity(
+                    (self.config.consensus.chunk_size * 2).try_into().unwrap(),
+                );
+
+                let mut process_chunk = |chunk_bytes: Bytes| {
+                    // TODO: move our use of Vec for bytes to, well, Bytes, so we get much cheaper copies etc
+
+                    storage_module.write_chunk(
+                        irys_types::PartitionChunkOffset(range_start),
+                        chunk_bytes.to_vec(),
+                        ChunkType::Entropy,
+                    );
+
+                    if range_start % LOG_PER_CHUNKS == 0 {
+                        debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &range_start, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+                    }
+                    if range_start % short_writes_before_sync == 0 {
+                        debug!("triggering sync");
+                        // TODO: we shouldn't ignore these errors - if we get one, we should try to sample the SM's state and re-compute job(s) (depending on fragmentation) to pack the range this job would've covered
+                        let _ = storage_module.sync_pending_chunks();
+                        // don't need this as stream.next() uses await, so it naturally yields
+                        // yield_now().await // so the shutdown can stop us
+                    }
+
+                    range_start += 1;
+                };
+
+                while let Some(chunk_result) = stream.next().await {
+                    let chunk = match chunk_result {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Error getting chunk {:?}", &e);
+                            // we assume this means the packing remote has failed
+                            // so we move to the next one
+                            continue 'outer;
+                        }
+                    };
+
+                    buffer.extend_from_slice(&chunk);
+
+                    // Process complete chunks
+                    while buffer.len() >= chunk_size {
+                        let chunk_to_process = buffer.split_to(chunk_size).freeze();
+                        process_chunk(chunk_to_process);
+                    }
+                }
+
+                // Process any remaining bytes
+                if !buffer.is_empty() {
+                    process_chunk(buffer.freeze());
+                }
+
+                // we finished (>= because when we process the last chunk we still += 1)
+                if range_start >= range_end {
+                    continue 'main;
+                }
+            }
+
+            // we fall back to local packing if the remote packing systems fail
+            // TODO: maybe allow for no local packing? if so, push the Jobs CURRENT state back to the pending queue
+
+            // recompute this so we account for partial completions from other packing remotes
+            let current_chunk_range =
+                PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
+
             match PACKING_TYPE {
                 PackingType::CPU => {
-                    for i in start_value..=end_value {
+                    for i in range_start..=range_end {
                         // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
                         // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
                         // whereas CPU will do this permit system
@@ -147,12 +315,15 @@ impl PackingActor {
                         }
 
                         // wait for the permit before spawning the thread
-                        let permit = semaphore.clone().acquire_owned().await.unwrap();
+                        let permit = semaphore
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .expect("Failure acquiring a CPU packing semaphore");
 
-                        // debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
-                        let config = storage_module.config.clone();
+                        let config = self.config.clone();
                         let storage_module_clone = storage_module.clone();
-                        let chain_id = self.config.chain_id;
+                        let chain_id = self.packing_config.chain_id;
                         runtime_handle.clone().spawn_blocking(move || {
                             let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
                             compute_entropy_chunk(
@@ -172,11 +343,11 @@ impl PackingActor {
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
                         });
 
-                        if i % 1000 == 0 {
-                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", chunk_range.0.start(), &i, chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+                        if i % LOG_PER_CHUNKS == 0 {
+                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &i, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
                         }
                     }
-                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}",  chunk_range.0.start(),chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}", job_chunk_range.0.start(), job_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
@@ -187,9 +358,10 @@ impl PackingActor {
                         "Chunk size is not aligned with C code"
                     );
 
-                    for chunk_range_split in split_interval(&chunk_range, self.config.max_chunks)
-                        .unwrap()
-                        .iter()
+                    for chunk_range_split in
+                        split_interval(&current_chunk_range, self.packing_config.max_chunks)
+                            .unwrap()
+                            .iter()
                     {
                         let start: u32 = *(*chunk_range_split).start();
                         let end: u32 = *(*chunk_range_split).end();
@@ -205,12 +377,12 @@ impl PackingActor {
                         // wait for the permit before spawning the thread
                         let permit = semaphore.clone().acquire_owned().await.unwrap();
                         let storage_module_clone = storage_module.clone();
-                        let chain_id = self.config.chain_id;
+                        let chain_id = self.packing_config.chain_id;
                         let entropy_iterations =
                             storage_module.config.consensus.entropy_packing_iterations;
                         let runtime_handle_clone = runtime_handle.clone();
                         runtime_handle.clone().spawn(async move {
-                            // Run the CPU-intensive packing in a blocking thread
+                            // Run the GPU packing in a blocking task
                             let out = runtime_handle_clone
                                 .spawn_blocking(move || {
                                     let mut out: Vec<u8> = Vec::with_capacity(
@@ -221,10 +393,9 @@ impl PackingActor {
                                         mining_address,
                                         start as u64,
                                         partition_hash,
-                                        Some(entropy_iterations),
-                                        &mut out,
                                         entropy_iterations,
                                         chain_id,
+                                        &mut out,
                                     );
                                     out
                                 })
@@ -258,8 +429,6 @@ impl PackingActor {
             }
 
             let _ = storage_module.sync_pending_chunks();
-            // Remove from queue once complete
-            let _ = pending_jobs.write().unwrap().pop_front();
         }
     }
 }
@@ -345,9 +514,10 @@ pub struct GetInternals();
 
 #[derive(Debug, MessageResponse, Clone)]
 pub struct Internals {
-    pending_jobs: PackingJobsBySM,
-    semaphore: PackingSemaphore,
-    config: PackingConfig,
+    pub pending_jobs: PackingJobsBySM,
+    pub semaphore: PackingSemaphore,
+    pub active_workers: Arc<AtomicUsize>,
+    pub config: PackingConfig,
 }
 
 impl Handler<GetInternals> for PackingActor {
@@ -357,7 +527,8 @@ impl Handler<GetInternals> for PackingActor {
         Internals {
             pending_jobs: self.pending_jobs.clone(),
             semaphore: self.semaphore.clone(),
-            config: self.config.clone(),
+            config: self.packing_config.clone(),
+            active_workers: self.active_workers.clone(),
         }
     }
 }
@@ -369,6 +540,7 @@ pub async fn wait_for_packing(
 ) -> eyre::Result<()> {
     let internals = packing_addr.send(GetInternals()).await?;
     tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
+        let mut i = 0;
         loop {
             // Counts all jobs in all job queues
             if internals
@@ -376,17 +548,19 @@ pub async fn wait_for_packing(
                 .values()
                 .fold(0, |acc, x| acc + x.as_ref().read().unwrap().len())
                 == 0
+                && internals.semaphore.available_permits() == internals.config.concurrency as usize
             {
-                // try to get all the semaphore permits - this is how we know that the packing is done
-                let _permit = internals
-                    .semaphore
-                    .acquire_many(internals.config.concurrency.into())
-                    .await
-                    .unwrap();
-                break Some(());
-            } else {
-                sleep(Duration::from_millis(100)).await
+                match internals.active_workers.load(Ordering::Relaxed) {
+                    0 => break Some(()),
+                    n => {
+                        i += 1;
+                        if i % 10 == 0 {
+                            debug!("{} active packing workers, waiting...", &n)
+                        }
+                    }
+                }
             }
+            sleep(Duration::from_millis(100)).await
         }
     })
     .await?
@@ -409,7 +583,7 @@ mod tests {
     };
 
     use crate::packing::{
-        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingConfig, PackingRequest,
+        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingRequest,
     };
 
     #[test_log::test(actix::test)]
@@ -433,14 +607,16 @@ mod tests {
                 num_writes_before_sync: 1,
             },
             packing: irys_types::PackingConfig {
-                cpu_packing_concurrency: 1,
-                gpu_packing_batch_size: 1,
+                local: irys_types::LocalPackingConfig {
+                    cpu_packing_concurrency: 1,
+                    gpu_packing_batch_size: 1,
+                },
+                remote: Default::default(),
             },
             base_directory: base_path.clone(),
             ..NodeConfig::testing()
         };
         let config = Config::new(node_config);
-        let packing_config = PackingConfig::new(&config);
 
         let infos = [StorageModuleInfo {
             id: 0,
@@ -468,7 +644,7 @@ mod tests {
         };
         // Create an instance of the packing actor
         let sm_ids = vec![storage_module.id];
-        let packing = PackingActor::new(sm_ids, packing_config);
+        let packing = PackingActor::new(sm_ids, Arc::new(config.clone()));
 
         // Spawn packing controllers with runtime handle
         // In actix test context, we need to get the tokio runtime this way
@@ -481,7 +657,7 @@ mod tests {
         // action
         packing_addr.send(request).await?;
         wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
-        storage_module.sync_pending_chunks()?;
+        storage_module.force_sync_pending_chunks()?;
 
         // assert
         // check that the chunks are marked as packed
