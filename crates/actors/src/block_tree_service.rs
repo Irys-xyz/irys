@@ -331,8 +331,8 @@ impl BlockTreeServiceInner {
         );
         self.reth_service_actor
             .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(tip_hash),
-                confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
+                head_hash: tip_hash,
+                confirmed_hash: Some(confirmed_block.block_hash),
                 finalized_hash: None,
             })
             .expect("Unable to send confirmation FCU message to reth");
@@ -824,9 +824,9 @@ impl BlockTreeServiceInner {
         if let Some(finalized_hash) = finalized_at_prune_depth {
             self.reth_service_actor
                 .try_send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(block_hash),
+                    head_hash: block_hash,
                     confirmed_hash: None,
-                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
+                    finalized_hash: Some(finalized_hash),
                 })
                 .expect("Unable to send finalization message to reth");
         }

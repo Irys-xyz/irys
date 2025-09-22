@@ -1329,8 +1329,8 @@ async fn update_reth_with_initial_block(
     if let Some(reth_service_addr) = reth_service_addr {
         reth_service_addr
             .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
-                confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
+                head_hash: latest_block.block_hash,
+                confirmed_hash: Some(latest_block.block_hash),
                 finalized_hash: None,
             })
             .await

@@ -367,7 +367,7 @@ where
             );
             reth_service
                 .send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(block_header.block_hash),
+                    head_hash: block_header.block_hash,
                     confirmed_hash: None,
                     finalized_hash: None,
                 })

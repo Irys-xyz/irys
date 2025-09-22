@@ -5,6 +5,7 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
     UnpackedChunk,
@@ -24,8 +25,10 @@ async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[actix_web::test]
 async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug,storage=off");
+    initialize_tracing();
     api_end_to_end_test(256 * 1024).await?;
     Ok(())
 }

@@ -1,12 +1,14 @@
+use std::sync::Arc;
+
 use crate::mempool_service::MempoolServiceMessage;
 use actix::{
     Actor, ActorTryFutureExt as _, AtomicResponse, Context, Handler, Message, Supervised,
     SystemService, WrapFuture as _,
 };
-use eyre::eyre;
+use eyre::{eyre, OptionExt as _};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{DatabaseProvider, RethPeerInfo, H256};
+use irys_types::{BlockHash, Config, DatabaseProvider, RethPeerInfo, H256};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::{FixedBytes, B256},
@@ -22,6 +24,7 @@ pub struct RethServiceActor {
     pub mempool: UnboundedSender<MempoolServiceMessage>,
     // we store a copy of the latest FCU so we can always provide reth with a "full" FCU; in Irys terms this corresponds to the migrated height, though reth still uses the `finalized` field to control block persistence.
     pub latest_fcu: ForkChoiceUpdate,
+    pub config: Arc<Config>,
 }
 
 impl Default for RethServiceActor {
@@ -81,12 +84,14 @@ impl RethServiceActor {
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
         mempool: UnboundedSender<MempoolServiceMessage>,
+        config: Config,
     ) -> Self {
         Self {
             handle,
             db: database_provider,
             mempool,
             latest_fcu: ForkChoiceUpdate::default(),
+            config: Arc::new(config),
         }
     }
 
@@ -105,28 +110,14 @@ impl RethServiceActor {
             finalized_hash,
         } = new_fcu;
 
-        let evm_head_hash = match head_hash {
-            BlockHashType::Irys(irys_hash) => {
-                debug!(irys_hash = %irys_hash, "Converting Irys head hash to EVM hash");
-                evm_block_hash_from_block_hash(mempool_service, &db, irys_hash).await?
-            }
-            BlockHashType::Evm(v) => {
-                debug!(evm_hash = %v, "Head hash already in EVM format");
-                v
-            }
-        };
+        let evm_head_hash = evm_block_hash_from_block_hash(mempool_service, &db, head_hash).await?;
 
         let evm_confirmed_hash = match confirmed_hash {
-            Some(confirmed_hash) => Some(match confirmed_hash {
-                BlockHashType::Irys(irys_hash) => {
-                    debug!(irys_hash = %irys_hash, "Converting Irys confirmed hash to EVM hash");
-                    evm_block_hash_from_block_hash(mempool_service, &db, irys_hash).await?
-                }
-                BlockHashType::Evm(v) => {
-                    debug!(evm_hash = %v, "Confirmed hash already in EVM format");
-                    v
-                }
-            }),
+            Some(confirmed_hash) => Some(
+                /* match confirmed_hash {
+                BlockHashType::Irys(irys_hash) => { */
+                evm_block_hash_from_block_hash(mempool_service, &db, confirmed_hash).await?,
+            ),
             None => {
                 debug!(previous_hash = ?prev_fcu.confirmed_hash, "No confirmed hash provided, using previous");
                 prev_fcu.confirmed_hash
@@ -134,16 +125,9 @@ impl RethServiceActor {
         };
 
         let evm_finalized_hash = match finalized_hash {
-            Some(finalized_hash) => Some(match finalized_hash {
-                BlockHashType::Irys(irys_hash) => {
-                    debug!(irys_hash = %irys_hash, "Converting Irys finalized hash to EVM hash");
-                    evm_block_hash_from_block_hash(mempool_service, &db, irys_hash).await?
-                }
-                BlockHashType::Evm(v) => {
-                    debug!(evm_hash = %v, "Finalized hash already in EVM format");
-                    v
-                }
-            }),
+            Some(finalized_hash) => {
+                Some(evm_block_hash_from_block_hash(mempool_service, &db, finalized_hash).await?)
+            }
             None => {
                 debug!(previous_hash = ?prev_fcu.finalized_hash, "No finalized hash provided, using previous");
                 prev_fcu.finalized_hash
@@ -162,6 +146,78 @@ impl RethServiceActor {
             confirmed_hash: evm_confirmed_hash,
             finalized_hash: evm_finalized_hash,
         })
+    }
+
+    pub async fn process_fcu(
+        fcu: ForkChoiceUpdate,
+        handle: IrysRethNodeAdapter,
+    ) -> eyre::Result<ForkChoiceUpdate> {
+        let ForkChoiceUpdate {
+            head_hash,
+            confirmed_hash,
+            finalized_hash,
+        } = fcu;
+
+        info!(
+            head = %head_hash,
+            confirmed = ?confirmed_hash,
+            finalized = ?finalized_hash,
+            "Updating Reth fork choice"
+        );
+        let eth_api = handle.inner.eth_api();
+
+        let latest = eth_api
+            .block_by_number(BlockNumberOrTag::Latest, false)
+            .await;
+
+        let safe = eth_api.block_by_number(BlockNumberOrTag::Safe, false).await;
+
+        let finalized = eth_api
+            .block_by_number(BlockNumberOrTag::Finalized, false)
+            .await;
+
+        debug!(
+            latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+            safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+            finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+            "Reth state before fork choice update"
+        );
+
+        handle
+            .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
+            .await
+            .map_err(|e| {
+                error!(error = %e, ?fcu, "Failed to update Reth fork choice");
+                eyre!("Error updating reth with forkchoice {:?} - {}", &fcu, &e)
+            })?;
+
+        debug!("Fork choice update sent to Reth, fetching current state");
+
+        let latest = handle
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Latest, false)
+            .await;
+
+        let safe = handle
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Safe, false)
+            .await;
+
+        let finalized = handle
+            .inner
+            .eth_api()
+            .block_by_number(BlockNumberOrTag::Finalized, false)
+            .await;
+
+        debug!(
+            latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+            safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+            finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+            "Reth state after fork choice update"
+        );
+        Ok(fcu)
     }
 }
 
@@ -186,9 +242,9 @@ pub enum BlockHashType {
 #[derive(Message, Debug, Clone, Copy)]
 #[rtype(result = "eyre::Result<ForkChoiceUpdate>")]
 pub struct ForkChoiceUpdateMessage {
-    pub head_hash: BlockHashType,
-    pub confirmed_hash: Option<BlockHashType>,
-    pub finalized_hash: Option<BlockHashType>,
+    pub head_hash: BlockHash,
+    pub confirmed_hash: Option<BlockHash>,
+    pub finalized_hash: Option<BlockHash>,
 }
 
 impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
@@ -200,6 +256,7 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
         let db = self.db.clone();
         let mempool = self.mempool.clone();
         let prev_fcu = self.latest_fcu;
+        let config = self.config.clone();
         AtomicResponse::new(Box::pin(
             async move {
                 debug!("Resolving fork choice update from Irys to EVM blocks");
@@ -208,80 +265,7 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                     .inspect_err(|e| {
                         error!(error = ?e, ?msg, "Failed to resolve fork choice update");
                     })?;
-
-                let ForkChoiceUpdate {
-                    head_hash,
-                    confirmed_hash,
-                    finalized_hash,
-                } = fcu;
-
-                info!(
-                    head = %head_hash,
-                    confirmed = ?confirmed_hash,
-                    finalized = ?finalized_hash,
-                    "Updating Reth fork choice"
-                );
-
-                let latest = handle
-                    .inner
-                    .eth_api()
-                    .block_by_number(BlockNumberOrTag::Latest, false)
-                    .await;
-
-                let safe = handle
-                    .inner
-                    .eth_api()
-                    .block_by_number(BlockNumberOrTag::Safe, false)
-                    .await;
-
-                let finalized = handle
-                    .inner
-                    .eth_api()
-                    .block_by_number(BlockNumberOrTag::Finalized, false)
-                    .await;
-
-                debug!(
-                    latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-                    safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-                    finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-                    "Reth state before fork choice update"
-                );
-
-                handle
-                    .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
-                    .await
-                    .map_err(|e| {
-                        error!(error = %e, ?msg, "Failed to update Reth fork choice");
-                        eyre!("Error updating reth with forkchoice {:?} - {}", &msg, &e)
-                    })?;
-
-                debug!("Fork choice update sent to Reth, fetching current state");
-
-                let latest = handle
-                    .inner
-                    .eth_api()
-                    .block_by_number(BlockNumberOrTag::Latest, false)
-                    .await;
-
-                let safe = handle
-                    .inner
-                    .eth_api()
-                    .block_by_number(BlockNumberOrTag::Safe, false)
-                    .await;
-
-                let finalized = handle
-                    .inner
-                    .eth_api()
-                    .block_by_number(BlockNumberOrTag::Finalized, false)
-                    .await;
-
-                debug!(
-                    latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-                    safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-                    finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-                    "Reth state after fork choice update"
-                );
-                Ok(fcu)
+                Self::process_fcu(fcu, handle).await
             }
             .into_actor(self)
             .map_ok(|fcu, a, _| {

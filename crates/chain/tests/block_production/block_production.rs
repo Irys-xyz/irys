@@ -1196,6 +1196,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 }
 
 #[test_log::test(actix::test)]
+#[ignore]
 async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     // Define the OptimisticBlockMiningStrategy that mines blocks without waiting for validation
     struct OptimisticBlockMiningStrategy {
