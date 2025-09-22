@@ -92,7 +92,7 @@ impl Inner {
 
             let data_root = submit_tx.data_root;
             match self.irys_db.update_eyre(|db_tx| {
-                irys_database::cache_data_root(db_tx, &submit_tx, Some(&block))?;
+                irys_database::cache_data_root(db_tx, submit_tx, Some(&block))?;
                 Ok(())
             }) {
                 Ok(()) => {

@@ -815,7 +815,7 @@ impl Inner {
                     // Get assigned and unassigned proofs using the existing utility function
                     let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
                         &all_tx_proofs,
-                        &tx_header,
+                        tx_header,
                         |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
                         &self.block_tree_read_guard,
                         &self.irys_db,

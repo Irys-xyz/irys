@@ -40,7 +40,7 @@ use irys_types::{BlockHash, LedgerChunkRange};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
-use nodit::InclusiveInterval;
+use nodit::InclusiveInterval as _;
 use openssl::sha;
 use reth::revm::primitives::FixedBytes;
 use reth::rpc::api::EngineApiClient as _;
@@ -1744,7 +1744,7 @@ pub async fn data_txs_are_valid(
                 &tx_proofs,
                 &tx_header,
                 |hash| mempool_block_retriever(hash, service_senders),
-                &block_tree_guard,
+                block_tree_guard,
                 db,
                 config,
             )
@@ -2056,7 +2056,7 @@ where
         }
 
         //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, &block_tree_guard);
+        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree_guard);
 
         // d) Get the ledger ranges of the slot indexes
         let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
@@ -2074,8 +2074,7 @@ where
             .collect();
 
         // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts =
-            get_submit_ledger_slot_addresses(&slot_indexes, &block_tree_guard);
+        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree_guard);
 
         //  f) are there any intersections of block and slot ranges?
         let mut is_intersected = false;
@@ -2134,16 +2133,15 @@ where
 {
     let block = mempool_block_retriever(*hash).await;
 
-    let block = if block.is_none() {
+    // Return the block if we found it in the mempool, otherwise get it from the db
+    if let Some(block) = block {
+        block
+    } else {
         db.view(|tx| block_header_by_hash(tx, hash, false))
             .expect("creating a read tx should succeed")
+            .expect("creating a read tx should succeed")
             .expect("db query should succeed")
-            .expect("block should be in database if its not in retriever")
-    } else {
-        block.unwrap()
-    };
-
-    block
+    }
 }
 
 fn get_submit_ledger_slot_assignments(
