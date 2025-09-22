@@ -579,7 +579,6 @@ mod tests {
         Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
         StorageSyncConfig,
     };
-    use tokio::time::sleep;
 
     use crate::packing::{
         cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingRequest,
