@@ -76,6 +76,7 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
+    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -136,6 +137,8 @@ pub enum MempoolServiceMessage {
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
+    UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
+    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
 }
 
 impl Inner {
@@ -255,6 +258,18 @@ impl Inner {
                 MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
                     let response_value = self.remove_from_blacklists(tx_ids).await;
                     if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
+                    self.stake_and_pledge_whitelist.extend(new_entries);
+                    if let Err(e) = response.send(()) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
+                    let whitelist = self.stake_and_pledge_whitelist.clone();
+                    if let Err(e) = tx.send(whitelist) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
@@ -1406,6 +1421,10 @@ impl MempoolService {
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
+        let initial_stake_and_pledge_whitelist = config
+            .node_config
+            .initial_stake_and_pledge_whitelist
+            .clone();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -1414,6 +1433,9 @@ impl MempoolService {
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
                 );
+
+                let mut stake_and_pledge_whitelist = HashSet::new();
+                stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
@@ -1430,6 +1452,7 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
+                        stake_and_pledge_whitelist,
                     },
                 };
                 mempool_service

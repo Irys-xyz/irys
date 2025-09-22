@@ -4,11 +4,12 @@ use crate::mempool_service::{
 };
 use crate::services::ServiceSenders;
 use eyre::eyre;
-use irys_types::IngressProof;
 use irys_types::{
     chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     H256,
 };
+use irys_types::{Address, IngressProof};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
@@ -42,6 +43,13 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()>;
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
+
+    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address>;
+
+    async fn update_stake_and_pledge_whitelist(
+        &self,
+        new_whitelist: HashSet<Address>,
+    ) -> eyre::Result<()>;
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +195,31 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::RemoveFromBlacklist(tx_ids, tx))
+            .map_err(|send_error| eyre!("{send_error:?}"))?;
+
+        rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
+    }
+
+    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx))
+            .expect("to send GetStakeAndPledgeWhitelist message");
+
+        rx.await
+            .expect("to process GetStakeAndPledgeWhitelist message")
+    }
+
+    async fn update_stake_and_pledge_whitelist(
+        &self,
+        new_whitelist: HashSet<Address>,
+    ) -> eyre::Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(
+                new_whitelist,
+                tx,
+            ))
             .map_err(|send_error| eyre!("{send_error:?}"))?;
 
         rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))

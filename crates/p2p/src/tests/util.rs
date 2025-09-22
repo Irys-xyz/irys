@@ -36,7 +36,7 @@ use irys_types::{
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};
@@ -167,6 +167,17 @@ impl MempoolFacade for MempoolStub {
     async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {
         Ok(())
     }
+
+    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address> {
+        HashSet::new()
+    }
+
+    async fn update_stake_and_pledge_whitelist(
+        &self,
+        _new_whitelist: HashSet<Address>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +286,14 @@ impl ApiClient for ApiClientStub {
         Ok(())
     }
 
+    async fn post_commitment_transaction(
+        &self,
+        _peer: SocketAddr,
+        _transaction: CommitmentTransaction,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_transactions(
         &self,
         peer: SocketAddr,
@@ -303,6 +322,14 @@ impl ApiClient for ApiClientStub {
         &self,
         _peer: SocketAddr,
         _block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        Ok(None)
+    }
+
+    async fn get_block_by_height(
+        &self,
+        _peer: SocketAddr,
+        _block_height: u64,
     ) -> Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }

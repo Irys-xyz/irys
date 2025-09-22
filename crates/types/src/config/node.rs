@@ -44,6 +44,13 @@ pub struct NodeConfig {
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<PeerAddress>,
 
+    /// Initial whitelist of miner who can post stake and pledge transaction. To be removed on a
+    /// later date. If this field is empty, all peers are allowed to stake and pledge.
+    /// This has effect only on the genesis node, as all other nodes will get this parameter
+    /// from their trusted peers.
+    #[serde(default)]
+    pub initial_stake_and_pledge_whitelist: Vec<Address>,
+
     /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
     /// trusted-only or trusted-and-handshake mode, you'll be supplied one during the handshake
     /// with the trusted peers. For the original trusted peer that has to be set.
@@ -540,6 +547,7 @@ impl NodeConfig {
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             }*/],
+            initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
@@ -669,6 +677,7 @@ impl NodeConfig {
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
+            initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {

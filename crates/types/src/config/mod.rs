@@ -510,6 +510,10 @@ mod tests {
         genesis_peer_discovery_timeout_millis = 10000
         stake_pledge_drives = false
         initial_whitelist = ["127.0.0.1:8080"]
+        initial_stake_and_pledge_whitelist = [
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32",
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+        ]
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
@@ -590,6 +594,14 @@ mod tests {
             },
         }];
         expected_config.initial_whitelist = vec!["127.0.0.1:8080".parse().unwrap()];
+        expected_config.initial_stake_and_pledge_whitelist = vec![
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+                .parse()
+                .unwrap(),
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+                .parse()
+                .unwrap(),
+        ];
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();

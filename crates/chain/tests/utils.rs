@@ -52,7 +52,7 @@ use irys_types::{
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
     DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    NodeConfig, NodeMode, PackedChunk, PeerAddress, RethPeerInfo, TxChunkOffset, UnpackedChunk,
+    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
@@ -1411,21 +1411,6 @@ impl IrysNodeTest<IrysNodeCtx> {
             ))
             .expect("to send MempoolServiceMessage");
         rx.await.expect("to receive best transactions from mempool")
-    }
-
-    pub fn peer_address(&self) -> PeerAddress {
-        let http = &self.node_ctx.config.node_config.http;
-        let gossip = &self.node_ctx.config.node_config.gossip;
-
-        PeerAddress {
-            api: format!("{}:{}", http.bind_ip, http.bind_port)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            gossip: format!("{}:{}", gossip.bind_ip, gossip.bind_port)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            execution: RethPeerInfo::default(),
-        }
     }
 
     // get account reth balance at specific block
