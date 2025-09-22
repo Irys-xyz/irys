@@ -545,7 +545,7 @@ mod tests {
         public_ip = "127.0.0.1"
         public_port = 0
 
-        [packing]
+        [packing.local]
         cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
 
@@ -604,8 +604,8 @@ mod tests {
         ];
         // for debugging purposes
 
-        // let expected_toml_data = toml::to_string(&expected_config).unwrap();
-        // println!("{}", expected_toml_data);
+        let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a NodeConfig
         let config = toml::from_str::<NodeConfig>(toml_data)

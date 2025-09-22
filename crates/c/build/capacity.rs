@@ -59,7 +59,6 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     cc.flag("-std=c++17");
     cc.flag("-Xcompiler");
     cc.flag("-fPIC");
-    cc.flag("-ccbin=/usr/bin/gcc-13");
     cc.flag("-DCAP_IMPL_CUDA");
 
     let ossl = pkg_config::probe_library("openssl").expect("unable to find openssl");
