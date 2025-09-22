@@ -158,7 +158,7 @@ pub struct PackingParams {
     pub partition_hash: Option<H256>,
     pub ledger: Option<u32>,
     pub slot: Option<usize>,
-    pub last_updated_height: Option<u64>,
+    pub last_updated_height: u64,
 }
 
 impl PackingParams {
@@ -280,6 +280,7 @@ impl StorageModule {
             if !params_path.exists() {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
+                    last_updated_height: 0,
                     ..Default::default()
                 };
                 if let Some(pa) = storage_module_info.partition_assignment {
@@ -318,7 +319,7 @@ impl StorageModule {
                         params.partition_hash = Some(pa.partition_hash);
                         params.ledger = pa.ledger_id;
                         params.slot = pa.slot_index;
-                        params.last_updated_height = Some(0);
+                        params.last_updated_height = 0;
                         params.write_to_disk(&params_path);
                     }
                 }
@@ -425,7 +426,7 @@ impl StorageModule {
                 partition_hash: Some(partition_assignment.partition_hash),
                 ledger: partition_assignment.ledger_id,
                 slot: partition_assignment.slot_index,
-                last_updated_height: Some(update_height),
+                last_updated_height: update_height,
             };
 
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);

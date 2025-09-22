@@ -941,7 +941,7 @@ impl EpochSnapshot {
                     params.is_none()
                     // if an assignment exists, and is from the future, we pass it through
                         || params.is_some_and(|pa| {
-                            pa.last_updated_height.unwrap_or(self.epoch_height + 1) > self.epoch_height
+                            pa.last_updated_height/* .unwrap_or(self.epoch_height + 1) */ > self.epoch_height
                         })
                 })
         {
@@ -1039,7 +1039,7 @@ impl EpochSnapshot {
                 partition_hash: Some(pa.partition_hash),
                 ledger: pa.ledger_id,
                 slot: pa.slot_index,
-                last_updated_height: Some(self.epoch_height),
+                last_updated_height: self.epoch_height,
             });
         }
     }
