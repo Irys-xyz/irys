@@ -658,8 +658,6 @@ mod tests {
         wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
         storage_module.sync_pending_chunks()?;
 
-        sleep(Duration::from_secs(4)).await;
-
         // assert
         // check that the chunks are marked as packed
         let intervals = storage_module.get_intervals(ChunkType::Entropy);

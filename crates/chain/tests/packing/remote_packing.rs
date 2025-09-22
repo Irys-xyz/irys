@@ -14,7 +14,7 @@ use irys_types::{
     RemotePackingConfig, StorageSyncConfig,
 };
 use irys_utils::listener::create_listener;
-use tokio::{sync::mpsc::channel, time::sleep};
+use tokio::sync::mpsc::channel;
 
 #[actix::test]
 pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
@@ -23,7 +23,6 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     let packing_config = PackingWorkerConfig {
         bind_port: 0,
         bind_addr: "127.0.0.1".to_string(),
-        secret: "seeeecrrreeeetttt".to_string(),
         cpu_packing_concurrency: 2,
         gpu_packing_batch_size: 0,
         max_pending: NonZero::new(1).unwrap(),
@@ -40,19 +39,6 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
 
     let (tx, rx) = channel(1);
     let exit_handle = tokio::spawn(start_worker(packing_config.clone(), listener, rx));
-    // let mut config = NodeConfig::testing();
-
-    // config.packing.local.cpu_packing_concurrency = 0;
-
-    // config.packing.remote = vec![RemotePackingConfig {
-    //     url: format!("http://{}:{}", &local_addr.ip(), &local_addr.port()),
-    //     timeout: Some(Duration::from_secs(10)),
-    //     secret: packing_config.secret,
-    // }];
-
-    // // TODO: rework the packing code
-    // let node = IrysNodeTest::new_genesis(config).start().await;
-    // node.wait_for_packing(10).await;
 
     // setup
     let partition_hash = PartitionHash::zero();
@@ -81,7 +67,6 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
             remote: vec![RemotePackingConfig {
                 url: format!("http://{}:{}", &local_addr.ip(), &local_addr.port()),
                 timeout: Some(Duration::from_secs(10)),
-                secret: packing_config.secret,
             }],
         },
         base_directory: base_path.clone(),
@@ -126,8 +111,6 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     packing_addr.send(request).await?;
     wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
     storage_module.sync_pending_chunks()?;
-
-    sleep(Duration::from_secs(10)).await;
 
     // assert
     // check that the chunks are marked as packed

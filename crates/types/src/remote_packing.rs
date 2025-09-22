@@ -22,9 +22,6 @@ pub struct PackingWorkerConfig {
     pub bind_port: u8,
     pub bind_addr: String,
 
-    /// shared secret
-    pub secret: String,
-
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
 

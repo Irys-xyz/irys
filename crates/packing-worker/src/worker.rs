@@ -72,7 +72,6 @@ mod tests {
         let config = PackingWorkerConfig {
             bind_port: 0,
             bind_addr: "127.0.0.1".to_string(),
-            secret: "seeeecrrreeeetttt".to_string(),
             cpu_packing_concurrency: 2,
             gpu_packing_batch_size: 0,
             max_pending: NonZero::new(1).unwrap(),
