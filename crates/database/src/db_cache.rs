@@ -83,6 +83,9 @@ pub struct CachedDataRoot {
 
     /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
+
+    /// Block hashes for blocks containing transactions with this `data_root`
+    pub block_set: Vec<H256>,
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
