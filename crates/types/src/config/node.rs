@@ -48,6 +48,7 @@ pub struct NodeConfig {
     /// later date. If this field is empty, all peers are allowed to stake and pledge.
     /// This has effect only on the genesis node, as all other nodes will get this parameter
     /// from their trusted peers.
+    #[serde(default)]
     pub initial_stake_and_pledge_whitelist: Vec<Address>,
 
     /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
