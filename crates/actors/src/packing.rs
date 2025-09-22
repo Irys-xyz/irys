@@ -298,6 +298,7 @@ impl PackingActor {
             // recompute this so we account for partial completions from other packing remotes
             let current_chunk_range =
                 PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
+
             match PACKING_TYPE {
                 PackingType::CPU => {
                     for i in range_start..=range_end {
@@ -547,6 +548,7 @@ pub async fn wait_for_packing(
                 .values()
                 .fold(0, |acc, x| acc + x.as_ref().read().unwrap().len())
                 == 0
+                && internals.semaphore.available_permits() == internals.config.concurrency as usize
             {
                 match internals.active_workers.load(Ordering::Relaxed) {
                     0 => break Some(()),
@@ -655,7 +657,7 @@ mod tests {
         // action
         packing_addr.send(request).await?;
         wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
-        storage_module.sync_pending_chunks()?;
+        storage_module.force_sync_pending_chunks()?;
 
         // assert
         // check that the chunks are marked as packed
