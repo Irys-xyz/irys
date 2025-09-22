@@ -2,7 +2,7 @@ use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     rate_limiting::DataRequestTracker,
-    types::{InternalGossipError, InvalidDataError},
+    types::{InternalGossipError, InvalidDataError, NetErr},
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
@@ -33,7 +33,7 @@ where
     pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub(crate) cache: Arc<GossipCache>,
     pub api_client: TApiClient,
-    pub gossip_client: GossipClient,
+    pub gossip_client: Arc<GossipClient>,
     pub peer_list: PeerList,
     pub sync_state: ChainSyncState,
     /// Tracing span
@@ -135,7 +135,7 @@ where
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",
-            self.gossip_client.mining_address,
+            self.gossip_client.mining_address(),
             transaction_request.miner_address,
             transaction_request.data.id
         );
@@ -148,7 +148,8 @@ where
         if already_seen {
             debug!(
                 "Node {}: Transaction {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address, tx_id
+                self.gossip_client.mining_address(),
+                tx_id
             );
             return Ok(());
         }
@@ -166,7 +167,7 @@ where
         {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
-                self.gossip_client.mining_address
+                self.gossip_client.mining_address()
             );
             return Ok(());
         }
@@ -197,7 +198,7 @@ where
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip ingress_proof received from peer {}: {:?}",
-            self.gossip_client.mining_address,
+            self.gossip_client.mining_address(),
             proof_request.miner_address,
             proof_request.data.proof
         );
@@ -211,7 +212,8 @@ where
         if already_seen {
             debug!(
                 "Node {}: Ingress Proof {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address, proof_hash
+                self.gossip_client.mining_address(),
+                proof_hash
             );
             return Ok(());
         }
@@ -246,7 +248,7 @@ where
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
-            self.gossip_client.mining_address,
+            self.gossip_client.mining_address(),
             transaction_request.miner_address,
             transaction_request.data.id
         );
@@ -259,7 +261,8 @@ where
         if already_seen {
             debug!(
                 "Node {}: Commitment Transaction {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address, tx_id
+                self.gossip_client.mining_address(),
+                tx_id
             );
             return Ok(());
         }
@@ -277,7 +280,7 @@ where
         {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
-                self.gossip_client.mining_address
+                self.gossip_client.mining_address()
             );
             return Ok(());
         }
@@ -379,7 +382,7 @@ where
         let block_hash = block_header.block_hash;
         debug!(
             "Node {}: Gossip block received from peer {}: {} height: {}",
-            self.gossip_client.mining_address,
+            self.gossip_client.mining_address(),
             source_miner_address,
             block_hash,
             block_header.height
@@ -390,7 +393,8 @@ where
         {
             debug!(
                 "Node {}: Block {} is out of the sync range, skipping",
-                self.gossip_client.mining_address, block_hash
+                self.gossip_client.mining_address(),
+                block_hash
             );
             return Ok(());
         }
@@ -403,7 +407,8 @@ where
         if has_block_already_been_received && !is_block_requested_by_the_pool {
             debug!(
                 "Node {}: Block {} already seen and not requested by the pool, skipping",
-                self.gossip_client.mining_address, block_header.block_hash
+                self.gossip_client.mining_address(),
+                block_header.block_hash
             );
             return Ok(());
         }
@@ -413,7 +418,8 @@ where
         if !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
-                self.gossip_client.mining_address, block_header.block_hash
+                self.gossip_client.mining_address(),
+                block_header.block_hash
             );
             self.peer_list
                 .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
@@ -435,14 +441,16 @@ where
         if has_block_already_been_processed {
             debug!(
                 "Node {}: Block {} has already been processed, skipping",
-                self.gossip_client.mining_address, block_header.block_hash
+                self.gossip_client.mining_address(),
+                block_header.block_hash
             );
             return Ok(());
         }
 
         debug!(
             "Node {}: Block {} has not been processed yet, starting processing",
-            self.gossip_client.mining_address, block_header.block_hash
+            self.gossip_client.mining_address(),
+            block_header.block_hash
         );
 
         let mut missing_tx_ids = Vec::new();
@@ -543,7 +551,7 @@ where
                         .unwrap_or_default()
                 );
                 error!("{:?}", err_msg);
-                return Err(GossipError::Network(err_msg));
+                return Err(GossipError::Network(NetErr::Other(err_msg)));
             };
 
             // Process the fetched transaction immediately
@@ -667,7 +675,7 @@ where
         if payload_already_seen_before && !expecting_payload {
             debug!(
                 "Node {}: Execution payload for EVM block {:?} already seen, and no service requested it to be fetched again, skipping",
-                self.gossip_client.mining_address,
+                self.gossip_client.mining_address(),
                 evm_block_hash
             );
             return Ok(());
@@ -693,7 +701,8 @@ where
 
         debug!(
             "Node {}: Execution payload for EVM block {:?} have been added to the cache",
-            self.gossip_client.mining_address, evm_block_hash
+            self.gossip_client.mining_address(),
+            evm_block_hash
         );
 
         Ok(())
@@ -723,7 +732,8 @@ where
         if !check_result.should_serve() {
             debug!(
                 "Node {}: Rate limiting peer {:?} for data request",
-                self.gossip_client.mining_address, request.miner_address
+                self.gossip_client.mining_address(),
+                request.miner_address
             );
             return Err(GossipError::RateLimited);
         }
@@ -757,7 +767,8 @@ where
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 debug!(
                     "Node {}: Handling execution payload request for block {:?}",
-                    self.gossip_client.mining_address, evm_block_hash
+                    self.gossip_client.mining_address(),
+                    evm_block_hash
                 );
                 let maybe_evm_block = self
                     .execution_payload_cache

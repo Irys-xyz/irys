@@ -885,9 +885,16 @@ impl IrysNode {
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
 
+        // Create a shared GossipClient instance
+        let gossip_client = Arc::new(irys_p2p::GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
+
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
             receivers.gossip_broadcast,
+            Arc::clone(&gossip_client),
         );
         let sync_state = p2p_service.sync_state.clone();
 
@@ -936,6 +943,7 @@ impl IrysNode {
             reth_service_actor.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
+            Arc::clone(&gossip_client),
         );
         let peer_list_guard = peer_list_service
             .send(GetPeerListGuard)
@@ -1636,6 +1644,7 @@ fn init_peer_list_service(
     reth_service_addr: Addr<RethServiceActor>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
+    gossip_client: Arc<irys_p2p::GossipClient>,
 ) -> (
     Addr<PeerNetworkService<IrysApiClient, RethServiceActor>>,
     Arbiter,
@@ -1647,6 +1656,7 @@ fn init_peer_list_service(
         reth_service_addr,
         service_receiver,
         service_sender,
+        gossip_client,
     );
     let peer_list_service =
         PeerNetworkService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);

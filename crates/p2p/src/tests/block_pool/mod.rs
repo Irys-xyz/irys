@@ -6,7 +6,7 @@ use crate::tests::util::{
     MockRethServiceActor,
 };
 use crate::types::GossipResponse;
-use crate::{BlockStatusProvider, GetPeerListGuard};
+use crate::{BlockStatusProvider, GetPeerListGuard, GossipClient};
 use actix::Actor as _;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
@@ -128,6 +128,10 @@ impl MockedServices {
         let reth_service = MockRethServiceActor {};
         let reth_addr = reth_service.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let peer_list_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             config,
@@ -135,6 +139,7 @@ impl MockedServices {
             reth_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_service_addr = peer_list_service.start();
         let peer_list_data_guard = peer_service_addr

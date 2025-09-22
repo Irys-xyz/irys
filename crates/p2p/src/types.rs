@@ -1,14 +1,46 @@
 use crate::block_pool::BlockPoolError;
 use irys_actors::mempool_service::{IngressProofError, TxIngressError};
 use irys_types::{CommitmentValidationError, PeerNetworkError};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
+pub enum NetErr {
+    #[error("http {status} {body}")]
+    Http { status: StatusCode, body: String },
+    #[error("transport {0}")]
+    Transport(String),
+    #[error("decode {0}")]
+    Decode(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl NetErr {
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport(msg) => {
+                // Only retry transport errors that indicate transient network issues
+                msg.contains("timeout")
+                    || msg.contains("connection")
+                    || msg.contains("Connection refused")
+                    || msg.contains("tcp connect")
+            }
+            Self::Http { status, .. } => {
+                status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS
+            }
+            Self::Decode(_) => false, // bad payload from server -> don't thrash
+            Self::Other(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone)]
 pub enum GossipError {
     #[error("Network error: {0}")]
-    Network(String),
+    Network(NetErr),
     #[error("Invalid peer: {0}")]
     InvalidPeer(String),
     #[error("Cache error: {0}")]

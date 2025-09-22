@@ -34,6 +34,7 @@ serde_json.workspace = true
 dashmap = "6.1.0"
 backon = "1.2"
 sha2 = "0.10"
+tokio-util = "0.7"
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
@@ -42,6 +43,8 @@ irys-api-client = { workspace = true, features = ["test-utils"] }
 irys-actors = { workspace = true, features = ["test-utils"] }
 irys-storage.workspace = true
 async-trait = "0.1"
+rstest.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

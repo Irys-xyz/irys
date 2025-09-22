@@ -98,7 +98,7 @@ impl ServiceHandleWithShutdownSignal {
 pub struct P2PService {
     cache: Arc<GossipCache>,
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
-    client: GossipClient,
+    client: Arc<GossipClient>,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
 }
@@ -118,13 +118,11 @@ impl P2PService {
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
-        mining_address: Address,
+        _mining_address: Address,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
+        client: Arc<GossipClient>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
-
-        let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(client_timeout, mining_address);
 
         Self {
             client,
@@ -254,7 +252,7 @@ impl P2PService {
         if peers.is_empty() {
             debug!(
                 "Node {:?}: No peers to broadcast to",
-                self.client.mining_address
+                self.client.mining_address()
             );
         }
 
@@ -268,7 +266,7 @@ impl P2PService {
             if peers.is_empty() {
                 debug!(
                     "Node {:?}: No peers left to broadcast to",
-                    self.client.mining_address
+                    self.client.mining_address()
                 );
                 break;
             }
@@ -278,7 +276,8 @@ impl P2PService {
 
             debug!(
                 "Node {:?}: Peers selected for the current broadcast step: {:?}",
-                self.client.mining_address, selected_peers
+                self.client.mining_address(),
+                selected_peers
             );
             // Send data to selected peers
             for (peer_miner_address, peer_entry) in selected_peers {
@@ -297,7 +296,10 @@ impl P2PService {
         ))
         .await;
 
-        debug!("Node {:?}: Broadcast finished", self.client.mining_address);
+        debug!(
+            "Node {:?}: Broadcast finished",
+            self.client.mining_address()
+        );
         Ok(())
     }
 }

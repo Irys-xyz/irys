@@ -400,6 +400,10 @@ impl GossipServiceTestFixture {
         let (service_senders, service_receivers) = ServiceSenders::new();
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let peer_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
@@ -407,6 +411,7 @@ impl GossipServiceTestFixture {
             reth_service_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list = peer_service.start();
         let peer_list_data_guard = peer_list
@@ -506,9 +511,14 @@ impl GossipServiceTestFixture {
         ServiceHandleWithShutdownSignal,
         mpsc::UnboundedSender<GossipBroadcastMessage>,
     ) {
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            self.mining_address,
+        ));
         let gossip_service = P2PService::new(
             self.mining_address,
             self.gossip_receiver.take().expect("to take receiver"),
+            gossip_client,
         );
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
@@ -874,7 +884,10 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
         api_client: api_client_stub.clone(),
-        gossip_client: GossipClient::new(Duration::from_millis(100000), Address::repeat_byte(2)),
+        gossip_client: Arc::new(GossipClient::new(
+            Duration::from_millis(100000),
+            Address::repeat_byte(2),
+        )),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
         span: Span::current(),

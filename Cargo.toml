@@ -90,6 +90,7 @@ pretty_assertions = "1"
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
 openssl = { version = "0.10", features = ["vendored"] }
+proptest = "1.6"
 proptest-derive = "0.5"
 rust_decimal = "1"
 rust_decimal_macros = "1"
@@ -124,7 +125,7 @@ paste = "1.0.15"
 async-trait = "0.1.83"
 strum = { version = "0.27", features = ["derive"] }
 priority-queue = "2.5"
-moka = "0.12.10"
+moka = { version = "0.12.10", features = ["future"] }
 
 # Reth & Alloy deps
 # These should be kept in lockstep with the Reth dependencies - for compatability and built times

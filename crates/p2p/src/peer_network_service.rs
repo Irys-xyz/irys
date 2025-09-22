@@ -15,6 +15,7 @@ use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, error, info, warn};
@@ -130,7 +131,7 @@ where
     failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
 
     // This is related to networking - requesting data from the network and joining the network
-    gossip_client: GossipClient,
+    gossip_client: Arc<GossipClient>,
     irys_api_client: A,
 
     chain_id: u64,
@@ -154,6 +155,7 @@ impl<R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Conte
         reth_service_addr: Addr<R>,
         service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
         service_sender: PeerNetworkSender,
+        gossip_client: Arc<GossipClient>,
     ) -> Self {
         info!("service started: peer_list");
         Self::new_with_custom_api_client(
@@ -163,6 +165,7 @@ impl<R: Handler<RethPeerInfo, Result = eyre::Result<()>> + Actor<Context = Conte
             reth_service_addr,
             service_receiver,
             service_sender,
+            gossip_client,
         )
     }
 }
@@ -181,6 +184,7 @@ where
         reth_actor: Addr<R>,
         service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
         service_sender: PeerNetworkSender,
+        gossip_client: Arc<GossipClient>,
     ) -> Self {
         let peer_list_data =
             PeerList::new(config, &db, service_sender).expect("Failed to load peer list data");
@@ -194,10 +198,7 @@ where
                 .time_to_live(SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL)
                 .build(),
             failed_announcements: HashMap::new(),
-            gossip_client: GossipClient::new(
-                Duration::from_secs(5),
-                config.node_config.miner_address(),
-            ),
+            gossip_client,
             irys_api_client,
             chain_id: config.consensus.chain_id,
             peer_address: PeerAddress {
@@ -374,10 +375,10 @@ where
                             debug!("Peer {:?} is offline", mining_addr);
                             act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
                         }
-                        Err(GossipClientError::HealthCheck(u, e)) => {
+                        Err(GossipClientError::HealthCheck { url, status }) => {
                             debug!(
                                 "Peer {:?}{} healthcheck failed with status {}",
-                                mining_addr, u, e
+                                mining_addr, url, status
                             );
                             act.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
                         }
@@ -1206,7 +1207,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1221,6 +1222,10 @@ mod tests {
 
         let (service_sender, service_receiver) = PeerNetworkSender::new_with_receiver();
         // Create service with our mocks
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1228,6 +1233,7 @@ mod tests {
             reth_actor,
             service_receiver,
             service_sender,
+            gossip_client,
         );
 
         // Test adding a new peer
@@ -1259,7 +1265,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_peer_score_management() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1268,6 +1274,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1275,6 +1285,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
 
         // Add a test peer
@@ -1317,7 +1328,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_active_peers_request() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1326,6 +1337,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1333,6 +1348,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
 
         // Add multiple peers with different states
@@ -1385,7 +1401,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_edge_cases() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1394,6 +1410,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1401,6 +1421,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
 
         // Test adding duplicate peer
@@ -1451,6 +1472,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let empty_service = PeerNetworkService::new_with_custom_api_client(
             new_test_db,
             &config,
@@ -1458,6 +1483,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
 
         let exclude_peers = HashSet::new();
@@ -1470,7 +1496,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_periodic_flush() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1481,6 +1507,10 @@ mod tests {
 
         // Start the actor system with our service
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
@@ -1488,6 +1518,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         service.start();
@@ -1532,7 +1563,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_load_from_database() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1543,6 +1574,10 @@ mod tests {
         let mock_addr = mock_actor.start();
         // Create first service instance and add some peers
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
@@ -1550,6 +1585,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         service.start();
@@ -1580,6 +1616,10 @@ mod tests {
 
         // Create new service instance that should load from database
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let new_service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1587,6 +1627,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
 
         // Verify peers were loaded correctly
@@ -1649,6 +1690,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let peer_list_service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1656,6 +1701,7 @@ mod tests {
             mock_addr.clone(),
             receiver,
             sender,
+            gossip_client,
         );
         let addr = peer_list_service.start();
 
@@ -1695,6 +1741,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1702,6 +1752,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
 
         // Add initial peer
@@ -1787,7 +1838,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_reth_actor_receives_reth_peer_info() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -1802,6 +1853,10 @@ mod tests {
 
         // Create service with our mocks
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1809,6 +1864,7 @@ mod tests {
             reth_actor.clone(),
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         service.start();
@@ -1881,6 +1937,10 @@ mod tests {
 
         // Create the service with our mock client instead of the real one
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1888,6 +1948,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         service.start();
@@ -1947,6 +2008,10 @@ mod tests {
         let mock_addr = mock_actor.start();
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -1954,6 +2019,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let service_addr = service.start();
 
@@ -2010,6 +2076,10 @@ mod tests {
 
         // Create the service with our mock client instead of the real one
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -2017,6 +2087,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         let service_addr = service.start();
@@ -2108,6 +2179,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -2115,6 +2190,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         service.start();
@@ -2182,6 +2258,10 @@ mod tests {
         let mock_actor = MockRethServiceActor::new();
         let mock_addr = mock_actor.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -2189,6 +2269,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let peer_list_data_guard = service.peer_list.clone();
         service.start();
@@ -2265,6 +2346,10 @@ mod tests {
 
         // Create and start the service with our mock client
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -2272,6 +2357,7 @@ mod tests {
             mock_addr,
             receiver,
             sender,
+            gossip_client,
         );
         let _service_addr = service.start();
 
@@ -2300,7 +2386,7 @@ mod tests {
     #[actix_rt::test]
     async fn test_staked_unstaked_peer_flush_behavior() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -2315,6 +2401,10 @@ mod tests {
 
         let (service_sender, service_receiver) = PeerNetworkSender::new_with_receiver();
         // Create service with our mocks
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
@@ -2322,6 +2412,7 @@ mod tests {
             reth_actor,
             service_receiver,
             service_sender,
+            gossip_client,
         );
 
         // Create first peer (staked)
@@ -2452,7 +2543,7 @@ mod tests {
     #[actix_rt::test]
     async fn should_be_able_to_handshake_if_removed_from_purgatory() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config = NodeConfig::testing().into();
+        let config: Config = NodeConfig::testing().into();
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir"),
@@ -2467,6 +2558,10 @@ mod tests {
 
         let (service_sender, service_receiver) = PeerNetworkSender::new_with_receiver();
         // Create service with our mocks
+        let gossip_client = Arc::new(GossipClient::new(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+        ));
         let service = PeerNetworkService::new_with_custom_api_client(
             db,
             &config,
@@ -2474,6 +2569,7 @@ mod tests {
             reth_actor,
             service_receiver,
             service_sender,
+            gossip_client,
         );
 
         // Create first peer (staked)
