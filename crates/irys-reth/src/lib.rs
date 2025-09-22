@@ -781,6 +781,8 @@ mod tests {
     // test decrementing when account does not exist (expect that even receipt not created)
     #[test_log::test(tokio::test)]
     async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -806,10 +808,9 @@ mod tests {
         );
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
-        // Submit a normal transaction to ensure block is produced
-        let normal_tx_hash = create_and_submit_normal_tx(
+        // Submit a normal transaction to ensure there's something in the mempool
+        let _normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
             U256::from(1000),
@@ -819,29 +820,52 @@ mod tests {
         )
         .await?;
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
+        // Attempt to produce a new block - this should fail because the shadow transaction
+        // tries to deduct priority fees from a non-existent account
 
-        // // Verify the shadow transaction is NOT included
-        assert_txs_not_in_block(
-            &block_payload,
-            &shadow_tx_hashes,
-            "Shadow transaction for non-existent account should not be included in block",
-        );
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![shadow_tx]);
 
-        // Verify the normal transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &[normal_tx_hash],
-            "Normal transaction should be included in block",
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err("Block production should have failed due to non-existent account");
+
+        let error_msg = format!("{:?}", err);
+        assert!(
+            error_msg.contains("Shadow transaction priority fee failed"),
+            "Expected shadow transaction priority fee failure for non-existent account, got: {}",
+            error_msg
         );
 
         Ok(())
     }
 
-    // test decrementing when account exists but not enough balance (expect failed tx receipt)
+    // test decrementing when account exists but not enough balance (expect block production failure)
     #[test_log::test(tokio::test)]
     async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -853,7 +877,8 @@ mod tests {
         );
 
         // Create a shadow tx that tries to decrement more than the balance
-        let decrement_amount = funded_balance + U256::ONE;
+        // This should cause block production to fail entirely
+        let decrement_amount = funded_balance + U256::from(DEFAULT_PRIORITY_FEE) + U256::ONE;
         let shadow_tx = ShadowTransaction::new_v1(
             TransactionPacket::Stake(BalanceDecrement {
                 amount: decrement_amount,
@@ -864,25 +889,45 @@ mod tests {
         );
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
+        // Attempt to produce a new block - this should fail because the shadow transaction
+        // tries to decrement more than the available balance
 
-        // Verify the shadow transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &shadow_tx_hashes,
-            "Shadow transaction should be included in block",
-        );
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![shadow_tx]);
 
-        // Verify the receipt for the shadow tx is a revert/failure
-        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
-        let receipts = block_execution.receipts;
-        let receipt = &receipts[1][0];
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err("Block production should have failed due to insufficient balance");
+
+        let error_msg = format!("{:?}", err);
         assert!(
-            !receipt.success,
-            "Expected a revert/failure receipt for shadow tx with insufficient balance"
+            error_msg.contains("insufficient balance")
+                || error_msg.contains("Shadow transaction failed")
+                || error_msg.contains("EVM"),
+            "Expected shadow transaction insufficient balance failure, got: {}",
+            error_msg
         );
 
         Ok(())
@@ -1677,9 +1722,11 @@ mod tests {
         Ok(())
     }
 
-    /// Test unpledge on non-existent account is rejected
+    /// Test unpledge on non-existent account fails block production
     #[test_log::test(tokio::test)]
     async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -1708,45 +1755,45 @@ mod tests {
         );
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let unpledge_tx_hash = *unpledge_tx.hash();
 
-        // Submit a normal transaction to ensure block is produced
-        let normal_tx_hash = create_and_submit_normal_tx(
-            &mut node,
-            0,
-            U256::from(1000),
-            1_000_000_000_u128,
-            Address::random(),
-            &ctx.normal_signer,
-        )
-        .await?;
+        // Attempt to produce a new block - this should fail because the unpledge transaction
+        // tries to deduct priority fees from a non-existent account
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unpledge_tx]).await?;
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![unpledge_tx]);
 
-        // Verify the unpledge transaction is NOT included (rejected due to non-existent account)
-        assert_txs_not_in_block(
-            &block_payload,
-            &[unpledge_tx_hash],
-            "Unpledge transaction for non-existent account should not be included in block",
-        );
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
 
-        // Verify the normal transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &[normal_tx_hash],
-            "Normal transaction should be included in block",
-        );
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Verify the account still doesn't exist
-        let final_account = node
-            .inner
-            .provider
-            .basic_account(&nonexistent_address)
-            .unwrap();
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err(
+                "Block production should have failed due to non-existent account for unpledge",
+            );
+
+        let error_msg = format!("{:?}", err);
         assert!(
-            final_account.is_none(),
-            "Non-existent account should remain non-existent after rejected unpledge"
+            error_msg.contains("Shadow transaction priority fee failed"),
+            "Expected shadow transaction priority fee failure for non-existent account, got: {}",
+            error_msg
         );
 
         Ok(())
@@ -1755,6 +1802,8 @@ mod tests {
     /// Test pledge on non-existent account fails
     #[test_log::test(tokio::test)]
     async fn test_pledge_nonexistent_account() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -1780,10 +1829,9 @@ mod tests {
         );
         let pledge_tx =
             sign_shadow_tx(pledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let pledge_tx_hash = *pledge_tx.hash();
 
-        // Submit a normal transaction to ensure block is produced
-        let normal_tx_hash = create_and_submit_normal_tx(
+        // Submit a normal transaction to ensure there's something in the mempool
+        let _normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
             U256::from(1000),
@@ -1793,21 +1841,44 @@ mod tests {
         )
         .await?;
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![pledge_tx]).await?;
+        // Attempt to produce a new block - this should fail because the pledge transaction
+        // tries to deduct priority fees from a non-existent account
 
-        // Verify the pledge transaction is NOT included
-        assert_txs_not_in_block(
-            &block_payload,
-            &[pledge_tx_hash],
-            "Pledge transaction for non-existent account should not be included in block",
-        );
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![pledge_tx]);
 
-        // Verify the normal transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &[normal_tx_hash],
-            "Normal transaction should be included in block",
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err(
+                "Block production should have failed due to non-existent account for pledge",
+            );
+
+        let error_msg = format!("{:?}", err);
+        assert!(
+            error_msg.contains("Shadow transaction priority fee failed"),
+            "Expected shadow transaction priority fee failure for non-existent account, got: {}",
+            error_msg
         );
 
         Ok(())

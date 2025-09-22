@@ -399,7 +399,6 @@ mod tests {
         let toml_data = r#"
         chain_id = 1270
         token_price_safe_range = 1.0
-        genesis_price = 1.0
         annual_cost_per_gb = 0.01
         decay_rate = 0.01
         chunk_size = 32
@@ -419,6 +418,7 @@ mod tests {
         minimum_term_fee_usd = 0.01
 
         [genesis]
+        genesis_price = 1.0
         miner_address = "0x0000000000000000000000000000000000000000"
         reward_address = "0x0000000000000000000000000000000000000000"
         last_epoch_hash = "11111111111111111111111111111111"
@@ -629,7 +629,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert_eq!(config.node_mode, NodeMode::Peer);
+        assert!(matches!(config.node_mode, NodeMode::Peer { .. }));
 
         // Check consensus config fields
         let consensus = config.consensus_config();

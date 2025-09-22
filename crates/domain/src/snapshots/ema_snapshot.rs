@@ -418,7 +418,7 @@ mod test {
 
             // Set oracle price for all blocks
             block.oracle_irys_price = if height == 0 {
-                config.genesis_price
+                config.genesis.genesis_price
             } else {
                 oracle_price_for_height(height)
             };
@@ -426,7 +426,7 @@ mod test {
             // Calculate snapshot and EMA price based on block height
             let snapshot = if height == 0 {
                 // Genesis block: use genesis price for EMA and create genesis snapshot
-                block.ema_irys_price = config.genesis_price;
+                block.ema_irys_price = config.genesis.genesis_price;
                 EmaSnapshot::genesis(&block)
             } else {
                 // Non-genesis blocks: calculate EMA and create next snapshot
@@ -589,8 +589,8 @@ mod test {
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
-        genesis_block.oracle_irys_price = config.genesis_price;
-        genesis_block.ema_irys_price = config.genesis_price;
+        genesis_block.oracle_irys_price = config.genesis.genesis_price;
+        genesis_block.ema_irys_price = config.genesis.genesis_price;
 
         // Create genesis snapshot
         let genesis_snapshot = EmaSnapshot::genesis(&genesis_block);

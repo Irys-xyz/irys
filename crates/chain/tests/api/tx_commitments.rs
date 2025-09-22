@@ -180,7 +180,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // ===== PHASE 4: Second Epoch - Add More Commitments =====
         // Create pledge for second test signer
-        let pledge3 = post_pledge_commitment(&node, &signer2, H256::default()).await;
+        let pledge3 = post_pledge_commitment(&node, &signer2, node.get_anchor().await?).await;
         info!("signer2: {} post pledge: {}", signer2_address, pledge3.id);
 
         // Add some data so that the submit ledger grows and a capacity
@@ -430,7 +430,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address using the pricing API pattern
-    let pledge_tx = post_pledge_commitment(&node, &signer, H256::default()).await;
+    let pledge_tx = post_pledge_commitment(&node, &signer, node.get_anchor().await?).await;
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unknown' state (already posted by helper)
@@ -470,7 +470,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let consensus = &node.node_ctx.config.consensus;
     let pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
-        H256::default(),
+        node.get_anchor().await?,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
     )
@@ -509,9 +509,13 @@ async fn post_stake_commitment(
         .expect("Failed to get stake price from API");
 
     let consensus = &node.node_ctx.config.consensus;
+    let anchor = node
+        .get_anchor()
+        .await
+        .expect("anchor should be available for stake commitment");
     let stake_tx = CommitmentTransaction {
         commitment_type: CommitmentType::Stake,
-        anchor: H256::default(),
+        anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
         ..CommitmentTransaction::new(consensus)
