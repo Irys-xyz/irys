@@ -77,6 +77,9 @@ impl PackingConfig {
     }
 }
 
+// log every 1000 chunks
+const LOG_PER_CHUNKS: u32 = 1000;
+
 impl PackingActor {
     /// creates a new packing actor
     pub fn new(storage_module_ids: Vec<usize>, config: Arc<Config>) -> Self {
@@ -167,11 +170,7 @@ impl PackingActor {
                 let current_chunk_range =
                     PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
-                let RemotePackingConfig {
-                    url,
-                    secret: _,
-                    timeout,
-                } = remote;
+                let RemotePackingConfig { url, timeout } = remote;
 
                 let v1_url = format!("{}/v1", &url);
                 // try to connect
@@ -248,7 +247,7 @@ impl PackingActor {
                         ChunkType::Entropy,
                     );
 
-                    if range_start % 1000 == 0 {
+                    if range_start % LOG_PER_CHUNKS == 0 {
                         debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &range_start, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
                     }
                     if range_start % short_writes_before_sync == 0 {
@@ -343,7 +342,7 @@ impl PackingActor {
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
                         });
 
-                        if i % 1000 == 0 {
+                        if i % LOG_PER_CHUNKS == 0 {
                             debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &i, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
                         }
                     }

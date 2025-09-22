@@ -275,8 +275,6 @@ pub struct LocalPackingConfig {
 pub struct RemotePackingConfig {
     pub url: String,
 
-    pub secret: String,
-
     // This is the read (max time between streamed chunks) and connection timeout
     pub timeout: Option<Duration>,
 }
