@@ -1,7 +1,7 @@
 use crate::types::{GossipResponse, RejectionReason};
 use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
 use eyre::{Report, Result as EyreResult};
-use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
+use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
@@ -293,20 +293,14 @@ where
         let peer_list = self.inner.peer_list();
 
         let trusted_peers = peer_list.trusted_peer_addresses();
-        tokio::spawn(Self::trusted_peers_handshake_task(
-            sender.clone(),
-            trusted_peers,
-        ));
+        Self::trusted_peers_handshake_task(sender.clone(), trusted_peers);
 
         let initial_peers: HashMap<Address, PeerListItem> = peer_list
             .all_peers()
             .iter()
             .map(|(addr, peer)| (*addr, peer.clone()))
             .collect();
-        tokio::spawn(Self::announce_yourself_to_all_peers(
-            initial_peers,
-            sender.clone(),
-        ));
+        Self::spawn_announce_yourself_to_all_peers_task(initial_peers, sender.clone());
 
         let mut flush_interval = interval(FLUSH_INTERVAL);
         flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -434,7 +428,7 @@ where
             api_client,
             peer_api_addr,
             version_request,
-            sender.clone(),
+            sender,
             is_trusted_peer,
             peer_filter_mode,
             peer_list,
@@ -528,11 +522,11 @@ where
         };
 
         if let Some(task) = task {
-            self.spawn_handshake_task(task).await;
+            self.spawn_handshake_task(task);
         }
     }
 
-    async fn spawn_handshake_task(&self, task: HandshakeTask<A>) {
+    fn spawn_handshake_task(&self, task: HandshakeTask<A>) {
         let semaphore = handshake_semaphore_with_max(task.max_concurrent_handshakes);
         tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
@@ -801,7 +795,7 @@ where
             data_request, sample_size, last_error
         )))
     }
-    async fn trusted_peers_handshake_task(
+    fn trusted_peers_handshake_task(
         sender: PeerNetworkSender,
         trusted_peers_api_addresses: HashSet<SocketAddr>,
     ) {
@@ -816,7 +810,7 @@ where
         }
     }
 
-    async fn announce_yourself_to_all_peers(
+    fn spawn_announce_yourself_to_all_peers_task(
         known_peers: HashMap<Address, PeerListItem>,
         sender: PeerNetworkSender,
     ) {
@@ -918,7 +912,7 @@ where
                         peer_addresses.len(),
                         peer_addresses
                     );
-                    peer_list.add_peers_to_whitelist(peer_addresses.clone());
+                    peer_list.add_peers_to_whitelist(peer_addresses);
                 }
 
                 accepted_peers.peers.shuffle(&mut rand::thread_rng());
@@ -979,7 +973,7 @@ where
         PeerList::new(config, &db, service_sender.clone()).expect("Failed to load peer list data");
 
     let inner = Arc::new(PeerNetworkServiceInner::new(
-        db.clone(),
+        db,
         config.clone(),
         irys_api_client,
         reth_peer_sender,
@@ -988,7 +982,7 @@ where
     ));
 
     let (shutdown_tx, shutdown_rx) = signal();
-    let service = PeerNetworkService::new(shutdown_rx, service_receiver, inner.clone());
+    let service = PeerNetworkService::new(shutdown_rx, service_receiver, inner);
 
     let handle = runtime_handle.spawn(async move {
         if let Err(err) = service.start().await {

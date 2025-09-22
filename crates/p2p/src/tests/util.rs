@@ -535,7 +535,7 @@ impl GossipServiceTestFixture {
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: Some(self.service_senders.gossip_broadcast.clone()),
-            block_status_provider: block_status_provider_mock.clone(),
+            block_status_provider: block_status_provider_mock,
         };
 
         let peer_list = self.peer_list.clone();
@@ -590,7 +590,7 @@ impl GossipServiceTestFixture {
         );
 
         self.peer_list
-            .add_or_update_peer(other.mining_address, peer.clone(), true);
+            .add_or_update_peer(other.mining_address, peer, true);
     }
 }
 

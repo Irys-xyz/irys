@@ -131,7 +131,7 @@ impl MockedServices {
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let runtime_handle = tokio::runtime::Handle::current();
         let reth_peer_sender = {
-            let reth_addr = reth_addr.clone();
+            let reth_addr = reth_addr;
             Arc::new(move |peer_info: RethPeerInfo| {
                 let addr = reth_addr.clone();
                 async move {
