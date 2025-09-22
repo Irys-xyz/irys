@@ -447,6 +447,7 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
+    #[tracing::instrument(skip_all, fields(expected_genesis_hash))]
     async fn fetch_genesis_from_trusted_peer(
         &self,
         expected_genesis_hash: H256,
