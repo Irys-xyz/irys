@@ -19,8 +19,7 @@ pub struct IrysCli {
 pub enum Commands {
     #[command(name = "start")]
     Start {},
-    #[command(name = "bench")]
-    Bench {},
+    // TODO: add a `Bench` subcommand
 }
 
 #[tokio::main]
@@ -49,9 +48,6 @@ async fn main() -> eyre::Result<()> {
                 format!("{}:{}", &config.bind_addr, &config.bind_port).parse()?;
             let listener = create_listener(addr)?;
             start_worker(config, listener, rx).await?
-        }
-        Commands::Bench {} => {
-            todo!()
         }
     }
 

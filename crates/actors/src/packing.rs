@@ -103,15 +103,16 @@ impl PackingActor {
         let mut was_active = false;
         'main: loop {
             if was_active {
+                // basic atomic counter so we can keep track of the number of active workers
                 self.active_workers.fetch_sub(1, Ordering::Relaxed);
                 was_active = false
             }
             // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
             let front = {
-                let mut pending_read_guard = pending_jobs
+                let mut pending_write_guard = pending_jobs
                     .write()
                     .expect("Unable to acquire pending jobs write lock");
-                pending_read_guard.pop_front()
+                pending_write_guard.pop_front()
             };
 
             let next_range = match front {
@@ -136,7 +137,6 @@ impl PackingActor {
                 Some(v) => v,
                 None => {
                     warn!(target:"irys::packing", "Partition assignment for storage module {} is `None`, cannot pack requested range {:?}", &storage_module.id, &job_chunk_range);
-                    // pending_jobs.write().unwrap().pop_front();
                     continue;
                 }
             };
@@ -184,7 +184,7 @@ impl PackingActor {
                 );
 
                 // let mut headers = HeaderMap::new();
-                // // TODO: actual auth, don't just send the secret in the headers lmao (at least hash it with a nonce)
+                // // TODO: actual auth, don't just send the secret in the headers (at least hash it with a nonce)
                 // headers.append(
                 //     "X-Irys-Packing-Auth-Secret",
                 //     HeaderValue::from_str(secret)
@@ -321,7 +321,6 @@ impl PackingActor {
                             .await
                             .expect("Failure acquiring a CPU packing semaphore");
 
-                        // debug!(target: "irys::packing", "Packing chunk {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module.id, &partition_hash, &mining_address, &entropy_packing_iterations);
                         let config = self.config.clone();
                         let storage_module_clone = storage_module.clone();
                         let chain_id = self.packing_config.chain_id;
