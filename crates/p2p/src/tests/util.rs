@@ -516,7 +516,6 @@ impl GossipServiceTestFixture {
             self.mining_address,
         ));
         let gossip_service = P2PService::new(
-            self.mining_address,
             self.gossip_receiver.take().expect("to take receiver"),
             gossip_client,
         );

@@ -234,7 +234,8 @@ impl CircuitBreakerManager {
         Self {
             // LRU eviction strategy: Retains active peer states while bounding memory
             breakers: std::sync::Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(MAX_CIRCUIT_BREAKERS).unwrap(),
+                NonZeroUsize::new(MAX_CIRCUIT_BREAKERS)
+                    .expect("MAX_CIRCUIT_BREAKERS is a non-zero constant"),
             ))),
         }
     }
@@ -417,8 +418,9 @@ mod tests {
         // --- Simulate cooldown elapsed so next availability check moves to HalfOpen ---
         let past_time = CircuitBreaker::instant_to_nanos(
             Instant::now()
-                .checked_sub(COOLDOWN_DURATION + Duration::from_secs(1))
-                .expect("instant subtraction should not underflow"),
+                .checked_sub(COOLDOWN_DURATION)
+                .and_then(|t| t.checked_sub(Duration::from_secs(1)))
+                .expect("test requires system uptime > COOLDOWN_DURATION + 1s"),
         );
         breaker
             .last_failure_time_nanos
@@ -529,10 +531,15 @@ mod tests {
             let breakers = manager.breakers.read().await;
             assert_eq!(breakers.len(), 1);
             // Force staleness
-            let br = breakers.peek(&addr).unwrap();
+            let br = breakers
+                .peek(&addr)
+                .expect("breaker was just inserted, should exist");
             br.last_access_time_nanos.store(
                 CircuitBreaker::instant_to_nanos(
-                    Instant::now() - STALE_BREAKER_TIMEOUT - Duration::from_secs(1),
+                    Instant::now()
+                        .checked_sub(STALE_BREAKER_TIMEOUT)
+                        .and_then(|t| t.checked_sub(Duration::from_secs(1)))
+                        .expect("test requires system uptime > STALE_BREAKER_TIMEOUT + 1s"),
                 ),
                 Ordering::Relaxed,
             );
@@ -596,7 +603,9 @@ mod tests {
         );
 
         // Test with past instant (should have elapsed)
-        let past_time = Instant::now() - Duration::from_secs(60);
+        let past_time = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("test requires system uptime > 60s");
         let past_nanos = CircuitBreaker::instant_to_nanos(past_time);
         assert!(
             CircuitBreaker::has_timeout_elapsed(past_nanos, Duration::from_secs(1)),
@@ -675,9 +684,8 @@ mod tests {
             let past_time = CircuitBreaker::instant_to_nanos(
                 Instant::now()
                     .checked_sub(COOLDOWN_DURATION)
-                    .unwrap()
-                    .checked_sub(Duration::from_secs(1))
-                    .unwrap(),
+                    .and_then(|t| t.checked_sub(Duration::from_secs(1)))
+                    .expect("test requires system uptime > COOLDOWN_DURATION + 1s"),
             );
             breaker
                 .last_failure_time_nanos

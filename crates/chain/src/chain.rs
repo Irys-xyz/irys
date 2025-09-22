@@ -892,7 +892,6 @@ impl IrysNode {
         ));
 
         let p2p_service = P2PService::new(
-            config.node_config.miner_address(),
             receivers.gossip_broadcast,
             Arc::clone(&gossip_client),
         );
