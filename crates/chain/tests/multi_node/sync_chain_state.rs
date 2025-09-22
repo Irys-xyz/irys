@@ -8,7 +8,7 @@ use irys_chain::{
 use irys_database::block_header_by_hash;
 use irys_types::{
     irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
-    NodeMode, SyncMode, H256,
+    NodeMode, SyncMode,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
@@ -227,7 +227,9 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await;
 
     let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
-    ctx_peer2_node.node_mode = NodeMode::Peer;
+    ctx_peer2_node.node_mode = NodeMode::Peer {
+        expected_genesis_hash: ctx_genesis_node.node_ctx.genesis_hash,
+    };
     ctx_peer2_node.sync_mode = SyncMode::Trusted;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
@@ -248,16 +250,27 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // TEST CASE: check genesis blocks match across the three nodes
     //
     {
-        // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
-        let genesis_genesis_block =
-            block_header_by_hash(&ctx_genesis_node.node_ctx.db.tx()?, &H256::zero(), false)?
-                .unwrap();
+        // Compare actual genesis block headers across nodes using the proper genesis hash
+        let genesis_genesis_block = block_header_by_hash(
+            &ctx_genesis_node.node_ctx.db.tx()?,
+            &ctx_genesis_node.node_ctx.genesis_hash,
+            false,
+        )?
+        .unwrap();
 
-        let peer1_genesis_block =
-            block_header_by_hash(&ctx_peer1_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
+        let peer1_genesis_block = block_header_by_hash(
+            &ctx_peer1_node.node_ctx.db.tx()?,
+            &ctx_peer1_node.node_ctx.genesis_hash,
+            false,
+        )?
+        .unwrap();
 
-        let peer2_genesis_block =
-            block_header_by_hash(&ctx_peer2_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
+        let peer2_genesis_block = block_header_by_hash(
+            &ctx_peer2_node.node_ctx.db.tx()?,
+            &ctx_peer2_node.node_ctx.genesis_hash,
+            false,
+        )?
+        .unwrap();
 
         assert_eq!(genesis_genesis_block, peer1_genesis_block);
         assert_eq!(genesis_genesis_block, peer2_genesis_block);
