@@ -15,7 +15,7 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, commitment, get_chunk, index, network_config, observability, peer_list,
+    block, block_index, commitment, get_chunk, index, mempool, network_config, observability, peer_list,
     post_chunk, post_version, price, proxy::proxy, tx,
 };
 use std::{
@@ -125,6 +125,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/observability/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
             web::get().to(observability::get_storage_intervals),
+        )
+  .route(
+            "/mempool/status",
+            web::get().to(mempool::get_mempool_status),
         )
 }
 

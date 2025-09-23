@@ -4,6 +4,7 @@ pub mod block_index;
 pub mod commitment;
 pub mod get_chunk;
 pub mod index;
+pub mod mempool;
 pub mod network_config;
 pub mod observability;
 pub mod peer_list;

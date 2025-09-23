@@ -5,9 +5,11 @@ pub mod facade;
 pub mod ingress_proofs;
 pub mod lifecycle;
 pub mod pledge_provider;
+pub mod types;
 
 pub use chunks::*;
 pub use facade::*;
+pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
@@ -139,6 +141,9 @@ pub enum MempoolServiceMessage {
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
     UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
     GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
+    /// Get overall mempool status and metrics
+    GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
+
 }
 
 impl Inner {
@@ -261,6 +266,7 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+<<<<<<< HEAD
                 MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
                     self.stake_and_pledge_whitelist.extend(new_entries);
                     if let Err(e) = response.send(()) {
@@ -270,11 +276,44 @@ impl Inner {
                 MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
                     let whitelist = self.stake_and_pledge_whitelist.clone();
                     if let Err(e) = tx.send(whitelist) {
+=======
+                MempoolServiceMessage::GetMempoolStatus(response) => {
+                    let response_value = self.handle_get_mempool_status().await;
+                    if let Err(e) = response.send(response_value) {
+>>>>>>> ff042bb8 (feat(tui/api): added mempool status for tui)
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
             }
             Ok(())
+        })
+    }
+
+    async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
+        let state = self.mempool_state.read().await;
+
+        // Calculate total data size
+        let data_tx_total_size: u64 = state
+            .valid_submit_ledger_tx
+            .values()
+            .map(|tx| tx.data_size)
+            .sum();
+
+        let mempool_config = &self.config.node_config.consensus_config().mempool;
+
+        Ok(MempoolStatus {
+            data_tx_count: state.valid_submit_ledger_tx.len(),
+            commitment_tx_count: state
+                .valid_commitment_tx
+                .values()
+                .map(|txs| txs.len())
+                .sum(),
+            pending_chunks_count: state.pending_chunks.len(),
+            pending_pledges_count: state.pending_pledges.len(),
+            recent_valid_tx_count: state.recent_valid_tx.len(),
+            recent_invalid_tx_count: state.recent_invalid_tx.len(),
+            data_tx_total_size,
+            config: mempool_config.clone(),
         })
     }
 

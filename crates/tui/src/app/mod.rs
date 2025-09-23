@@ -28,6 +28,7 @@ struct NodeData {
     response_time_ms: Option<u64>,
     chain_height: Option<crate::api::models::ChainHeight>,
     peers: Option<crate::api::models::PeerListResponse>,
+    mempool_status: Option<crate::api::models::MempoolStatus>,
 }
 
 pub struct App {
@@ -137,6 +138,11 @@ impl App {
                         // Also refresh observability data if in PartitionSync view
                         if matches!(self.state.current_menu, state::MenuSelection::PartitionSync) {
                             self.refresh_observability_data().await?;
+                        }
+
+                        // Also refresh mempool data if in Mempool view
+                        if matches!(self.state.current_menu, state::MenuSelection::Mempool) {
+                            self.refresh_mempool_data().await?;
                         }
                     }
                 }
@@ -337,6 +343,15 @@ impl App {
                         )
                         .await;
                     }
+
+                    // Also refresh mempool data if in Mempool view
+                    if matches!(self.state.current_menu, state::MenuSelection::Mempool) {
+                        let _ = tokio::time::timeout(
+                            tokio::time::Duration::from_millis(50),
+                            self.refresh_mempool_data(),
+                        )
+                        .await;
+                    }
                 }
                 KeyCode::Char('t') => {
                     self.state.toggle_auto_refresh();
@@ -441,6 +456,11 @@ impl App {
                         if matches!(selection, state::MenuSelection::PartitionSync) {
                             let _ = self.refresh_observability_data().await;
                         }
+
+                        // Fetch mempool data when entering Mempool view
+                        if matches!(selection, state::MenuSelection::Mempool) {
+                            let _ = self.refresh_mempool_data().await;
+                        }
                     }
                 }
                 KeyCode::Tab => {
@@ -517,6 +537,33 @@ impl App {
             {
                 if let Some(node_state) = self.state.nodes.get_mut(&url) {
                     node_state.metrics.chunk_counts = chunk_counts;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_mempool_data(&mut self) -> Result<()> {
+        // Only fetch mempool data for reachable nodes
+        let urls: Vec<String> = self
+            .state
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.is_reachable)
+            .map(|(url, _)| url.clone())
+            .collect();
+
+        let cancel_token = CancellationToken::new();
+
+        for url in urls {
+            if let Ok(mempool_status) = self
+                .api_client
+                .get_mempool_status_cancellable(&url, &cancel_token)
+                .await
+            {
+                if let Some(node_state) = self.state.nodes.get_mut(&url) {
+                    node_state.mempool_status = Some(mempool_status);
                 }
             }
         }
@@ -653,6 +700,9 @@ impl App {
             if let Some(peers) = data.peers {
                 node_state.peers = peers.clone();
                 node_state.metrics.peer_count = peers.len();
+            }
+            if let Some(mempool) = data.mempool_status {
+                node_state.mempool_status = Some(mempool);
             }
             // Don't update chunk_counts here - only fetch when needed for PartitionSync view
         }
