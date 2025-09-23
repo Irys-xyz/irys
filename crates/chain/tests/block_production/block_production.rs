@@ -1334,26 +1334,27 @@ async fn heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     let signer = config.new_random_signer();
     config.fund_genesis_accounts(vec![&signer]);
     let source_node = IrysNodeTest::new_genesis(config).start().await;
+    let genesis_block = source_node.node_ctx.genesis_hash;
+    tracing::error!(genesis_hash = ? genesis_block);
 
     // Create a peer configuration derived from the genesis node and start it with validation disabled.
     let peer_node = source_node.testing_peer_with_assignments(&signer).await?;
     peer_node.node_ctx.set_validation_enabled(false);
 
     // Mine blocks on the source node and deliver them directly to the peer, building a queued backlog.
-    const BLOCKS_TO_PIPELINE: usize = 3;
+    const BLOCKS_TO_PIPELINE: usize = 10;
     let mut source_blocks = Vec::with_capacity(BLOCKS_TO_PIPELINE);
 
     for _ in 0..BLOCKS_TO_PIPELINE {
         let block = source_node.mine_block().await?;
         source_node.send_full_block(&peer_node, &block).await?;
-        tracing::error!(i = ?block.block_hash);
+        tracing::error!(i = ?block.block_hash, prev = ?block.previous_block_hash);
         source_blocks.push(block);
     }
 
     let last_source_block = source_blocks
         .last()
         .ok_or_eyre("expected backlog to contain blocks")?;
-    tracing::error!(last = ?last_source_block.block_hash);
 
     // Enable validation on the peer and wait until it processes the backlog.
     peer_node.node_ctx.set_validation_enabled(true);

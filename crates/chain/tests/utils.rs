@@ -1064,7 +1064,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
-        let height = self.get_canonical_chain_height().await;
+        let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
         let hash = self.wait_until_height(height + 1, 10).await?;
         self.get_block_by_hash(&hash)
@@ -1078,7 +1078,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 num_blocks as u64,
             )))
             .unwrap();
-        let height = self.get_canonical_chain_height().await;
+        let height = self.get_max_difficulty_block().height;
         self.node_ctx.start_mining()?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
