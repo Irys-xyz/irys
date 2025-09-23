@@ -447,8 +447,18 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    node_a
+        .wait_until_height(a_block2.height, seconds_to_wait)
+        .await?;
+
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    node_b
+        .wait_until_height(b_block3.height, seconds_to_wait)
+        .await?;
 
     // check how many txs made it into each block, we expect no more than 2
     assert_eq!(
@@ -647,10 +657,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///    - tests all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - tests new balance changes are applied based on the new canonical branch
 #[test_log::test(actix_web::test)]
-#[ignore]
 async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
-    initialize_tracing();
-
     //
     // Stage 0: SETUP AND STARTUP
     //
@@ -838,7 +845,14 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    node_a
+        .wait_until_height(a_block2.height, seconds_to_wait)
+        .await?;
+
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
 
     // post chunks so txs go from submit ledger to publish ledger in block 3
     node_b
@@ -850,6 +864,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // Mine the heightest block on any node so far, on Node B
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    node_b
+        .wait_until_height(b_block3.height, seconds_to_wait)
+        .await?;
 
     // check how many txs made it into each block, we expect no more than 1
     assert_eq!(
