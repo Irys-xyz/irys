@@ -16,7 +16,6 @@ pub struct Config(Arc<CombinedConfigInner>);
 impl Config {
     pub fn new(node_config: NodeConfig) -> Self {
         let consensus = node_config.consensus_config();
-        
 
         Self(Arc::new(CombinedConfigInner {
             consensus,
