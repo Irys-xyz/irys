@@ -534,6 +534,11 @@ where
                     prev_block_hash
                 );
                 return Ok(ProcessBlockResult::ParentAlreadyInCache);
+            } else {
+                debug!(
+                    "Parent block for block {:?} is not in the cache either",
+                    current_block_hash
+                );
             }
 
             let canonical_height = self.block_status_provider.canonical_height();
@@ -550,6 +555,10 @@ where
                 return Ok(ProcessBlockResult::ParentTooFarAhead);
             }
 
+            debug!(
+                "Requesting parent block {:?} for block {:?} from the network",
+                prev_block_hash, current_block_hash
+            );
             // Use the sync service to request parent block (fire and forget)
             if let Err(send_err) =
                 self.sync_service_sender
@@ -564,6 +573,10 @@ where
                 );
                 return Ok(ProcessBlockResult::ParentRequestFailed);
             } else {
+                debug!(
+                    "Block pool: Requested parent block {:?} for block {:?} from the network",
+                    prev_block_hash, current_block_hash
+                );
                 return Ok(ProcessBlockResult::ParentRequested);
             }
         }

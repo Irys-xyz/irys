@@ -12,7 +12,9 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
+use irys_database::{
+    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
+};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
     ExecutionPayloadCache,
@@ -22,10 +24,9 @@ use irys_primitives::CommitmentType;
 use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
-use irys_storage::ii;
+use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
-use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -34,16 +35,19 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
-use irys_types::{get_ingress_proofs, LedgerChunkOffset};
+use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
+use irys_types::{BlockHash, LedgerChunkRange};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
+use nodit::InclusiveInterval as _;
 use openssl::sha;
 use reth::revm::primitives::FixedBytes;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
+use std::future::Future;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -204,6 +208,8 @@ pub enum PreValidationError {
         "Incorrect Ingress proof count to publish a transaction. Expected: {expected}, Actual: {actual}"
     )]
     IngressProofCountMismatch { expected: usize, actual: usize },
+    #[error("Incorrect number of ingress proofs from assigned owners. Expected {expected}, Actual: {actual}")]
+    AssignedProofCountMismatch { expected: usize, actual: usize },
     #[error("Transaction {tx_id} has invalid ingress proof: {reason}")]
     InvalidIngressProof { tx_id: H256, reason: String },
     #[error("Ingress proof mismatch for transaction {tx_id}")]
@@ -1733,15 +1739,32 @@ pub async fn data_txs_are_valid(
                 }
             })?;
 
-            // Loop though all the ingress proofs for the published transaction and pre-validate them
-            for ingress_proof in tx_proofs.iter() {
-                // Validate ingress proof signature and data_root match the transaction
-                let _ = ingress_proof
-                    .pre_validate(&tx_header.data_root)
-                    .map_err(|e| PreValidationError::InvalidIngressProof {
-                        tx_id: tx_header.id,
-                        reason: e.to_string(),
-                    })?;
+            // Validate assigned ingress proofs and get counts
+            let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
+                &tx_proofs,
+                &tx_header,
+                |hash| mempool_block_retriever(hash, service_senders),
+                block_tree_guard,
+                db,
+                config,
+            )
+            .await?;
+
+            let mut expected_assigned_proofs =
+                config.consensus.number_of_ingress_proofs_from_assignees as usize;
+
+            // While the protocol can require X number of assigned proofs, if there
+            // is less than that many assigned to the slot, it still needs to function.
+            if assigned_miners < expected_assigned_proofs {
+                warn!("Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ", expected_assigned_proofs, assigned_miners);
+                expected_assigned_proofs = assigned_miners;
+            }
+
+            if assigned_proofs.len() < expected_assigned_proofs {
+                return Err(PreValidationError::AssignedProofCountMismatch {
+                    expected: expected_assigned_proofs,
+                    actual: assigned_proofs.len(),
+                });
             }
 
             if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
@@ -1974,6 +1997,189 @@ fn process_block_ledgers_with_states(
         }
     }
     Ok(())
+}
+
+async fn mempool_block_retriever(
+    hash: H256,
+    service_senders: &ServiceSenders,
+) -> Option<IrysBlockHeader> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    service_senders
+        .mempool
+        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .expect("MempoolServiceMessage should be delivered");
+    rx.await.expect("mempool service message should succeed")
+}
+
+pub async fn get_assigned_ingress_proofs<F, Fut>(
+    tx_proofs: &[IngressProof],
+    tx_header: &DataTransactionHeader,
+    mempool_block_retriever: F,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+) -> Result<(Vec<IngressProof>, usize), PreValidationError>
+where
+    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
+    Fut: Future<Output = Option<IrysBlockHeader>>,
+{
+    // Returns (assigned_proofs, assigned_miners)
+    let mut assigned_proofs = Vec::new();
+    let mut assigned_miners = 0;
+
+    // Loop through all the ingress proofs for the published transaction and pre-validate them
+    for ingress_proof in tx_proofs.iter() {
+        // Validate ingress proof signature and data_root match the transaction
+        let proof_address = ingress_proof
+            .pre_validate(&tx_header.data_root)
+            .map_err(|e| PreValidationError::InvalidIngressProof {
+                tx_id: tx_header.id,
+                reason: e.to_string(),
+            })?;
+
+        // 1.) is the proof from a miner assigned to store the data in the submit ledger?
+
+        //  a) Get the block hashes from the cached data_root
+        let block_hashes = db
+            .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+            .expect("creating a read tx should succeed")
+            .expect("db query should succeed")
+            .expect("CachedDataRoot should be found for data_root")
+            .block_set;
+
+        //  b) Get the submit ledger offset intervals for each of the blocks
+        let mut block_ranges = Vec::new();
+        for block_hash in block_hashes.iter() {
+            let block_range =
+                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await;
+            block_ranges.push(block_range);
+        }
+
+        //  c) Get the slots the proof address is assigned to store
+        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree_guard);
+
+        // d) Get the ledger ranges of the slot indexes
+        let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
+            .iter()
+            .map(|index| {
+                let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
+                let start = *index as u64 * num_chunks_in_partition;
+                let end = start + num_chunks_in_partition;
+                let range = LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(start),
+                    LedgerChunkOffset::from(end),
+                ));
+                (*index, range)
+            })
+            .collect();
+
+        // e) Get the number of unique addresses assigned to each slot
+        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree_guard);
+
+        //  f) are there any intersections of block and slot ranges?
+        let mut is_intersected = false;
+        for block_range in &block_ranges {
+            for (slot_index, slot_range) in &slot_ranges {
+                if block_range.intersection(slot_range).is_some() {
+                    is_intersected = true;
+                    assigned_miners = *slot_address_counts.get(slot_index).unwrap();
+                    break;
+                }
+            }
+            if is_intersected {
+                assigned_proofs.push(ingress_proof.clone());
+                break;
+            }
+        }
+    }
+
+    Ok((assigned_proofs, assigned_miners))
+}
+
+async fn get_ledger_range<F, Fut>(
+    hash: &H256,
+    mempool_block_retriever: F,
+    db: &DatabaseProvider,
+) -> LedgerChunkRange
+where
+    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
+    Fut: Future<Output = Option<IrysBlockHeader>>,
+{
+    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await;
+    let prev_block_hash = block.previous_block_hash;
+
+    if block.height == 0 {
+        LedgerChunkRange(ii(
+            LedgerChunkOffset::from(0),
+            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
+        ))
+    } else {
+        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await;
+        LedgerChunkRange(ii(
+            LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
+            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
+        ))
+    }
+}
+
+async fn get_block_by_hash<F, Fut>(
+    hash: &H256,
+    mempool_block_retriever: F,
+    db: &DatabaseProvider,
+) -> IrysBlockHeader
+where
+    F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
+    Fut: Future<Output = Option<IrysBlockHeader>>,
+{
+    let block = mempool_block_retriever(*hash).await;
+
+    // Return the block if we found it in the mempool, otherwise get it from the db
+    if let Some(block) = block {
+        block
+    } else {
+        db.view(|tx| block_header_by_hash(tx, hash, false))
+            .expect("creating a read tx should succeed")
+            .expect("creating a read tx should succeed")
+            .expect("db query should succeed")
+    }
+}
+
+fn get_submit_ledger_slot_assignments(
+    address: &Address,
+    block_tree_guard: &BlockTreeReadGuard,
+) -> Vec<usize> {
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let mut partition_assignments = epoch_snapshot.get_partition_assignments(*address);
+    partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
+    partition_assignments
+        .iter()
+        .map(|pa| pa.slot_index.unwrap())
+        .collect()
+}
+
+fn get_submit_ledger_slot_addresses(
+    slot_indexes: &Vec<usize>,
+    block_tree_guard: &BlockTreeReadGuard,
+) -> HashMap<usize, usize> {
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+
+    let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
+
+    for slot_index in slot_indexes {
+        let num_addresses = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .iter()
+            .filter(|(_hash, pa)| {
+                pa.ledger_id == Some(DataLedger::Submit.into())
+                    && pa.slot_index == Some(*slot_index)
+            })
+            .count();
+
+        num_addresses_per_slot.insert(*slot_index, num_addresses);
+    }
+
+    num_addresses_per_slot
 }
 
 #[cfg(test)]

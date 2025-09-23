@@ -22,14 +22,14 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        ctx.node_ctx.config.consensus.genesis_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price,
     )?;
 
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        ctx.node_ctx.config.consensus.genesis_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price,
         expected_term_fee,
     )?;
 
@@ -90,7 +90,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             U256::from(ctx.node_ctx.config.consensus.chunk_size),
             ctx.node_ctx.config.consensus.chunk_size,
             // node just started up, using genesis ema price
-            ctx.node_ctx.config.consensus.genesis_price,
+            ctx.node_ctx.config.consensus.genesis.genesis_price,
         )?
     };
 
@@ -98,7 +98,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size, // small data rounds up to chunk_size
         &ctx.node_ctx.config.consensus,
-        ctx.node_ctx.config.consensus.genesis_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price,
     )?;
 
     // Calculate expected perm_fee using the same method as the API
@@ -191,7 +191,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             U256::from(ctx.node_ctx.config.consensus.chunk_size * 2),
             ctx.node_ctx.config.consensus.chunk_size,
             // node just started up, using genesis ema price
-            ctx.node_ctx.config.consensus.genesis_price,
+            ctx.node_ctx.config.consensus.genesis.genesis_price,
         )?
     };
 
@@ -199,7 +199,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size * 2, // data rounds up to 2 chunks
         &ctx.node_ctx.config.consensus,
-        ctx.node_ctx.config.consensus.genesis_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price,
     )?;
 
     // Calculate expected perm_fee using the same method as the API

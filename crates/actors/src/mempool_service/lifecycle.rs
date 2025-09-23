@@ -77,6 +77,39 @@ impl Inner {
             }
         }
 
+        // Update `CachedDataRoots` so that this block_hash is cached for each data_root
+        let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+        let submit_tx_headers = self.handle_get_data_tx_message(submit_txids).await;
+
+        for (i, submit_tx) in submit_tx_headers.iter().enumerate() {
+            let Some(submit_tx) = submit_tx else {
+                error!(
+                    "No transaction header found for txid: {}",
+                    block.data_ledgers[DataLedger::Submit].tx_ids.0[i]
+                );
+                continue;
+            };
+
+            let data_root = submit_tx.data_root;
+            match self.irys_db.update_eyre(|db_tx| {
+                irys_database::cache_data_root(db_tx, submit_tx, Some(&block))?;
+                Ok(())
+            }) {
+                Ok(()) => {
+                    info!(
+                        "Successfully cached data_root {:?} for tx {:?}",
+                        data_root, submit_tx.id
+                    );
+                }
+                Err(db_error) => {
+                    error!(
+                        "Failed to cache data_root {:?} for tx {:?}: {:?}",
+                        data_root, submit_tx.id, db_error
+                    );
+                }
+            };
+        }
+
         self.prune_pending_txs().await;
 
         Ok(())
