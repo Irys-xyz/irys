@@ -998,3 +998,661 @@ where
 
     (service_handle, peer_list)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_rt::test;
+    use async_trait::async_trait;
+    use eyre::eyre;
+    use futures::FutureExt as _;
+    use irys_api_client::test_utils::CountingMockClient;
+    use irys_database::{tables::PeerListItems, walk_all};
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+    use irys_types::peer_list::PeerScore;
+    use irys_types::{
+        AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+        CommitmentTransaction, Config, DataTransactionHeader, IrysTransactionResponse, NodeConfig,
+        NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
+    };
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::net::{IpAddr, SocketAddr};
+    use std::str::FromStr as _;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+    use tokio::time::{sleep, timeout, Duration};
+
+    fn create_test_peer(
+        mining_addr: &str,
+        gossip_port: u16,
+        is_online: bool,
+        custom_ip: Option<IpAddr>,
+    ) -> (Address, PeerListItem) {
+        let mining_addr = Address::from_str(mining_addr).expect("Invalid mining address");
+        let ip = custom_ip.unwrap_or_else(|| IpAddr::from_str("127.0.0.1").expect("invalid ip"));
+        let gossip_addr = SocketAddr::new(ip, gossip_port);
+        let api_addr = SocketAddr::new(ip, gossip_port + 1);
+        let peer_addr = PeerAddress {
+            gossip: gossip_addr,
+            api: api_addr,
+            execution: RethPeerInfo::default(),
+        };
+        let peer = PeerListItem {
+            address: peer_addr,
+            reputation_score: PeerScore::new(50),
+            response_time: 100,
+            last_seen: 123,
+            is_online,
+        };
+        (mining_addr, peer)
+    }
+
+    fn open_db(path: &std::path::Path) -> DatabaseProvider {
+        DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(&path.to_path_buf()).expect("open test database"),
+        ))
+    }
+
+    fn reset_global_state() {
+        handshake_failures()
+            .lock()
+            .expect("handshake mutex")
+            .clear();
+        blocklist_until().lock().expect("blocklist mutex").clear();
+    }
+
+    #[test]
+    async fn test_add_peer() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let (mining_addr, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        assert_eq!(
+            peer_list
+                .peer_by_gossip_address(peer.address.gossip)
+                .expect("peer exists"),
+            peer
+        );
+        assert!(peer_list.all_known_peers().contains(&peer.address));
+    }
+
+    #[test]
+    async fn test_active_peers_request() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let (mining_addr1, mut peer1) = create_test_peer(
+            "0x1111111111111111111111111111111111111111",
+            8081,
+            true,
+            None,
+        );
+        let (mining_addr2, mut peer2) = create_test_peer(
+            "0x2222222222222222222222222222222222222222",
+            8082,
+            true,
+            None,
+        );
+        let (mining_addr3, peer3) = create_test_peer(
+            "0x3333333333333333333333333333333333333333",
+            8083,
+            false,
+            None,
+        );
+        peer1.reputation_score.increase();
+        peer1.reputation_score.increase();
+        peer2.reputation_score.increase();
+        peer_list.add_or_update_peer(mining_addr1, peer1.clone(), true);
+        peer_list.add_or_update_peer(mining_addr2, peer2.clone(), true);
+        peer_list.add_or_update_peer(mining_addr3, peer3, true);
+        let active = peer_list.top_active_peers(Some(2), Some(HashSet::new()));
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].1, peer1);
+        assert_eq!(active[1].1, peer2);
+    }
+
+    #[test]
+    async fn test_initial_handshake_with_trusted_peers() {
+        let (sender, mut receiver) = PeerNetworkSender::new_with_receiver();
+        let peers: HashSet<SocketAddr> = vec![
+            "127.0.0.1:25001".parse().unwrap(),
+            "127.0.0.1:25002".parse().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        PeerNetworkService::<IrysApiClient>::trusted_peers_handshake_task(sender, peers);
+        let mut messages = Vec::new();
+        while let Ok(msg) = receiver.try_recv() {
+            messages.push(msg);
+        }
+        assert_eq!(messages.len(), 2);
+        for msg in messages {
+            match msg {
+                PeerNetworkServiceMessage::Handshake(handshake) => assert!(handshake.force),
+                other => panic!("unexpected message: {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    async fn test_announce_yourself_to_all_peers() {
+        let (sender, mut receiver) = PeerNetworkSender::new_with_receiver();
+        let peer1 = create_test_peer(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9001,
+            true,
+            None,
+        )
+        .1;
+        let peer2 = create_test_peer(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            9002,
+            true,
+            None,
+        )
+        .1;
+        let known_peers = HashMap::from([
+            (Address::repeat_byte(0xAA), peer1.clone()),
+            (Address::repeat_byte(0xBB), peer2.clone()),
+        ]);
+        PeerNetworkService::<IrysApiClient>::spawn_announce_yourself_to_all_peers_task(
+            known_peers,
+            sender,
+        );
+        let mut api_addrs = Vec::new();
+        while let Ok(message) = receiver.try_recv() {
+            match message {
+                PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer) => {
+                    api_addrs.push(peer.address.api);
+                }
+                other => panic!("unexpected message: {:?}", other),
+            }
+        }
+        api_addrs.sort();
+        let mut expected = vec![peer1.address.api, peer2.address.api];
+        expected.sort();
+        assert_eq!(api_addrs, expected);
+    }
+
+    #[derive(Clone)]
+    struct TestApiClient {
+        inner: Arc<TestApiClientInner>,
+    }
+
+    #[derive(Default)]
+    struct TestApiClientInner {
+        responses: AsyncMutex<VecDeque<EyreResult<PeerResponse>>>,
+        calls: AsyncMutex<Vec<SocketAddr>>,
+    }
+
+    impl Default for TestApiClient {
+        fn default() -> Self {
+            Self {
+                inner: Arc::new(TestApiClientInner::default()),
+            }
+        }
+    }
+
+    impl TestApiClient {
+        async fn push_response(&self, response: EyreResult<PeerResponse>) {
+            self.inner.responses.lock().await.push_back(response);
+        }
+
+        async fn calls(&self) -> Vec<SocketAddr> {
+            self.inner.calls.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl ApiClient for TestApiClient {
+        async fn get_transaction(
+            &self,
+            _peer: SocketAddr,
+            _tx_id: H256,
+        ) -> EyreResult<IrysTransactionResponse> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn post_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: DataTransactionHeader,
+        ) -> EyreResult<()> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn post_commitment_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: CommitmentTransaction,
+        ) -> EyreResult<()> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_transactions(
+            &self,
+            _peer: SocketAddr,
+            _tx_ids: &[H256],
+        ) -> EyreResult<Vec<IrysTransactionResponse>> {
+            Ok(Vec::new())
+        }
+
+        async fn post_version(
+            &self,
+            peer: SocketAddr,
+            _version: VersionRequest,
+        ) -> EyreResult<PeerResponse> {
+            self.inner.calls.lock().await.push(peer);
+            if let Some(response) = self.inner.responses.lock().await.pop_front() {
+                response
+            } else {
+                Ok(PeerResponse::Accepted(AcceptedResponse::default()))
+            }
+        }
+
+        async fn get_block_by_hash(
+            &self,
+            _peer: SocketAddr,
+            _block_hash: H256,
+        ) -> EyreResult<Option<CombinedBlockHeader>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_block_by_height(
+            &self,
+            _peer: SocketAddr,
+            _block_height: u64,
+        ) -> EyreResult<Option<CombinedBlockHeader>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_block_index(
+            &self,
+            _peer: SocketAddr,
+            _block_index_query: BlockIndexQuery,
+        ) -> EyreResult<Vec<BlockIndexItem>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn node_info(&self, _peer: SocketAddr) -> EyreResult<NodeInfo> {
+            Err(eyre!("not implemented"))
+        }
+    }
+
+    struct TestHarness {
+        config: Config,
+        api_client: TestApiClient,
+        inner: Arc<PeerNetworkServiceInner<TestApiClient>>,
+        service: PeerNetworkService<TestApiClient>,
+        reth_calls: Arc<AsyncMutex<Vec<RethPeerInfo>>>,
+    }
+
+    impl TestHarness {
+        async fn new(temp_dir: &std::path::Path, config: Config) -> Self {
+            let db = open_db(temp_dir);
+            let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+            let api_client = TestApiClient::default();
+            let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
+            let reth_sender = {
+                let reth_calls = reth_calls.clone();
+                Arc::new(move |info: RethPeerInfo| {
+                    let reth_calls = reth_calls.clone();
+                    async move {
+                        reth_calls.lock().await.push(info);
+                    }
+                    .boxed()
+                })
+            };
+            let peer_list = PeerList::new(&config, &db, sender.clone()).expect("peer list");
+            let inner = Arc::new(PeerNetworkServiceInner::new(
+                db,
+                config.clone(),
+                api_client.clone(),
+                reth_sender,
+                peer_list,
+                sender,
+            ));
+            let (_shutdown_tx, shutdown_rx) = signal();
+            let (_msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
+            let service = PeerNetworkService::new(shutdown_rx, msg_rx, inner.clone());
+            Self {
+                config,
+                api_client,
+                inner,
+                service,
+                reth_calls,
+            }
+        }
+
+        fn peer_list(&self) -> PeerList {
+            self.inner.peer_list()
+        }
+    }
+
+    #[test]
+    async fn test_handshake_blacklist_after_max_retries() {
+        reset_global_state();
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let target: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let max_retries = harness.config.node_config.p2p_handshake.max_retries;
+        for _ in 0..max_retries {
+            harness
+                .service
+                .handle_announcement_finished(AnnouncementFinishedMessage {
+                    peer_api_address: target,
+                    success: false,
+                    retry: true,
+                })
+                .await;
+        }
+        assert!(blocklist_until()
+            .lock()
+            .expect("blocklist")
+            .contains_key(&target));
+    }
+
+    #[test]
+    async fn should_prevent_infinite_handshake_loop() {
+        reset_global_state();
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut node_config = NodeConfig::testing();
+        node_config.trusted_peers = vec![];
+        let config = Config::new(node_config);
+        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let peer = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        )
+        .1;
+        harness
+            .peer_list()
+            .add_or_update_peer(Address::repeat_byte(0xAA), peer.clone(), true);
+        harness
+            .api_client
+            .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
+            .await;
+        harness
+            .service
+            .handle_handshake_request(HandshakeMessage {
+                api_address: peer.address.api,
+                force: false,
+            })
+            .await;
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(harness.api_client.calls().await.len(), 1);
+        harness
+            .service
+            .handle_announcement_finished(AnnouncementFinishedMessage {
+                peer_api_address: peer.address.api,
+                success: true,
+                retry: false,
+            })
+            .await;
+        harness
+            .api_client
+            .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
+            .await;
+        harness
+            .service
+            .handle_handshake_request(HandshakeMessage {
+                api_address: peer.address.api,
+                force: true,
+            })
+            .await;
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(harness.api_client.calls().await.len(), 2);
+    }
+
+    #[test]
+    async fn test_reth_sender_receives_reth_peer_info() {
+        reset_global_state();
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let harness = TestHarness::new(temp_dir.path(), config).await;
+        harness
+            .api_client
+            .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
+            .await;
+        let (_, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        harness
+            .service
+            .handle_message(PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer))
+            .await;
+        sleep(Duration::from_millis(50)).await;
+        let calls = harness.reth_calls.lock().await;
+        assert!(!calls.is_empty());
+    }
+
+    #[test]
+    async fn test_periodic_flush() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
+        let reth_sender = {
+            let reth_calls = reth_calls.clone();
+            Arc::new(move |info: RethPeerInfo| {
+                let reth_calls = reth_calls.clone();
+                async move {
+                    reth_calls.lock().await.push(info);
+                }
+                .boxed()
+            })
+        };
+        let runtime_handle = tokio::runtime::Handle::current();
+        let (service_handle, peer_list) = spawn_peer_network_service_with_client(
+            db.clone(),
+            &config,
+            CountingMockClient::default(),
+            reth_sender,
+            receiver,
+            sender,
+            runtime_handle,
+        );
+        let (addr, peer) = create_test_peer(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9100,
+            true,
+            None,
+        );
+        peer_list.add_or_update_peer(addr, peer.clone(), true);
+        sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
+        let TokioServiceHandle {
+            shutdown_signal,
+            handle,
+            ..
+        } = service_handle;
+        shutdown_signal.fire();
+        let _ = handle.await;
+        let read_tx = db.tx().expect("tx");
+        let items = walk_all::<PeerListItems, _>(&read_tx).expect("walk");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1 .0.address.api, peer.address.api);
+    }
+
+    #[test]
+    async fn test_load_from_database() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+        let runtime_handle = tokio::runtime::Handle::current();
+        let reth_sender = { Arc::new(move |_info: RethPeerInfo| async {}.boxed()) };
+        let (service_handle, peer_list) = spawn_peer_network_service_with_client(
+            db.clone(),
+            &config,
+            CountingMockClient::default(),
+            reth_sender.clone(),
+            receiver,
+            sender,
+            runtime_handle.clone(),
+        );
+        let (addr1, peer1) = create_test_peer(
+            "0x1111111111111111111111111111111111111111",
+            9200,
+            true,
+            None,
+        );
+        let (addr2, peer2) = create_test_peer(
+            "0x2222222222222222222222222222222222222222",
+            9202,
+            true,
+            None,
+        );
+        peer_list.add_or_update_peer(addr1, peer1.clone(), true);
+        peer_list.add_or_update_peer(addr2, peer2.clone(), true);
+        sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
+        let TokioServiceHandle {
+            shutdown_signal,
+            handle,
+            ..
+        } = service_handle;
+        shutdown_signal.fire();
+        let _ = handle.await;
+        let (sender2, receiver2) = PeerNetworkSender::new_with_receiver();
+        let (new_handle, new_peer_list) = spawn_peer_network_service_with_client(
+            db,
+            &config,
+            CountingMockClient::default(),
+            reth_sender,
+            receiver2,
+            sender2,
+            runtime_handle,
+        );
+        assert!(new_peer_list
+            .peer_by_gossip_address(peer1.address.gossip)
+            .is_some());
+        assert!(new_peer_list
+            .peer_by_gossip_address(peer2.address.gossip)
+            .is_some());
+        let TokioServiceHandle {
+            shutdown_signal,
+            handle,
+            ..
+        } = new_handle;
+        shutdown_signal.fire();
+        let _ = handle.await;
+    }
+
+    #[test]
+    async fn test_wait_for_active_peer() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let wait_list = peer_list.clone();
+        let wait_handle = tokio::spawn(async move {
+            wait_list.wait_for_active_peers().await;
+        });
+        sleep(Duration::from_millis(50)).await;
+        let (mining_addr, peer) = create_test_peer(
+            "0x4444444444444444444444444444444444444444",
+            9300,
+            true,
+            None,
+        );
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        wait_handle.await.expect("wait task");
+        let active = peer_list.top_active_peers(None, None);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].1, peer);
+    }
+
+    #[test]
+    async fn test_wait_for_active_peer_no_peers() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let wait_list = peer_list.clone();
+        let result = timeout(Duration::from_millis(200), async move {
+            wait_list.wait_for_active_peers().await;
+        })
+        .await;
+        assert!(result.is_err(), "wait should time out without peers");
+    }
+
+    #[test]
+    async fn test_staked_unstaked_peer_flush_behavior() {
+        reset_global_state();
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let mut node_config = NodeConfig::testing();
+        node_config.trusted_peers = vec![];
+        let config = Config::new(node_config);
+        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let (staked_addr, staked_peer) = create_test_peer(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            9400,
+            true,
+            None,
+        );
+        let (unstaked_addr, unstaked_peer) = create_test_peer(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            9402,
+            true,
+            None,
+        );
+        harness
+            .peer_list()
+            .add_or_update_peer(staked_addr, staked_peer.clone(), true);
+        harness
+            .peer_list()
+            .add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+        harness.inner.flush().await.expect("flush");
+        let persistable = harness.peer_list().persistable_peers();
+        assert!(persistable.contains_key(&staked_addr));
+        assert!(!persistable.contains_key(&unstaked_addr));
+        for _ in 0..31 {
+            harness
+                .peer_list()
+                .increase_peer_score(&unstaked_addr, ScoreIncreaseReason::Online);
+        }
+        harness.inner.flush().await.expect("second flush");
+        let persistable_after = harness.peer_list().persistable_peers();
+        assert!(persistable_after.contains_key(&unstaked_addr));
+    }
+
+    #[test]
+    async fn should_be_able_to_handshake_if_removed_from_purgatory() {
+        let temp_dir = setup_tracing_and_temp_dir(None, false);
+        let config: Config = NodeConfig::testing().into();
+        let db = open_db(temp_dir.path());
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let (mining_addr, peer) = create_test_peer(
+            "0x9999999999999999999999999999999999999999",
+            9500,
+            true,
+            None,
+        );
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), false);
+        assert!(peer_list.temporary_peers().contains(&mining_addr));
+        peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData);
+        assert!(!peer_list.temporary_peers().contains(&mining_addr));
+        peer_list.add_or_update_peer(mining_addr, peer, false);
+        assert!(peer_list.temporary_peers().contains(&mining_addr));
+    }
+}
