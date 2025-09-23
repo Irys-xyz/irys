@@ -465,10 +465,16 @@ where
             let already_in_cache = self.inner.peer_list().contains_api_address(&api_address);
             let already_announcing = state.currently_running_announcements.contains(&api_address);
 
-            debug!("Already announcing: {:?}", already_announcing);
-            debug!("Already in cache: {:?}", already_in_cache);
-            let needs_announce = force_announce || !(already_announcing || already_in_cache);
+            debug!(
+                "Handshake request {:?}: already_in_cache={:?}, already_announcing={:?}, force={}",
+                api_address, already_in_cache, already_announcing, force_announce
+            );
+            let needs_announce = force_announce || !already_announcing;
 
+            debug!(
+                "Handshake request {:?}: needs_announce={:?}",
+                api_address, needs_announce
+            );
             if !needs_announce {
                 return;
             }
@@ -1062,6 +1068,160 @@ mod tests {
         blocklist_until().lock().expect("blocklist mutex").clear();
     }
 
+    #[derive(Clone)]
+    struct TestApiClient {
+        inner: Arc<TestApiClientInner>,
+    }
+
+    #[derive(Default)]
+    struct TestApiClientInner {
+        responses: AsyncMutex<VecDeque<EyreResult<PeerResponse>>>,
+        calls: AsyncMutex<Vec<SocketAddr>>,
+    }
+
+    impl Default for TestApiClient {
+        fn default() -> Self {
+            Self {
+                inner: Arc::new(TestApiClientInner::default()),
+            }
+        }
+    }
+
+    impl TestApiClient {
+        async fn push_response(&self, response: EyreResult<PeerResponse>) {
+            self.inner.responses.lock().await.push_back(response);
+        }
+
+        async fn calls(&self) -> Vec<SocketAddr> {
+            self.inner.calls.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl ApiClient for TestApiClient {
+        async fn get_transaction(
+            &self,
+            _peer: SocketAddr,
+            _tx_id: H256,
+        ) -> EyreResult<IrysTransactionResponse> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn post_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: DataTransactionHeader,
+        ) -> EyreResult<()> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn post_commitment_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: CommitmentTransaction,
+        ) -> EyreResult<()> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_transactions(
+            &self,
+            _peer: SocketAddr,
+            _tx_ids: &[H256],
+        ) -> EyreResult<Vec<IrysTransactionResponse>> {
+            Ok(Vec::new())
+        }
+
+        async fn post_version(
+            &self,
+            peer: SocketAddr,
+            _version: VersionRequest,
+        ) -> EyreResult<PeerResponse> {
+            self.inner.calls.lock().await.push(peer);
+            if let Some(response) = self.inner.responses.lock().await.pop_front() {
+                response
+            } else {
+                Ok(PeerResponse::Accepted(AcceptedResponse::default()))
+            }
+        }
+
+        async fn get_block_by_hash(
+            &self,
+            _peer: SocketAddr,
+            _block_hash: H256,
+        ) -> EyreResult<Option<CombinedBlockHeader>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_block_by_height(
+            &self,
+            _peer: SocketAddr,
+            _block_height: u64,
+        ) -> EyreResult<Option<CombinedBlockHeader>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_block_index(
+            &self,
+            _peer: SocketAddr,
+            _block_index_query: BlockIndexQuery,
+        ) -> EyreResult<Vec<BlockIndexItem>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn node_info(&self, _peer: SocketAddr) -> EyreResult<NodeInfo> {
+            Err(eyre!("not implemented"))
+        }
+    }
+
+    struct TestHarness {
+        config: Config,
+        api_client: TestApiClient,
+        inner: Arc<PeerNetworkServiceInner<TestApiClient>>,
+        service: PeerNetworkService<TestApiClient>,
+        reth_calls: Arc<AsyncMutex<Vec<RethPeerInfo>>>,
+    }
+
+    impl TestHarness {
+        fn new(temp_dir: &std::path::Path, config: Config) -> Self {
+            let db = open_db(temp_dir);
+            let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+            let api_client = TestApiClient::default();
+            let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
+            let reth_sender = {
+                let reth_calls = reth_calls.clone();
+                Arc::new(move |info: RethPeerInfo| {
+                    let reth_calls = reth_calls.clone();
+                    async move {
+                        reth_calls.lock().await.push(info);
+                    }
+                    .boxed()
+                })
+            };
+            let peer_list = PeerList::new(&config, &db, sender.clone()).expect("peer list");
+            let inner = Arc::new(PeerNetworkServiceInner::new(
+                db,
+                config.clone(),
+                api_client.clone(),
+                reth_sender,
+                peer_list,
+                sender,
+            ));
+            let (_shutdown_tx, shutdown_rx) = signal();
+            let service = PeerNetworkService::new(shutdown_rx, receiver, inner.clone());
+            Self {
+                config,
+                api_client,
+                inner,
+                service,
+                reth_calls,
+            }
+        }
+
+        fn peer_list(&self) -> PeerList {
+            self.inner.peer_list()
+        }
+    }
+
     #[test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
@@ -1185,161 +1345,6 @@ mod tests {
         assert_eq!(api_addrs, expected);
     }
 
-    #[derive(Clone)]
-    struct TestApiClient {
-        inner: Arc<TestApiClientInner>,
-    }
-
-    #[derive(Default)]
-    struct TestApiClientInner {
-        responses: AsyncMutex<VecDeque<EyreResult<PeerResponse>>>,
-        calls: AsyncMutex<Vec<SocketAddr>>,
-    }
-
-    impl Default for TestApiClient {
-        fn default() -> Self {
-            Self {
-                inner: Arc::new(TestApiClientInner::default()),
-            }
-        }
-    }
-
-    impl TestApiClient {
-        async fn push_response(&self, response: EyreResult<PeerResponse>) {
-            self.inner.responses.lock().await.push_back(response);
-        }
-
-        async fn calls(&self) -> Vec<SocketAddr> {
-            self.inner.calls.lock().await.clone()
-        }
-    }
-
-    #[async_trait]
-    impl ApiClient for TestApiClient {
-        async fn get_transaction(
-            &self,
-            _peer: SocketAddr,
-            _tx_id: H256,
-        ) -> EyreResult<IrysTransactionResponse> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn post_transaction(
-            &self,
-            _peer: SocketAddr,
-            _transaction: DataTransactionHeader,
-        ) -> EyreResult<()> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn post_commitment_transaction(
-            &self,
-            _peer: SocketAddr,
-            _transaction: CommitmentTransaction,
-        ) -> EyreResult<()> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_transactions(
-            &self,
-            _peer: SocketAddr,
-            _tx_ids: &[H256],
-        ) -> EyreResult<Vec<IrysTransactionResponse>> {
-            Ok(Vec::new())
-        }
-
-        async fn post_version(
-            &self,
-            peer: SocketAddr,
-            _version: VersionRequest,
-        ) -> EyreResult<PeerResponse> {
-            self.inner.calls.lock().await.push(peer);
-            if let Some(response) = self.inner.responses.lock().await.pop_front() {
-                response
-            } else {
-                Ok(PeerResponse::Accepted(AcceptedResponse::default()))
-            }
-        }
-
-        async fn get_block_by_hash(
-            &self,
-            _peer: SocketAddr,
-            _block_hash: H256,
-        ) -> EyreResult<Option<CombinedBlockHeader>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_block_by_height(
-            &self,
-            _peer: SocketAddr,
-            _block_height: u64,
-        ) -> EyreResult<Option<CombinedBlockHeader>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_block_index(
-            &self,
-            _peer: SocketAddr,
-            _block_index_query: BlockIndexQuery,
-        ) -> EyreResult<Vec<BlockIndexItem>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn node_info(&self, _peer: SocketAddr) -> EyreResult<NodeInfo> {
-            Err(eyre!("not implemented"))
-        }
-    }
-
-    struct TestHarness {
-        config: Config,
-        api_client: TestApiClient,
-        inner: Arc<PeerNetworkServiceInner<TestApiClient>>,
-        service: PeerNetworkService<TestApiClient>,
-        reth_calls: Arc<AsyncMutex<Vec<RethPeerInfo>>>,
-    }
-
-    impl TestHarness {
-        fn new(temp_dir: &std::path::Path, config: Config) -> Self {
-            let db = open_db(temp_dir);
-            let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
-            let api_client = TestApiClient::default();
-            let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
-            let reth_sender = {
-                let reth_calls = reth_calls.clone();
-                Arc::new(move |info: RethPeerInfo| {
-                    let reth_calls = reth_calls.clone();
-                    async move {
-                        reth_calls.lock().await.push(info);
-                    }
-                    .boxed()
-                })
-            };
-            let peer_list = PeerList::new(&config, &db, sender.clone()).expect("peer list");
-            let inner = Arc::new(PeerNetworkServiceInner::new(
-                db,
-                config.clone(),
-                api_client.clone(),
-                reth_sender,
-                peer_list,
-                sender,
-            ));
-            let (_shutdown_tx, shutdown_rx) = signal();
-            let (_msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
-            let service = PeerNetworkService::new(shutdown_rx, msg_rx, inner.clone());
-            Self {
-                config,
-                api_client,
-                inner,
-                service,
-                reth_calls,
-            }
-        }
-
-        fn peer_list(&self) -> PeerList {
-            self.inner.peer_list()
-        }
-    }
-
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
         reset_global_state();
@@ -1394,7 +1399,10 @@ mod tests {
             })
             .await;
         sleep(Duration::from_millis(50)).await;
-        assert_eq!(harness.api_client.calls().await.len(), 1);
+
+        debug!("Handshake test: Checking API calls");
+        let api_calls = harness.api_client.calls().await;
+        assert_eq!(api_calls.len(), 1, "Expected one API call");
         harness
             .service
             .handle_announcement_finished(AnnouncementFinishedMessage {
@@ -1415,6 +1423,8 @@ mod tests {
             })
             .await;
         sleep(Duration::from_millis(50)).await;
+
+        debug!("Handshake test: Checking API calls after a forced handshake");
         assert_eq!(harness.api_client.calls().await.len(), 2);
     }
 
