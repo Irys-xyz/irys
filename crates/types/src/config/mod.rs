@@ -16,14 +16,14 @@ pub struct Config(Arc<CombinedConfigInner>);
 impl Config {
     pub fn new(node_config: NodeConfig) -> Self {
         let consensus = node_config.consensus_config();
-        let config = Self(Arc::new(CombinedConfigInner {
+        
+
+        Self(Arc::new(CombinedConfigInner {
             consensus,
             mempool: node_config.mempool(),
             vdf: node_config.vdf(),
             node_config,
-        }));
-
-        config
+        }))
     }
 
     pub fn irys_signer(&self) -> IrysSigner {
