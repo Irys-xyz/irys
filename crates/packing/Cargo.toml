@@ -1,13 +1,18 @@
 [package]
-edition = "2021"
 name = "irys-packing"
 version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 irys-c.workspace = true
 irys-types.workspace = true
 rand.workspace = true
-
+serde.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }

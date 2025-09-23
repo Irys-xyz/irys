@@ -13,7 +13,7 @@ irys-types.workspace = true
 
 reth.workspace = true
 awc.workspace = true
-socket2 = "0.5"
+socket2.workspace = true
 base58.workspace = true
 tokio.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }

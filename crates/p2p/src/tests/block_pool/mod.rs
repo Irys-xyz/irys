@@ -16,9 +16,9 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    Config, DataTransactionHeader, DatabaseProvider, GossipData, GossipDataRequest,
-    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerResponse, PeerScore, VersionRequest, H256,
+    CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData,
+    GossipDataRequest, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerResponse, PeerScore, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -51,6 +51,14 @@ impl ApiClient for MockApiClient {
         Ok(())
     }
 
+    async fn post_commitment_transaction(
+        &self,
+        _peer: SocketAddr,
+        _transaction: CommitmentTransaction,
+    ) -> eyre::Result<()> {
+        Ok(())
+    }
+
     async fn get_transactions(
         &self,
         _peer: SocketAddr,
@@ -73,6 +81,14 @@ impl ApiClient for MockApiClient {
         _block_hash: BlockHash,
     ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
         Ok(self.block_response.clone())
+    }
+
+    async fn get_block_by_height(
+        &self,
+        _peer: SocketAddr,
+        _block_height: u64,
+    ) -> eyre::Result<Option<CombinedBlockHeader>> {
+        Ok(None)
     }
 
     async fn get_block_index(

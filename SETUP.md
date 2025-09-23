@@ -33,6 +33,7 @@ e.g `RUST_LOG="debug" cargo run --bin irys --release` will enable `debug` and hi
 These are the configuration options you *should* change when configuring a new node:
 -  `mode`: either `Genesis`, `PeerSync` or `TrustedPeerSync` 
     - If you are running a local network, use `Genesis` - otherwise, use `PeerSync`
+    - to join a network you must also specify the genesis block hash. This will be used for validating the genesis block that you will receive from a trusted peer.
 - `base_directory`: The fully qualified path to where the Irys node should store all it's data. 
     - Note: Changing this will require you to manually move your existing data directory.
 - `mining_key`: Hex encoded EVM private key that the node uses to interact with the network.
@@ -67,9 +68,12 @@ This will run a small, low-capacity localnet node that you can interact with:
 
 
 ### Joining a network quickstart
-- Get the trusted peer info from the peer(s) you want to connect to.\
+- Get the trusted peer info from the peer(s) you want to connect to.
 Note: the trusted peers section template is:
-```
+
+```toml
+node_mode = { Peer = { expected_genesis_hash = "11111111111111111111111111111111" } }
+
 [[trusted_peers]]
 gossip = "<public IP>:<public port>"
 api = "<public IP>:<public port>"

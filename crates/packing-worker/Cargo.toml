@@ -1,0 +1,39 @@
+[package]
+name = "irys-packing-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "irys-packing-worker"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+clap.workspace = true
+eyre.workspace = true
+serde.workspace = true
+actix-web.workspace = true
+tracing.workspace = true
+toml.workspace = true
+futures-util.workspace = true
+futures.workspace = true
+irys-packing.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
+irys-testing-utils.workspace = true
+irys-utils.workspace = true
+
+
+[dev-dependencies]
+reqwest.workspace = true
+
+
+[features]
+nvidia = ["irys-packing/nvidia"]
+
+[lints]
+workspace = true
