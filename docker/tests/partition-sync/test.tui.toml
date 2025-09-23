@@ -1,0 +1,14 @@
+refresh_interval_secs = 30
+connection_timeout_secs = 10
+
+[[nodes]]
+alias = "Test Irys 1"
+url = "http://localhost:19080"
+
+[[nodes]]
+alias = "Test Irys 2"
+url = "http://localhost:19081"
+
+[[nodes]]
+alias = "Test Irys 3"
+url = "http://localhost:19082"

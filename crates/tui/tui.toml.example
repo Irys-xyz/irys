@@ -1,0 +1,19 @@
+# Example TUI configuration file
+# Save this as tui.toml
+
+# TUI behavior settings
+refresh_interval_secs = 30
+connection_timeout_secs = 10
+
+# List of nodes to monitor
+[[nodes]]
+url = "http://localhost:19080"
+alias = "Primary Node"
+
+[[nodes]]
+url = "http://localhost:19081"
+alias = "Secondary Node"
+
+[[nodes]]
+url = "http://localhost:19082"
+# alias is optional

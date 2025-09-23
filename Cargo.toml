@@ -22,6 +22,7 @@ members = [
   "crates/utils/utils",
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
+  "crates/tui",
 ]
 resolver = "2"
 
@@ -57,6 +58,7 @@ irys-p2p = { path = "./crates/p2p" }
 irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
+irys-tui = { path = "./crates/tui" }
 
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"

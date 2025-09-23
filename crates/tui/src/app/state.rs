@@ -1,0 +1,716 @@
+use crate::api::models::{NodeMetrics, PeerInfo};
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+/// Duration in seconds for the splash screen timeout
+const SPLASH_TIMEOUT_SECS: u64 = 3;
+
+#[derive(Debug, Clone)]
+pub enum AppScreen {
+    Splash,
+    Main,
+}
+
+#[derive(Debug, Clone)]
+pub enum MenuSelection {
+    Nodes,
+    PartitionSync,
+    Metrics,
+    Logs,
+    Settings,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeState {
+    pub url: String,
+    pub alias: Option<String>,
+    pub metrics: NodeMetrics,
+    pub peers: Vec<PeerInfo>,
+    pub last_updated: DateTime<Utc>,
+    pub is_reachable: bool,
+    pub response_time_ms: Option<u64>,
+    /// Scroll offset for this node's display in the UI
+    pub scroll_offset: u16,
+    /// Total content height for scrolling
+    pub content_height: u16,
+}
+
+impl NodeState {
+    /// Creates a new NodeState with default values for the given URL.
+    ///
+    /// The node starts in an unreachable state with empty metrics.
+    /// Call refresh methods to populate with actual data from the node.
+    pub fn new(url: String) -> Self {
+        Self {
+            url,
+            alias: None,
+            metrics: NodeMetrics::new(),
+            peers: Vec::new(),
+            last_updated: Utc::now(),
+            is_reachable: false,
+            response_time_ms: None,
+            scroll_offset: 0,
+            content_height: 0,
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        if let Some(alias) = &self.alias {
+            alias.clone()
+        } else {
+            // Extract hostname:port from URL for cleaner display
+            self.url
+                .replace("http://", "")
+                .replace("https://", "")
+                .split('/')
+                .next()
+                .unwrap_or(&self.url)
+                .to_string()
+        }
+    }
+
+    pub fn set_alias(&mut self, alias: Option<String>) {
+        self.alias = alias;
+    }
+}
+
+#[derive(Debug)]
+pub struct AppState {
+    /// Current screen being displayed (splash or main)
+    pub screen: AppScreen,
+    /// Start time for splash screen animation timing
+    pub splash_start_time: Option<std::time::Instant>,
+    /// URL of the primary/initial node
+    pub primary_node_url: String,
+    /// Currently selected menu in the main interface
+    pub current_menu: MenuSelection,
+    /// Map of all monitored nodes keyed by their URLs
+    pub nodes: HashMap<String, NodeState>,
+    /// URL of the currently selected/focused node
+    pub selected_node: Option<String>,
+    /// Index of the currently focused node box for scrolling (used in Nodes view)
+    pub focused_node_index: usize,
+    /// Auto-refresh interval in seconds
+    pub refresh_interval_secs: u64,
+    /// Whether auto-refresh is enabled
+    pub auto_refresh: bool,
+    /// Time since last refresh for countdown display
+    pub time_since_last_refresh: std::time::Duration,
+    /// Whether a refresh is currently in progress
+    pub is_refreshing: bool,
+    /// Flag to signal the application should exit
+    pub should_quit: bool,
+}
+
+impl AppState {
+    pub fn new(primary_url: String) -> Self {
+        Self {
+            screen: AppScreen::Splash,
+            splash_start_time: Some(std::time::Instant::now()),
+            primary_node_url: primary_url.clone(),
+            current_menu: MenuSelection::Nodes,
+            nodes: HashMap::new(),
+            selected_node: Some(primary_url),
+            focused_node_index: 0,
+            refresh_interval_secs: 30,
+            auto_refresh: true,
+            time_since_last_refresh: std::time::Duration::from_secs(0),
+            is_refreshing: false,
+            should_quit: false,
+        }
+    }
+
+    /// Checks if the splash screen timeout period has elapsed.
+    pub fn is_splash_finished(&self) -> bool {
+        self.splash_start_time
+            .is_none_or(|start| start.elapsed().as_secs() >= SPLASH_TIMEOUT_SECS)
+    }
+
+    /// Transitions from splash screen to the main application interface.
+    pub fn transition_to_main(&mut self) {
+        self.screen = AppScreen::Main;
+        self.splash_start_time = None;
+    }
+
+    /// Adds a new node to the monitoring list.
+    pub fn add_node(&mut self, url: String) {
+        let node_state = NodeState::new(url.clone());
+        self.nodes.insert(url.clone(), node_state);
+        if self.selected_node.is_none() {
+            self.selected_node = Some(url);
+        }
+    }
+
+    /// Removes a node from the monitoring list.
+    pub fn remove_node(&mut self, url: &str) {
+        self.nodes.remove(url);
+        if self.selected_node.as_ref() == Some(&url.to_string()) {
+            self.selected_node = self.nodes.keys().next().cloned();
+        }
+    }
+
+    pub fn get_selected_node(&self) -> Option<&NodeState> {
+        let url = self.selected_node.as_ref()?;
+        self.nodes.get(url)
+    }
+
+    pub fn select_next_node(&mut self) {
+        if self.nodes.is_empty() {
+            return;
+        }
+
+        let node_urls: Vec<String> = self.nodes.keys().cloned().collect();
+
+        if let Some(current_url) = &self.selected_node {
+            if let Some(current_index) = node_urls.iter().position(|url| url == current_url) {
+                let next_index = (current_index + 1) % node_urls.len();
+                self.selected_node = Some(node_urls[next_index].clone());
+            }
+        } else if !node_urls.is_empty() {
+            self.selected_node = Some(node_urls[0].clone());
+        }
+    }
+
+    pub fn select_previous_node(&mut self) {
+        if self.nodes.is_empty() {
+            return;
+        }
+
+        let node_urls: Vec<String> = self.nodes.keys().cloned().collect();
+
+        if let Some(current_url) = &self.selected_node {
+            if let Some(current_index) = node_urls.iter().position(|url| url == current_url) {
+                let prev_index = if current_index == 0 {
+                    node_urls.len() - 1
+                } else {
+                    current_index - 1
+                };
+                self.selected_node = Some(node_urls[prev_index].clone());
+            }
+        } else if !node_urls.is_empty() {
+            self.selected_node = Some(node_urls[0].clone());
+        }
+    }
+
+    pub fn get_selected_node_url(&self) -> Option<String> {
+        self.selected_node.clone()
+    }
+
+    pub fn set_node_alias(&mut self, url: &str, alias: Option<String>) {
+        if let Some(node) = self.nodes.get_mut(url) {
+            node.set_alias(alias);
+        }
+    }
+
+    pub fn get_node_urls(&self) -> Vec<String> {
+        self.nodes.keys().cloned().collect()
+    }
+
+    /// Increases the refresh interval by 1 second, up to a maximum of 60 seconds.
+    pub fn increase_refresh_interval(&mut self) {
+        if self.refresh_interval_secs < 60 {
+            self.refresh_interval_secs += 1;
+        }
+    }
+
+    /// Decreases the refresh interval by 1 second, down to a minimum of 1 second.
+    pub fn decrease_refresh_interval(&mut self) {
+        if self.refresh_interval_secs > 1 {
+            self.refresh_interval_secs -= 1;
+        }
+    }
+
+    /// Toggles auto-refresh on/off.
+    pub fn toggle_auto_refresh(&mut self) {
+        self.auto_refresh = !self.auto_refresh;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_app_screen_debug() {
+        let splash = AppScreen::Splash;
+        let main = AppScreen::Main;
+
+        assert!(format!("{:?}", splash).contains("Splash"));
+        assert!(format!("{:?}", main).contains("Main"));
+    }
+
+    #[test]
+    fn test_menu_selection_debug() {
+        let nodes = MenuSelection::Nodes;
+        let partition_sync = MenuSelection::PartitionSync;
+        let metrics = MenuSelection::Metrics;
+        let logs = MenuSelection::Logs;
+        let settings = MenuSelection::Settings;
+
+        assert!(format!("{:?}", nodes).contains("Nodes"));
+        assert!(format!("{:?}", partition_sync).contains("PartitionSync"));
+        assert!(format!("{:?}", metrics).contains("Metrics"));
+        assert!(format!("{:?}", logs).contains("Logs"));
+        assert!(format!("{:?}", settings).contains("Settings"));
+    }
+
+    #[test]
+    fn test_node_state_new() {
+        let url = "http://localhost:1984".to_string();
+        let node = NodeState::new(url.clone());
+
+        assert_eq!(node.url, url);
+        assert_eq!(node.alias, None);
+        assert_eq!(node.is_reachable, false);
+        assert_eq!(node.response_time_ms, None);
+        assert!(node.peers.is_empty());
+        // last_updated should be recent (within last few seconds)
+        assert!(node.last_updated <= Utc::now());
+        assert!(
+            Utc::now()
+                .signed_duration_since(node.last_updated)
+                .num_seconds()
+                < 5
+        );
+    }
+
+    #[test]
+    fn test_node_state_display_name_without_alias() {
+        let node = NodeState::new("http://localhost:1984".to_string());
+        assert_eq!(node.display_name(), "localhost:1984");
+
+        let node2 = NodeState::new("https://api.irys.xyz:443".to_string());
+        assert_eq!(node2.display_name(), "api.irys.xyz:443");
+
+        let node3 = NodeState::new("http://192.168.1.100:8080/path".to_string());
+        assert_eq!(node3.display_name(), "192.168.1.100:8080");
+    }
+
+    #[test]
+    fn test_node_state_display_name_with_alias() {
+        let mut node = NodeState::new("http://localhost:1984".to_string());
+        node.set_alias(Some("Main Node".to_string()));
+        assert_eq!(node.display_name(), "Main Node");
+    }
+
+    #[test]
+    fn test_node_state_set_alias() {
+        let mut node = NodeState::new("http://localhost:1984".to_string());
+
+        // Test setting an alias
+        node.set_alias(Some("Test Node".to_string()));
+        assert_eq!(node.alias, Some("Test Node".to_string()));
+
+        // Test clearing an alias
+        node.set_alias(None);
+        assert_eq!(node.alias, None);
+    }
+
+    #[test]
+    fn test_node_state_display_name_edge_cases() {
+        // Test with just hostname
+        let node1 = NodeState::new("localhost".to_string());
+        assert_eq!(node1.display_name(), "localhost");
+
+        // Test with empty URL (shouldn't happen but handle gracefully)
+        let node2 = NodeState::new("".to_string());
+        assert_eq!(node2.display_name(), "");
+
+        // Test with malformed URL
+        let node3 = NodeState::new("not-a-url".to_string());
+        assert_eq!(node3.display_name(), "not-a-url");
+    }
+
+    #[test]
+    fn test_app_state_new() {
+        let primary_url = "http://localhost:1984".to_string();
+        let app_state = AppState::new(primary_url.clone());
+
+        assert!(matches!(app_state.screen, AppScreen::Splash));
+        assert!(app_state.splash_start_time.is_some());
+        assert_eq!(app_state.primary_node_url, primary_url);
+        assert!(matches!(app_state.current_menu, MenuSelection::Nodes));
+        assert!(app_state.nodes.is_empty());
+        assert_eq!(app_state.selected_node, Some(primary_url));
+        assert_eq!(app_state.refresh_interval_secs, 30);
+        assert_eq!(app_state.auto_refresh, true);
+        assert_eq!(
+            app_state.time_since_last_refresh,
+            std::time::Duration::from_secs(0)
+        );
+        assert_eq!(app_state.is_refreshing, false);
+        assert_eq!(app_state.should_quit, false);
+    }
+
+    #[test]
+    fn test_app_state_is_splash_finished() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+
+        // Should not be finished immediately
+        assert!(!app_state.is_splash_finished());
+
+        // Test with no splash start time
+        app_state.splash_start_time = None;
+        assert!(app_state.is_splash_finished());
+    }
+
+    #[test]
+    fn test_app_state_transition_to_main() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+
+        assert!(matches!(app_state.screen, AppScreen::Splash));
+        assert!(app_state.splash_start_time.is_some());
+
+        app_state.transition_to_main();
+
+        assert!(matches!(app_state.screen, AppScreen::Main));
+        assert!(app_state.splash_start_time.is_none());
+    }
+
+    #[test]
+    fn test_app_state_add_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let new_node_url = "http://localhost:1985".to_string();
+
+        app_state.add_node(new_node_url.clone());
+
+        assert!(app_state.nodes.contains_key(&new_node_url));
+        assert_eq!(app_state.nodes[&new_node_url].url, new_node_url);
+    }
+
+    #[test]
+    fn test_app_state_add_node_sets_selection_when_none() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        app_state.selected_node = None;
+
+        let new_node_url = "http://localhost:1985".to_string();
+        app_state.add_node(new_node_url.clone());
+
+        assert_eq!(app_state.selected_node, Some(new_node_url));
+    }
+
+    #[test]
+    fn test_app_state_remove_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        app_state.add_node(node_url.clone());
+        assert!(app_state.nodes.contains_key(&node_url));
+
+        app_state.remove_node(&node_url);
+        assert!(!app_state.nodes.contains_key(&node_url));
+    }
+
+    #[test]
+    fn test_app_state_remove_selected_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node1_url = "http://localhost:1985".to_string();
+        let node2_url = "http://localhost:1986".to_string();
+
+        app_state.add_node(node1_url.clone());
+        app_state.add_node(node2_url.clone());
+        app_state.selected_node = Some(node1_url.clone());
+
+        app_state.remove_node(&node1_url);
+
+        // Should automatically select another available node
+        assert_ne!(app_state.selected_node, Some(node1_url));
+        assert!(app_state.selected_node.is_some());
+    }
+
+    #[test]
+    fn test_app_state_remove_last_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        app_state.add_node(node_url.clone());
+        app_state.selected_node = Some(node_url.clone());
+
+        app_state.remove_node(&node_url);
+
+        // Should have no selected node
+        assert_eq!(app_state.selected_node, None);
+    }
+
+    #[test]
+    fn test_app_state_get_selected_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        // No selected node returns None
+        app_state.selected_node = None;
+        assert!(app_state.get_selected_node().is_none());
+
+        // Add a node and select it
+        app_state.add_node(node_url.clone());
+        app_state.selected_node = Some(node_url.clone());
+
+        let selected = app_state.get_selected_node();
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap().url, node_url);
+    }
+
+    #[test]
+    fn test_app_state_select_next_node_empty() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        app_state.selected_node = None;
+
+        app_state.select_next_node();
+
+        // Should remain None with no nodes
+        assert_eq!(app_state.selected_node, None);
+    }
+
+    #[test]
+    fn test_app_state_select_next_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node1_url = "http://localhost:1985".to_string();
+        let node2_url = "http://localhost:1986".to_string();
+
+        app_state.add_node(node1_url.clone());
+        app_state.add_node(node2_url.clone());
+        app_state.selected_node = Some(node1_url.clone());
+
+        let initial_selection = app_state.selected_node.clone();
+        app_state.select_next_node();
+
+        // Should select a different node
+        assert_ne!(app_state.selected_node, initial_selection);
+        assert!(app_state.selected_node.is_some());
+    }
+
+    #[test]
+    fn test_app_state_select_next_node_wraps_around() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        app_state.add_node(node_url.clone());
+        app_state.selected_node = Some(node_url.clone());
+
+        app_state.select_next_node();
+
+        // With only one node, should stay selected
+        assert_eq!(app_state.selected_node, Some(node_url));
+    }
+
+    #[test]
+    fn test_app_state_select_previous_node_empty() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        app_state.selected_node = None;
+
+        app_state.select_previous_node();
+
+        // Should remain None with no nodes
+        assert_eq!(app_state.selected_node, None);
+    }
+
+    #[test]
+    fn test_app_state_select_previous_node() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node1_url = "http://localhost:1985".to_string();
+        let node2_url = "http://localhost:1986".to_string();
+
+        app_state.add_node(node1_url.clone());
+        app_state.add_node(node2_url.clone());
+        app_state.selected_node = Some(node1_url.clone());
+
+        let initial_selection = app_state.selected_node.clone();
+        app_state.select_previous_node();
+
+        // Should select a different node
+        assert_ne!(app_state.selected_node, initial_selection);
+        assert!(app_state.selected_node.is_some());
+    }
+
+    #[test]
+    fn test_app_state_select_previous_node_with_no_selection() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        app_state.add_node(node_url.clone());
+        app_state.selected_node = None;
+
+        app_state.select_previous_node();
+
+        // Should select the first (and only) node
+        assert_eq!(app_state.selected_node, Some(node_url));
+    }
+
+    #[test]
+    fn test_app_state_get_selected_node_url() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        // No selection
+        app_state.selected_node = None;
+        assert_eq!(app_state.get_selected_node_url(), None);
+
+        // With selection
+        app_state.selected_node = Some(node_url.clone());
+        assert_eq!(app_state.get_selected_node_url(), Some(node_url));
+    }
+
+    #[test]
+    fn test_app_state_set_node_alias() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node_url = "http://localhost:1985".to_string();
+
+        app_state.add_node(node_url.clone());
+
+        // Set alias
+        app_state.set_node_alias(&node_url, Some("Test Node".to_string()));
+        assert_eq!(
+            app_state.nodes[&node_url].alias,
+            Some("Test Node".to_string())
+        );
+
+        // Clear alias
+        app_state.set_node_alias(&node_url, None);
+        assert_eq!(app_state.nodes[&node_url].alias, None);
+    }
+
+    #[test]
+    fn test_app_state_set_node_alias_nonexistent() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let nonexistent_url = "http://localhost:9999".to_string();
+
+        // Should not panic when setting alias for non-existent node
+        app_state.set_node_alias(&nonexistent_url, Some("Test".to_string()));
+
+        // No node should be added
+        assert!(!app_state.nodes.contains_key(&nonexistent_url));
+    }
+
+    #[test]
+    fn test_app_state_get_node_urls() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node1_url = "http://localhost:1985".to_string();
+        let node2_url = "http://localhost:1986".to_string();
+
+        // Empty initially
+        assert!(app_state.get_node_urls().is_empty());
+
+        app_state.add_node(node1_url.clone());
+        app_state.add_node(node2_url.clone());
+
+        let urls = app_state.get_node_urls();
+        assert_eq!(urls.len(), 2);
+        assert!(urls.contains(&node1_url));
+        assert!(urls.contains(&node2_url));
+    }
+
+    #[test]
+    fn test_node_selection_cycling_with_multiple_nodes() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node1_url = "http://localhost:1985".to_string();
+        let node2_url = "http://localhost:1986".to_string();
+        let node3_url = "http://localhost:1987".to_string();
+
+        app_state.add_node(node1_url.clone());
+        app_state.add_node(node2_url.clone());
+        app_state.add_node(node3_url.clone());
+
+        // Set initial selection
+        app_state.selected_node = Some(node1_url.clone());
+
+        let initial = app_state.selected_node.clone();
+
+        // Cycle through all nodes
+        app_state.select_next_node();
+        let second = app_state.selected_node.clone();
+        assert_ne!(second, initial);
+
+        app_state.select_next_node();
+        let third = app_state.selected_node.clone();
+        assert_ne!(third, second);
+        assert_ne!(third, initial);
+
+        app_state.select_next_node();
+        let fourth = app_state.selected_node.clone();
+        // Should wrap around
+        assert_eq!(fourth, initial);
+    }
+
+    #[test]
+    fn test_node_selection_cycling_backwards() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let node1_url = "http://localhost:1985".to_string();
+        let node2_url = "http://localhost:1986".to_string();
+
+        app_state.add_node(node1_url.clone());
+        app_state.add_node(node2_url.clone());
+
+        // Set initial selection
+        app_state.selected_node = Some(node1_url.clone());
+
+        let initial = app_state.selected_node.clone();
+
+        // Go backwards
+        app_state.select_previous_node();
+        let previous = app_state.selected_node.clone();
+        assert_ne!(previous, initial);
+
+        // Go backwards again should wrap to initial
+        app_state.select_previous_node();
+        assert_eq!(app_state.selected_node, initial);
+    }
+
+    #[test]
+    fn test_increase_refresh_interval() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+
+        // Default is 30
+        assert_eq!(app_state.refresh_interval_secs, 30);
+
+        // Increase by 1
+        app_state.increase_refresh_interval();
+        assert_eq!(app_state.refresh_interval_secs, 31);
+
+        // Test near maximum (60)
+        app_state.refresh_interval_secs = 59;
+        app_state.increase_refresh_interval();
+        assert_eq!(app_state.refresh_interval_secs, 60);
+
+        // Should not exceed 60
+        app_state.increase_refresh_interval();
+        assert_eq!(app_state.refresh_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_decrease_refresh_interval() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+
+        // Default is 30
+        assert_eq!(app_state.refresh_interval_secs, 30);
+
+        // Decrease by 1
+        app_state.decrease_refresh_interval();
+        assert_eq!(app_state.refresh_interval_secs, 29);
+
+        // Test near minimum (1)
+        app_state.refresh_interval_secs = 2;
+        app_state.decrease_refresh_interval();
+        assert_eq!(app_state.refresh_interval_secs, 1);
+
+        // Should not go below 1
+        app_state.decrease_refresh_interval();
+        assert_eq!(app_state.refresh_interval_secs, 1);
+    }
+
+    #[test]
+    fn test_toggle_auto_refresh() {
+        let mut app_state = AppState::new("http://localhost:1984".to_string());
+
+        // Default is true
+        assert_eq!(app_state.auto_refresh, true);
+
+        // Toggle off
+        app_state.toggle_auto_refresh();
+        assert_eq!(app_state.auto_refresh, false);
+
+        // Toggle on
+        app_state.toggle_auto_refresh();
+        assert_eq!(app_state.auto_refresh, true);
+    }
+}
