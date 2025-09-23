@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     impl TestHarness {
-        async fn new(temp_dir: &std::path::Path, config: Config) -> Self {
+        fn new(temp_dir: &std::path::Path, config: Config) -> Self {
             let db = open_db(temp_dir);
             let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
             let api_client = TestApiClient::default();
@@ -1345,7 +1345,7 @@ mod tests {
         reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let config: Config = NodeConfig::testing().into();
-        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let harness = TestHarness::new(temp_dir.path(), config);
         let target: SocketAddr = "127.0.0.1:18080".parse().unwrap();
         let max_retries = harness.config.node_config.p2p_handshake.max_retries;
         for _ in 0..max_retries {
@@ -1371,7 +1371,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
-        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let harness = TestHarness::new(temp_dir.path(), config);
         let peer = create_test_peer(
             "0x1234567890123456789012345678901234567890",
             8080,
@@ -1423,7 +1423,7 @@ mod tests {
         reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let config: Config = NodeConfig::testing().into();
-        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let harness = TestHarness::new(temp_dir.path(), config);
         harness
             .api_client
             .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
@@ -1602,7 +1602,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
-        let harness = TestHarness::new(temp_dir.path(), config).await;
+        let harness = TestHarness::new(temp_dir.path(), config);
         let (staked_addr, staked_peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9400,
