@@ -170,7 +170,7 @@ impl RethService {
         Ok(())
     }
 
-    #[tracing::instrument(err, ret)]
+    #[tracing::instrument(skip(self), err, ret)]
     async fn resolve_new_fcu(
         &self,
         new_fcu: ForkChoiceUpdateMessage,

@@ -4,7 +4,7 @@ use crate::{
     BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
-use actix::{Actor, Addr};
+use actix::{Actor as _, Addr};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;

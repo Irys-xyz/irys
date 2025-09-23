@@ -3,7 +3,6 @@ use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{
     data_handler_stub, ApiClientStub, BlockDiscoveryStub, FakeGossipServer, MempoolStub,
-    MockRethService,
 };
 use crate::types::GossipResponse;
 use crate::{BlockStatusProvider, GetPeerListGuard};

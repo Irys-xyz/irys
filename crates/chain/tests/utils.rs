@@ -340,7 +340,7 @@ impl IrysNodeTest<()> {
     fn get_span(&self) -> tracing::Span {
         match &self.name {
             Some(name) => error_span!("NODE", name = %name),
-            None => tracing::Span::none(),
+            None => error_span!("NODE", name = "genesis"),
         }
     }
 

@@ -1342,7 +1342,7 @@ async fn update_reth_with_initial_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethService};
+    use crate::tests::util::{ApiClientStub, FakeGossipServer};
     use irys_types::BlockHash;
 
     mod catch_up_task {
