@@ -273,7 +273,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                         &block_index,
                         &block_pool.db,
                         &mut reth_service,
-                    ).await;
+                    );
                 }
 
                 let res = sync_chain(
@@ -1349,7 +1349,7 @@ async fn is_local_index_is_behind_trusted_peers(
 }
 
 // Sends a fork choice update message to the Reth service with the latest block from the block index
-async fn update_reth_with_initial_block(
+fn update_reth_with_initial_block(
     block_index: &BlockIndexReadGuard,
     irys_db: &DatabaseProvider,
     reth_service: &mut Option<mpsc::UnboundedSender<RethServiceMessage>>,

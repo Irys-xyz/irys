@@ -2,7 +2,7 @@ use alloy_core::primitives::{ruint::aliases::U256, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_eips::HashOrNumber;
 use alloy_genesis::GenesisAccount;
-use eyre::OptionExt;
+use eyre::OptionExt as _;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     mempool_service::TxIngressError, reth_ethereum_primitives,
