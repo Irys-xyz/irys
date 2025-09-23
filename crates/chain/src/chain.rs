@@ -337,11 +337,14 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block(evm_block_hash).await
             }
-            NodeMode::Peer {
-                expected_genesis_hash,
-            } => {
+            NodeMode::Peer => {
+                let expected_genesis_hash = self
+                    .config
+                    .consensus
+                    .expected_genesis_hash
+                    .expect("expected_genesis_hash must be configured for peer nodes");
                 // Fetch genesis data from trusted peer when joining network
-                self.fetch_genesis_from_trusted_peer(*expected_genesis_hash)
+                self.fetch_genesis_from_trusted_peer(expected_genesis_hash)
                     .await
             }
         }
@@ -440,8 +443,11 @@ impl IrysNode {
         info!("=====================================");
         info!("GENESIS BLOCK CREATED");
         info!("Hash: {}", genesis_block.block_hash);
-        info!("Add this to peer configs:");
-        info!("expected_genesis_hash = \"{}\"", genesis_block.block_hash);
+        info!("Add this to consensus configs:");
+        info!(
+            "consensus.expected_genesis_hash = \"{}\"",
+            genesis_block.block_hash
+        );
         info!("=====================================");
 
         (genesis_block, commitments)
@@ -452,6 +458,11 @@ impl IrysNode {
         &self,
         expected_genesis_hash: H256,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+        tracing::Span::current().record(
+            "expected_genesis_hash",
+            format_args!("{}", expected_genesis_hash),
+        );
+
         // Get trusted peer from config
         let trusted_peer = &self
             .config
