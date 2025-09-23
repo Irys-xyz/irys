@@ -2,7 +2,6 @@ use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, RethServiceActor},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -138,8 +137,6 @@ pub struct BlockProducerInner {
     pub reth_provider: NodeProvider,
     /// Shadow tx store
     pub shadow_tx_store: ShadowTxStore,
-    /// Reth service actor
-    pub reth_service: Addr<RethServiceActor>,
     /// Reth beacon engine handle
     pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index

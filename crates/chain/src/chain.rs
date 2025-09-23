@@ -16,10 +16,10 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
-    mempool_service::{MempoolService, MempoolServiceFacadeImpl},
+    mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingConfig, PackingRequest},
-    reth_service::{GetPeeringInfoMessage, RethServiceActor},
+    reth_service::RethServiceMessage,
     services::ServiceSenders,
     validation_service::ValidationService,
 };
@@ -853,15 +853,25 @@ impl IrysNode {
         );
 
         // start reth service
-        let (reth_service_actor, reth_arbiter) = init_reth_service(
+        let reth_service_task = init_reth_service(
             &irys_db,
             reth_node_adapter.clone(),
-            service_senders.clone(),
-            config.clone(),
+            service_senders.mempool.clone(),
+            receivers.reth_service,
+            runtime_handle.clone(),
         );
-        debug!("Reth Service Actor initialized");
+        debug!("Reth service initialized");
         // Get the correct Reth peer info
-        let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
+        let (peering_tx, peering_rx) = oneshot::channel();
+        service_senders
+            .reth_service
+            .send(RethServiceMessage::GetPeeringInfo {
+                response: peering_tx,
+            })
+            .expect("Reth service channel should be open");
+        let reth_peering = peering_rx
+            .await
+            .expect("Reth service to respond with peering info")?;
 
         // overwrite config as we now have reth peering information
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
@@ -911,7 +921,6 @@ impl IrysNode {
             &storage_submodules_config,
             &config,
             &service_senders,
-            reth_service_actor.clone(),
             runtime_handle.clone(),
         );
 
@@ -944,7 +953,7 @@ impl IrysNode {
         let (peer_list_service, peer_list_arbiter) = init_peer_list_service(
             &irys_db,
             &config,
-            reth_service_actor.clone(),
+            service_senders.reth_service.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
         );
@@ -1083,7 +1092,6 @@ impl IrysNode {
             broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
-            reth_service_actor.clone(),
             receivers.block_producer,
             reth_node.provider.clone(),
             shadow_tx_store.clone(),
@@ -1143,7 +1151,7 @@ impl IrysNode {
             Arc::clone(&block_pool),
             gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
-            reth_service_actor.clone(),
+            service_senders.reth_service.clone(),
             Arc::clone(&is_vdf_mining_enabled),
         );
 
@@ -1152,7 +1160,6 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 packing: packing_actor_addr,
-                reth: reth_service_actor,
             },
             reward_curve,
             reth_handle: reth_node.clone(),
@@ -1262,9 +1269,7 @@ impl IrysNode {
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()),
             });
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()),
-            });
+            services.push(ArbiterEnum::TokioService(reth_service_task));
         }
 
         let server = run_server(
@@ -1462,7 +1467,6 @@ impl IrysNode {
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-        reth_service_actor: actix::Addr<RethServiceActor>,
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
@@ -1482,7 +1486,6 @@ impl IrysNode {
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
             shadow_tx_store,
-            reth_service: reth_service_actor,
             beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
         });
@@ -1569,7 +1572,7 @@ impl IrysNode {
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
-        reth_service_addr: Addr<RethServiceActor>,
+        reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
@@ -1581,7 +1584,7 @@ impl IrysNode {
             block_index_guard,
             block_pool,
             gossip_data_handler,
-            Some(reth_service_addr),
+            Some(reth_service),
             is_vdf_mining_enabled,
         );
 
@@ -1616,18 +1619,15 @@ fn read_latest_block_data(
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
-    reth_service_addr: Addr<RethServiceActor>,
+    reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
-) -> (
-    Addr<PeerNetworkService<IrysApiClient, RethServiceActor>>,
-    Arbiter,
-) {
+) -> (Addr<PeerNetworkService<IrysApiClient>>, Arbiter) {
     let peer_list_arbiter = Arbiter::new();
     let peer_list_service = PeerNetworkService::new(
         irys_db.clone(),
         config,
-        reth_service_addr,
+        reth_service,
         service_receiver,
         service_sender,
     );
@@ -1652,20 +1652,17 @@ fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>,
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    service_senders: ServiceSenders,
-    config: Config,
-) -> (actix::Addr<RethServiceActor>, Arbiter) {
-    let reth_service = RethServiceActor::new(
+    mempool_sender: tokio::sync::mpsc::UnboundedSender<MempoolServiceMessage>,
+    reth_rx: tokio::sync::mpsc::UnboundedReceiver<RethServiceMessage>,
+    runtime_handle: tokio::runtime::Handle,
+) -> TokioServiceHandle {
+    irys_actors::reth_service::RethService::spawn_service(
         reth_node_adapter,
         irys_db.clone(),
-        service_senders.mempool.clone(),
-        config,
-    );
-    let reth_arbiter = Arbiter::new();
-    let reth_service_actor =
-        RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);
-    SystemRegistry::set(reth_service_actor.clone());
-    (reth_service_actor, reth_arbiter)
+        mempool_sender,
+        reth_rx,
+        runtime_handle,
+    )
 }
 
 async fn init_reth_db(

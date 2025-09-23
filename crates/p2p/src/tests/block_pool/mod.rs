@@ -3,7 +3,7 @@ use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::PeerNetworkService;
 use crate::tests::util::{
     data_handler_stub, ApiClientStub, BlockDiscoveryStub, FakeGossipServer, MempoolStub,
-    MockRethServiceActor,
+    MockRethService,
 };
 use crate::types::GossipResponse;
 use crate::{BlockStatusProvider, GetPeerListGuard};
@@ -125,14 +125,17 @@ impl MockedServices {
             block_status_provider: block_status_provider_mock.clone(),
             internal_message_bus: None,
         };
-        let reth_service = MockRethServiceActor {};
-        let reth_addr = reth_service.start();
+        let (service_senders, service_receivers) = ServiceSenders::new();
+        let reth_service_tx = service_senders.reth_service.clone();
+        let mut vdf_receiver = service_receivers.vdf_fast_forward;
+        let mut block_tree_receiver = service_receivers.block_tree;
+
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             config,
             mock_client.clone(),
-            reth_addr,
+            reth_service_tx,
             receiver,
             sender,
         );
@@ -151,9 +154,6 @@ impl MockedServices {
         let vdf_state_readonly =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
-        let (service_senders, service_receivers) = ServiceSenders::new();
-
-        let mut vdf_receiver = service_receivers.vdf_fast_forward;
         let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {
             loop {
@@ -171,8 +171,6 @@ impl MockedServices {
                 }
             }
         });
-
-        let mut block_tree_receiver = service_receivers.block_tree;
 
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {

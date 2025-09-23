@@ -1,8 +1,7 @@
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
-use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
+use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::database;
@@ -111,7 +110,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     ///  much behind the network we are, if at all.
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
-    reth_service_actor: Option<Addr<RethServiceActor>>,
+    reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
     /// An atomic bool to enable or disable VDF mining when sync is in progress
     is_vdf_mining_enabled: Arc<AtomicBool>,
 }
@@ -158,7 +157,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
-        reth_service_actor: Option<Addr<RethServiceActor>>,
+        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self::new_with_client(
@@ -169,7 +168,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiCli
             block_index,
             block_pool,
             gossip_data_handler,
-            reth_service_actor,
+            reth_service,
             is_vdf_mining_enabled,
         )
     }
@@ -184,7 +183,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
-        reth_service_actor: Option<Addr<RethServiceActor>>,
+        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -196,7 +195,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             block_pool,
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
-            reth_service_actor,
+            reth_service,
             is_vdf_mining_enabled,
         }
     }
@@ -234,7 +233,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
-        let mut reth_service_addr = self.reth_service_actor.clone();
+        let mut reth_service = self.reth_service.clone();
         let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
         let block_index = self.block_index.clone();
 
@@ -255,7 +254,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 }
 
                 if let Err(err) = block_pool
-                    .repair_missing_payloads_if_any(reth_service_addr.clone(), Arc::clone(&gossip_data_handler))
+                    .repair_missing_payloads_if_any(reth_service.clone(), Arc::clone(&gossip_data_handler))
                     .await
                 {
                     error!(
@@ -268,7 +267,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     update_reth_with_initial_block(
                         &block_index,
                         &block_pool.db,
-                        &mut reth_service_addr,
+                        &mut reth_service,
                     ).await;
                 }
 
@@ -1307,11 +1306,11 @@ async fn is_local_index_is_behind_trusted_peers(
     }
 }
 
-// Sends a fork choice update message to the Reth service actor with the latest block from the block index
+// Sends a fork choice update message to the Reth service with the latest block from the block index
 async fn update_reth_with_initial_block(
     block_index: &BlockIndexReadGuard,
     irys_db: &DatabaseProvider,
-    reth_service_addr: &mut Option<Addr<RethServiceActor>>,
+    reth_service: &mut Option<mpsc::UnboundedSender<RethServiceMessage>>,
 ) {
     // Read the latest from the block index; if no entries, panic
     let latest_block_index = block_index
@@ -1326,24 +1325,24 @@ async fn update_reth_with_initial_block(
     .expect("at least the genesis block header must be in the database");
 
     // update reth service about the latest block data it must use
-    if let Some(reth_service_addr) = reth_service_addr {
-        reth_service_addr
-            .send(ForkChoiceUpdateMessage {
-                head_hash: latest_block.block_hash,
-                confirmed_hash: Some(latest_block.block_hash),
-                finalized_hash: None,
+    if let Some(reth_service_tx) = reth_service {
+        reth_service_tx
+            .send(RethServiceMessage::ForkChoice {
+                update: ForkChoiceUpdateMessage {
+                    head_hash: latest_block.block_hash,
+                    confirmed_hash: Some(latest_block.block_hash),
+                    finalized_hash: None,
+                },
             })
-            .await
-            .expect("reth service actor to be alive at init")
-            .expect("reth service actor to process the fork choice update message at init");
-        debug!("Reth Service Actor updated about fork choice");
+            .expect("reth service to be alive at init");
+        debug!("Reth service updated about fork choice");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+    use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethService};
     use irys_types::BlockHash;
 
     mod catch_up_task {
@@ -1441,13 +1440,12 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
-            let reth_mock = MockRethServiceActor {};
-            let reth_mock_addr = reth_mock.start();
+            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
             let peer_list_service = PeerNetworkService::new_with_custom_api_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_tx,
                 receiver,
                 sender,
             );
@@ -1559,15 +1557,13 @@ mod tests {
                 }))),
             };
 
-            let reth_mock = MockRethServiceActor {};
-            let reth_mock_addr = reth_mock.start();
-
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
             let peer_list_service = PeerNetworkService::new_with_custom_api_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_tx,
                 receiver,
                 sender,
             );
@@ -1631,7 +1627,7 @@ mod tests {
         use super::*;
         use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
-        use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+        use crate::tests::util::{ApiClientStub, FakeGossipServer};
         use crate::types::GossipResponse;
         use crate::GetPeerListGuard;
         use actix::Actor as _;
@@ -1697,8 +1693,7 @@ mod tests {
             });
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let reth_mock = MockRethServiceActor {};
-            let reth_mock_addr = reth_mock.start();
+            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
@@ -1707,7 +1702,7 @@ mod tests {
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_tx,
                 receiver,
                 sender,
             );
@@ -1823,8 +1818,7 @@ mod tests {
             });
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let reth_mock = MockRethServiceActor {};
-            let reth_mock_addr = reth_mock.start();
+            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
@@ -1833,7 +1827,7 @@ mod tests {
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_tx,
                 receiver,
                 sender,
             );

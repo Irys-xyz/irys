@@ -6,7 +6,7 @@ use crate::{
     },
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
     StorageModuleServiceMessage,
@@ -77,8 +77,6 @@ pub struct BlockTreeServiceInner {
     pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
-    /// Reth service actor sender
-    pub reth_service_actor: Addr<RethServiceActor>,
     /// Current actix system
     pub system: System,
 }
@@ -116,7 +114,6 @@ impl BlockTreeService {
         storage_submodules_config: &StorageSubmodulesConfig,
         config: &Config,
         service_senders: &ServiceSenders,
-        reth_service_actor: Addr<RethServiceActor>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -158,7 +155,6 @@ impl BlockTreeService {
                         block_index_guard: bi_guard,
                         config,
                         service_senders,
-                        reth_service_actor,
                         system,
                         storage_submodules_config: storage_submodules_config.clone(),
                     },
@@ -329,11 +325,14 @@ impl BlockTreeServiceInner {
             "confirming irys block evm_block_hash: {} ({})",
             &confirmed_block.evm_block_hash, &confirmed_block.height
         );
-        self.reth_service_actor
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: tip_hash,
-                confirmed_hash: Some(confirmed_block.block_hash),
-                finalized_hash: None,
+        self.service_senders
+            .reth_service
+            .send(RethServiceMessage::ForkChoice {
+                update: ForkChoiceUpdateMessage {
+                    head_hash: tip_hash,
+                    confirmed_hash: Some(confirmed_block.block_hash),
+                    finalized_hash: None,
+                },
             })
             .expect("Unable to send confirmation FCU message to reth");
         self.service_senders
@@ -822,11 +821,14 @@ impl BlockTreeServiceInner {
 
         // Send finalization update for block at prune depth, if any
         if let Some(finalized_hash) = finalized_at_prune_depth {
-            self.reth_service_actor
-                .try_send(ForkChoiceUpdateMessage {
-                    head_hash: block_hash,
-                    confirmed_hash: None,
-                    finalized_hash: Some(finalized_hash),
+            self.service_senders
+                .reth_service
+                .send(RethServiceMessage::ForkChoice {
+                    update: ForkChoiceUpdateMessage {
+                        head_hash: block_hash,
+                        confirmed_hash: None,
+                        finalized_hash: Some(finalized_hash),
+                    },
                 })
                 .expect("Unable to send finalization message to reth");
         }

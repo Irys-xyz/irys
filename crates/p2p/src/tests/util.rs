@@ -4,7 +4,7 @@ use crate::{
     BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
-use actix::{Actor, Addr, Context, Handler};
+use actix::{Actor, Addr};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
@@ -334,8 +334,6 @@ impl Default for ApiClientStub {
     }
 }
 
-pub(crate) type PeerListMock = Addr<PeerNetworkService<ApiClientStub, MockRethServiceActor>>;
-
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
@@ -343,7 +341,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool_stub: MempoolStub,
-    pub peer_list: PeerListMock,
+    pub peer_list: Addr<PeerNetworkService<ApiClientStub>>,
     pub mempool_txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
@@ -359,21 +357,6 @@ pub(crate) struct GossipServiceTestFixture {
     pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct MockRethServiceActor {}
-
-impl Actor for MockRethServiceActor {
-    type Context = Context<Self>;
-}
-
-impl Handler<RethPeerInfo> for MockRethServiceActor {
-    type Result = eyre::Result<()>;
-
-    fn handle(&mut self, _msg: RethPeerInfo, _ctx: &mut Self::Context) -> Self::Result {
-        Ok(())
-    }
 }
 
 impl GossipServiceTestFixture {
@@ -394,17 +377,17 @@ impl GossipServiceTestFixture {
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let mock_reth_service = MockRethServiceActor {};
-        let reth_service_addr = mock_reth_service.start();
-
         let (service_senders, service_receivers) = ServiceSenders::new();
+        let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
+        let gossip_broadcast_rx = service_receivers.gossip_broadcast;
+        let block_tree_rx = service_receivers.block_tree;
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let peer_service = PeerNetworkService::new_with_custom_api_client(
             db.clone(),
             &config,
             ApiClientStub::new(),
-            reth_service_addr,
+            service_senders.reth_service.clone(),
             receiver,
             sender,
         );
@@ -444,7 +427,7 @@ impl GossipServiceTestFixture {
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
         let vdf_state = vdf_state_stub;
-        let mut vdf_receiver = service_receivers.vdf_fast_forward;
+        let mut vdf_receiver = vdf_fast_forward_rx;
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
@@ -462,7 +445,7 @@ impl GossipServiceTestFixture {
             }
         });
 
-        let mut block_tree_receiver = service_receivers.block_tree;
+        let mut block_tree_receiver = block_tree_rx;
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
@@ -481,7 +464,6 @@ impl GossipServiceTestFixture {
             mining_address: config.node_config.miner_address(),
             mempool_stub,
             peer_list,
-            // block_discovery_stub,
             mempool_txs,
             mempool_chunks,
             discovery_blocks,
@@ -492,7 +474,7 @@ impl GossipServiceTestFixture {
             execution_payload_provider,
             config,
             service_senders,
-            gossip_receiver: Some(service_receivers.gossip_broadcast),
+            gossip_receiver: Some(gossip_broadcast_rx),
             sync_tx,
             _sync_rx: Some(sync_rx),
         }

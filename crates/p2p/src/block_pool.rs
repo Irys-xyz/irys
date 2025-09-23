@@ -2,9 +2,8 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
+use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
 use irys_actors::MempoolFacade;
 use irys_api_client::ApiClient;
@@ -24,7 +23,7 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
@@ -285,7 +284,7 @@ where
     async fn validate_and_submit_reth_payload<A: ApiClient>(
         &self,
         block_header: &IrysBlockHeader,
-        reth_service: Option<Addr<RethServiceActor>>,
+        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
         // This function repairs missing execution payloads for already-validated blocks.
@@ -361,26 +360,27 @@ where
         );
 
         if let Some(reth_service) = reth_service {
+            let block_status = self
+                .block_status_provider
+                .block_status(block_header.height, &block_header.block_hash);
+            let confirmed_hash = Some(block_header.block_hash);
+            let finalized_hash =
+                matches!(block_status, BlockStatus::Finalized).then_some(block_header.block_hash);
             debug!(
                 "Sending ForkChoiceUpdateMessage to Reth service for block {:?}",
                 block_header.block_hash
             );
             reth_service
-                .send(ForkChoiceUpdateMessage {
-                    head_hash: block_header.block_hash,
-                    confirmed_hash: None,
-                    finalized_hash: None,
+                .send(RethServiceMessage::ForkChoice {
+                    update: ForkChoiceUpdateMessage {
+                        head_hash: block_header.block_hash,
+                        confirmed_hash,
+                        finalized_hash,
+                    },
                 })
-                .await
                 .map_err(|err| {
                     BlockPoolError::OtherInternal(format!(
                         "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
-                        err
-                    ))
-                })?
-                .map_err(|err| {
-                    BlockPoolError::ForkChoiceFailed(format!(
-                        "Failed to update fork choice in Reth service: {:?}",
                         err
                     ))
                 })?;
@@ -398,7 +398,7 @@ where
     #[instrument(err, skip_all)]
     pub async fn repair_missing_payloads_if_any<A: ApiClient>(
         &self,
-        reth_service: Option<Addr<RethServiceActor>>,
+        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
         if reth_service.is_none() {
@@ -579,7 +579,10 @@ where
             )
             .await
             {
-                error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, err);
+                error!(
+                    "Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool",
+                    block_header.block_hash, err
+                );
                 self.blocks_cache
                     .remove_block(&block_header.block_hash)
                     .await;
@@ -603,7 +606,10 @@ where
             .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
             .await
         {
-            error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
+            error!(
+                "Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool",
+                block_header.block_hash, block_discovery_error
+            );
             self.blocks_cache
                 .remove_block(&block_header.block_hash)
                 .await;
@@ -668,13 +674,16 @@ where
             "Block pool: Forcing handling of execution payload for EVM block hash: {:?}",
             evm_block_hash
         );
-        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+        let (response_sender, response_receiver) = oneshot::channel();
 
         if !execution_payload_provider
             .is_payload_in_cache(&evm_block_hash)
             .await
         {
-            debug!("BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network", evm_block_hash);
+            debug!(
+                "BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network",
+                evm_block_hash
+            );
 
             if let Some(gossip_data_handler) = gossip_data_handler {
                 let result = gossip_data_handler
@@ -716,7 +725,10 @@ where
                 GossipError::Internal(InternalGossipError::Unknown(err_text))
             })?
         } else {
-            debug!("BlockPool: Payload for EVM block hash {:?} is already in cache, no need to request", evm_block_hash);
+            debug!(
+                "BlockPool: Payload for EVM block hash {:?} is already in cache, no need to request",
+                evm_block_hash
+            );
             Ok(())
         }
     }
@@ -754,7 +766,10 @@ where
 
                     if let Some(payload) = gossip_payload {
                         if let Err(err) = gossip_broadcast_sender.send(payload) {
-                            error!("Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
+                            error!(
+                                "Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}",
+                                evm_block_hash, err
+                            );
                         } else {
                             debug!(
                                 "Block pool: Broadcasted execution payload for EVM block hash {:?}",
@@ -764,7 +779,10 @@ where
                     }
                 }
                 Err(err) => {
-                    error!("Block pool: Failed to handle execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
+                    error!(
+                        "Block pool: Failed to handle execution payload for EVM block hash {:?}: {:?}",
+                        evm_block_hash, err
+                    );
                 }
             }
         });
@@ -812,7 +830,7 @@ where
                 return Err(BlockPoolError::MempoolError(format!(
                     "Mempool error: {:?}",
                     err
-                )))
+                )));
             }
         }
 
@@ -884,10 +902,9 @@ fn check_block_status(
         }
         BlockStatus::Finalized => {
             debug!(
-                    "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
-                    block_height,
-                    block_hash,
-                );
+                "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
+                block_height, block_hash,
+            );
             Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
         }
         BlockStatus::PartOfAPrunedFork => {

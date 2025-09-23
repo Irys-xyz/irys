@@ -1,36 +1,46 @@
-use std::sync::Arc;
-
 use crate::mempool_service::MempoolServiceMessage;
-use actix::{
-    Actor, ActorTryFutureExt as _, AtomicResponse, Context, Handler, Message, Supervised,
-    SystemService, WrapFuture as _,
-};
-use eyre::{eyre, OptionExt as _};
+use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{BlockHash, Config, DatabaseProvider, RethPeerInfo, H256};
+use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::{FixedBytes, B256},
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
+    tasks::shutdown::Shutdown,
 };
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use tokio::sync::{mpsc::UnboundedReceiver, mpsc::UnboundedSender, oneshot};
 use tracing::{debug, error, info};
 
 #[derive(Debug)]
-pub struct RethServiceActor {
-    pub handle: IrysRethNodeAdapter,
-    pub db: DatabaseProvider,
-    pub mempool: UnboundedSender<MempoolServiceMessage>,
-    // we store a copy of the latest FCU so we can always provide reth with a "full" FCU; in Irys terms this corresponds to the migrated height, though reth still uses the `finalized` field to control block persistence.
-    pub latest_fcu: ForkChoiceUpdate,
-    pub config: Arc<Config>,
+pub struct RethService {
+    shutdown: Shutdown,
+    cmd_rx: UnboundedReceiver<RethServiceMessage>,
+    handle: IrysRethNodeAdapter,
+    db: DatabaseProvider,
+    mempool: UnboundedSender<MempoolServiceMessage>,
+    latest_fcu: ForkChoiceUpdate,
 }
 
-impl Default for RethServiceActor {
-    fn default() -> Self {
-        panic!("expected RethServiceActor::new() to be used instead of Default");
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct ForkChoiceUpdateMessage {
+    pub head_hash: BlockHash,
+    pub confirmed_hash: Option<BlockHash>,
+    pub finalized_hash: Option<BlockHash>,
+}
+
+#[derive(Debug)]
+pub enum RethServiceMessage {
+    ForkChoice {
+        update: ForkChoiceUpdateMessage,
+    },
+    ConnectToPeer {
+        peer: RethPeerInfo,
+        response: oneshot::Sender<eyre::Result<()>>,
+    },
+    GetPeeringInfo {
+        response: oneshot::Sender<eyre::Result<RethPeerInfo>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,29 +88,92 @@ async fn evm_block_hash_from_block_hash(
     Ok(irys_header.evm_block_hash)
 }
 
-// todo: move the entire reth process in here
-impl RethServiceActor {
-    pub fn new(
+impl RethService {
+    pub fn spawn_service(
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
         mempool: UnboundedSender<MempoolServiceMessage>,
-        config: Config,
-    ) -> Self {
-        Self {
+        cmd_rx: UnboundedReceiver<RethServiceMessage>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        let (shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
+
+        let service = Self {
+            shutdown,
+            cmd_rx,
             handle,
             db: database_provider,
             mempool,
             latest_fcu: ForkChoiceUpdate::default(),
-            config: Arc::new(config),
+        };
+
+        let join_handle = runtime_handle.spawn(async move {
+            if let Err(err) = service.run().await {
+                error!(error = %err, "Reth service terminated with error");
+            }
+        });
+
+        TokioServiceHandle {
+            name: "reth_service".to_string(),
+            handle: join_handle,
+            shutdown_signal,
         }
     }
 
-    // computes a new FCU, resolving any Irys block hashes into EVM block hashes, as well as backfilling the safe (confirmed) and finalized fields.
-    pub async fn resolve_new_fcu(
-        db: DatabaseProvider,
-        mempool_service: &UnboundedSender<MempoolServiceMessage>,
+    #[tracing::instrument(skip_all, err)]
+    async fn run(mut self) -> eyre::Result<()> {
+        info!("Starting Reth service");
+
+        loop {
+            tokio::select! {
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for Reth service");
+                    break;
+                }
+                command = self.cmd_rx.recv() => {
+                    match command {
+                        Some(command) => self.handle_command(command).await?,
+                        None => {
+                            info!("Reth service command channel closed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_command(&mut self, command: RethServiceMessage) -> eyre::Result<()> {
+        match command {
+            RethServiceMessage::ForkChoice { update } => {
+                self.handle_forkchoice(update).await?;
+            }
+            RethServiceMessage::ConnectToPeer { peer, response } => {
+                let result = self.connect_to_peer(peer);
+                let _ = response.send(result);
+            }
+            RethServiceMessage::GetPeeringInfo { response } => {
+                let result = self.get_peering_info();
+                let _ = response.send(result);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_forkchoice(&mut self, update: ForkChoiceUpdateMessage) -> eyre::Result<()> {
+        debug!(?update, "Received fork choice update command");
+
+        let resolved = self.resolve_new_fcu(update).await?;
+        self.process_fcu(resolved).await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(err, ret)]
+    async fn resolve_new_fcu(
+        &self,
         new_fcu: ForkChoiceUpdateMessage,
-        prev_fcu: ForkChoiceUpdate,
     ) -> eyre::Result<ForkChoiceUpdate> {
         debug!("Resolving new fork choice update");
 
@@ -110,36 +183,34 @@ impl RethServiceActor {
             finalized_hash,
         } = new_fcu;
 
-        let evm_head_hash = evm_block_hash_from_block_hash(mempool_service, &db, head_hash).await?;
+        let evm_head_hash =
+            evm_block_hash_from_block_hash(&self.mempool, &self.db, head_hash).await?;
 
         let evm_confirmed_hash = match confirmed_hash {
-            Some(confirmed_hash) => Some(
-                /* match confirmed_hash {
-                BlockHashType::Irys(irys_hash) => { */
-                evm_block_hash_from_block_hash(mempool_service, &db, confirmed_hash).await?,
-            ),
+            Some(confirmed_hash) => {
+                Some(evm_block_hash_from_block_hash(&self.mempool, &self.db, confirmed_hash).await?)
+            }
             None => {
-                debug!(previous_hash = ?prev_fcu.confirmed_hash, "No confirmed hash provided, using previous");
-                prev_fcu.confirmed_hash
+                debug!(
+                    previous_hash = ?self.latest_fcu.confirmed_hash,
+                    "No confirmed hash provided, using previous"
+                );
+                self.latest_fcu.confirmed_hash
             }
         };
 
         let evm_finalized_hash = match finalized_hash {
             Some(finalized_hash) => {
-                Some(evm_block_hash_from_block_hash(mempool_service, &db, finalized_hash).await?)
+                Some(evm_block_hash_from_block_hash(&self.mempool, &self.db, finalized_hash).await?)
             }
             None => {
-                debug!(previous_hash = ?prev_fcu.finalized_hash, "No finalized hash provided, using previous");
-                prev_fcu.finalized_hash
+                debug!(
+                    previous_hash = ?self.latest_fcu.finalized_hash,
+                    "No finalized hash provided, using previous"
+                );
+                self.latest_fcu.finalized_hash
             }
         };
-
-        debug!(
-            head = %evm_head_hash,
-            confirmed = ?evm_confirmed_hash,
-            finalized = ?evm_finalized_hash,
-            "Resolved fork choice update"
-        );
 
         Ok(ForkChoiceUpdate {
             head_hash: evm_head_hash,
@@ -148,10 +219,7 @@ impl RethServiceActor {
         })
     }
 
-    pub async fn process_fcu(
-        fcu: ForkChoiceUpdate,
-        handle: IrysRethNodeAdapter,
-    ) -> eyre::Result<ForkChoiceUpdate> {
+    async fn process_fcu(&self, fcu: ForkChoiceUpdate) -> eyre::Result<ForkChoiceUpdate> {
         let ForkChoiceUpdate {
             head_hash,
             confirmed_hash,
@@ -164,6 +232,7 @@ impl RethServiceActor {
             finalized = ?finalized_hash,
             "Updating Reth fork choice"
         );
+        let handle = self.handle.clone();
         let eth_api = handle.inner.eth_api();
 
         let latest = eth_api
@@ -219,95 +288,22 @@ impl RethServiceActor {
         );
         Ok(fcu)
     }
-}
 
-impl Actor for RethServiceActor {
-    type Context = Context<Self>;
-}
-
-impl Supervised for RethServiceActor {}
-
-impl SystemService for RethServiceActor {
-    fn service_started(&mut self, _ctx: &mut Context<Self>) {
-        info!("RethServiceActor started successfully");
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum BlockHashType {
-    Irys(H256),
-    Evm(B256),
-}
-
-#[derive(Message, Debug, Clone, Copy)]
-#[rtype(result = "eyre::Result<ForkChoiceUpdate>")]
-pub struct ForkChoiceUpdateMessage {
-    pub head_hash: BlockHash,
-    pub confirmed_hash: Option<BlockHash>,
-    pub finalized_hash: Option<BlockHash>,
-}
-
-impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
-    type Result = AtomicResponse<Self, eyre::Result<ForkChoiceUpdate>>;
-
-    fn handle(&mut self, msg: ForkChoiceUpdateMessage, _ctx: &mut Self::Context) -> Self::Result {
-        debug!(?msg, "Received ForkChoiceUpdateMessage");
-        let handle = self.handle.clone();
-        let db = self.db.clone();
-        let mempool = self.mempool.clone();
-        let prev_fcu = self.latest_fcu;
-        let config = self.config.clone();
-        AtomicResponse::new(Box::pin(
-            async move {
-                debug!("Resolving fork choice update from Irys to EVM blocks");
-                let fcu = Self::resolve_new_fcu(db, &mempool, msg, prev_fcu)
-                    .await
-                    .inspect_err(|e| {
-                        error!(error = ?e, ?msg, "Failed to resolve fork choice update");
-                    })?;
-                Self::process_fcu(fcu, handle).await
-            }
-            .into_actor(self)
-            .map_ok(|fcu, a, _| {
-                a.latest_fcu = fcu; // update the latest FCU so we can provide reth a consistent FCU state
-                fcu
-            })
-            .map_err(|e: eyre::Error, _, _| {
-                error!(error = %e, "Error processing RethServiceActor ForkChoiceUpdateMessage");
-                std::process::abort();
-            }),
-        ))
-    }
-}
-
-type ConnectToPeerMessage = RethPeerInfo;
-
-impl Handler<ConnectToPeerMessage> for RethServiceActor {
-    type Result = eyre::Result<()>;
-
-    fn handle(&mut self, msg: ConnectToPeerMessage, _ctx: &mut Self::Context) -> Self::Result {
+    fn connect_to_peer(&self, peer: RethPeerInfo) -> eyre::Result<()> {
         info!(
-            peer_id = %msg.peer_id,
-            address = %msg.peering_tcp_addr,
+            peer_id = %peer.peer_id,
+            address = %peer.peering_tcp_addr,
             "Connecting to peer"
         );
         self.handle
             .inner
             .network
-            .add_peer(msg.peer_id, msg.peering_tcp_addr);
-        debug!(peer_id = %msg.peer_id, "Peer connection initiated");
+            .add_peer(peer.peer_id, peer.peering_tcp_addr);
+        debug!(peer_id = %peer.peer_id, "Peer connection initiated");
         Ok(())
     }
-}
 
-#[derive(Message, Debug, Clone, Copy)]
-#[rtype(result = "eyre::Result<RethPeerInfo>")]
-pub struct GetPeeringInfoMessage {}
-
-impl Handler<GetPeeringInfoMessage> for RethServiceActor {
-    type Result = eyre::Result<RethPeerInfo>;
-
-    fn handle(&mut self, _: GetPeeringInfoMessage, _ctx: &mut Self::Context) -> Self::Result {
+    fn get_peering_info(&self) -> eyre::Result<RethPeerInfo> {
         let handle = self.handle.clone();
         let peer_id = *handle.inner.network.peer_id();
         let local_addr = handle.inner.network.local_addr();
@@ -318,7 +314,6 @@ impl Handler<GetPeeringInfoMessage> for RethServiceActor {
             "Returning peering info"
         );
 
-        // TODO: we need to store the external socketaddr somewhere and use that instead
         Ok(RethPeerInfo {
             peer_id,
             peering_tcp_addr: local_addr,
