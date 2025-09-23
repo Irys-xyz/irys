@@ -301,7 +301,7 @@ impl IrysNodeTest<()> {
 
     /// Start a new test node in peer-sync mode with full block validation
     pub fn new(mut config: NodeConfig) -> Self {
-        // Do not override node_mode; allow caller to set expected_genesis_hash
+        // Do not override node_mode; allow caller to set consensus.expected_genesis_hash
         config.sync_mode = SyncMode::Full;
         Self::new_inner(config)
     }
@@ -379,7 +379,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let node_config = &self.node_ctx.config.node_config;
 
-        if matches!(node_config.node_mode, NodeMode::Peer { .. }) {
+        if matches!(node_config.node_mode, NodeMode::Peer) {
             panic!("Can only create a peer from a genesis config");
         }
 
@@ -387,10 +387,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config.mining_key = peer_signer.signer.clone();
         peer_config.reward_address = peer_signer.address();
 
-        // Set expected genesis hash directly in node mode for network consensus
-        peer_config.node_mode = NodeMode::Peer {
-            expected_genesis_hash: self.node_ctx.genesis_hash,
-        };
+        // Set peer mode and expected genesis hash via consensus config
+        peer_config.node_mode = NodeMode::Peer;
+        peer_config.consensus.get_mut().expected_genesis_hash = Some(self.node_ctx.genesis_hash);
 
         // Make sure this peer does port randomization instead of copying the genesis ports
         peer_config.http.bind_port = 0;
@@ -398,7 +397,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config.gossip.bind_port = 0;
         peer_config.gossip.public_port = 0;
 
-        // Make sure to mark this config as a peer (already set above with expected_genesis_hash)
+        // Make sure to mark this config as a peer (already set above with consensus hash)
         peer_config.sync_mode = SyncMode::Full;
 
         // Add the genesis node details as a trusted peer

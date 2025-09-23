@@ -72,7 +72,7 @@ This will run a small, low-capacity localnet node that you can interact with:
 Note: the trusted peers section template is:
 
 ```toml
-node_mode = { Peer = { expected_genesis_hash = "11111111111111111111111111111111" } }
+node_mode = "Peer"
 
 [[trusted_peers]]
 gossip = "<public IP>:<public port>"

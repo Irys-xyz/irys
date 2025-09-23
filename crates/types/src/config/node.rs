@@ -122,8 +122,9 @@ pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
 
-    /// Join an existing network by connecting to trusted peers
-    Peer { expected_genesis_hash: H256 },
+    /// Join an existing network by connecting to trusted peers.
+    /// Requires `consensus.expected_genesis_hash` to be set.
+    Peer,
 }
 
 /// # Node Synchronization Mode
@@ -646,10 +647,9 @@ impl NodeConfig {
         let reward_address = signer.address();
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
+        consensus.expected_genesis_hash = Some(H256::zero());
         Self {
-            node_mode: NodeMode::Peer {
-                expected_genesis_hash: H256::zero(),
-            },
+            node_mode: NodeMode::Peer,
             sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),

@@ -227,9 +227,9 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .await;
 
     let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
-    ctx_peer2_node.node_mode = NodeMode::Peer {
-        expected_genesis_hash: ctx_genesis_node.node_ctx.genesis_hash,
-    };
+    ctx_peer2_node.node_mode = NodeMode::Peer;
+    ctx_peer2_node.consensus.get_mut().expected_genesis_hash =
+        Some(ctx_genesis_node.node_ctx.genesis_hash);
     ctx_peer2_node.sync_mode = SyncMode::Trusted;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
