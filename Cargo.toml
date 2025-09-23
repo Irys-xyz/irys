@@ -23,6 +23,7 @@ members = [
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
   "crates/packing-worker",
+  "crates/tui",
 ]
 resolver = "2"
 
@@ -59,7 +60,7 @@ irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
 irys-packing-worker = { path = "./crates/packing-worker" }
-
+irys-tui = { path = "./crates/tui" }
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
 actix-rt = "2.10.0"

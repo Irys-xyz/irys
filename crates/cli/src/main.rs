@@ -33,6 +33,16 @@ pub enum Commands {
         #[command(subcommand)]
         mode: RollbackMode,
     },
+    #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
+    Tui {
+        /// Node URLs to connect to
+        #[arg(value_name = "NODE_URLS")]
+        node_urls: Vec<String>,
+
+        /// Configuration file path (contains both TUI settings and nodes list)
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -173,6 +183,33 @@ async fn main() -> eyre::Result<()> {
             rw_tx.commit()?;
 
             Ok(())
+        }
+        Commands::Tui { node_urls, config } => {
+            // Check if we have any node configuration
+            if node_urls.is_empty() && config.is_none() {
+                eprintln!("Error: No nodes specified.");
+                eprintln!("\nYou must provide nodes via one of the following methods:");
+                eprintln!(
+                    "  1. Command line arguments: irys-cli tui http://node1:port http://node2:port"
+                );
+                eprintln!("  2. Config file: irys-cli tui --config tui.toml");
+                eprintln!("\nExample:");
+                eprintln!("  irys-cli tui http://localhost:19080 http://localhost:19081");
+                eprintln!("  irys-cli tui --config tui.toml");
+                std::process::exit(1);
+            }
+
+            // Initialize terminal
+            let mut terminal = irys_tui::utils::terminal::init()?;
+
+            // Create and run the TUI app
+            let mut app = irys_tui::app::App::new(node_urls, config)?;
+            let app_result = app.run(&mut terminal).await;
+
+            // Restore terminal on exit
+            irys_tui::utils::terminal::restore()?;
+
+            app_result
         }
     }
 }

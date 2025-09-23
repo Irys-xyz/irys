@@ -1,0 +1,60 @@
+[package]
+name = "irys-tui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "irys-tui"
+path = "src/bin/main.rs"
+
+[dependencies]
+# TUI Framework
+ratatui = "0.28"
+crossterm = "0.28"
+
+# HTTP Client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio = { version = "1.38", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Configuration
+clap = { version = "4.5", features = ["derive"] }
+config = "0.14"
+dirs = "5.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+eyre = "0.6"
+thiserror = "1.0"
+
+# Async
+futures = "0.3"
+tokio-util = "0.7"
+
+# Retry logic
+backon = "1.2"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# URL handling
+url = "2.5"
+
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[lints]
+workspace = true
