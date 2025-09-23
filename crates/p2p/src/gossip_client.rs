@@ -16,7 +16,7 @@ use irys_types::{
     IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
@@ -1056,17 +1056,18 @@ impl GossipClient {
                     peer.1.address.gossip
                 );
 
-                let response = self
-                    .client
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|response_error| {
-                        PeerNetworkError::FailedToRequestData(format!(
-                            "Failed to get the stake/pledge whitelist {}: {:?}",
-                            url, response_error
-                        ))
-                    })?;
+                let response =
+                    self.inner
+                        .client
+                        .get(&url)
+                        .send()
+                        .await
+                        .map_err(|response_error| {
+                            PeerNetworkError::FailedToRequestData(format!(
+                                "Failed to get the stake/pledge whitelist {}: {:?}",
+                                url, response_error
+                            ))
+                        })?;
 
                 let status = response.status();
 
