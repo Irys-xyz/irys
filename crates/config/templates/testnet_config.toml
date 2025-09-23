@@ -1,4 +1,4 @@
-node_mode = { Peer = { expected_genesis_hash = "11111111111111111111111111111111" } }
+node_mode = "Peer"
 sync_mode = "Full"
 base_directory = ""
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
@@ -66,6 +66,8 @@ parallel_verification_thread_limit = 4
 [consensus.Custom]
 chain_id = 1270
 token_price_safe_range = 1.0
+# Replace with the actual genesis hash of the network you're joining
+expected_genesis_hash = "11111111111111111111111111111111"
 # Storage economics: Based on 0.01 USD/GB/year target
 annual_cost_per_gb = 0.01                   # $0.01 USD/GB/year
 decay_rate = 0.01                           # 1% annual decay per year
