@@ -7,6 +7,7 @@ use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58 as _};
 use derive_more::Deref;
+use eyre::eyre;
 use eyre::Error;
 use rand::RngCore as _;
 use reth_codecs::Compact;
@@ -239,6 +240,7 @@ impl Compact for U256 {
 pub use crate::h256::H256;
 
 impl H256 {
+    /// Decodes a H256 from a string. This will panic if the input is malformed!
     pub fn from_base58(string: &str) -> Self {
         let decoded = string.from_base58().expect("to parse base58 string");
         let array: [u8; 32] = decoded.as_slice()[..32]
@@ -246,6 +248,14 @@ impl H256 {
             .expect("Decoded base58 string should have at least 32 bytes");
 
         Self(array)
+    }
+
+    pub fn from_base58_result(string: &str) -> eyre::Result<Self> {
+        let decoded = string
+            .from_base58()
+            .map_err(|e| eyre!("Invalid base58 string: {:?}", &e))?;
+        let array: [u8; 32] = decoded.as_slice()[..32].try_into()?; // shouldn't happen
+        Ok(Self(array))
     }
 }
 

@@ -1,34 +1,55 @@
 use clap::{command, Parser, Subcommand};
+use eyre::{bail, OptionExt as _};
 use irys_chain::utils::load_config;
 use irys_config::chain::chainspec::build_reth_chainspec;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
-use irys_types::{Config, NodeConfig};
+use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use std::{path::PathBuf, sync::Arc};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt as _;
-use tracing::info;
 use tracing::level_filters::LevelFilter;
+use tracing::{info, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Clone, Parser)]
 pub struct IrysCli {
     #[command(subcommand)]
     pub command: Commands,
 }
 
-#[derive(Debug, Subcommand, Clone)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
     #[command(name = "dump-state")]
     DumpState {},
     #[command(name = "init-state")]
     InitState { state_path: PathBuf },
     #[command(name = "rollback-blocks")]
-    RollbackBlocks { count: u64 },
+    RollbackBlocks {
+        #[command(subcommand)]
+        mode: RollbackMode,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum RollbackMode {
+    #[command(
+        name = "to-block",
+        about = "Rollback to a specific block by height or hash. the provided height/hash will be the new tip of the block index"
+    )]
+    ToBlock {
+        #[arg(help = "Block height (number) or block hash")]
+        target: String,
+    },
+    #[command(name = "count", about = "Rollback a specific number of blocks")]
+    Count {
+        #[arg(help = "Number of blocks to rollback")]
+        count: u64,
+    },
 }
 
 #[tokio::main]
@@ -66,17 +87,46 @@ async fn main() -> eyre::Result<()> {
             let chain_spec = build_reth_chainspec(&Config::new(node_config.clone()))?;
             init_state(node_config, chain_spec.into(), state_path).await
         }
-        Commands::RollbackBlocks { count } => {
+        Commands::RollbackBlocks { mode } => {
             let db = cli_init_irys_db(DatabaseEnvKind::RW)?;
 
             let block_index = irys_domain::BlockIndex::new(&node_config).await?;
 
-            let (retained, removed) = &block_index.items.split_at(
-                block_index
-                    .items
-                    .len()
-                    .saturating_sub(count.try_into().unwrap()),
-            );
+            let (retained, removed) = {
+                let count = match mode {
+                    RollbackMode::ToBlock { target } => {
+                        if let Ok(height) = target.parse::<u64>() {
+                            if block_index.latest_height() < height {
+                                warn!("Block index is at {}, which is smaller than rollback height {}", &block_index.latest_height(), &height);
+                                return Ok(());
+                            }
+                            block_index.latest_height().saturating_sub(height)
+                        } else if let Ok(hash) = H256::from_base58_result(&target) {
+                            let idx = block_index
+                                .items
+                                .iter()
+                                .position(|itm| itm.block_hash == hash)
+                                .ok_or_eyre(format!(
+                                    "Unable to find block {} in the block index",
+                                    hash
+                                ))?;
+                            // the idx is the height
+                            info!("Found block {} at height {}", &hash, &idx);
+                            block_index.latest_height().saturating_sub(idx as u64)
+                        } else {
+                            bail!("Invalid target {} - could not parse as a height or a valid irys block hash", &target)
+                        }
+                    }
+                    RollbackMode::Count { count } => count,
+                };
+
+                &block_index.items.split_at(
+                    block_index
+                        .items
+                        .len()
+                        .saturating_sub(count.try_into().unwrap()),
+                )
+            };
 
             info!(
                 "Old len: {}, new {} - retaining <{}, removing {} -> {} ",
@@ -88,8 +138,9 @@ async fn main() -> eyre::Result<()> {
             );
 
             // remove every block in `removed` from the database
-            let rw_tx = db.tx_mut()?;
             use irys_database::reth_db::transaction::DbTxMut as _;
+            let rw_tx = db.tx_mut()?;
+
             for itm in removed.iter() {
                 let hdr = rw_tx
                     .get::<irys_database::tables::IrysBlockHeaders>(itm.block_hash)?
