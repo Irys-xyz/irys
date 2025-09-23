@@ -1211,7 +1211,6 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);
-    debug!("DONE!");
     Ok(())
 }
 
