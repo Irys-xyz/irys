@@ -211,4 +211,13 @@ impl ApiClient {
             packed: packed_count,
         })
     }
+
+    pub async fn get_mempool_status_cancellable(
+        &self,
+        node_url: &str,
+        cancel_token: &CancellationToken,
+    ) -> Result<MempoolStatus> {
+        self.get_with_cancellation(node_url, "/mempool/status", Some(cancel_token))
+            .await
+    }
 }

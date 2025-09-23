@@ -42,6 +42,11 @@ impl Default for MainMenu {
                 "Partition Sync",
                 "Partition data synchronization status",
             ),
+            (
+                MenuSelection::Mempool,
+                "Mempool",
+                "Memory pool status and metrics",
+            ),
             (MenuSelection::Metrics, "Metrics", "Performance metrics"),
             (MenuSelection::Logs, "Logs", "System logs and events"),
             (
@@ -137,6 +142,7 @@ impl MainMenu {
         let menu_name = match app_state.current_menu {
             MenuSelection::Nodes => "Nodes",
             MenuSelection::PartitionSync => "Partition Sync",
+            MenuSelection::Mempool => "Mempool",
             MenuSelection::Metrics => "Metrics",
             MenuSelection::Logs => "Logs",
             MenuSelection::Settings => "Settings",
@@ -211,6 +217,7 @@ impl MainMenu {
         match app_state.current_menu {
             MenuSelection::Nodes => self.render_nodes_view(frame, area, app_state),
             MenuSelection::PartitionSync => self.render_partition_sync_view(frame, area, app_state),
+            MenuSelection::Mempool => self.render_mempool_view(frame, area, app_state),
             MenuSelection::Metrics => self.render_metrics_view(frame, area, app_state),
             MenuSelection::Logs => self.render_logs_view(frame, area, app_state),
             MenuSelection::Settings => self.render_settings_view(frame, area, app_state),
@@ -725,6 +732,223 @@ impl MainMenu {
 
         if let Some(help_chunk) = node_chunks.get(node_count) {
             let help_widget = Paragraph::new("Press 'r' to refresh immediately, 'q' to quit")
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(help_widget, *help_chunk);
+        }
+    }
+
+    fn render_mempool_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
+        let title = Paragraph::new(vec![Line::from(vec![Span::styled(
+            "Cluster Mempool Status Monitor",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )])])
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(title, chunks[0]);
+
+        let node_count = app_state.nodes.len();
+        if node_count == 0 {
+            let no_nodes = Paragraph::new("No nodes configured")
+                .block(Block::default().title("Nodes").borders(Borders::ALL))
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(no_nodes, chunks[1]);
+            return;
+        }
+
+        // Calculate height needed for each node (approximately 12 lines per node)
+        let node_height = 12u16;
+        let constraints: Vec<Constraint> = (0..node_count)
+            .map(|_| Constraint::Length(node_height))
+            .chain(std::iter::once(Constraint::Min(1)))
+            .collect();
+
+        let node_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(chunks[1]);
+
+        for (i, (_node_url, node_state)) in app_state.nodes.iter().enumerate() {
+            let display_name = node_state.display_name();
+
+            let mut node_lines = Vec::new();
+
+            if node_state.is_reachable {
+                // Node header with status
+                node_lines.push(Line::from(vec![
+                    Span::styled(
+                        "Node: ",
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(display_name.clone(), Style::default().fg(Color::Cyan)),
+                    Span::raw("  "),
+                    Span::styled(
+                        " ONLINE ",
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+
+                if let Some(mempool_status) = &node_state.mempool_status {
+                    // Transaction counts
+                    node_lines.push(Line::from(vec![
+                        Span::styled(
+                            "Transactions: ",
+                            Style::default()
+                                .fg(Color::Blue)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!(
+                            "Data={} Commitment={}",
+                            mempool_status.data_tx_count, mempool_status.commitment_tx_count
+                        )),
+                    ]));
+
+                    // Pending items
+                    node_lines.push(Line::from(vec![
+                        Span::styled(
+                            "Pending: ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!(
+                            "Chunks={} Pledges={}",
+                            mempool_status.pending_chunks_count, mempool_status.pending_pledges_count
+                        )),
+                    ]));
+
+                    // Recent transactions
+                    node_lines.push(Line::from(vec![
+                        Span::styled(
+                            "Recent: ",
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!(
+                            "Valid={} Invalid={}",
+                            mempool_status.recent_valid_tx_count, mempool_status.recent_invalid_tx_count
+                        )),
+                    ]));
+
+                    // Total data size
+                    let size_mb = mempool_status.data_tx_total_size as f64 / (1024.0 * 1024.0);
+                    node_lines.push(Line::from(vec![
+                        Span::styled(
+                            "Total Data Size: ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("{:.2} MB", size_mb)),
+                    ]));
+
+                    // Pool utilization indicator
+                    let utilization = if mempool_status.data_tx_count > 100 {
+                        ("HIGH", Color::Red)
+                    } else if mempool_status.data_tx_count > 50 {
+                        ("MEDIUM", Color::Yellow)
+                    } else {
+                        ("LOW", Color::Green)
+                    };
+
+                    node_lines.push(Line::from(vec![
+                        Span::styled(
+                            "Pool Utilization: ",
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {} ", utilization.0),
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(utilization.1)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+
+                    // Last update time
+                    let elapsed = chrono::Utc::now()
+                        .signed_duration_since(node_state.last_updated)
+                        .num_seconds();
+                    node_lines.push(Line::from(vec![
+                        Span::styled(
+                            "Last Updated: ",
+                            Style::default().fg(Color::Gray),
+                        ),
+                        Span::styled(
+                            format!("{}s ago", elapsed),
+                            Style::default().fg(Color::Gray),
+                        ),
+                    ]));
+                } else {
+                    node_lines.push(Line::from(vec![Span::styled(
+                        "No mempool data available",
+                        Style::default().fg(Color::Yellow),
+                    )]));
+                    node_lines.push(Line::from(vec![Span::styled(
+                        "Press 'r' to refresh",
+                        Style::default().fg(Color::Gray),
+                    )]));
+                }
+            } else {
+                // Offline node
+                node_lines.push(Line::from(vec![
+                    Span::styled(
+                        "Node: ",
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(display_name.clone(), Style::default().fg(Color::Red)),
+                    Span::raw("  "),
+                    Span::styled(
+                        " OFFLINE ",
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::Red)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                node_lines.push(Line::from(vec![Span::styled(
+                    "ERROR - Node offline or unreachable",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )]));
+            }
+
+            let node_widget = Paragraph::new(node_lines)
+                .block(
+                    Block::default()
+                        .title(display_name)
+                        .borders(Borders::ALL)
+                        .border_style(if node_state.is_reachable {
+                            Style::default().fg(Color::Green)
+                        } else {
+                            Style::default().fg(Color::Red)
+                        }),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: true });
+
+            if i < node_chunks.len() {
+                frame.render_widget(node_widget, node_chunks[i]);
+            }
+        }
+
+        if let Some(help_chunk) = node_chunks.get(node_count) {
+            let help_widget = Paragraph::new("Press 'r' to refresh immediately, 't' to toggle auto-refresh, 'q' to quit")
                 .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(help_widget, *help_chunk);
         }

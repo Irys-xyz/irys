@@ -1,4 +1,4 @@
-use crate::api::models::{NodeMetrics, PeerInfo};
+use crate::api::models::{MempoolStatus, NodeMetrics, PeerInfo};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -15,6 +15,7 @@ pub enum AppScreen {
 pub enum MenuSelection {
     Nodes,
     PartitionSync,
+    Mempool,
     Metrics,
     Logs,
     Settings,
@@ -26,6 +27,7 @@ pub struct NodeState {
     pub alias: Option<String>,
     pub metrics: NodeMetrics,
     pub peers: Vec<PeerInfo>,
+    pub mempool_status: Option<MempoolStatus>,
     pub last_updated: DateTime<Utc>,
     pub is_reachable: bool,
     pub response_time_ms: Option<u64>,
@@ -46,6 +48,7 @@ impl NodeState {
             alias: None,
             metrics: NodeMetrics::new(),
             peers: Vec::new(),
+            mempool_status: None,
             last_updated: Utc::now(),
             is_reachable: false,
             response_time_ms: None,

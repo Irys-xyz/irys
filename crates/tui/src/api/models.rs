@@ -95,6 +95,18 @@ pub struct PartitionChunkCounts {
     pub submit_1: ChunkCounts,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MempoolStatus {
+    pub data_tx_count: usize,
+    pub commitment_tx_count: usize,
+    pub pending_chunks_count: usize,
+    pub pending_pledges_count: usize,
+    pub recent_valid_tx_count: usize,
+    pub recent_invalid_tx_count: usize,
+    pub data_tx_total_size: u64,
+    pub config: serde_json::Value, // Using Value since we don't need to parse the config
+}
+
 impl PartitionChunkCounts {
     pub fn new() -> Self {
         Self::default()
