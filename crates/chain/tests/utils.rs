@@ -1773,8 +1773,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
 
-            // Transfer chunks for this tx to the peer so block validation can verify proofs
+            // Before sending the header, only transfer chunks if full validation is enabled
+            if peer
+                .node_ctx
+                .config
+                .node_config
+                .consensus_config()
+                .enable_full_ingress_proof_validation
             {
+                // Transfer chunks for this tx to the peer so block validation can verify proofs
                 let chunk_size = self
                     .node_ctx
                     .config
