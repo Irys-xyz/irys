@@ -47,6 +47,11 @@ impl Default for MainMenu {
                 "Mempool",
                 "Memory pool status and metrics",
             ),
+            (
+                MenuSelection::Mining,
+                "Mining",
+                "Mining status and difficulty",
+            ),
             (MenuSelection::Metrics, "Metrics", "Performance metrics"),
             (MenuSelection::Logs, "Logs", "System logs and events"),
             (
@@ -143,6 +148,7 @@ impl MainMenu {
             MenuSelection::Nodes => "Nodes",
             MenuSelection::PartitionSync => "Partition Sync",
             MenuSelection::Mempool => "Mempool",
+            MenuSelection::Mining => "Mining",
             MenuSelection::Metrics => "Metrics",
             MenuSelection::Logs => "Logs",
             MenuSelection::Settings => "Settings",
@@ -218,6 +224,7 @@ impl MainMenu {
             MenuSelection::Nodes => self.render_nodes_view(frame, area, app_state),
             MenuSelection::PartitionSync => self.render_partition_sync_view(frame, area, app_state),
             MenuSelection::Mempool => self.render_mempool_view(frame, area, app_state),
+            MenuSelection::Mining => self.render_mining_view(frame, area, app_state),
             MenuSelection::Metrics => self.render_metrics_view(frame, area, app_state),
             MenuSelection::Logs => self.render_logs_view(frame, area, app_state),
             MenuSelection::Settings => self.render_settings_view(frame, area, app_state),
@@ -764,7 +771,7 @@ impl MainMenu {
         }
 
         // Calculate height needed for each node (approximately 12 lines per node)
-        let node_height = 12u16;
+        let node_height = 12_u16;
         let constraints: Vec<Constraint> = (0..node_count)
             .map(|_| Constraint::Length(node_height))
             .chain(std::iter::once(Constraint::Min(1)))
@@ -852,7 +859,7 @@ impl MainMenu {
                                 .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::raw(format!("{:.2} MB", size_mb)),
+                        Span::raw(format!("{size_mb:.2} MB")),
                     ]));
 
                     // Pool utilization indicator
@@ -890,7 +897,7 @@ impl MainMenu {
                             Style::default().fg(Color::Gray),
                         ),
                         Span::styled(
-                            format!("{}s ago", elapsed),
+                            format!("{elapsed}s ago"),
                             Style::default().fg(Color::Gray),
                         ),
                     ]));
@@ -951,6 +958,165 @@ impl MainMenu {
             let help_widget = Paragraph::new("Press 'r' to refresh immediately, 't' to toggle auto-refresh, 'q' to quit")
                 .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(help_widget, *help_chunk);
+        }
+    }
+
+    fn render_mining_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
+        let title = Paragraph::new(vec![Line::from(vec![Span::styled(
+            "Cluster Mining Status Monitor",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )])])
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(title, chunks[0]);
+
+        let node_count = app_state.nodes.len();
+        if node_count == 0 {
+            let no_nodes = Paragraph::new("No nodes configured")
+                .block(Block::default().title("Nodes").borders(Borders::ALL))
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(no_nodes, chunks[1]);
+            return;
+        }
+
+        // Calculate height needed for each node (approximately 15 lines per node for mining info)
+        let node_height = 15_u16;
+        let constraints: Vec<Constraint> = (0..node_count)
+            .map(|_| Constraint::Length(node_height))
+            .chain(std::iter::once(Constraint::Min(1)))
+            .collect();
+
+        let node_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(chunks[1]);
+
+        for (i, (_node_url, node_state)) in app_state.nodes.iter().enumerate() {
+            let display_name = node_state.display_name();
+
+            let mut node_lines = Vec::new();
+
+            if node_state.is_reachable {
+                // Node header with status
+                node_lines.push(Line::from(vec![
+                    Span::styled(
+                        "Node: ",
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(&display_name, Style::default().fg(Color::Green)),
+                    Span::raw(" ● "),
+                    Span::styled("Online", Style::default().fg(Color::Green)),
+                ]));
+
+                if let Some(mining_info) = &node_state.mining_info {
+                    // Block information
+                    node_lines.push(Line::from(vec![
+                        Span::styled("Block Height: ", Style::default().fg(Color::Cyan)),
+                        Span::raw(mining_info.block_height.to_string()),
+                        Span::raw("  "),
+                        Span::styled("Hash: ", Style::default().fg(Color::Cyan)),
+                        Span::raw(truncate_hash(&mining_info.block_hash, 16)),
+                    ]));
+
+                    // Difficulty information
+                    node_lines.push(Line::from(vec![
+                        Span::styled("Difficulty: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(truncate_hash(&mining_info.current_difficulty, 20)),
+                    ]));
+
+                    node_lines.push(Line::from(vec![
+                        Span::styled("Cumulative: ", Style::default().fg(Color::Yellow)),
+                        Span::raw(truncate_hash(&mining_info.cumulative_difficulty, 20)),
+                    ]));
+
+                    // Mining rewards
+                    node_lines.push(Line::from(vec![
+                        Span::styled("Miner: ", Style::default().fg(Color::Magenta)),
+                        Span::raw(truncate_hash(&mining_info.miner_address, 16)),
+                        Span::raw("  "),
+                        Span::styled("Reward: ", Style::default().fg(Color::Magenta)),
+                        Span::raw(&mining_info.reward_amount),
+                    ]));
+
+                    // VDF information if available
+                    if let Some(vdf_obj) = mining_info.vdf_limiter_info.as_object() {
+                        if let Some(global_step) = vdf_obj.get("globalStepNumber") {
+                            node_lines.push(Line::from(vec![
+                                Span::styled("VDF Step: ", Style::default().fg(Color::Blue)),
+                                Span::raw(global_step.to_string()),
+                            ]));
+                        }
+                        if let Some(vdf_diff) = vdf_obj.get("vdfDifficulty") {
+                            if !vdf_diff.is_null() {
+                                node_lines.push(Line::from(vec![
+                                    Span::styled("VDF Difficulty: ", Style::default().fg(Color::Blue)),
+                                    Span::raw(vdf_diff.to_string()),
+                                ]));
+                            }
+                        }
+                    }
+
+                    // Block timestamp
+                    let timestamp_secs = mining_info.block_timestamp / 1000;
+                    let datetime = chrono::DateTime::from_timestamp(timestamp_secs as i64, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "Invalid timestamp".to_string());
+
+                    node_lines.push(Line::from(vec![
+                        Span::styled("Block Time: ", Style::default().fg(Color::Gray)),
+                        Span::raw(datetime),
+                    ]));
+                } else {
+                    node_lines.push(Line::from(vec![Span::styled(
+                        "Mining info not available",
+                        Style::default().fg(Color::Yellow),
+                    )]));
+                }
+            } else {
+                // Node is not reachable
+                node_lines.push(Line::from(vec![
+                    Span::styled(
+                        "Node: ",
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(&display_name, Style::default().fg(Color::Red)),
+                    Span::raw(" ● "),
+                    Span::styled("Offline", Style::default().fg(Color::Red)),
+                ]));
+                node_lines.push(Line::from(vec![Span::styled(
+                    "Unable to connect to node",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            }
+
+            // Render the node block
+            let node_block = Paragraph::new(node_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(
+                            if node_state.is_reachable {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            },
+                        )),
+                )
+                .alignment(ratatui::layout::Alignment::Left);
+
+            frame.render_widget(node_block, node_chunks[i]);
         }
     }
 

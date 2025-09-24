@@ -1,4 +1,4 @@
-use crate::api::models::{MempoolStatus, NodeMetrics, PeerInfo};
+use crate::api::models::{MempoolStatus, MiningInfo, NodeMetrics, PeerInfo};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -16,6 +16,7 @@ pub enum MenuSelection {
     Nodes,
     PartitionSync,
     Mempool,
+    Mining,
     Metrics,
     Logs,
     Settings,
@@ -28,6 +29,7 @@ pub struct NodeState {
     pub metrics: NodeMetrics,
     pub peers: Vec<PeerInfo>,
     pub mempool_status: Option<MempoolStatus>,
+    pub mining_info: Option<MiningInfo>,
     pub last_updated: DateTime<Utc>,
     pub is_reachable: bool,
     pub response_time_ms: Option<u64>,
@@ -49,6 +51,7 @@ impl NodeState {
             metrics: NodeMetrics::new(),
             peers: Vec::new(),
             mempool_status: None,
+            mining_info: None,
             last_updated: Utc::now(),
             is_reachable: false,
             response_time_ms: None,
@@ -239,8 +242,8 @@ mod tests {
         let splash = AppScreen::Splash;
         let main = AppScreen::Main;
 
-        assert!(format!("{:?}", splash).contains("Splash"));
-        assert!(format!("{:?}", main).contains("Main"));
+        assert!(format!("{splash:?}").contains("Splash"));
+        assert!(format!("{main:?}").contains("Main"));
     }
 
     #[test]
@@ -251,11 +254,11 @@ mod tests {
         let logs = MenuSelection::Logs;
         let settings = MenuSelection::Settings;
 
-        assert!(format!("{:?}", nodes).contains("Nodes"));
-        assert!(format!("{:?}", partition_sync).contains("PartitionSync"));
-        assert!(format!("{:?}", metrics).contains("Metrics"));
-        assert!(format!("{:?}", logs).contains("Logs"));
-        assert!(format!("{:?}", settings).contains("Settings"));
+        assert!(format!("{nodes:?}").contains("Nodes"));
+        assert!(format!("{partition_sync:?}").contains("PartitionSync"));
+        assert!(format!("{metrics:?}").contains("Metrics"));
+        assert!(format!("{logs:?}").contains("Logs"));
+        assert!(format!("{settings:?}").contains("Settings"));
     }
 
     #[test]
@@ -265,7 +268,7 @@ mod tests {
 
         assert_eq!(node.url, url);
         assert_eq!(node.alias, None);
-        assert_eq!(node.is_reachable, false);
+        assert!(!node.is_reachable);
         assert_eq!(node.response_time_ms, None);
         assert!(node.peers.is_empty());
         // last_updated should be recent (within last few seconds)
@@ -317,7 +320,7 @@ mod tests {
         assert_eq!(node1.display_name(), "localhost");
 
         // Test with empty URL (shouldn't happen but handle gracefully)
-        let node2 = NodeState::new("".to_string());
+        let node2 = NodeState::new(String::new());
         assert_eq!(node2.display_name(), "");
 
         // Test with malformed URL
@@ -337,13 +340,13 @@ mod tests {
         assert!(app_state.nodes.is_empty());
         assert_eq!(app_state.selected_node, Some(primary_url));
         assert_eq!(app_state.refresh_interval_secs, 30);
-        assert_eq!(app_state.auto_refresh, true);
+        assert!(app_state.auto_refresh);
         assert_eq!(
             app_state.time_since_last_refresh,
             std::time::Duration::from_secs(0)
         );
-        assert_eq!(app_state.is_refreshing, false);
-        assert_eq!(app_state.should_quit, false);
+        assert!(!app_state.is_refreshing);
+        assert!(!app_state.should_quit);
     }
 
     #[test]
@@ -412,7 +415,7 @@ mod tests {
         let node2_url = "http://localhost:1986".to_string();
 
         app_state.add_node(node1_url.clone());
-        app_state.add_node(node2_url.clone());
+        app_state.add_node(node2_url);
         app_state.selected_node = Some(node1_url.clone());
 
         app_state.remove_node(&node1_url);
@@ -472,8 +475,8 @@ mod tests {
         let node2_url = "http://localhost:1986".to_string();
 
         app_state.add_node(node1_url.clone());
-        app_state.add_node(node2_url.clone());
-        app_state.selected_node = Some(node1_url.clone());
+        app_state.add_node(node2_url);
+        app_state.selected_node = Some(node1_url);
 
         let initial_selection = app_state.selected_node.clone();
         app_state.select_next_node();
@@ -515,8 +518,8 @@ mod tests {
         let node2_url = "http://localhost:1986".to_string();
 
         app_state.add_node(node1_url.clone());
-        app_state.add_node(node2_url.clone());
-        app_state.selected_node = Some(node1_url.clone());
+        app_state.add_node(node2_url);
+        app_state.selected_node = Some(node1_url);
 
         let initial_selection = app_state.selected_node.clone();
         app_state.select_previous_node();
@@ -611,11 +614,11 @@ mod tests {
         let node3_url = "http://localhost:1987".to_string();
 
         app_state.add_node(node1_url.clone());
-        app_state.add_node(node2_url.clone());
-        app_state.add_node(node3_url.clone());
+        app_state.add_node(node2_url);
+        app_state.add_node(node3_url);
 
         // Set initial selection
-        app_state.selected_node = Some(node1_url.clone());
+        app_state.selected_node = Some(node1_url);
 
         let initial = app_state.selected_node.clone();
 
@@ -642,10 +645,10 @@ mod tests {
         let node2_url = "http://localhost:1986".to_string();
 
         app_state.add_node(node1_url.clone());
-        app_state.add_node(node2_url.clone());
+        app_state.add_node(node2_url);
 
         // Set initial selection
-        app_state.selected_node = Some(node1_url.clone());
+        app_state.selected_node = Some(node1_url);
 
         let initial = app_state.selected_node.clone();
 
@@ -706,14 +709,14 @@ mod tests {
         let mut app_state = AppState::new("http://localhost:1984".to_string());
 
         // Default is true
-        assert_eq!(app_state.auto_refresh, true);
+        assert!(app_state.auto_refresh);
 
         // Toggle off
         app_state.toggle_auto_refresh();
-        assert_eq!(app_state.auto_refresh, false);
+        assert!(!app_state.auto_refresh);
 
         // Toggle on
         app_state.toggle_auto_refresh();
-        assert_eq!(app_state.auto_refresh, true);
+        assert!(app_state.auto_refresh);
     }
 }

@@ -220,4 +220,13 @@ impl ApiClient {
         self.get_with_cancellation(node_url, "/mempool/status", Some(cancel_token))
             .await
     }
+
+    pub async fn get_mining_info_cancellable(
+        &self,
+        node_url: &str,
+        cancel_token: &CancellationToken,
+    ) -> Result<MiningInfo> {
+        self.get_with_cancellation(node_url, "/mining/info", Some(cancel_token))
+            .await
+    }
 }

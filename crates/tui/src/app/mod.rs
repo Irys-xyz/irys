@@ -144,6 +144,11 @@ impl App {
                         if matches!(self.state.current_menu, state::MenuSelection::Mempool) {
                             self.refresh_mempool_data().await?;
                         }
+
+                        // Also refresh mining data if in Mining view
+                        if matches!(self.state.current_menu, state::MenuSelection::Mining) {
+                            self.refresh_mining_data().await?;
+                        }
                     }
                 }
             }
@@ -352,6 +357,15 @@ impl App {
                         )
                         .await;
                     }
+
+                    // Also refresh mining data if in Mining view
+                    if matches!(self.state.current_menu, state::MenuSelection::Mining) {
+                        let _ = tokio::time::timeout(
+                            tokio::time::Duration::from_millis(50),
+                            self.refresh_mining_data(),
+                        )
+                        .await;
+                    }
                 }
                 KeyCode::Char('t') => {
                     self.state.toggle_auto_refresh();
@@ -461,6 +475,11 @@ impl App {
                         if matches!(selection, state::MenuSelection::Mempool) {
                             let _ = self.refresh_mempool_data().await;
                         }
+
+                        // Fetch mining data when entering Mining view
+                        if matches!(selection, state::MenuSelection::Mining) {
+                            let _ = self.refresh_mining_data().await;
+                        }
                     }
                 }
                 KeyCode::Tab => {
@@ -564,6 +583,33 @@ impl App {
             {
                 if let Some(node_state) = self.state.nodes.get_mut(&url) {
                     node_state.mempool_status = Some(mempool_status);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn refresh_mining_data(&mut self) -> Result<()> {
+        // Only fetch mining data for reachable nodes
+        let urls: Vec<String> = self
+            .state
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.is_reachable)
+            .map(|(url, _)| url.clone())
+            .collect();
+
+        let cancel_token = CancellationToken::new();
+
+        for url in urls {
+            if let Ok(mining_info) = self
+                .api_client
+                .get_mining_info_cancellable(&url, &cancel_token)
+                .await
+            {
+                if let Some(node_state) = self.state.nodes.get_mut(&url) {
+                    node_state.mining_info = Some(mining_info);
                 }
             }
         }
