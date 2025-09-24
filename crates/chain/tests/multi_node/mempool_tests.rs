@@ -1017,12 +1017,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
         // note we send the full blocks to node a, including txs, and chunks
         b_node.send_full_block(&a_node, &b_blk1).await?;
-        b_node.send_full_block(&a_node, &b_blk2).await?;
-
         a_node
             .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
             .await?;
-
+        b_node.send_full_block(&a_node, &b_blk2).await?;
         a_node
             .wait_for_block(&b_blk2.block_hash, seconds_to_wait)
             .await?;
