@@ -1384,22 +1384,22 @@ fn update_reth_with_initial_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::util::{ApiClientStub, FakeGossipServer};
+    use crate::peer_network_service::spawn_peer_network_service_with_client;
+    use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+    use futures::FutureExt as _;
     use irys_types::BlockHash;
 
     mod catch_up_task {
         use super::*;
-        use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
             Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -1482,21 +1482,30 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
-            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
-            let peer_list_service = PeerNetworkService::new_with_custom_api_client(
+            let reth_mock = MockRethServiceActor {};
+            let reth_mock_addr = reth_mock.start();
+
+            let tokio_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_tx,
+                reth_peer_sender,
                 receiver,
                 sender,
+                tokio_handle,
             );
-            let peer_service_addr = peer_list_service.start();
-            let peer_list_guard = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("to get a peer list")
-                .expect("to get a peer list");
 
             peer_list_guard.add_or_update_peer(
                 Address::repeat_byte(2),
@@ -1600,14 +1609,26 @@ mod tests {
             };
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
-            let peer_list_service = PeerNetworkService::new_with_custom_api_client(
+            let runtime_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_tx,
+                reth_peer_sender,
                 receiver,
                 sender,
+                runtime_handle,
             );
 
             let fake_peer_address = PeerAddress {
@@ -1615,13 +1636,6 @@ mod tests {
                 api: SocketAddr::from(([127, 0, 0, 1], 1270)),
                 execution: Default::default(),
             };
-
-            let peer_service_addr = peer_list_service.start();
-            let peer_list = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("to get peer list")
-                .expect("to get peer list");
 
             peer_list.add_or_update_peer(
                 Address::repeat_byte(2),
@@ -1667,11 +1681,9 @@ mod tests {
 
     mod post_sync_unique_highest_blocks {
         use super::*;
-        use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
         use crate::tests::util::{ApiClientStub, FakeGossipServer};
         use crate::types::GossipResponse;
-        use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -1679,7 +1691,7 @@ mod tests {
         use irys_types::{
             Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
             NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
-            SyncMode,
+            RethPeerInfo, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1740,20 +1752,28 @@ mod tests {
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
-            let peer_service = PeerNetworkService::new_with_custom_api_client(
+
+            let runtime_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_tx,
+                reth_peer_sender,
                 receiver,
                 sender,
+                runtime_handle,
             );
-            let peer_service_addr = peer_service.start();
-            let peer_list_guard = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("peer list")
-                .expect("peer list");
 
             // Add two peers reporting the same highest hash
             let peer1 = PeerListItem {
@@ -1865,20 +1885,28 @@ mod tests {
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
-            let peer_service = PeerNetworkService::new_with_custom_api_client(
+
+            let runtime_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_tx,
+                reth_peer_sender,
                 receiver,
                 sender,
+                runtime_handle,
             );
-            let peer_service_addr = peer_service.start();
-            let peer_list_guard = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("peer list")
-                .expect("peer list");
 
             let peer1 = PeerListItem {
                 reputation_score: PeerScore::new(100),

@@ -16,6 +16,7 @@ pub struct Config(Arc<CombinedConfigInner>);
 impl Config {
     pub fn new(node_config: NodeConfig) -> Self {
         let consensus = node_config.consensus_config();
+
         Self(Arc::new(CombinedConfigInner {
             consensus,
             mempool: node_config.mempool(),
@@ -44,6 +45,13 @@ impl Config {
             std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
                 <= (self.consensus.mempool.anchor_expiry_depth + 4)
         );
+
+        if matches!(self.node_config.node_mode, NodeMode::Peer) {
+            ensure!(
+                self.consensus.expected_genesis_hash.is_some(),
+                "expected_genesis_hash must be set in consensus config for peer nodes"
+            );
+        }
 
         Ok(())
     }
@@ -641,7 +649,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert!(matches!(config.node_mode, NodeMode::Peer { .. }));
+        assert!(matches!(config.node_mode, NodeMode::Peer));
 
         // Check consensus config fields
         let consensus = config.consensus_config();

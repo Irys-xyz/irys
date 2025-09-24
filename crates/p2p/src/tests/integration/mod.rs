@@ -16,12 +16,8 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new().await;
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new().await;
 
-    gossip_service_test_fixture_1
-        .add_peer(&gossip_service_test_fixture_2)
-        .await;
-    gossip_service_test_fixture_2
-        .add_peer(&gossip_service_test_fixture_1)
-        .await;
+    gossip_service_test_fixture_1.add_peer(&gossip_service_test_fixture_2);
+    gossip_service_test_fixture_2.add_peer(&gossip_service_test_fixture_1);
 
     let (service1_handle, gossip_service1_message_bus) =
         gossip_service_test_fixture_1.run_service().await;
@@ -76,7 +72,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
                     clippy::indexing_slicing,
                     reason = "just a test - doesn't need to fight the borrow checker this way"
                 )]
-                fixtures[i].add_peer(&fixtures[j]).await;
+                fixtures[i].add_peer(&fixtures[j]);
             }
         }
     }
@@ -131,8 +127,8 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
 
-    fixture1.add_peer(&fixture2).await;
-    fixture2.add_peer(&fixture1).await;
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
@@ -175,8 +171,8 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
 
-    fixture1.add_peer(&fixture2).await;
-    fixture2.add_peer(&fixture1).await;
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
     let (service2_handle, _) = fixture2.run_service().await;
@@ -218,7 +214,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     let fixture2 = GossipServiceTestFixture::new().await;
 
     // Add peer2 but don't start its service
-    fixture1.add_peer(&fixture2).await;
+    fixture1.add_peer(&fixture2);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
 
@@ -243,8 +239,8 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
 
-    fixture1.add_peer(&fixture2).await;
-    fixture2.add_peer(&fixture1).await;
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
 
     // Create a test block with transactions
     let mut block = IrysBlockHeader {
@@ -301,8 +297,8 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
 
-    fixture1.add_peer(&fixture2).await;
-    fixture2.add_peer(&fixture1).await;
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
@@ -356,8 +352,8 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
 
-    fixture1.add_peer(&fixture2).await;
-    fixture2.add_peer(&fixture1).await;
+    fixture1.add_peer(&fixture2);
+    fixture2.add_peer(&fixture1);
 
     let evm_block = Block {
         header: Header {
