@@ -1,6 +1,6 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
+use actix::{Actor as _, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
 use futures::FutureExt as _;
@@ -1338,9 +1338,7 @@ impl IrysNode {
 
             // 8. Core infrastructure (shutdown last)
             services.push(ArbiterEnum::TokioService(peer_network_handle));
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()),
-            });
+            services.push(ArbiterEnum::TokioService(reth_service_task));
         }
 
         let server = run_server(
@@ -1696,22 +1694,29 @@ fn init_peer_list_service(
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList) {
     let reth_peer_sender = {
-        let reth_service_addr = reth_service_addr;
+        let reth_service = reth_service.clone();
         Arc::new(move |reth_peer_info: RethPeerInfo| {
-            let addr = reth_service_addr.clone();
+            let reth_service = reth_service.clone();
             async move {
-                match addr.send(reth_peer_info).await {
+                let (response_tx, response_rx) = oneshot::channel();
+
+                if let Err(send_error) = reth_service.send(RethServiceMessage::ConnectToPeer {
+                    peer: reth_peer_info,
+                    response: response_tx,
+                }) {
+                    error!(%send_error, "Failed to enqueue connect-to-peer request for reth service");
+                    return;
+                }
+
+                match response_rx.await {
                     Ok(Ok(())) => {
                         debug!("Successfully connected to reth peer");
                     }
                     Ok(Err(err)) => {
-                        error!("Failed to connect to reth peer: {}", err);
+                        error!(error = %err, "Reth service failed to connect to peer");
                     }
-                    Err(mailbox_error) => {
-                        error!(
-                            "Failed to connect to reth peer due to mailbox error: {}",
-                            mailbox_error
-                        );
+                    Err(recv_error) => {
+                        error!(%recv_error, "Reth service connect-to-peer response channel closed");
                     }
                 }
             }
