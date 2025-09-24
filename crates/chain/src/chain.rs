@@ -308,6 +308,8 @@ impl IrysNode {
         }
 
         let config = Config::new(node_config);
+        config.validate()?;
+
         Ok(Self {
             config,
             http_listener,
