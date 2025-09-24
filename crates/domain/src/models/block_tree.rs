@@ -17,11 +17,19 @@ use crate::{
     CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+pub struct AnchorBlock {
+    pub entry: BlockTreeEntry,
+    pub header: Arc<IrysBlockHeader>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CanonicalAnchors {
-    pub head: BlockTreeEntry,
-    pub migration_block: BlockTreeEntry,
-    pub prune_block: BlockTreeEntry,
+    pub head: AnchorBlock,
+    pub migration_block: AnchorBlock,
+    pub prune_block: AnchorBlock,
+    pub migration_depth_reached: bool,
+    pub prune_depth_reached: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,37 +622,77 @@ impl BlockTree {
             return None;
         }
 
+        let header_for = |hash: &BlockHash| -> Arc<IrysBlockHeader> {
+            Arc::new(
+                self.blocks
+                    .get(hash)
+                    .unwrap_or_else(|| {
+                        panic!("block {} missing from cache while building anchors", hash)
+                    })
+                    .block
+                    .clone(),
+            )
+        };
+
         let fallback_entry = canonical_chain
             .first()
-            .expect("canonical chain cannot be empty");
+            .expect("canonical chain cannot be empty")
+            .clone();
+        let fallback_header = header_for(&fallback_entry.block_hash);
+
         let head_entry = canonical_chain
             .last()
-            .expect("canonical chain cannot be empty");
+            .expect("canonical chain cannot be empty")
+            .clone();
+        let head_header = header_for(&head_entry.block_hash);
 
-        let migration_entry = if canonical_chain.len() > migration_depth {
-            &canonical_chain[canonical_chain.len() - 1 - migration_depth]
+        let migration_depth_reached = canonical_chain.len() > migration_depth;
+        let migration_entry = if migration_depth_reached {
+            canonical_chain[canonical_chain.len() - 1 - migration_depth].clone()
         } else {
             debug_assert!(
                 fallback_entry.height == 0,
                 "fallback entry for migration anchor should be genesis",
             );
-            fallback_entry
+            fallback_entry.clone()
+        };
+        let migration_header = if migration_entry.block_hash == fallback_entry.block_hash {
+            fallback_header.clone()
+        } else {
+            header_for(&migration_entry.block_hash)
         };
 
-        let prune_entry = if canonical_chain.len() > prune_depth {
-            &canonical_chain[canonical_chain.len() - 1 - prune_depth]
+        let prune_depth_reached = canonical_chain.len() > prune_depth;
+        let prune_entry = if prune_depth_reached {
+            canonical_chain[canonical_chain.len() - 1 - prune_depth].clone()
         } else {
             debug_assert!(
                 fallback_entry.height == 0,
                 "fallback entry for prune anchor should be genesis",
             );
-            fallback_entry
+            fallback_entry.clone()
+        };
+        let prune_header = if prune_entry.block_hash == fallback_entry.block_hash {
+            fallback_header.clone()
+        } else {
+            header_for(&prune_entry.block_hash)
         };
 
         Some(CanonicalAnchors {
-            head: head_entry.clone(),
-            migration_block: migration_entry.clone(),
-            prune_block: prune_entry.clone(),
+            head: AnchorBlock {
+                entry: head_entry,
+                header: head_header,
+            },
+            migration_block: AnchorBlock {
+                entry: migration_entry,
+                header: migration_header,
+            },
+            prune_block: AnchorBlock {
+                entry: prune_entry,
+                header: prune_header,
+            },
+            migration_depth_reached,
+            prune_depth_reached,
         })
     }
 
@@ -2518,9 +2566,11 @@ mod tests {
             .canonical_anchors(2, 4)
             .expect("canonical chain should not be empty");
 
-        assert_eq!(anchors.head.height, 5);
-        assert_eq!(anchors.migration_block.height, 3);
-        assert_eq!(anchors.prune_block.height, 1);
+        assert_eq!(anchors.head.entry.height, 5);
+        assert_eq!(anchors.migration_block.entry.height, 3);
+        assert_eq!(anchors.prune_block.entry.height, 1);
+        assert!(anchors.migration_depth_reached);
+        assert!(anchors.prune_depth_reached);
     }
 
     #[test]
@@ -2536,9 +2586,11 @@ mod tests {
             .canonical_anchors(5, 8)
             .expect("canonical chain should not be empty");
 
-        assert_eq!(anchors.head.height, 1);
-        assert_eq!(anchors.migration_block.height, 0);
-        assert_eq!(anchors.prune_block.height, 0);
+        assert_eq!(anchors.head.entry.height, 1);
+        assert_eq!(anchors.migration_block.entry.height, 0);
+        assert_eq!(anchors.prune_block.entry.height, 0);
+        assert!(!anchors.migration_depth_reached);
+        assert!(!anchors.prune_depth_reached);
     }
 
     const fn extend_chain(
