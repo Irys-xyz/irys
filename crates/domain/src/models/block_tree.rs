@@ -650,10 +650,6 @@ impl BlockTree {
         let migration_entry = if migration_depth_reached {
             canonical_chain[canonical_chain.len() - 1 - migration_depth].clone()
         } else {
-            debug_assert!(
-                fallback_entry.height == 0,
-                "fallback entry for migration anchor should be genesis",
-            );
             fallback_entry.clone()
         };
         let migration_header = if migration_entry.block_hash == fallback_entry.block_hash {
@@ -666,10 +662,6 @@ impl BlockTree {
         let prune_entry = if prune_depth_reached {
             canonical_chain[canonical_chain.len() - 1 - prune_depth].clone()
         } else {
-            debug_assert!(
-                fallback_entry.height == 0,
-                "fallback entry for prune anchor should be genesis",
-            );
             fallback_entry.clone()
         };
         let prune_header = if prune_entry.block_hash == fallback_entry.block_hash {
