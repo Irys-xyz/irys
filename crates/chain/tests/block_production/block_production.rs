@@ -1466,8 +1466,11 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     let num_blocks_to_mine = 10;
 
     // Configure a node with specified block_tree_depth
-    let mut config = NodeConfig::testing();
-    config.consensus.get_mut().block_tree_depth = block_tree_depth;
+    let config = NodeConfig::testing().with_consensus(|c| {
+        c.block_tree_depth = block_tree_depth;
+        c.mempool.anchor_expiry_depth = 2;
+        c.block_migration_depth = 2;
+    });
 
     let node = IrysNodeTest::new_genesis(config).start().await;
 
