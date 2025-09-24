@@ -9,10 +9,10 @@ use irys_actors::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
+use irys_domain::{chain_sync_state::ChainSyncState, CanonicalAnchors};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
     PeerNetworkError,
@@ -256,6 +256,13 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
+    fn current_canonical_anchors(&self) -> Option<CanonicalAnchors> {
+        let migration_depth = self.config.consensus.block_migration_depth as usize;
+        let prune_depth = self.config.consensus.block_tree_depth as usize;
+        let tree = self.block_status_provider.block_tree_read_guard().read();
+        tree.canonical_anchors(migration_depth, prune_depth)
+    }
+
     pub(crate) fn new(
         db: DatabaseProvider,
         block_discovery: B,
@@ -360,20 +367,24 @@ where
         );
 
         if let Some(reth_service) = reth_service {
-            let block_status = self
-                .block_status_provider
-                .block_status(block_header.height, &block_header.block_hash);
-            let confirmed_hash = Some(block_header.block_hash);
-            let finalized_hash =
-                matches!(block_status, BlockStatus::Finalized).then_some(block_header.block_hash);
+            let anchors = self.current_canonical_anchors().ok_or_else(|| {
+                BlockPoolError::OtherInternal(
+                    "Canonical anchors unavailable while emitting FCU".to_string(),
+                )
+            })?;
+            let head_hash = anchors.head.entry.block_hash;
+            let confirmed_hash = anchors.migration_block.entry.block_hash;
+            let finalized_hash = anchors.prune_block.entry.block_hash;
             debug!(
-                "Sending ForkChoiceUpdateMessage to Reth service for block {:?}",
-                block_header.block_hash
+                head = %head_hash,
+                confirmed = %confirmed_hash,
+                finalized = %finalized_hash,
+                "Sending ForkChoiceUpdateMessage to Reth service"
             );
             reth_service
                 .send(RethServiceMessage::ForkChoice {
                     update: ForkChoiceUpdateMessage {
-                        head_hash: block_header.block_hash,
+                        head_hash,
                         confirmed_hash,
                         finalized_hash,
                     },

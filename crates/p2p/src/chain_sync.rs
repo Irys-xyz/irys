@@ -272,6 +272,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     update_reth_with_initial_block(
                         &block_index,
                         &block_pool.db,
+                        &config,
                         &mut reth_service,
                     );
                 }
@@ -1352,19 +1353,33 @@ async fn is_local_index_is_behind_trusted_peers(
 fn update_reth_with_initial_block(
     block_index: &BlockIndexReadGuard,
     irys_db: &DatabaseProvider,
+    config: &Config,
     reth_service: &mut Option<mpsc::UnboundedSender<RethServiceMessage>>,
 ) {
     // Read the latest from the block index; if no entries, panic
-    let latest_block_index = block_index
-        .get_latest_item_cloned()
-        .expect("a block index must have at least one entry at init");
-    let latest_block = database::block_header_by_hash(
-        &irys_db.tx().unwrap(),
-        &latest_block_index.block_hash,
-        false,
-    )
-    .expect("database to be accessible during init")
-    .expect("at least the genesis block header must be in the database");
+    let index_guard = block_index.read();
+    let latest_height = index_guard.latest_height();
+    let head_hash = index_guard
+        .get_item(latest_height)
+        .expect("latest height must exist in block index")
+        .block_hash;
+
+    let migration_depth = u64::from(config.consensus.block_migration_depth);
+    let confirmed_hash = index_guard
+        .get_item(latest_height.saturating_sub(migration_depth))
+        .map(|item| item.block_hash)
+        .unwrap_or(head_hash);
+
+    let prune_depth = config.consensus.block_tree_depth;
+    let finalized_hash = index_guard
+        .get_item(latest_height.saturating_sub(prune_depth))
+        .map(|item| item.block_hash)
+        .unwrap_or(head_hash);
+    drop(index_guard);
+
+    let latest_block = database::block_header_by_hash(&irys_db.tx().unwrap(), &head_hash, false)
+        .expect("database to be accessible during init")
+        .expect("at least the genesis block header must be in the database");
 
     // update reth service about the latest block data it must use
     if let Some(reth_service_tx) = reth_service {
@@ -1372,8 +1387,8 @@ fn update_reth_with_initial_block(
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
                     head_hash: latest_block.block_hash,
-                    confirmed_hash: Some(latest_block.block_hash),
-                    finalized_hash: None,
+                    confirmed_hash,
+                    finalized_hash,
                 },
             })
             .expect("reth service to be alive at init");

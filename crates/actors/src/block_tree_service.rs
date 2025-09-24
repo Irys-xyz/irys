@@ -319,8 +319,8 @@ impl BlockTreeServiceInner {
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
                     head_hash: anchors.head.entry.block_hash,
-                    confirmed_hash: Some(anchors.migration_block.entry.block_hash),
-                    finalized_hash: Some(anchors.prune_block.entry.block_hash),
+                    confirmed_hash: anchors.migration_block.entry.block_hash,
+                    finalized_hash: anchors.prune_block.entry.block_hash,
                 },
             })
             .expect("Unable to send confirmation FCU message to reth");
@@ -350,8 +350,8 @@ impl BlockTreeServiceInner {
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
                     head_hash: anchors.head.entry.block_hash,
-                    confirmed_hash: Some(anchors.migration_block.entry.block_hash),
-                    finalized_hash: Some(anchors.prune_block.entry.block_hash),
+                    confirmed_hash: anchors.migration_block.entry.block_hash,
+                    finalized_hash: anchors.prune_block.entry.block_hash,
                 },
             })
             .expect("Unable to send confirmation FCU message to reth");

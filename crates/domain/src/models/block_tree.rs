@@ -23,6 +23,11 @@ pub struct AnchorBlock {
     pub header: Arc<IrysBlockHeader>,
 }
 
+/// CanonicalAnchors captures the head plus safe/finalized anchor blocks used for fork choice.
+/// `head` tracks the current canonical tip broadcast to downstream services.
+/// `migration_block` marks the migration depth where chunks are guaranteed on-chain.
+/// `prune_block` marks the finalized boundary past which forks are irrelevant.
+/// Flags report whether the configured migration and prune depths have been satisfied.
 #[derive(Debug, Clone)]
 pub struct CanonicalAnchors {
     pub head: AnchorBlock,

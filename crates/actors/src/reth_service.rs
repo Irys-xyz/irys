@@ -5,7 +5,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
-    revm::primitives::{FixedBytes, B256},
+    revm::primitives::B256,
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
@@ -25,8 +25,8 @@ pub struct RethService {
 #[derive(Debug, Clone, Copy)]
 pub struct ForkChoiceUpdateMessage {
     pub head_hash: BlockHash,
-    pub confirmed_hash: Option<BlockHash>,
-    pub finalized_hash: Option<BlockHash>,
+    pub confirmed_hash: BlockHash,
+    pub finalized_hash: BlockHash,
 }
 
 #[derive(Debug)]
@@ -51,15 +51,15 @@ pub enum RethServiceMessage {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForkChoiceUpdate {
     pub head_hash: B256,
-    pub confirmed_hash: Option<B256>,
-    pub finalized_hash: Option<B256>,
+    pub confirmed_hash: B256,
+    pub finalized_hash: B256,
 }
 
 async fn evm_block_hash_from_block_hash(
     mempool_service: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
     irys_hash: H256,
-) -> eyre::Result<FixedBytes<32>> {
+) -> eyre::Result<B256> {
     debug!(irys_hash = %irys_hash, "Resolving EVM block hash for Irys block");
 
     let irys_header = {
@@ -171,7 +171,8 @@ impl RethService {
         debug!(?update, "Received fork choice update command");
 
         let resolved = self.resolve_new_fcu(update).await?;
-        self.process_fcu(resolved).await?;
+        let latest = self.process_fcu(resolved).await?;
+        self.latest_fcu = latest;
         Ok(())
     }
 
@@ -191,31 +192,11 @@ impl RethService {
         let evm_head_hash =
             evm_block_hash_from_block_hash(&self.mempool, &self.db, head_hash).await?;
 
-        let evm_confirmed_hash = match confirmed_hash {
-            Some(confirmed_hash) => {
-                Some(evm_block_hash_from_block_hash(&self.mempool, &self.db, confirmed_hash).await?)
-            }
-            None => {
-                debug!(
-                    previous_hash = ?self.latest_fcu.confirmed_hash,
-                    "No confirmed hash provided, using previous"
-                );
-                self.latest_fcu.confirmed_hash
-            }
-        };
+        let evm_confirmed_hash =
+            evm_block_hash_from_block_hash(&self.mempool, &self.db, confirmed_hash).await?;
 
-        let evm_finalized_hash = match finalized_hash {
-            Some(finalized_hash) => {
-                Some(evm_block_hash_from_block_hash(&self.mempool, &self.db, finalized_hash).await?)
-            }
-            None => {
-                debug!(
-                    previous_hash = ?self.latest_fcu.finalized_hash,
-                    "No finalized hash provided, using previous"
-                );
-                self.latest_fcu.finalized_hash
-            }
-        };
+        let evm_finalized_hash =
+            evm_block_hash_from_block_hash(&self.mempool, &self.db, finalized_hash).await?;
 
         Ok(ForkChoiceUpdate {
             head_hash: evm_head_hash,
@@ -233,8 +214,8 @@ impl RethService {
 
         info!(
             head = %head_hash,
-            confirmed = ?confirmed_hash,
-            finalized = ?finalized_hash,
+            confirmed = %confirmed_hash,
+            finalized = %finalized_hash,
             "Updating Reth fork choice"
         );
         let handle = self.handle.clone();
@@ -258,7 +239,7 @@ impl RethService {
         );
 
         handle
-            .update_forkchoice_full(head_hash, confirmed_hash, finalized_hash)
+            .update_forkchoice_full(head_hash, Some(confirmed_hash), Some(finalized_hash))
             .await
             .map_err(|e| {
                 error!(error = %e, ?fcu, "Failed to update Reth fork choice");
