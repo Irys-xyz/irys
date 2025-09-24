@@ -301,7 +301,7 @@ impl BlockTreeServiceInner {
     }
 
     fn emit_fcu(&self, anchors: &CanonicalAnchors) {
-        let tip_block = anchors.head.header.clone();
+        let tip_block = &anchors.head.header;
         debug_assert_eq!(
             anchors.head.entry.block_hash, tip_block.block_hash,
             "canonical chain head mismatch with staged tip",
@@ -324,38 +324,10 @@ impl BlockTreeServiceInner {
                 },
             })
             .expect("Unable to send confirmation FCU message to reth");
-
-        self.service_senders
-            .mempool
-            .send(MempoolServiceMessage::BlockConfirmed(tip_block))
-            .expect("mempool service has unexpectedly become unreachable");
     }
 
     fn emit_block_confirmed(&self, anchors: &CanonicalAnchors) {
-        let tip_block = anchors.head.header.clone();
-        debug_assert_eq!(
-            anchors.head.entry.block_hash, tip_block.block_hash,
-            "canonical chain head mismatch with staged tip",
-        );
-
-        debug!(
-            head = %anchors.head.entry.block_hash,
-            migration = %anchors.migration_block.entry.block_hash,
-            prune = %anchors.prune_block.entry.block_hash,
-            "broadcasting canonical chain update",
-        );
-
-        self.service_senders
-            .reth_service
-            .send(RethServiceMessage::ForkChoice {
-                update: ForkChoiceUpdateMessage {
-                    head_hash: anchors.head.entry.block_hash,
-                    confirmed_hash: anchors.migration_block.entry.block_hash,
-                    finalized_hash: anchors.prune_block.entry.block_hash,
-                },
-            })
-            .expect("Unable to send confirmation FCU message to reth");
-
+        let tip_block = Arc::clone(&anchors.head.header);
         self.service_senders
             .mempool
             .send(MempoolServiceMessage::BlockConfirmed(tip_block))
@@ -370,6 +342,7 @@ impl BlockTreeServiceInner {
         let block_hash = anchor.entry.block_hash;
         let migration_height = anchor.entry.height;
 
+        // Check if the block is already in the block index
         let binding = self.block_index_guard.clone();
         {
             let bi = binding.read();
@@ -392,13 +365,15 @@ impl BlockTreeServiceInner {
             }
         }
 
+        // todo: instead of setting the poa chunk *here* (and causing unnecessary clones),
+        // it should be done in the downstream recipients of the `BlockMigratedEvent`.
         let mut block_for_event = (*anchor.header).clone();
         block_for_event.poa.chunk = None;
         let migrated_block = Arc::new(block_for_event);
         debug!(hash = %block_hash, height = migration_height, "migrating irys block");
 
         // NOTE: order of events is very important! block migration event
-        // writes chunks to db, which is needed for later block migration message.
+        // writes chunks to db, which is expected by `send_block_migration_message`.
         let block_migrated_event = BlockMigratedEvent {
             block: migrated_block,
         };
@@ -569,7 +544,7 @@ impl BlockTreeServiceInner {
             return Ok(());
         }
 
-        let (arc_block, epoch_block, reorg_event, tip_changed, state, pending_chain_update) = {
+        let (arc_block, epoch_block, reorg_event, tip_changed, state, new_canonical_anchors) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -579,7 +554,8 @@ impl BlockTreeServiceInner {
             let old_tip = cache.tip;
             let old_tip_block = cache
                 .get_block(&old_tip)
-                .unwrap_or_else(|| panic!("old tip block {old_tip} not found in cache"))
+                .ok_or_else(|| eyre::eyre!("old tip block {old_tip} not found in cache"))?
+                // todo: expensive clone here
                 .clone();
 
             // Mark block as validated in cache, this will update the canonical chain
@@ -618,13 +594,7 @@ impl BlockTreeServiceInner {
                 .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
             let arc_block = Arc::new(block_entry.block.clone());
 
-            let tip_changed = match cache.mark_tip(&block_hash) {
-                Ok(changed) => changed,
-                Err(err) => {
-                    error!(block_hash = %block_hash, error = %err, "failed to mark block as tip");
-                    return Ok(());
-                }
-            };
+            let tip_changed = cache.mark_tip(&block_hash)?;
 
             let (epoch_block, reorg_event, canonical_anchors) = if tip_changed {
                 let anchors = cache
@@ -633,7 +603,7 @@ impl BlockTreeServiceInner {
                         self.config.consensus.block_tree_depth as usize,
                     )
                     .expect("canonical chain cannot be empty");
-                let pending_chain_update = Some(anchors);
+                let new_canonical_anchors = Some(anchors);
 
                 // Prune the cache after tip changes.
                 //
@@ -746,7 +716,7 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (new_epoch_block, Some(event), pending_chain_update)
+                    (new_epoch_block, Some(event), new_canonical_anchors)
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -763,7 +733,7 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (new_epoch_block, None, pending_chain_update)
+                    (new_epoch_block, None, new_canonical_anchors)
                 }
             } else {
                 (None, None, None)
@@ -798,7 +768,7 @@ impl BlockTreeServiceInner {
             }
         }
 
-        if let Some(anchors) = &pending_chain_update {
+        if let Some(anchors) = &new_canonical_anchors {
             self.emit_fcu(anchors);
             self.emit_block_confirmed(anchors);
             // Handle block migration (move chunks to disk and add to block_index)

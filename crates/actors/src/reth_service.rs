@@ -245,21 +245,14 @@ impl RethService {
 
         debug!("Fork choice update sent to Reth, fetching current state");
 
-        let latest = handle
-            .inner
-            .eth_api()
+        let eth_api = handle.inner.eth_api();
+        let latest = eth_api
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await;
 
-        let safe = handle
-            .inner
-            .eth_api()
-            .block_by_number(BlockNumberOrTag::Safe, false)
-            .await;
+        let safe = eth_api.block_by_number(BlockNumberOrTag::Safe, false).await;
 
-        let finalized = handle
-            .inner
-            .eth_api()
+        let finalized = eth_api
             .block_by_number(BlockNumberOrTag::Finalized, false)
             .await;
 

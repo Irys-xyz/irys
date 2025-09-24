@@ -70,6 +70,7 @@ pub struct BlockTree {
 
 #[derive(Debug)]
 pub struct BlockMetadata {
+    // todo: wrap into Arc to avoid expensive clones
     pub block: IrysBlockHeader,
     chain_state: ChainState,
     timestamp: SystemTime,
