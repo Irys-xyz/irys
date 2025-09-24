@@ -134,20 +134,20 @@ table CachedDataRoots {
     type Value = CachedDataRoot;
 }
 
-/// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
+/// Index mapping a DataRoot to a set of ordered-by-index index entries, which contain the ChunkPathHash ('chunk id')
 table CachedChunksIndex {
     type Key = DataRoot;
     type Value = CachedChunkIndexEntry;
     type SubKey = u32;
 }
 
-/// Table mapping a chunk path hash to a cached chunk (with data)
+/// Maps a ChunkPathHash to the cached chunk metadata and optionally its data
 table CachedChunks {
     type Key = ChunkPathHash;
     type Value = CachedChunk;
 }
 
-/// Indexes Ingress proofs by their data_root
+/// Indexes ingress proofs by DataRoot and Address
 table IngressProofs {
     type Key = DataRoot;
     type Value = CompactCachedIngressProof;
