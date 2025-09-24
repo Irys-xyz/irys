@@ -832,7 +832,8 @@ impl MainMenu {
                         ),
                         Span::raw(format!(
                             "Chunks={} Pledges={}",
-                            mempool_status.pending_chunks_count, mempool_status.pending_pledges_count
+                            mempool_status.pending_chunks_count,
+                            mempool_status.pending_pledges_count
                         )),
                     ]));
 
@@ -846,7 +847,8 @@ impl MainMenu {
                         ),
                         Span::raw(format!(
                             "Valid={} Invalid={}",
-                            mempool_status.recent_valid_tx_count, mempool_status.recent_invalid_tx_count
+                            mempool_status.recent_valid_tx_count,
+                            mempool_status.recent_invalid_tx_count
                         )),
                     ]));
 
@@ -892,14 +894,8 @@ impl MainMenu {
                         .signed_duration_since(node_state.last_updated)
                         .num_seconds();
                     node_lines.push(Line::from(vec![
-                        Span::styled(
-                            "Last Updated: ",
-                            Style::default().fg(Color::Gray),
-                        ),
-                        Span::styled(
-                            format!("{elapsed}s ago"),
-                            Style::default().fg(Color::Gray),
-                        ),
+                        Span::styled("Last Updated: ", Style::default().fg(Color::Gray)),
+                        Span::styled(format!("{elapsed}s ago"), Style::default().fg(Color::Gray)),
                     ]));
                 } else {
                     node_lines.push(Line::from(vec![Span::styled(
@@ -955,8 +951,10 @@ impl MainMenu {
         }
 
         if let Some(help_chunk) = node_chunks.get(node_count) {
-            let help_widget = Paragraph::new("Press 'r' to refresh immediately, 't' to toggle auto-refresh, 'q' to quit")
-                .alignment(ratatui::layout::Alignment::Center);
+            let help_widget = Paragraph::new(
+                "Press 'r' to refresh immediately, 't' to toggle auto-refresh, 'q' to quit",
+            )
+            .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(help_widget, *help_chunk);
         }
     }
@@ -1059,7 +1057,10 @@ impl MainMenu {
                         if let Some(vdf_diff) = vdf_obj.get("vdfDifficulty") {
                             if !vdf_diff.is_null() {
                                 node_lines.push(Line::from(vec![
-                                    Span::styled("VDF Difficulty: ", Style::default().fg(Color::Blue)),
+                                    Span::styled(
+                                        "VDF Difficulty: ",
+                                        Style::default().fg(Color::Blue),
+                                    ),
                                     Span::raw(vdf_diff.to_string()),
                                 ]));
                             }
@@ -1102,19 +1103,16 @@ impl MainMenu {
             }
 
             // Render the node block
-            let node_block = Paragraph::new(node_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(
-                            if node_state.is_reachable {
-                                Color::Green
-                            } else {
-                                Color::Red
-                            },
-                        )),
-                )
-                .alignment(ratatui::layout::Alignment::Left);
+            let node_block =
+                Paragraph::new(node_lines)
+                    .block(Block::default().borders(Borders::ALL).border_style(
+                        Style::default().fg(if node_state.is_reachable {
+                            Color::Green
+                        } else {
+                            Color::Red
+                        }),
+                    ))
+                    .alignment(ratatui::layout::Alignment::Left);
 
             frame.render_widget(node_block, node_chunks[i]);
         }

@@ -37,7 +37,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 eyre = "0.6"
-thiserror = "1.0"
 
 # Async
 futures = "0.3"

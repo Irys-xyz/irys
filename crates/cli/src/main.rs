@@ -37,7 +37,7 @@ pub enum Commands {
         /// Configuration file path (contains both TUI settings and nodes list)
         #[arg(short, long)]
         config: Option<String>,
-
+    },
     #[command(name = "rollback-blocks")]
     RollbackBlocks {
         #[command(subcommand)]

@@ -26,9 +26,7 @@ pub struct MiningInfo {
     pub vdf_limiter_info: VDFLimiterInfo,
 }
 
-pub async fn get_mining_info(
-    app_state: Data<ApiState>,
-) -> Result<Json<MiningInfo>, ApiError> {
+pub async fn get_mining_info(app_state: Data<ApiState>) -> Result<Json<MiningInfo>, ApiError> {
     let canonical_chain = get_canonical_chain(app_state.block_tree.clone())
         .await
         .map_err(ApiError::canonical_chain_error)?;
@@ -59,4 +57,3 @@ pub async fn get_mining_info(
         vdf_limiter_info: header.vdf_limiter_info.clone(),
     }))
 }
-

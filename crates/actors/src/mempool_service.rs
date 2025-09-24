@@ -269,6 +269,9 @@ impl Inner {
                 MempoolServiceMessage::GetMempoolStatus(response) => {
                     let response_value = self.handle_get_mempool_status().await;
                     if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
                 MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
                     self.stake_and_pledge_whitelist.extend(new_entries);
                     if let Err(e) = response.send(()) {
