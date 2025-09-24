@@ -646,8 +646,13 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///    - tests all canonical blocks move to all peers
 ///    - tests all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - tests new balance changes are applied based on the new canonical branch
+#[rstest::rstest]
+#[case::full_validation(true)]
+#[case::default(false)]
 #[test_log::test(actix_web::test)]
-async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
+async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
+    #[case] enable_full_validation: bool,
+) -> eyre::Result<()> {
     initialize_tracing();
 
     //
@@ -664,6 +669,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = DATA_CHUNK_SIZE as u64;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    genesis_config
+        .consensus
+        .get_mut()
+        .enable_full_ingress_proof_validation = enable_full_validation;
 
     // create test data
     let data = vec![0_u8; DATA_CHUNK_SIZE];
