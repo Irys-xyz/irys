@@ -25,6 +25,8 @@ pub enum ApiError {
     CanonicalChainError(String),
     #[error("Canonical chain is empty - no blocks found")]
     EmptyCanonicalChain,
+    #[error("Block not found: {block_hash}")]
+    BlockNotFound { block_hash: String },
 }
 
 impl ApiError {
@@ -45,6 +47,7 @@ impl ResponseError for ApiError {
             Self::InvalidAddress(_) => StatusCode::BAD_REQUEST,
             Self::CanonicalChainError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::EmptyCanonicalChain => StatusCode::SERVICE_UNAVAILABLE,
+            Self::BlockNotFound { .. } => StatusCode::NOT_FOUND,
         }
     }
 

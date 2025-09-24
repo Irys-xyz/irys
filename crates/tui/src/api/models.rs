@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -104,7 +105,28 @@ pub struct MempoolStatus {
     pub recent_valid_tx_count: usize,
     pub recent_invalid_tx_count: usize,
     pub data_tx_total_size: u64,
-    pub config: serde_json::Value, // Using Value since we don't need to parse the config
+    pub config: Value, // Using Value since we don't need to parse the config
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningInfo {
+    // Block info
+    pub block_height: u64,
+    pub block_hash: String,
+    pub block_timestamp: u128,
+
+    // Difficulty info
+    pub current_difficulty: String,
+    pub cumulative_difficulty: String,
+    pub last_diff_adjustment_timestamp: u128,
+
+    // Mining rewards
+    pub miner_address: String,
+    pub reward_address: String,
+    pub reward_amount: String,
+
+    // VDF info (includes vdf_difficulty and next_vdf_difficulty)
+    pub vdf_limiter_info: Value, // Using Value since it's a complex nested structure
 }
 
 impl PartitionChunkCounts {
