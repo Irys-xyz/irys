@@ -37,7 +37,12 @@ impl Config {
     // TODO: expand this!
     pub fn validate(&self) -> eyre::Result<()> {
         // ensures the block tree is able to contain all unmigrated blocks
-        ensure!((self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth, "Block tree depth ({}) is smaller than the block migration depth ({})", &self.consensus.block_tree_depth, &self.consensus.block_migration_depth);
+        ensure!(
+            (self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth,
+            "Block tree depth ({}) is smaller than the block migration depth ({})",
+            &self.consensus.block_tree_depth,
+            &self.consensus.block_migration_depth
+        );
 
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         // TODO: once anchor maturity is enforced, apply that value here
@@ -54,7 +59,10 @@ impl Config {
         }
 
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
-        let minimum_step_capacity = self.consensus.num_chunks_in_partition.div_ceil(self.consensus.num_chunks_in_recall_range);
+        let minimum_step_capacity = self
+            .consensus
+            .num_chunks_in_partition
+            .div_ceil(self.consensus.num_chunks_in_recall_range);
         ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
 
         Ok(())
