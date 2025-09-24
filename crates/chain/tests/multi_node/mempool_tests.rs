@@ -793,8 +793,13 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// assert txs return to mempool
 /// send returned txs to C
 /// mine a block on C, assert that all reorgd txs are present
-#[actix_web::test]
-async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
+#[rstest::rstest]
+#[case::full_validation(true)]
+#[case::default(false)]
+#[test_log::test(actix_web::test)]
+async fn slow_heavy_mempool_publish_fork_recovery_test(
+    #[case] enable_full_validation: bool,
+) -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
@@ -810,6 +815,11 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let mut a_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch.try_into().unwrap());
     a_config.consensus.get_mut().chunk_size = 32;
     a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    a_config
+        .consensus
+        .get_mut()
+        .enable_full_ingress_proof_validation = enable_full_validation;
+
     // signers
     // Create a signer (keypair) for the peer and fund it
     let b_signer = a_config.new_random_signer();
