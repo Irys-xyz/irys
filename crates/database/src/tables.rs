@@ -104,7 +104,7 @@ use reth_db::table::TableInfo;
 tables! {
 IrysTables;
 
-/// Stores the header hashes belonging to the canonical chain.
+/// Stores block headers keyed by their hash (canonical chain).
 table IrysBlockHeaders {
     type Key = H256;
     type Value = CompactIrysBlockHeader;
@@ -116,7 +116,7 @@ table IrysPoAChunks {
     type Value = CompactBase64;
 }
 
-/// Stores the tx header headers that have been confirmed
+/// Stores confirmed transaction headers
 table IrysTxHeaders {
     type Key = H256;
     type Value = CompactTxHeader;
