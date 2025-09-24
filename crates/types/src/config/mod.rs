@@ -45,7 +45,6 @@ impl Config {
         );
 
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
-        // TODO: once anchor maturity is enforced, apply that value here
         ensure!(
             std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
                 <= (self.consensus.mempool.anchor_expiry_depth)
