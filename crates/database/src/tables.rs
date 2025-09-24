@@ -177,7 +177,7 @@ table ProgrammableDataCache {
 
 /// Tracks the peer list of known peers as well as their reputation score.
 /// While the node maintains connections to a subset of these peers - the
-/// ones with high reputation - the PeerListEntries contain all the peers
+/// ones with high reputation - the PeerListItems contain all the peers
 /// that the node is aware of and is periodically updated via peer discovery
 table PeerListItems {
     type Key = Address;
