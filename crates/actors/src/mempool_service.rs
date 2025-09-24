@@ -303,11 +303,7 @@ impl Inner {
 
         Ok(MempoolStatus {
             data_tx_count: state.valid_submit_ledger_tx.len(),
-            commitment_tx_count: state
-                .valid_commitment_tx
-                .values()
-                .map(|txs| txs.len())
-                .sum(),
+            commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
             pending_chunks_count: state.pending_chunks.len(),
             pending_pledges_count: state.pending_pledges.len(),
             recent_valid_tx_count: state.recent_valid_tx.len(),
