@@ -1044,11 +1044,23 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_a.gossip_enable();
         node_b.gossip_enable();
         node_c.gossip_enable();
-        // Gossip all blocks so everyone syncs
-        node_b.gossip_block_to_peers(&b_block2)?;
-        node_b.gossip_block_to_peers(&b_block3)?;
-        node_c.gossip_block_to_peers(&c_block4)?;
-        node_a.gossip_block_to_peers(&a_block2)?;
+        if enable_full_validation {
+            // Use full block transfer so chunks arrive before validation
+            node_b.send_full_block(&node_a, &b_block2).await?;
+            node_b.send_full_block(&node_a, &b_block3).await?;
+            node_c.send_full_block(&node_a, &c_block4).await?;
+            // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
+            // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
+            // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
+            node_a.send_block_to_peer(&node_b, &a_block2).await?;
+            node_a.send_block_to_peer(&node_c, &a_block2).await?;
+        } else {
+            // Gossip all blocks so everyone syncs
+            node_b.gossip_block_to_peers(&b_block2)?;
+            node_b.gossip_block_to_peers(&b_block3)?;
+            node_c.gossip_block_to_peers(&c_block4)?;
+            node_a.gossip_block_to_peers(&a_block2)?;
+        }
     }
     //
     // Stage 9: FINAL STATE CHECKS
