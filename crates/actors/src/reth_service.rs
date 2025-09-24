@@ -43,6 +43,11 @@ pub enum RethServiceMessage {
     },
 }
 
+// - safe and finalized are <= head (ancestors or equal).
+// - finalized never decreases; safe virtually never decreases.
+// - Reorgs never cross your finalized point (by policy/design).
+// - If chain height < k_safe, safe = head (or genesis).
+// - finalized only points to blocks already in your non-reorgable index.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForkChoiceUpdate {
     pub head_hash: B256,

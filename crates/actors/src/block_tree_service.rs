@@ -18,7 +18,7 @@ use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
     create_epoch_snapshot_for_block, make_block_tree_entry, BlockState, BlockTree, BlockTreeEntry,
-    BlockTreeReadGuard, ChainState, EpochReplayData,
+    BlockTreeReadGuard, CanonicalAnchors, ChainState, EpochReplayData,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
@@ -316,30 +316,33 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn notify_services_of_block_confirmation(
-        &self,
-        tip_hash: BlockHash,
-        confirmed_block: &Arc<IrysBlockHeader>,
-    ) {
-        debug!(
-            "confirming irys block evm_block_hash: {} ({})",
-            &confirmed_block.evm_block_hash, &confirmed_block.height
+    fn maybe_emit_chain_update(&self, tip_block: Arc<IrysBlockHeader>, anchors: CanonicalAnchors) {
+        debug_assert_eq!(
+            anchors.head.block_hash, tip_block.block_hash,
+            "canonical chain head mismatch with staged tip",
         );
+
+        debug!(
+            head = %anchors.head.block_hash,
+            migration = %anchors.migration_block.block_hash,
+            prune = %anchors.prune_block.block_hash,
+            "broadcasting canonical chain update",
+        );
+
         self.service_senders
             .reth_service
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
-                    head_hash: tip_hash,
-                    confirmed_hash: Some(confirmed_block.block_hash),
-                    finalized_hash: None,
+                    head_hash: anchors.head.block_hash,
+                    confirmed_hash: Some(anchors.migration_block.block_hash),
+                    finalized_hash: Some(anchors.prune_block.block_hash),
                 },
             })
             .expect("Unable to send confirmation FCU message to reth");
+
         self.service_senders
             .mempool
-            .send(MempoolServiceMessage::BlockConfirmed(
-                confirmed_block.clone(),
-            ))
+            .send(MempoolServiceMessage::BlockConfirmed(tip_block))
             .expect("mempool service has unexpectedly become unreachable");
     }
 
@@ -593,9 +596,7 @@ impl BlockTreeServiceInner {
             return Ok(());
         }
 
-        let state;
-
-        let (arc_block, epoch_block, reorg_event, finalized_at_prune_depth) = {
+        let (arc_block, epoch_block, reorg_event, tip_changed, state, pending_chain_update) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -644,25 +645,28 @@ impl BlockTreeServiceInner {
                 .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
             let arc_block = Arc::new(block_entry.block.clone());
 
-            // Now do mutable operations
-            let mark_tip_result = if cache.mark_tip(&block_hash).is_ok() {
+            let tip_changed = match cache.mark_tip(&block_hash) {
+                Ok(changed) => changed,
+                Err(err) => {
+                    error!(block_hash = %block_hash, error = %err, "failed to mark block as tip");
+                    return Ok(());
+                }
+            };
+
+            let (epoch_block, reorg_event, pending_chain_update) = if tip_changed {
+                let anchors = cache
+                    .canonical_anchors(
+                        self.config.consensus.block_migration_depth as usize,
+                        self.config.consensus.block_tree_depth as usize,
+                    )
+                    .expect("canonical chain cannot be empty");
+                let pending_chain_update = Some((anchors, arc_block.clone()));
+
                 // Prune the cache after tip changes.
                 //
                 // Subtract 1 to ensure we keep exactly `depth` blocks.
                 // The cache.prune() implementation does not count `tip` into the depth
                 // equation, so it's always tip + `depth` that's kept around
-                // Before pruning, compute which block reaches prune depth behind the new tip
-                let finalized_at_prune_depth = {
-                    let (longest_chain, _) = cache.get_canonical_chain();
-                    let prune_depth = self.config.consensus.block_tree_depth as usize;
-                    if longest_chain.len() > prune_depth {
-                        let idx = longest_chain.len() - 1 - prune_depth;
-                        Some(longest_chain[idx].block_hash)
-                    } else {
-                        None
-                    }
-                };
-
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
                 if is_reorg {
@@ -769,12 +773,7 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (
-                        arc_block,
-                        new_epoch_block,
-                        Some(event),
-                        finalized_at_prune_depth,
-                    )
+                    (new_epoch_block, Some(event), pending_chain_update)
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -791,18 +790,25 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (arc_block, new_epoch_block, None, finalized_at_prune_depth)
+                    (new_epoch_block, None, pending_chain_update)
                 }
             } else {
-                (arc_block, None, None, None)
+                (None, None, None)
             };
 
-            state = cache
+            let state = cache
                 .get_block_and_status(&block_hash)
                 .map(|(_, state)| *state)
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-            mark_tip_result
+            (
+                arc_block,
+                epoch_block,
+                reorg_event,
+                tip_changed,
+                state,
+                pending_chain_update,
+            )
         }; // RwLockWriteGuard is dropped here, before the await
 
         // Send epoch events which require a Read lock
@@ -819,24 +825,12 @@ impl BlockTreeServiceInner {
             }
         }
 
-        // Send finalization update for block at prune depth, if any
-        if let Some(finalized_hash) = finalized_at_prune_depth {
-            self.service_senders
-                .reth_service
-                .send(RethServiceMessage::ForkChoice {
-                    update: ForkChoiceUpdateMessage {
-                        head_hash: block_hash,
-                        confirmed_hash: None,
-                        finalized_hash: Some(finalized_hash),
-                    },
-                })
-                .expect("Unable to send finalization message to reth");
+        if let Some((anchors, tip_block)) = pending_chain_update {
+            self.maybe_emit_chain_update(tip_block, anchors);
         }
 
-        self.notify_services_of_block_confirmation(block_hash, &arc_block);
-
         // Broadcast difficulty update to miners if tip difficulty changed from parent
-        let parent_diff_changed = {
+        let parent_diff_changed = tip_changed && {
             let cache = self.cache.read().expect("cache read lock poisoned");
             let parent_block = cache
                 .get_block(&arc_block.previous_block_hash)
@@ -856,8 +850,10 @@ impl BlockTreeServiceInner {
         }
 
         // Handle block migration (move chunks to disk and add to block_index)
-        self.try_notify_services_of_block_migration(&arc_block)
-            .await;
+        if tip_changed {
+            self.try_notify_services_of_block_migration(&arc_block)
+                .await;
+        }
 
         let event = BlockStateUpdated {
             block_hash,
