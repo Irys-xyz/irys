@@ -1737,7 +1737,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// - `send_full_block` requires that the sender has the EVM execution payload available locally
     ///   (otherwise it will panic). For blocks produced “without gossip,” prefer:
     ///   - Using `send_block_to_peer` for the header; and, if needed,
-   ///   - Pushing the EVM payload to the peer separately (e.g., gossiping the EVM block) before
+    ///   - Pushing the EVM payload to the peer separately (e.g., gossiping the EVM block) before
     ///     attempting a full transfer.
     pub async fn send_block_to_peer(
         &self,
