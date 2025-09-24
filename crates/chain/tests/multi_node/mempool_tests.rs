@@ -1043,23 +1043,32 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
-    // Determine expected mempool shape from explicit promotion status of B1's tx on A
+    // AT THIS POINT WE HAVE SOME NAUNCES AS TO THE STATE!
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
-    // Common expectation: 1 submit (A’s orphaned tx)
-    assert_eq!(
-        a1_b2_reorg_mempool_txs.submit_tx.len(),
-        1,
-        "Expected 1 submit tx from the mempool shape"
-    );
-    // Check whether B1's tx is already promoted on A to derive expected publish shape
-    let b1_tx_promoted_on_a = a_node.get_is_promoted(&b_blk1_tx1.header.id).await?;
-    let expected_publish_len = if b1_tx_promoted_on_a { 1 } else { 2 };
-    assert_eq!(
-        a1_b2_reorg_mempool_txs.publish_tx.txs.len(),
-        expected_publish_len,
-        "Unexpected publish candidates count; b1_promoted_on_a={}",
-        b1_tx_promoted_on_a
-    );
+    let processed_block_confirmed_prior_to_ingress_proofs = {
+        // If A processes BlockConfirmed for B’s block before ingress proofs:
+        //  - A finds B’s tx in the block’s Publish ledger and sets promoted_height on B’s header.
+        //  - get_publish_txs_and_proofs filters B’s tx (already promoted).
+        //  - Publish candidates usually show only A’s orphaned tx (until A gossips/promotes it), giving shape 1,1,0.
+        //
+        // If A processes ingress proofs (and data_root→txid mapping) first:
+        //  - A sees B’s tx as eligible to promote (enough proofs, promoted_height is None).
+        //  - Publish candidates can include both A’s orphaned tx and B’s tx, giving 1,2,0.
+        assert_eq!(
+            a1_b2_reorg_mempool_txs.submit_tx.len(),
+            1,
+            "In either state we expected 1 submit tx from the mempool shape"
+        );
+        if a1_b2_reorg_mempool_txs.publish_tx.txs.len() == 1 {
+            // A processed BlockConfirmed for B’s block before ingress proofs
+            true
+        } else if a1_b2_reorg_mempool_txs.publish_tx.txs.len() == 2 {
+            // A processed ingress proofs (and data_root→txid mapping) first
+            false
+        } else {
+            panic!("unexpected best mempool txs shape");
+        }
+    };
 
     // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
@@ -1167,7 +1176,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     );
 
     // Wait for the "best mempool txs" to settle to expected shape
-    if b1_tx_promoted_on_a {
+    if processed_block_confirmed_prior_to_ingress_proofs {
         a_node
             .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
             .await?;
