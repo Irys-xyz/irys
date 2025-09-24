@@ -25,9 +25,8 @@ pub struct AnchorBlock {
 
 /// CanonicalAnchors captures the head plus safe/finalized anchor blocks used for fork choice.
 /// `head` tracks the current canonical tip broadcast to downstream services.
-/// `migration_block` marks the migration depth where chunks are guaranteed on-chain.
-/// `prune_block` marks the finalized boundary past which forks are irrelevant.
-/// Flags report whether the configured migration and prune depths have been satisfied.
+/// `migration_block` marks the migration depth to block index.
+/// `prune_block` marks the prune depth of the block tree.
 #[derive(Debug, Clone)]
 pub struct CanonicalAnchors {
     pub head: AnchorBlock,
@@ -2576,8 +2575,8 @@ mod tests {
         let genesis = random_block(U256::from(0));
         let mut cache = BlockTree::new(&genesis, consensus);
 
-        let mut prev = cache.get_block(&genesis.block_hash).unwrap().clone();
-        prev = insert_chain_block(&mut cache, &prev, U256::from(1));
+        let prev = cache.get_block(&genesis.block_hash).unwrap().clone();
+        let _prev = insert_chain_block(&mut cache, &prev, U256::from(1));
 
         let anchors = cache
             .canonical_anchors(5, 8)

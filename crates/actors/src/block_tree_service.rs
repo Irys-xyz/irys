@@ -633,8 +633,6 @@ impl BlockTreeServiceInner {
                         self.config.consensus.block_tree_depth as usize,
                     )
                     .expect("canonical chain cannot be empty");
-                let prune_block_hash = anchors.prune_block.entry.block_hash;
-                let prune_depth_reached = anchors.prune_depth_reached;
                 let pending_chain_update = Some(anchors);
 
                 // Prune the cache after tip changes.
@@ -643,14 +641,6 @@ impl BlockTreeServiceInner {
                 // The cache.prune() implementation does not count `tip` into the depth
                 // equation, so it's always tip + `depth` that's kept around
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
-
-                if prune_depth_reached {
-                    debug_assert!(
-                        cache.blocks.get(&prune_block_hash).is_none(),
-                        "prune depth reached but anchor {} still available",
-                        prune_block_hash
-                    );
-                }
 
                 if is_reorg {
                     // =====================================

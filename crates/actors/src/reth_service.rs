@@ -19,7 +19,6 @@ pub struct RethService {
     handle: IrysRethNodeAdapter,
     db: DatabaseProvider,
     mempool: UnboundedSender<MempoolServiceMessage>,
-    latest_fcu: ForkChoiceUpdate,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +108,6 @@ impl RethService {
             handle,
             db: database_provider,
             mempool,
-            latest_fcu: ForkChoiceUpdate::default(),
         };
 
         let join_handle = runtime_handle.spawn(async move {
@@ -171,8 +169,7 @@ impl RethService {
         debug!(?update, "Received fork choice update command");
 
         let resolved = self.resolve_new_fcu(update).await?;
-        let latest = self.process_fcu(resolved).await?;
-        self.latest_fcu = latest;
+        self.process_fcu(resolved).await?;
         Ok(())
     }
 
