@@ -270,6 +270,65 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
     entropy
 }
 
+/// Runs entropy packing, starting with the testnet config's step count, calibrating the iterations between runs to get to ~3.5s/chunk - returning the value once `runs` runs are complete
+/// Note: please set `runs` to a decently high value, so calibration can occur on the maximum sustained performance, instead of the short lived peak performance
+/// This function may not accurately provide an iteration count for tests, or when many threads are run at the same time
+/// to calibrate that, run multiple instances of this function at the same time and take the lowest value
+/// (this is particularly notable on Heterogenous CPUs, with some higher and some lower performance cores)
+pub fn calibrate_packing(runs: u64) -> u32 {
+    let target_secs = std::time::Duration::from_millis(3_500).as_secs_f64();
+
+    let chunk_size = 256 * 1024;
+    let mining_address = Address::random();
+    let partition_hash = irys_types::H256::random();
+    let mut iterations = 10_000_000;
+    let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    let chain_id = 1270;
+
+    // we don't early return once we have a precise value - this is to allow the calibration to accurately reflect the sustained performance
+    for attempt in 0..runs {
+        let start = std::time::Instant::now();
+
+        capacity_single::compute_entropy_chunk(
+            mining_address,
+            0,
+            partition_hash.0,
+            iterations,
+            chunk_size,
+            &mut entropy_chunk,
+            chain_id,
+        );
+
+        let elapsed = start.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+
+        let ratio = target_secs / elapsed_secs;
+
+        println!(
+            "attempt {}: {} iterations took {:.6}s (target: {:.6}s, ratio: {:.4})",
+            attempt + 1,
+            iterations,
+            elapsed_secs,
+            target_secs,
+            ratio
+        );
+
+        // adjust iterations based on the ratio of target time to actual time
+        iterations = (iterations as f64 * ratio).round() as u32;
+
+        if iterations == 0 {
+            iterations = 1;
+        }
+    }
+
+    println!(
+        "maximum attempts reached - best approximation: {}",
+        iterations
+    );
+
+    iterations
+}
+
 #[cfg(test)]
 mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
