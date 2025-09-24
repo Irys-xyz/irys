@@ -75,7 +75,7 @@ pub struct ChunkPathHashes {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
-/// chunk offsets
+/// relative start offsets
 /// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
 pub struct RelativeStartOffsets(pub Vec<RelativeChunkOffset>);
 
