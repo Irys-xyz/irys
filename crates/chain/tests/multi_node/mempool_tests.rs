@@ -779,19 +779,19 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// prime a fork - mine one block on A and two on B
 ///  the second B block should promote B's storage tx
 /// assert A and B's blocks include their respective promoted tx
-/// trigger a reorg - gossip B's txs & blocks to A
+/// trigger a reorg - send B's txs & blocks to A
 /// assert that A has a reorg event
 /// assert that A's tx is returned to the mempool
-/// gossip A's tx to B & prepare it for promotion
+/// send A's tx to B & prepare it for promotion
 /// mine a block on B, assert A's tx is included correctly
-/// gossip B's block back to A, assert mempool state ingress proofs etc are correct
+/// send B's block back to A, assert mempool state ingress proofs etc are correct
 // TODO: once longer forks are stable & if it's worthwhile:
 /// mine 4 blocks on C
-/// gossip these to A
+/// send  C's blocks to A
 /// assert all txs return to mempool
-/// gossip C's blocks to B
+/// send C's blocks to B
 /// assert txs return to mempool
-/// gossip returned txs to C
+/// send returned txs to C
 /// mine a block on C, assert that all reorgd txs are present
 #[actix_web::test]
 async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
