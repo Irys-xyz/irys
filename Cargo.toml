@@ -511,4 +511,5 @@ default.extend-ignore-re = [
   "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
+default.extend-words = { ratatui = "ratatui" }
 files.extend-exclude = ["ext/*", "fixtures/*"]
