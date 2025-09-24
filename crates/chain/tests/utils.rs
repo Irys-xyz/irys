@@ -1713,8 +1713,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    /// useful in tests when creating forks and
-    /// needing to send specific blocks between specific peers
+    /// Sends only the Irys block header directly to a specific peer, bypassing gossip.
+    ///
+    /// Important:
+    /// - This does NOT transfer:
+    ///   - Data transaction headers beyond what the block already references
+    ///   - Any data chunks for those transactions
+    ///   - The EVM execution payload for this block
+    /// - In contrast, `send_full_block`:
+    ///   - Ingests data tx headers on the peer
+    ///   - Optionally transfers chunks (when the peer has full ingress-proof validation enabled)
+    ///   - Pushes the EVM execution payload into the peer’s cache before delivering the header
+    ///
+    /// When to use:
+    /// - Prefer `send_block_to_peer` when you only need to deliver the header and do not require
+    ///   proof/chunk verification during validation (e.g., full ingress-proof validation is disabled),
+    ///   or when the receiver already has all required chunks/payloads.
+    /// - If `enable_full_ingress_proof_validation` is true on the receiving node and the block’s
+    ///   Publish ledger contains transactions with proofs, use `send_full_block` (or pre-ingest chunks)
+    ///   so validation can verify proofs against actual chunk bytes.
+    ///
+    /// Execution payload note:
+    /// - `send_full_block` requires that the sender has the EVM execution payload available locally
+    ///   (otherwise it will panic). For blocks produced “without gossip,” prefer:
+    ///   - Using `send_block_to_peer` for the header; and, if needed,
+   ///   - Pushing the EVM payload to the peer separately (e.g., gossiping the EVM block) before
+    ///     attempting a full transfer.
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
