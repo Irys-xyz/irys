@@ -1,7 +1,7 @@
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, DataTransactionHeader,
-    IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
+    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, CommitmentTransaction,
+    DataTransactionHeader, IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
 };
 pub use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -36,6 +36,13 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         transaction: DataTransactionHeader,
     ) -> Result<()>;
 
+    /// Post a commitment transaction to a node
+    async fn post_commitment_transaction(
+        &self,
+        peer: SocketAddr,
+        transaction: CommitmentTransaction,
+    ) -> Result<()>;
+
     /// Fetch multiple transaction headers by their IDs from a peer
     async fn get_transactions(
         &self,
@@ -53,6 +60,13 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         &self,
         peer: SocketAddr,
         block_hash: H256,
+    ) -> Result<Option<CombinedBlockHeader>>;
+
+    /// Gets block by height
+    async fn get_block_by_height(
+        &self,
+        peer: SocketAddr,
+        block_height: u64,
     ) -> Result<Option<CombinedBlockHeader>>;
 
     async fn get_block_index(
@@ -161,6 +175,22 @@ impl ApiClient for IrysApiClient {
         }
     }
 
+    async fn post_commitment_transaction(
+        &self,
+        peer: SocketAddr,
+        transaction: CommitmentTransaction,
+    ) -> Result<()> {
+        let path = "/commitment_tx";
+        let response = self
+            .make_request::<(), _>(peer, Method::POST, path, Some(&transaction))
+            .await;
+
+        match response {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn get_transactions(
         &self,
         peer: SocketAddr,
@@ -198,6 +228,17 @@ impl ApiClient for IrysApiClient {
         block_hash: H256,
     ) -> Result<Option<CombinedBlockHeader>> {
         let path = format!("/block/{}", block_hash);
+
+        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
+            .await
+    }
+
+    async fn get_block_by_height(
+        &self,
+        peer: SocketAddr,
+        block_height: u64,
+    ) -> Result<Option<CombinedBlockHeader>> {
+        let path = format!("/block/{}", block_height);
 
         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
             .await
@@ -310,6 +351,22 @@ pub mod test_utils {
         async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
             Ok(NodeInfo::default())
         }
+
+        async fn post_commitment_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: CommitmentTransaction,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_block_by_height(
+            &self,
+            _peer: SocketAddr,
+            _block_height: u64,
+        ) -> Result<Option<CombinedBlockHeader>> {
+            Ok(None)
+        }
     }
 }
 
@@ -387,6 +444,22 @@ mod tests {
 
         async fn node_info(&self, _peer: SocketAddr) -> Result<NodeInfo> {
             Ok(NodeInfo::default())
+        }
+
+        async fn post_commitment_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: CommitmentTransaction,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_block_by_height(
+            &self,
+            _peer: SocketAddr,
+            _block_height: u64,
+        ) -> Result<Option<CombinedBlockHeader>> {
+            Ok(None)
         }
     }
 

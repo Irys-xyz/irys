@@ -400,7 +400,7 @@ impl PeerList {
             .await
     }
 
-    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, PeerListDataInner> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, PeerListDataInner> {
         self.0.read().expect("PeerListDataInner lock poisoned")
     }
 

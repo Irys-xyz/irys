@@ -1,7 +1,8 @@
 use crate::utils::IrysNodeTest;
 use assert_matches::assert_matches;
+use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
-use irys_types::NodeConfig;
+use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig};
 
 #[actix_web::test]
 async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
@@ -12,22 +13,29 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     initialize_tracing();
 
     let seconds_to_wait = 30;
-    let mut genesis_config = NodeConfig::testing();
 
     // Set up consensus to require 3 ingress proofs to promote
-    genesis_config
-        .consensus
-        .get_mut()
-        .number_of_ingress_proofs_total = 3;
-    genesis_config.consensus.get_mut().chunk_size = 32;
+    let mut config = NodeConfig::testing()
+        .with_consensus(|consensus| {
+            consensus.chunk_size = 32;
+            consensus.number_of_ingress_proofs_total = 3;
+            consensus.number_of_ingress_proofs_from_assignees = 2;
+            consensus.num_partitions_per_slot = 3;
+            consensus.epoch.num_blocks_in_epoch = 3;
+            consensus.block_migration_depth = 1;
+        })
+        .with_genesis_peer_discovery_timeout(1000);
+
+    config.consensus.get_mut().number_of_ingress_proofs_total = 3;
+    config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it
-    let peer1_signer = genesis_config.new_random_signer();
-    let peer2_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
+    let peer1_signer = config.new_random_signer();
+    let peer2_signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
 
     // Start the genesis node and wait for packing
-    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
@@ -48,8 +56,8 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
 
     genesis_node.wait_until_height(1, seconds_to_wait).await?;
 
-    let peer1_stake_tx = peer1_node.post_stake_commitment(None).await?;
-    let peer2_stake_tx = peer2_node.post_stake_commitment(None).await?;
+    let peer1_stake_tx = stake_and_pledge_signer(&peer1_node, &peer1_signer, 3).await?;
+    let peer2_stake_tx = stake_and_pledge_signer(&peer2_node, &peer2_signer, 3).await?;
 
     genesis_node
         .wait_for_mempool_commitment_txs(
@@ -70,6 +78,9 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     peer2_node
         .wait_until_height(height_before_commitments + 1, seconds_to_wait)
         .await?;
+
+    genesis_node.mine_until_next_epoch().await?; // Get peers assigned capacity partitions
+    genesis_node.mine_until_next_epoch().await?; // Gets peer partitions assigned to data ledger slots
 
     // Post a transaction and it's chunks to all 3
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
@@ -128,7 +139,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
 
     genesis_node
         .wait_until_height_confirmed(
-            height + genesis_config.consensus_config().block_migration_depth as u64,
+            height + config.consensus_config().block_migration_depth as u64,
             seconds_to_wait,
         )
         .await?;
@@ -142,4 +153,24 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     peer1_node.stop().await;
     peer2_node.stop().await;
     Ok(())
+}
+
+async fn post_multiple_pledges(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    signer: &IrysSigner,
+    count: usize,
+) {
+    for _ in 0..count {
+        node.post_pledge_commitment_with_signer(signer).await;
+    }
+}
+
+async fn stake_and_pledge_signer(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    signer: &IrysSigner,
+    pledge_count: usize,
+) -> eyre::Result<CommitmentTransaction> {
+    let commitment_tx = node.post_stake_commitment_with_signer(signer).await?;
+    post_multiple_pledges(node, signer, pledge_count).await;
+    Ok(commitment_tx)
 }

@@ -1,6 +1,7 @@
 //! api client tests
 
 use crate::utils::IrysNodeTest;
+use irys_api_client::ApiClientExt as _;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
@@ -177,6 +178,85 @@ async fn heavy_api_client_all_endpoints_should_work() {
     check_get_block_endpoint(&api_client, api_address, &ctx).await;
     check_get_block_index_endpoint(&api_client, api_address, &ctx).await;
     check_info_endpoint(&api_client, api_address, &ctx).await;
+
+    ctx.node_ctx.stop().await;
+}
+
+/// Ensures wait_for_promotion returns an error when the tx was never posted or is otherwise missing.
+/// Guards against silent success on NOT_FOUND or invalid responses from /tx/{id}/promotion_status.
+#[test_log::test(actix_rt::test)]
+async fn api_client_wait_for_promotion_errors_for_missing_tx() {
+    let config = NodeConfig::testing();
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.wait_for_packing(20).await;
+
+    let api_address = SocketAddr::new(
+        IpAddr::from_str("127.0.0.1").unwrap(),
+        ctx.node_ctx.config.node_config.http.bind_port,
+    );
+    let api_client = IrysApiClient::new();
+
+    // Create a tx but do NOT post it; waiting for promotion should error out
+    let tx = ctx
+        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![7, 8, 9])
+        .await
+        .unwrap();
+
+    let result = api_client
+        .wait_for_promotion(api_address, tx.header.id, 3)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "wait_for_promotion should error for a missing/unposted tx"
+    );
+
+    ctx.node_ctx.stop().await;
+}
+
+/// Ensures wait_for_promotion succeeds for a properly posted tx after uploading chunks and mining.
+/// Guards against regressions in /tx/{id}/promotion_status and client polling behavior.
+#[test_log::test(actix_rt::test)]
+async fn api_client_wait_for_promotion_happy_path() {
+    let config = NodeConfig::testing();
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.wait_for_packing(20).await;
+
+    let api_address = SocketAddr::new(
+        IpAddr::from_str("127.0.0.1").unwrap(),
+        ctx.node_ctx.config.node_config.http.bind_port,
+    );
+    let api_client = IrysApiClient::new();
+
+    // Create a full data tx, upload chunks, and post header
+    let tx = ctx
+        .create_signed_data_tx(
+            &ctx.node_ctx.config.irys_signer(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        .await
+        .unwrap();
+
+    // Upload chunks first so the node has the data
+    api_client
+        .upload_chunks(api_address, &tx)
+        .await
+        .expect("upload_chunks should succeed");
+
+    // Post the transaction header
+    api_client
+        .post_transaction(api_address, tx.header.clone())
+        .await
+        .expect("post_transaction should succeed");
+
+    // Optionally advance a block to drive background processing
+    let _ = ctx.mine_block().await.expect("expected mined block");
+
+    // This should succeed if promotion occurs within the attempts window
+    api_client
+        .wait_for_promotion(api_address, tx.header.id, 100)
+        .await
+        .expect("wait_for_promotion should succeed for a properly posted tx");
 
     ctx.node_ctx.stop().await;
 }

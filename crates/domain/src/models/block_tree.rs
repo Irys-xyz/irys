@@ -1446,8 +1446,8 @@ mod tests {
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testing();
         let genesis_header = IrysBlockHeader {
-            oracle_irys_price: config.genesis_price,
-            ema_irys_price: config.genesis_price,
+            oracle_irys_price: config.genesis.genesis_price,
+            ema_irys_price: config.genesis.genesis_price,
             ..Default::default()
         };
         EmaSnapshot::genesis(&genesis_header)

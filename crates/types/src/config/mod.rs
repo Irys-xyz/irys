@@ -16,6 +16,7 @@ pub struct Config(Arc<CombinedConfigInner>);
 impl Config {
     pub fn new(node_config: NodeConfig) -> Self {
         let consensus = node_config.consensus_config();
+
         Self(Arc::new(CombinedConfigInner {
             consensus,
             mempool: node_config.mempool(),
@@ -36,14 +37,32 @@ impl Config {
     // TODO: expand this!
     pub fn validate(&self) -> eyre::Result<()> {
         // ensures the block tree is able to contain all unmigrated blocks
-        ensure!((self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth);
+        ensure!(
+            (self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth,
+            "Block tree depth ({}) is smaller than the block migration depth ({})",
+            &self.consensus.block_tree_depth,
+            &self.consensus.block_migration_depth
+        );
 
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
-        // TODO: once anchor maturity is enforced, apply that value here
         ensure!(
             std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
-                <= (self.consensus.mempool.anchor_expiry_depth + 4)
+                <= (self.consensus.mempool.anchor_expiry_depth)
         );
+
+        if matches!(self.node_config.node_mode, NodeMode::Peer) {
+            ensure!(
+                self.consensus.expected_genesis_hash.is_some(),
+                "expected_genesis_hash must be set in consensus config for peer nodes"
+            );
+        }
+
+        // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
+        let minimum_step_capacity = self
+            .consensus
+            .num_chunks_in_partition
+            .div_ceil(self.consensus.num_chunks_in_recall_range);
+        ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
 
         Ok(())
     }
@@ -399,7 +418,6 @@ mod tests {
         let toml_data = r#"
         chain_id = 1270
         token_price_safe_range = 1.0
-        genesis_price = 1.0
         annual_cost_per_gb = 0.01
         decay_rate = 0.01
         chunk_size = 32
@@ -419,6 +437,7 @@ mod tests {
         minimum_term_fee_usd = 0.01
 
         [genesis]
+        genesis_price = 1.0
         miner_address = "0x0000000000000000000000000000000000000000"
         reward_address = "0x0000000000000000000000000000000000000000"
         last_epoch_hash = "11111111111111111111111111111111"
@@ -510,6 +529,10 @@ mod tests {
         genesis_peer_discovery_timeout_millis = 10000
         stake_pledge_drives = false
         initial_whitelist = ["127.0.0.1:8080"]
+        initial_stake_and_pledge_whitelist = [
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32",
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+        ]
 
         [[trusted_peers]]
         gossip = "127.0.0.1:8081"
@@ -541,7 +564,7 @@ mod tests {
         public_ip = "127.0.0.1"
         public_port = 0
 
-        [packing]
+        [packing.local]
         cpu_packing_concurrency = 4
         gpu_packing_batch_size = 1024
 
@@ -590,10 +613,18 @@ mod tests {
             },
         }];
         expected_config.initial_whitelist = vec!["127.0.0.1:8080".parse().unwrap()];
+        expected_config.initial_stake_and_pledge_whitelist = vec![
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+                .parse()
+                .unwrap(),
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+                .parse()
+                .unwrap(),
+        ];
         // for debugging purposes
 
-        // let expected_toml_data = toml::to_string(&expected_config).unwrap();
-        // println!("{}", expected_toml_data);
+        let expected_toml_data = toml::to_string(&expected_config).unwrap();
+        println!("{}", expected_toml_data);
 
         // Deserialize the TOML string into a NodeConfig
         let config = toml::from_str::<NodeConfig>(toml_data)
@@ -629,7 +660,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert_eq!(config.node_mode, NodeMode::Peer);
+        assert!(matches!(config.node_mode, NodeMode::Peer));
 
         // Check consensus config fields
         let consensus = config.consensus_config();

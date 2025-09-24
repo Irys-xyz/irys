@@ -3,7 +3,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    CommitmentTransaction, NodeConfig, H256,
+    CommitmentTransaction, NodeConfig,
 };
 use tracing::info;
 
@@ -35,7 +35,8 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 1: Stake commitment
     let stake_tx = {
-        let commitment = CommitmentTransaction::new_stake(&consensus_config, H256::zero());
+        let commitment =
+            CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
         user1_signer.sign_commitment(commitment)?
     };
     node.post_commitment_tx(&stake_tx).await?;
@@ -51,7 +52,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 3: Data transaction (1KB)
     let data_tx1 = node
-        .post_data_tx(H256::zero(), vec![1_u8; 1024], &user2_signer)
+        .post_data_tx(node.get_anchor().await?, vec![1_u8; 1024], &user2_signer)
         .await;
     node.wait_for_mempool(data_tx1.header.id, 10).await?;
     node.mine_block().await?;
@@ -59,13 +60,14 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 4: Multiple transactions (stake + 2KB data tx)
     let stake_tx2 = {
-        let commitment = CommitmentTransaction::new_stake(&consensus_config, H256::zero());
+        let commitment =
+            CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
         user2_signer.sign_commitment(commitment)?
     };
     node.post_commitment_tx(&stake_tx2).await?;
 
     let data_tx2 = node
-        .post_data_tx(H256::zero(), vec![2_u8; 2048], &user1_signer)
+        .post_data_tx(node.get_anchor().await?, vec![2_u8; 2048], &user1_signer)
         .await;
 
     node.wait_for_mempool(stake_tx2.id, 10).await?;

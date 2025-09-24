@@ -368,11 +368,19 @@ pub struct HandshakeMessage {
     pub force: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnnouncementFinishedMessage {
+    pub peer_api_address: SocketAddr,
+    pub success: bool,
+    pub retry: bool,
+}
+
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub enum PeerNetworkServiceMessage {
     Handshake(HandshakeMessage),
     AnnounceYourselfToPeer(PeerListItem),
+    AnnouncementFinished(AnnouncementFinishedMessage),
     RequestDataFromNetwork {
         data_request: GossipDataRequest,
         use_trusted_peers_only: bool,

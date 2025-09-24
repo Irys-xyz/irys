@@ -52,9 +52,6 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
-    ReloadCacheFromDb {
-        response: oneshot::Sender<eyre::Result<()>>,
-    },
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -243,49 +240,7 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
             }
-            BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
-                let res = self.reload_cache_from_db().await;
-                let _ = response.send(res);
-            }
         }
-        Ok(())
-    }
-
-    async fn reload_cache_from_db(&self) -> eyre::Result<()> {
-        let replay_data =
-            EpochReplayData::query_replay_data(&self.db, &self.block_index_guard, &self.config)
-                .await?;
-        debug!("Reloading block tree cache from database");
-        let new_block_tree_cache = BlockTree::restore_from_db(
-            self.block_index_guard.clone(),
-            replay_data,
-            self.db.clone(),
-            &self.storage_submodules_config,
-            self.config.clone(),
-        )?;
-        *self.cache.write().expect("cache write lock poisoned") = new_block_tree_cache;
-
-        //  Notify reth service
-        let tip_hash = {
-            let block_index = self.block_index_guard.read();
-
-            match block_index.get_latest_item() {
-                Some(block_index_item) => block_index_item.block_hash,
-                None => {
-                    // if the block index is empty or out of sync, panic to cause a node restart
-                    panic!("the block index is empty or out of sync");
-                }
-            }
-        };
-
-        self.reth_service_actor
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(tip_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .expect("could not send message to `RethServiceActor`");
-
         Ok(())
     }
 

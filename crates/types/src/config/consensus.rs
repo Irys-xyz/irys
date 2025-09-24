@@ -47,16 +47,12 @@ pub struct ConsensusConfig {
     )]
     pub token_price_safe_range: Amount<Percentage>,
 
-    /// The initial price of the Irys token at genesis in USD
-    /// Sets the baseline for all future pricing calculations
-    #[serde(
-        deserialize_with = "serde_utils::token_amount",
-        serialize_with = "serde_utils::serializes_token_amount"
-    )]
-    pub genesis_price: Amount<(IrysPrice, Usd)>,
-
     /// Genesis-specific config values
     pub genesis: GenesisConfig,
+
+    /// Expected genesis hash (when joining existing networks)
+    #[serde(default)]
+    pub expected_genesis_hash: Option<H256>,
 
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
@@ -261,6 +257,14 @@ pub struct GenesisConfig {
     /// If not set in config, defaults to the same value as `vdf_seed`.
     #[serde(default)]
     pub vdf_next_seed: Option<H256>,
+
+    /// The initial price of the Irys token at genesis in USD
+    /// Sets the baseline for all future pricing calculations
+    #[serde(
+        deserialize_with = "serde_utils::token_amount",
+        serialize_with = "serde_utils::serializes_token_amount"
+    )]
+    pub genesis_price: Amount<(IrysPrice, Usd)>,
 }
 
 /// # Epoch Configuration
@@ -410,7 +414,6 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs_total: 1,
             number_of_ingress_proofs_from_assignees: 0,
-            genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
                 timestamp_millis: 0,
                 miner_address: Address::ZERO,
@@ -418,7 +421,9 @@ impl ConsensusConfig {
                 last_epoch_hash: H256::zero(),
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
+                genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             },
+            expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
@@ -520,7 +525,6 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             number_of_ingress_proofs_total: 1,
             number_of_ingress_proofs_from_assignees: 0,
-            genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             genesis: GenesisConfig {
                 timestamp_millis: 0,
                 miner_address: Address::ZERO,
@@ -528,7 +532,9 @@ impl ConsensusConfig {
                 last_epoch_hash: H256::zero(),
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
+                genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             },
+            expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 51_872_000,
