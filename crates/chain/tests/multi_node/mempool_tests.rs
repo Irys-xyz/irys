@@ -1035,7 +1035,6 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
             b_node.get_block_by_height(network_height).await?
         );
     }
-    tracing::warn!("####### REORG on node A, COMPLETE");
 
     // ensure mempool has settled to expected shape for submit/publish
     // (allow both A and B txs to appear)
