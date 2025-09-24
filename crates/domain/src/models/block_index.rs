@@ -1,6 +1,6 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
-use actix::dev::MessageResponse;
+
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
@@ -238,7 +238,7 @@ impl BlockIndex {
 
 /// `BlockBounds` describe the size of a ledger at the start of a block
 /// and then after the blocks transactions were applied to the ledger
-#[derive(Debug, Default, Clone, PartialEq, Eq, MessageResponse)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BlockBounds {
     /// Block height where these bounds apply
     pub height: u128,

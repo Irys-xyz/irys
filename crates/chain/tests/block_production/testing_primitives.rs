@@ -54,7 +54,7 @@ async fn heavy_test_mine_tx() {
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
     let tx = irys_node
-        .create_publish_data_tx(&account, data)
+        .post_publish_data_tx(&account, data)
         .await
         .unwrap();
     irys_node.mine_block().await.unwrap();

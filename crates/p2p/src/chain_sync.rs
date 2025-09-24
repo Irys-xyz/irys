@@ -2,14 +2,16 @@ use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::reth_service::RethServiceActor;
+use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
+use irys_database::database;
+use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
-    PeerListItem, SyncMode, TokioServiceHandle,
+    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, DatabaseProvider, EvmBlockHash,
+    NodeMode, PeerListItem, SyncMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
@@ -112,6 +114,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     reth_service_actor: Option<Addr<RethServiceActor>>,
     /// An atomic bool to enable or disable VDF mining when sync is in progress
     is_vdf_mining_enabled: Arc<AtomicBool>,
+    is_update_whitelist_task_running: Arc<AtomicBool>,
 }
 
 /// Main sync service that runs in its own tokio task
@@ -178,7 +181,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         sync_state: ChainSyncState,
         api_client: A,
         peer_list: PeerList,
-        config: irys_types::Config,
+        config: Config,
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
@@ -196,6 +199,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             gossip_data_handler,
             reth_service_actor,
             is_vdf_mining_enabled,
+            is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -221,9 +225,9 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             return;
         }
 
+        // Check if we have any new whitelist updates
+        self.spawn_stake_and_pledge_update_task();
         self.is_sync_task_spawned.store(true, Ordering::Relaxed);
-
-        let start_sync_from_height = self.block_index.read().latest_height();
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
@@ -232,11 +236,15 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
-        let reth_service_addr = self.reth_service_actor.clone();
+        let mut reth_service_addr = self.reth_service_actor.clone();
         let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
+        let start_sync_from_height = self.block_index.read().latest_height();
+        let block_index = self.block_index.clone();
 
         tokio::spawn(
             async move {
+                debug!("Starting sync from height: {}", start_sync_from_height);
+
                 gossip_data_handler
                     .gossip_client
                     .hydrate_peers_online_status(&peer_list)
@@ -252,13 +260,21 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 }
 
                 if let Err(err) = block_pool
-                    .repair_missing_payloads_if_any(reth_service_addr, Arc::clone(&gossip_data_handler))
+                    .repair_missing_payloads_if_any(reth_service_addr.clone(), Arc::clone(&gossip_data_handler))
                     .await
                 {
                     error!(
                         "Sync task: Failed to repair missing payloads before starting sync: {:?}",
                         err
                     );
+                }
+
+                if is_initial_sync {
+                    update_reth_with_initial_block(
+                        &block_index,
+                        &block_pool.db,
+                        &mut reth_service_addr,
+                    ).await;
                 }
 
                 let res = sync_chain(
@@ -348,6 +364,30 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
             );
             Ok(())
         }
+    }
+
+    fn spawn_stake_and_pledge_update_task(&self) {
+        let stake_and_pledge_whitelist_running_flag = self.is_update_whitelist_task_running.clone();
+        let is_task_already_running =
+            stake_and_pledge_whitelist_running_flag.load(Ordering::Relaxed);
+        if is_task_already_running {
+            debug!("Stake and pledge whitelist update task is already running, skipping new task spawn");
+            return;
+        } else {
+            stake_and_pledge_whitelist_running_flag.store(true, Ordering::Relaxed);
+        }
+        let handler = self.gossip_data_handler.clone();
+        tokio::spawn(async move {
+            match handler.pull_and_process_stake_and_pledge_whitelist().await {
+                Ok(()) => {
+                    info!("Successfully updated stake and pledge whitelist",);
+                }
+                Err(e) => {
+                    error!("Failed to update stake and pledge whitelist: {:?}", e);
+                }
+            }
+            stake_and_pledge_whitelist_running_flag.store(false, Ordering::Relaxed);
+        });
     }
 
     /// Request parent block from network - moved from OrphanBlockProcessingService
@@ -493,6 +533,8 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
             } => {
                 debug!("SyncChainService: Received a signal that block {:?} has been processed by the pool, looking for unprocessed descendants", block_hash);
                 let inner = self.inner.clone();
+                // Check for whitelist updates after every block validation
+                self.inner.spawn_stake_and_pledge_update_task();
                 tokio::spawn(async move {
                     let result = inner.process_orphaned_ancestors(block_hash).await;
                     if let Some(sender) = response {
@@ -681,7 +723,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     let block_index = match get_block_index(
         peer_list,
         &api_client,
-        sync_state.sync_target_height(),
+        // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
+        sync_state.sync_target_height() + 1,
         BLOCK_BATCH_SIZE,
         5,
         is_trusted_mode,
@@ -928,15 +971,19 @@ async fn pull_highest_blocks(
 ) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
     let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
-        debug!("Collecting highest blocks from trusted peers");
+        debug!("Post-sync: Collecting the highest blocks from trusted peers");
         peer_list.online_trusted_peers()
     } else {
         let limit = top_n.unwrap_or(10);
-        debug!("Collecting highest blocks from top {} active peers", limit);
+        debug!(
+            "Post-sync: Collecting the highest blocks from top {} active peers",
+            limit
+        );
         peer_list.top_active_peers(Some(limit), None)
     };
 
     if peers.is_empty() {
+        warn!("Post-sync: No peers available to pull the highest blocks from");
         return Err(ChainSyncError::Network(
             "No online peers available".to_string(),
         ));
@@ -949,7 +996,7 @@ async fn pull_highest_blocks(
         match api_client.node_info(peer.address.api).await {
             Ok(info) => {
                 let hash = info.block_hash;
-                let height = info.block_index_height;
+                let height = info.height;
                 let entry = peers_by_top_block_hash
                     .entry(hash)
                     .or_insert_with(|| (height, Vec::new()));
@@ -962,13 +1009,13 @@ async fn pull_highest_blocks(
                     entry.1.push((miner_address, peer.clone()));
                 }
                 debug!(
-                    "Peer {:?} reported highest block hash {:?} (api: {})",
+                    "Post-sync: Peer {:?} reported highest block hash {:?} (api: {})",
                     miner_address, hash, peer.address.api
                 );
             }
             Err(err) => {
                 warn!(
-                    "Failed to fetch node info from peer {:?} (api: {}): {}",
+                    "Post-sync: Failed to fetch node info from peer {:?} (api: {}): {}",
                     miner_address, peer.address.api, err
                 );
             }
@@ -997,6 +1044,12 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
 
     let mut futures = Vec::new();
     for (block_hash, (reported_height, peers)) in peers_by_top_block_hash {
+        debug!(
+            "Post-sync: Considering pull of block {:?} (height {}) reported by {} peer(s)",
+            block_hash,
+            reported_height,
+            peers.len()
+        );
         // Filter out blocks that are already processed or currently being processed
         if gossip_data_handler
             .block_pool
@@ -1296,25 +1349,58 @@ async fn is_local_index_is_behind_trusted_peers(
     }
 }
 
+// Sends a fork choice update message to the Reth service actor with the latest block from the block index
+async fn update_reth_with_initial_block(
+    block_index: &BlockIndexReadGuard,
+    irys_db: &DatabaseProvider,
+    reth_service_addr: &mut Option<Addr<RethServiceActor>>,
+) {
+    // Read the latest from the block index; if no entries, panic
+    let latest_block_index = block_index
+        .get_latest_item_cloned()
+        .expect("a block index must have at least one entry at init");
+    let latest_block = database::block_header_by_hash(
+        &irys_db.tx().unwrap(),
+        &latest_block_index.block_hash,
+        false,
+    )
+    .expect("database to be accessible during init")
+    .expect("at least the genesis block header must be in the database");
+
+    // update reth service about the latest block data it must use
+    if let Some(reth_service_addr) = reth_service_addr {
+        reth_service_addr
+            .send(ForkChoiceUpdateMessage {
+                head_hash: BlockHashType::Evm(latest_block.evm_block_hash),
+                confirmed_hash: Some(BlockHashType::Evm(latest_block.evm_block_hash)),
+                finalized_hash: None,
+            })
+            .await
+            .expect("reth service actor to be alive at init")
+            .expect("reth service actor to process the fork choice update message at init");
+        debug!("Reth Service Actor updated about fork choice");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer_network_service::spawn_peer_network_service_with_client;
     use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+    use futures::FutureExt as _;
     use irys_types::BlockHash;
 
     mod catch_up_task {
         use super::*;
-        use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
             Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -1399,20 +1485,28 @@ mod tests {
 
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
-            let peer_list_service = PeerNetworkService::new_with_custom_api_client(
+
+            let tokio_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_peer_sender,
                 receiver,
                 sender,
+                tokio_handle,
             );
-            let peer_service_addr = peer_list_service.start();
-            let peer_list_guard = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("to get a peer list")
-                .expect("to get a peer list");
 
             peer_list_guard.add_or_update_peer(
                 Address::repeat_byte(2),
@@ -1454,7 +1548,7 @@ mod tests {
                 let data_requests = block_index_requests.lock().unwrap();
                 assert_eq!(data_requests.len(), 3);
                 debug!("Data requests: {:?}", data_requests);
-                assert_eq!(data_requests[0].height, 10);
+                assert_eq!(data_requests[0].height, 11);
                 assert_eq!(data_requests[1].height, 11);
                 assert_eq!(data_requests[0].limit, 10);
                 assert_eq!(data_requests[1].limit, 10);
@@ -1519,13 +1613,26 @@ mod tests {
             let reth_mock_addr = reth_mock.start();
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let peer_list_service = PeerNetworkService::new_with_custom_api_client(
+            let runtime_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_peer_sender,
                 receiver,
                 sender,
+                runtime_handle,
             );
 
             let fake_peer_address = PeerAddress {
@@ -1533,13 +1640,6 @@ mod tests {
                 api: SocketAddr::from(([127, 0, 0, 1], 1270)),
                 execution: Default::default(),
             };
-
-            let peer_service_addr = peer_list_service.start();
-            let peer_list = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("to get peer list")
-                .expect("to get peer list");
 
             peer_list.add_or_update_peer(
                 Address::repeat_byte(2),
@@ -1585,11 +1685,9 @@ mod tests {
 
     mod post_sync_unique_highest_blocks {
         use super::*;
-        use crate::peer_network_service::PeerNetworkService;
         use crate::tests::util::data_handler_stub;
         use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
         use crate::types::GossipResponse;
-        use crate::GetPeerListGuard;
         use actix::Actor as _;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -1597,7 +1695,7 @@ mod tests {
         use irys_types::{
             Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
             NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
-            SyncMode,
+            RethPeerInfo, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1659,20 +1757,28 @@ mod tests {
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
-            let peer_service = PeerNetworkService::new_with_custom_api_client(
+
+            let runtime_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_peer_sender,
                 receiver,
                 sender,
+                runtime_handle,
             );
-            let peer_service_addr = peer_service.start();
-            let peer_list_guard = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("peer list")
-                .expect("peer list");
 
             // Add two peers reporting the same highest hash
             let peer1 = PeerListItem {
@@ -1785,20 +1891,28 @@ mod tests {
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
-            let peer_service = PeerNetworkService::new_with_custom_api_client(
+
+            let runtime_handle = tokio::runtime::Handle::current();
+            let reth_peer_sender = {
+                let reth_mock_addr = reth_mock_addr.clone();
+                Arc::new(move |peer_info: RethPeerInfo| {
+                    let addr = reth_mock_addr.clone();
+                    async move {
+                        let _ = addr.send(peer_info).await;
+                    }
+                    .boxed()
+                })
+            };
+
+            let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
                 api_client_stub.clone(),
-                reth_mock_addr.clone(),
+                reth_peer_sender,
                 receiver,
                 sender,
+                runtime_handle,
             );
-            let peer_service_addr = peer_service.start();
-            let peer_list_guard = peer_service_addr
-                .send(GetPeerListGuard)
-                .await
-                .expect("peer list")
-                .expect("peer list");
 
             let peer1 = PeerListItem {
                 reputation_score: PeerScore::new(100),

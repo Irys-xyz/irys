@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod basic_contract;
 pub mod block_production;
+mod block_rebuilding;
 pub mod block_validation;
 mod difficulty_adjustment;
 mod reset_seed;

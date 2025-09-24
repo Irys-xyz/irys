@@ -61,7 +61,7 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     // 2. Post a data_tx that will cause the submit ledger to add a slot (9 chunks worth of bytes)
     let data = vec![255_u8; 9 * chunk_size];
     let data_tx = genesis_node
-        .create_publish_data_tx(&genesis_signer, data)
+        .post_publish_data_tx(&genesis_signer, data)
         .await?;
     genesis_node.post_data_tx_raw(&data_tx.header).await;
 

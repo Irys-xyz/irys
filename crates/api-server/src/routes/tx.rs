@@ -216,9 +216,9 @@ pub async fn get_tx_local_start_offset(
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PromotionStatus {
-    is_promoted: bool,
+    pub is_promoted: bool,
     #[serde(default, with = "option_u64_stringify")]
-    promotion_height: Option<u64>,
+    pub promotion_height: Option<u64>,
 }
 
 // TODO: REMOVE ME ONCE WE HAVE A GATEWAY

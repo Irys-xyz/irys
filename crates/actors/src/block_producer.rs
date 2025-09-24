@@ -61,6 +61,30 @@ mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
 
+/// Result of checking parent validity and solution compatibility
+#[derive(Debug)]
+pub enum ParentCheckResult {
+    /// Parent is still the best canonical block - keep current block
+    ParentStillBest,
+    /// Parent changed but solution is valid - must rebuild on new parent
+    MustRebuild { new_parent: H256 },
+    /// Solution is completely invalid and must be discarded
+    SolutionInvalid {
+        new_parent: H256,
+        reason: InvalidReason,
+    },
+}
+
+/// Reason why a solution is completely invalid
+#[derive(Debug)]
+pub enum InvalidReason {
+    /// Solution VDF step is at or before the new parent's VDF step
+    VdfTooOld {
+        parent_vdf_step: u64,
+        solution_vdf_step: u64,
+    },
+}
+
 /// Commands that can be sent to the block producer service
 #[derive(Debug)]
 pub enum BlockProducerCommand {
@@ -341,38 +365,50 @@ pub trait BlockProdStrategy {
             .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
     }
 
-    /// Selects the parent block for new block production.
-    ///
-    /// Targets the block with highest cumulative difficulty, but only if fully validated.
-    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
-    /// the latest validated block on timeout to ensure production continues.
-    ///
-    /// Returns the selected parent block header and its EMA snapshot.
-    #[tracing::instrument(skip(self), level = "debug")]
-    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-        let inner = self.inner();
-        // Use BlockValidationTracker to select the parent block
-        let parent_block_hash = BlockValidationTracker::new(
-            inner.block_tree_guard.clone(),
-            inner.service_senders.clone(),
-            MAX_WAIT_TIME,
-        )
-        .wait_for_validation()
-        .await?;
+    /// Checks parent validity and determines if the solution is still valid.
+    /// Returns a descriptive result indicating the required action.
+    async fn check_parent_and_solution_validity(
+        &self,
+        parent_hash: &H256,
+        solution: &SolutionContext,
+    ) -> ParentCheckResult {
+        let tree = self.inner().block_tree_guard.read();
+        let (_max_difficulty, current_best) = tree.get_max_cumulative_difficulty_block();
 
-        // Fetch the parent block header
-        let header = self.fetch_block_header(parent_block_hash).await?;
+        // Check if parent is still the best
+        if current_best == *parent_hash {
+            return ParentCheckResult::ParentStillBest;
+        }
 
-        // Get the EMA snapshot
-        let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
+        // Parent changed - get new parent's VDF step
+        let new_parent_vdf_step = tree
+            .get_block(&current_best)
+            .map(|b| b.vdf_limiter_info.global_step_number)
+            .unwrap_or(0);
 
-        Ok((header, ema_snapshot))
+        // Check if solution is too old (at or before new parent's VDF step)
+        if solution.vdf_step <= new_parent_vdf_step {
+            return ParentCheckResult::SolutionInvalid {
+                new_parent: current_best,
+                reason: InvalidReason::VdfTooOld {
+                    parent_vdf_step: new_parent_vdf_step,
+                    solution_vdf_step: solution.vdf_step,
+                },
+            };
+        }
+
+        // Parent changed but solution is valid - must rebuild on new parent
+        ParentCheckResult::MustRebuild {
+            new_parent: current_best,
+        }
     }
 
-    async fn fully_produce_new_block_without_gossip(
+    /// Core block production logic that can be used for both initial production and rebuilds.
+    async fn produce_block_with_parent(
         &self,
-        solution: SolutionContext,
+        solution: &SolutionContext,
+        prev_block_header: IrysBlockHeader,
+        prev_block_ema_snapshot: Arc<EmaSnapshot>,
     ) -> eyre::Result<
         Option<(
             Arc<IrysBlockHeader>,
@@ -380,7 +416,6 @@ pub trait BlockProdStrategy {
             EthBuiltPayload,
         )>,
     > {
-        let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
@@ -430,17 +465,141 @@ pub trait BlockProdStrategy {
         Ok(Some((block, stats, eth_built_payload)))
     }
 
+    /// Selects the parent block for new block production.
+    ///
+    /// Targets the block with highest cumulative difficulty, but only if fully validated.
+    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
+    /// the latest validated block on timeout to ensure production continues.
+    ///
+    /// Returns the selected parent block header and its EMA snapshot.
+    #[tracing::instrument(skip(self), level = "debug")]
+    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+        let inner = self.inner();
+        // Use BlockValidationTracker to select the parent block
+        let parent_block_hash = BlockValidationTracker::new(
+            inner.block_tree_guard.clone(),
+            inner.service_senders.clone(),
+            MAX_WAIT_TIME,
+        )
+        .wait_for_validation()
+        .await?;
+
+        // Fetch the parent block header
+        let header = self.fetch_block_header(parent_block_hash).await?;
+
+        // Get the EMA snapshot
+        let ema_snapshot = self.get_block_ema_snapshot(&header.block_hash)?;
+
+        Ok((header, ema_snapshot))
+    }
+
+    async fn fully_produce_new_block_without_gossip(
+        &self,
+        solution: &SolutionContext,
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            EthBuiltPayload,
+        )>,
+    > {
+        let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
+        self.produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
+            .await
+    }
+
+    /// Produces a new block with automatic parent chain rebuild capability.
+    ///
+    /// # Race Condition Handling
+    /// This function addresses a critical race condition where the canonical parent block
+    /// can change while we're producing a block, which would waste the valuable mining solution.
+    ///
+    /// ## The Problem
+    /// 1. Block production takes time
+    /// 2. During this time, another node might broadcast a new block
+    /// 3. If that block becomes the new canonical tip, building on the old parent wastes the solution
+    ///
+    /// ## The Solution
+    /// After producing a block, we check if the parent is still the best canonical block.
+    /// If not, we rebuild the block on the new parent, reusing the same solution hash.
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        let result = self
-            .fully_produce_new_block_without_gossip(solution)
+        let mut rebuild_attempts = 0;
+
+        // Initial block production
+        let mut result = self
+            .fully_produce_new_block_without_gossip(&solution)
             .await?;
+
+        // Check if we need to rebuild on a new parent
+        while let Some((ref block, _, _)) = result {
+            let parent_hash = &block.previous_block_hash;
+
+            match self
+                .check_parent_and_solution_validity(parent_hash, &solution)
+                .await
+            {
+                ParentCheckResult::ParentStillBest => {
+                    // Parent is still the best, keep the current block
+                    break;
+                }
+
+                ParentCheckResult::MustRebuild { new_parent } => {
+                    info!(
+                        solution_hash = %solution.solution_hash,
+                        solution_vdf_step = solution.vdf_step,
+                        new_parent = %new_parent,
+                        rebuild_attempt = rebuild_attempts + 1,
+                        "Parent changed but solution is valid - rebuilding on new parent"
+                    );
+
+                    // Rebuild the block on the new parent
+                    result = self
+                        .fully_produce_new_block_without_gossip(&solution)
+                        .await?;
+                    rebuild_attempts += 1;
+                }
+
+                ParentCheckResult::SolutionInvalid { new_parent, reason } => {
+                    // Log the specific reason why solution is invalid
+                    match &reason {
+                        InvalidReason::VdfTooOld {
+                            parent_vdf_step,
+                            solution_vdf_step,
+                        } => {
+                            warn!(
+                                solution_hash = %solution.solution_hash,
+                                solution_vdf_step,
+                                new_parent = %new_parent,
+                                parent_vdf_step,
+                                "Solution is too old for new parent (vdf_step {} <= {}), discarding",
+                                solution_vdf_step,
+                                parent_vdf_step
+                            );
+                        }
+                    }
+                    // Solution is completely invalid, cannot produce a block
+                    return Ok(None);
+                }
+            }
+        }
 
         let Some((block, stats, eth_built_payload)) = result else {
             return Ok(None);
         };
+
+        if rebuild_attempts > 0 {
+            info!(
+                solution_hash = %solution.solution_hash,
+                final_parent = %block.previous_block_hash,
+                block_height = block.height,
+                rebuild_count = rebuild_attempts,
+                "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
+            );
+        }
 
         if !block.data_ledgers[DataLedger::Publish].tx_ids.is_empty() {
             debug!(
@@ -625,7 +784,7 @@ pub trait BlockProdStrategy {
 
     async fn produce_block_without_broadcasting(
         &self,
-        solution: SolutionContext,
+        solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
         submit_txs: Vec<DataTransactionHeader>,
         publish_txs: PublishLedgerWithTxs,
@@ -688,7 +847,7 @@ pub trait BlockProdStrategy {
             .and_then(|pa| pa.ledger_id);
 
         // Create PoA data using the trait method
-        let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
+        let (poa, poa_chunk_hash) = self.create_poa_data(solution, ledger_id)?;
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
@@ -782,7 +941,7 @@ pub trait BlockProdStrategy {
             ],
             evm_block_hash,
             vdf_limiter_info: VDFLimiterInfo::new(
-                &solution,
+                solution,
                 prev_block_header,
                 steps,
                 &self.inner().config,

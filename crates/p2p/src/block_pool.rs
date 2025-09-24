@@ -4,7 +4,6 @@ use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::block_validation::shadow_transactions_are_valid;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
 use irys_actors::MempoolFacade;
@@ -85,7 +84,7 @@ where
     M: MempoolFacade,
 {
     /// Database provider for accessing transaction headers and related data.
-    db: DatabaseProvider,
+    pub(crate) db: DatabaseProvider,
 
     blocks_cache: BlockCacheGuard,
 
@@ -289,8 +288,11 @@ where
         reth_service: Option<Addr<RethServiceActor>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
+        // This function repairs missing execution payloads for already-validated blocks.
+        // Since blocks have been validated when accepted into the block index, we
+        // presume that the block is valid and submit the payload to reth
         debug!(
-            "Block pool: Validating and submitting execution payload for block {:?}",
+            "Block pool: Repairing missing execution payload for block {:?}",
             block_header.block_hash
         );
 
@@ -313,22 +315,6 @@ where
                 "Reth payload provider is not set".into(),
             ))?;
 
-        // Get parent epoch snapshot from block tree
-        let parent_epoch_snapshot = self
-            .block_status_provider
-            .block_tree_read_guard()
-            .read()
-            .get_epoch_snapshot(&block_header.previous_block_hash)
-            .ok_or_else(|| {
-                BlockPoolError::OtherInternal(format!(
-                    "Parent epoch snapshot isn't found for block {:?}",
-                    block_header.previous_block_hash
-                ))
-            })?;
-
-        // Get block index from the block status provider
-        let block_index = self.block_status_provider.block_index_read_guard().inner();
-
         Self::pull_and_seal_execution_payload(
             &self.execution_payload_provider,
             &self.sync_service_sender,
@@ -344,28 +330,33 @@ where
             ))
         })?;
 
-        match shadow_transactions_are_valid(
-            &self.config,
-            &self.service_senders,
+        // Fetch the execution data that was already pulled and sealed
+        let execution_data = self
+            .execution_payload_provider
+            .wait_for_payload(&block_header.evm_block_hash)
+            .await
+            .ok_or_else(|| {
+                BlockPoolError::OtherInternal(format!(
+                    "Failed to fetch execution payload for block {:?}",
+                    block_header.evm_block_hash
+                ))
+            })?;
+
+        // Directly submit the payload to reth
+        irys_actors::block_validation::submit_payload_to_reth(
             block_header,
             adapter,
-            &self.db,
-            self.execution_payload_provider.clone(),
-            parent_epoch_snapshot,
-            block_index,
+            execution_data,
         )
         .await
-        {
-            Ok(()) => {}
-            Err(err) => {
-                return Err(BlockPoolError::OtherInternal(format!(
-                    "Failed to validate and submit the execution payload for block {:?}: {:?}",
-                    block_header.block_hash, err
-                )));
-            }
-        }
+        .map_err(|err| {
+            BlockPoolError::OtherInternal(format!(
+                "Failed to submit payload to reth for block {:?}: {:?}",
+                block_header.block_hash, err
+            ))
+        })?;
         debug!(
-            "Block pool: Execution payload for block {:?} validated and submitted",
+            "Block pool: Execution payload for block {:?} repaired and submitted",
             block_header.block_hash
         );
 
@@ -543,6 +534,11 @@ where
                     prev_block_hash
                 );
                 return Ok(ProcessBlockResult::ParentAlreadyInCache);
+            } else {
+                debug!(
+                    "Parent block for block {:?} is not in the cache either",
+                    current_block_hash
+                );
             }
 
             let canonical_height = self.block_status_provider.canonical_height();
@@ -559,6 +555,10 @@ where
                 return Ok(ProcessBlockResult::ParentTooFarAhead);
             }
 
+            debug!(
+                "Requesting parent block {:?} for block {:?} from the network",
+                prev_block_hash, current_block_hash
+            );
             // Use the sync service to request parent block (fire and forget)
             if let Err(send_err) =
                 self.sync_service_sender
@@ -573,6 +573,10 @@ where
                 );
                 return Ok(ProcessBlockResult::ParentRequestFailed);
             } else {
+                debug!(
+                    "Block pool: Requested parent block {:?} for block {:?} from the network",
+                    prev_block_hash, current_block_hash
+                );
                 return Ok(ProcessBlockResult::ParentRequested);
             }
         }

@@ -4,7 +4,7 @@ use crate::{
         phantoms::{IrysPrice, Usd},
         Amount,
     },
-    ConsensusConfig, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig,
+    ConsensusConfig, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
 };
 use crate::{serde_utils, ConsensusOptions};
 use alloy_genesis::GenesisAccount;
@@ -43,6 +43,13 @@ pub struct NodeConfig {
 
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<PeerAddress>,
+
+    /// Initial whitelist of miner who can post stake and pledge transaction. To be removed on a
+    /// later date. If this field is empty, all peers are allowed to stake and pledge.
+    /// This has effect only on the genesis node, as all other nodes will get this parameter
+    /// from their trusted peers.
+    #[serde(default)]
+    pub initial_stake_and_pledge_whitelist: Vec<Address>,
 
     /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
     /// trusted-only or trusted-and-handshake mode, you'll be supplied one during the handshake
@@ -115,7 +122,8 @@ pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
 
-    /// Join an existing network by connecting to trusted peers
+    /// Join an existing network by connecting to trusted peers.
+    /// Requires `consensus.expected_genesis_hash` to be set.
     Peer,
 }
 
@@ -254,11 +262,29 @@ pub struct RethNetworkConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackingConfig {
+    #[serde(default)]
+    pub local: LocalPackingConfig,
+    #[serde(default)]
+    pub remote: Vec<RemotePackingConfig>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
 
     /// Batch size for GPU-accelerated packing operations
     pub gpu_packing_batch_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePackingConfig {
+    pub url: String,
+
+    // This is the read (max time between streamed chunks) and connection timeout
+    pub timeout: Option<Duration>,
 }
 
 /// # Cache Configuration
@@ -522,6 +548,7 @@ impl NodeConfig {
                 gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
                 execution: crate::RethPeerInfo::default(), // TODO: figure out how to pre-compute peer IDs
             }*/],
+            initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
@@ -541,8 +568,11 @@ impl NodeConfig {
                 },
             },
             packing: PackingConfig {
-                cpu_packing_concurrency: 4,
-                gpu_packing_batch_size: 1024,
+                local: LocalPackingConfig {
+                    cpu_packing_concurrency: 4,
+                    gpu_packing_batch_size: 1024,
+                },
+                remote: Default::default(),
             },
             cache: CacheConfig { cache_clean_lag: 2 },
             http: HttpConfig {
@@ -617,6 +647,7 @@ impl NodeConfig {
         let reward_address = signer.address();
         consensus.genesis.miner_address = reward_address;
         consensus.genesis.reward_address = reward_address;
+        consensus.expected_genesis_hash = Some(H256::zero());
         Self {
             node_mode: NodeMode::Peer,
             sync_mode: SyncMode::Full,
@@ -646,6 +677,7 @@ impl NodeConfig {
             //     gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr expected"),
             //     execution: reth_peer_info, // TODO: figure out how to pre-compute peer IDs
             // }],
+            initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
             gossip: GossipConfig {
@@ -665,8 +697,11 @@ impl NodeConfig {
                 },
             },
             packing: PackingConfig {
-                cpu_packing_concurrency: 4,
-                gpu_packing_batch_size: 1024,
+                local: LocalPackingConfig {
+                    cpu_packing_concurrency: 4,
+                    gpu_packing_batch_size: 1024,
+                },
+                remote: Default::default(),
             },
             cache: CacheConfig { cache_clean_lag: 2 },
             http: HttpConfig {

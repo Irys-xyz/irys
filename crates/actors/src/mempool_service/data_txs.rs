@@ -185,7 +185,7 @@ impl Inner {
 
         // Cache the data_root in the database
         match self.irys_db.update_eyre(|db_tx| {
-            irys_database::cache_data_root(db_tx, &tx)?;
+            irys_database::cache_data_root(db_tx, &tx, None)?;
             Ok(())
         }) {
             Ok(()) => {

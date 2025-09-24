@@ -22,7 +22,7 @@
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
-    recall_recall_range_is_valid, shadow_transactions_are_valid,
+    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
 };
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
@@ -330,7 +330,7 @@ impl BlockValidationTask {
             }
         };
 
-        // Shadow transaction validation
+        // Shadow transaction validation (pure validation, no reth submission)
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
 
@@ -349,7 +349,6 @@ impl BlockValidationTask {
                 config,
                 service_senders,
                 block,
-                &self.service_inner.reth_node_adapter,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
                 parent_epoch_snapshot,
@@ -358,8 +357,6 @@ impl BlockValidationTask {
             .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or(ValidationResult::Invalid)
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
@@ -420,10 +417,18 @@ impl BlockValidationTask {
             data_txs_validation_task
         );
 
+        // Check shadow_tx_result first to extract ExecutionData
+        let execution_data = match shadow_tx_result {
+            Ok(data) => data,
+            Err(_) => {
+                tracing::debug!("Shadow transaction validation failed, not submitting to reth");
+                return Ok(ValidationResult::Invalid);
+            }
+        };
+
         match (
             recall_result,
             poa_result,
-            shadow_tx_result,
             seeds_validation_result,
             commitment_ordering_result,
             data_txs_result,
@@ -434,13 +439,31 @@ impl BlockValidationTask {
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
-                ValidationResult::Valid,
             ) => {
-                tracing::debug!("block validation successful");
-                Ok(ValidationResult::Valid)
+                tracing::debug!("All consensus validations successful, submitting to reth");
+
+                // All consensus layer validations passed, now submit to execution layer
+                let reth_result = submit_payload_to_reth(
+                    &self.block,
+                    &self.service_inner.reth_node_adapter,
+                    execution_data,
+                )
+                .instrument(tracing::info_span!("reth_submission", block_hash = %self.block.block_hash, block_height = %self.block.height))
+                .await;
+
+                match reth_result {
+                    Ok(()) => {
+                        tracing::debug!("Reth execution layer validation successful");
+                        Ok(ValidationResult::Valid)
+                    }
+                    Err(err) => {
+                        tracing::error!(?err, "Reth execution layer validation failed");
+                        Ok(ValidationResult::Invalid)
+                    }
+                }
             }
             _ => {
-                tracing::debug!("block validation failed");
+                tracing::debug!("Consensus validation failed, not submitting to reth");
                 Ok(ValidationResult::Invalid)
             }
         }

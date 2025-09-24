@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, H256};
+use irys_types::{irys::IrysSigner, DataLedger, NodeConfig};
 
 #[actix_web::test]
 /// demonstrate that duplicate txs are allowed into mempool, to allow for forks, but not returned by handle_get_best_mempool_txs()
@@ -28,7 +28,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
 
     // create and submit a data transaction
     let tx_data = vec![1_u8; 64];
-    let anchor = H256::zero();
+    let anchor = node.get_anchor().await?;
     let tx_for_migration = node.post_data_tx(anchor, tx_data, &signer).await;
     let txid = tx_for_migration.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
@@ -52,7 +52,6 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     )
     .await?;
 
-    let anchor = node.get_anchor().await?;
     // check the shape of the mempool equates to empty
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
@@ -79,7 +78,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // create and submit a data transaction
     let tx_data = vec![1_u8; 64];
 
-    let tx_for_mempool = node.post_data_tx(H256::zero(), tx_data, &signer).await;
+    let tx_for_mempool = node.post_data_tx(anchor, tx_data, &signer).await;
     let txid = tx_for_mempool.header.id;
     node.wait_for_mempool(txid, seconds_to_wait).await?;
 

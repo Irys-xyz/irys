@@ -676,7 +676,7 @@ where
             &self.state.iter().collect::<Vec<_>>()
         );
 
-        self.distribute_priority_fee(total_fee, fee_payer_address, beneficiary, tx_hash)?;
+        self.distribute_priority_fee(total_fee, fee_payer_address, beneficiary)?;
 
         let (new_account_state, target) =
             self.process_shadow_transaction(&shadow_tx, tx_hash, beneficiary)?;
@@ -826,7 +826,6 @@ where
         total_fee: U256,
         fee_payer_address: Option<Address>,
         beneficiary: Address,
-        tx_hash: &FixedBytes<32>,
     ) -> Result<(), <Self as Evm>::Error> {
         // Early return if no fee to distribute
         if total_fee.is_zero() {
@@ -846,13 +845,11 @@ where
             // Validate account exists (but don't check balance since no transfer occurs)
             let account_state = self.load_account(target)?;
             if account_state.is_none() {
-                return Err(Self::create_invalid_tx_error(
-                    *tx_hash,
-                    InvalidTransaction::LackOfFundForMaxFee {
-                        fee: Box::new(total_fee),
-                        balance: Box::new(U256::ZERO),
-                    },
-                ));
+                return Err(Self::create_internal_error(format!(
+                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {}, Fee: {}",
+                    target,
+                    total_fee
+                )));
             }
 
             tracing::trace!(
@@ -872,7 +869,7 @@ where
 
         // Prepare fee transfer
         let (target_state, beneficiary_state) =
-            self.prepare_fee_transfer(target, beneficiary, total_fee, tx_hash)?;
+            self.prepare_fee_transfer(target, beneficiary, total_fee)?;
 
         let bef = self.load_account(beneficiary)?.unwrap();
 
@@ -895,10 +892,9 @@ where
         target: Address,
         beneficiary: Address,
         total_fee: U256,
-        tx_hash: &FixedBytes<32>,
     ) -> Result<(Account, Account), <Self as Evm>::Error> {
         // Deduct fee from target
-        let mut target_state = self.deduct_fee_from_target(target, total_fee, tx_hash)?;
+        let mut target_state = self.deduct_fee_from_target(target, total_fee)?;
         target_state.status = AccountStatus::Touched;
 
         // Add fee to beneficiary
@@ -916,13 +912,12 @@ where
     /// Deducts the fee from the target account after validating sufficient balance.
     ///
     /// # Errors
-    /// - Returns `InvalidTransaction::NonceTooHigh` if target account doesn't exist
-    /// - Returns `InvalidTransaction::LackOfFundForMaxFee` if insufficient balance
+    /// - Returns an internal error if target account doesn't exist
+    /// - Returns an internal error if insufficient balance
     fn deduct_fee_from_target(
         &mut self,
         target: Address,
         fee: U256,
-        tx_hash: &FixedBytes<32>,
     ) -> Result<Account, <Self as Evm>::Error> {
         // Load target account
         let target_state = self.load_account(target)?;
@@ -933,13 +928,11 @@ where
                 target = %target,
                 "Target account does not exist, cannot deduct priority fee"
             );
-            return Err(Self::create_invalid_tx_error(
-                *tx_hash,
-                InvalidTransaction::LackOfFundForMaxFee {
-                    fee: Box::new(fee),
-                    balance: Box::new(U256::ZERO),
-                },
-            ));
+            return Err(Self::create_internal_error(format!(
+                "Shadow transaction priority fee failed: target account does not exist. Target: {}, Required fee: {}",
+                target,
+                fee
+            )));
         };
 
         // Validate sufficient balance
@@ -950,13 +943,12 @@ where
                 required_fee = %fee,
                 "Target has insufficient balance for priority fee"
             );
-            return Err(Self::create_invalid_tx_error(
-                *tx_hash,
-                InvalidTransaction::LackOfFundForMaxFee {
-                    fee: Box::new(fee),
-                    balance: Box::new(account.info.balance),
-                },
-            ));
+            return Err(Self::create_internal_error(format!(
+                "Shadow transaction priority fee failed: insufficient balance. Target: {}, Required fee: {}, Available balance: {}",
+                target,
+                fee,
+                account.info.balance
+            )));
         }
 
         // Deduct fee
@@ -1223,11 +1215,13 @@ where
             ));
         };
         if new_account_info.info.balance < balance_decrement.amount {
-            tracing::warn!(?new_account_info.info.balance, ?balance_decrement.amount);
-            return Ok(Err(ExecutionResult::Revert {
-                gas_used: constants::SHADOW_TX_GAS_USED,
-                output: Bytes::new(),
-            }));
+            return Err(Self::create_internal_error(format!(
+                "Shadow transaction failed: insufficient balance for decrement. Target: {}, Required: {}, Available: {}, Reference: {:?}",
+                balance_decrement.target,
+                balance_decrement.amount,
+                new_account_info.info.balance,
+                balance_decrement.irys_ref
+            )));
         }
         // Apply the decrement amount to the balance
         new_account_info.info.balance = new_account_info

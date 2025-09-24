@@ -1,7 +1,7 @@
 use crate::{ApiClient, IrysApiClient, Method};
 use eyre::OptionExt as _;
 pub use irys_api_server::routes::block::BlockParam;
-use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo};
+use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
     Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset,
@@ -114,16 +114,15 @@ impl ApiClientExt for IrysApiClient {
         attempts: u64,
     ) -> eyre::Result<()> {
         for _i in 0..attempts {
-            if self
-                .make_request::<bool, _>(
+            let status = self
+                .make_request::<PromotionStatus, _>(
                     peer,
                     Method::GET,
-                    format!("/tx/{}/is_promoted", &tx_id).as_str(),
+                    format!("/tx/{}/promotion_status", &tx_id).as_str(),
                     None::<&()>,
                 )
-                .await?
-                .unwrap_or(false)
-            {
+                .await?;
+            if status.map(|s| s.is_promoted).unwrap_or(false) {
                 return Ok(());
             }
             sleep(Duration::from_millis(200)).await;

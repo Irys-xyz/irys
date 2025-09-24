@@ -121,7 +121,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -225,7 +225,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -307,7 +307,8 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 
     // Create a stake commitment
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut stake = CommitmentTransaction::new_stake(consensus_config, H256::zero());
+    let mut stake =
+        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     stake.signer = test_signer.address();
     stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
     let stake = test_signer.sign_commitment(stake)?;
@@ -316,7 +317,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     let _pledge_count = 0;
     let pledge = CommitmentTransaction::new_pledge(
         consensus_config,
-        H256::zero(),
+        genesis_node.get_anchor().await?,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
         test_signer.address(),
     )
@@ -332,7 +333,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     };
 
     let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -422,7 +423,8 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 
     // Create a different commitment that's NOT in the snapshot
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut wrong_commitment = CommitmentTransaction::new_stake(consensus_config, H256::zero());
+    let mut wrong_commitment =
+        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     wrong_commitment.signer = test_signer.address();
     let wrong_commitment = test_signer.sign_commitment(wrong_commitment)?;
     genesis_node.mine_block().await?;
@@ -436,7 +438,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     };
 
     let (block, _adj_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -488,7 +490,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -523,7 +525,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     let (block_after_epoch, _adjustment_stats2, _eth_payload2) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -744,7 +746,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -854,7 +856,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 

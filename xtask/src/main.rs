@@ -1,8 +1,7 @@
 use cargo_metadata::{MetadataCommand, Package};
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::process::{Command, Stdio};
+use std::io::Write as _;
 use xshell::{cmd, Cmd, Shell};
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
@@ -251,15 +250,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 cmd!(sh, "cargo build --workspace --tests").remove_and_run()?;
             }
 
-            println!("Running cargo-flake to detect flaky tests");
-
-            // Install cargo-flake if not already installed
-            cmd!(
-                sh,
-                "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
-            )
-            .remove_and_run()?;
-
             // Build command arguments
             let mut command_args = vec!["flake".to_string()];
 
@@ -300,8 +290,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     .format("%Y-%m-%d-%H-%M-%S");
                 let output_file = format!("target/flaky-test-output-{}.txt", timestamp);
 
-                println!("Streaming output to: {}", output_file);
-
                 // Create output file and write header
                 let mut file = fs::File::create(&output_file)?;
                 writeln!(file, "=== Flaky Test Run - {} ===", timestamp)?;
@@ -317,58 +305,85 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 }
                 writeln!(file)?;
                 writeln!(file)?;
+                file.flush()?;
+                drop(file);
 
-                // Spawn cargo command with streaming output to file
-                let mut child = Command::new("cargo")
-                    .args(&command_args)
-                    .env("RUST_BACKTRACE", "1")
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()?;
+                // Use script to preserve TTY behavior for progress bars
+                println!("Running cargo-flake to detect flaky tests");
+                println!("Streaming output to: {}", output_file);
 
-                // Stream stdout
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        let line = line?;
-                        println!("{}", line);
-                        writeln!(file, "{}", line)?;
-                        file.flush()?;
-                    }
-                }
+                // Install cargo-flake first
+                cmd!(
+                    sh,
+                    "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
+                )
+                .remove_and_run()?;
 
-                // Stream stderr
-                if let Some(stderr) = child.stderr.take() {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        let line = line?;
-                        eprintln!("{}", line);
-                        writeln!(file, "{}", line)?;
-                    }
-                    file.flush()?;
-                }
+                // Use script command to preserve TTY and tee to save output
+                // Handle different script syntax between platforms
+                let script_result = if cfg!(target_os = "macos") {
+                    // macOS script syntax
+                    let script_command = format!(
+                        "script -q /dev/stdout cargo {} | tee -a '{}'",
+                        command_args.join(" "),
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {script_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()
+                } else if cfg!(target_os = "linux") {
+                    // Linux script syntax
+                    let script_command = format!(
+                        "script -q -e -c 'cargo {}' /dev/stdout | tee -a '{}'",
+                        command_args.join(" "),
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {script_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()
+                } else {
+                    // Fallback for other platforms - try basic tee without script
+                    eprintln!("Warning: script command may not be available on this platform, progress bars may not display correctly");
+                    let tee_command = format!(
+                        "cargo {} 2>&1 | tee -a '{}'",
+                        command_args.join(" "),
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {tee_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()
+                };
 
-                // Wait for command to complete
-                let status = child.wait()?;
-                if !status.success() {
-                    return Err(eyre::eyre!(
-                        "cargo-flake failed with exit code: {:?}",
-                        status.code()
-                    ));
+                // If script command fails, fallback to basic tee
+                if script_result.is_err() {
+                    eprintln!(
+                        "Warning: script command failed, falling back to basic output capture"
+                    );
+                    let tee_command = format!(
+                        "cargo {} 2>&1 | tee -a '{}'",
+                        command_args.join(" "),
+                        output_file
+                    );
+                    cmd!(sh, "bash -c {tee_command}")
+                        .env("RUST_BACKTRACE", "1")
+                        .run()?;
+                } else {
+                    script_result?;
                 }
             } else {
-                // Run command without file output - just pass through to terminal
-                let status = Command::new("cargo")
-                    .args(&command_args)
-                    .env("RUST_BACKTRACE", "1")
-                    .status()?;
+                // Run command without file output - show output in terminal
+                println!("Running cargo-flake to detect flaky tests");
 
-                if !status.success() {
-                    return Err(eyre::eyre!(
-                        "cargo-flake failed with exit code: {:?}",
-                        status.code()
-                    ));
-                }
+                // Install cargo-flake if not already installed
+                cmd!(
+                    sh,
+                    "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
+                )
+                .remove_and_run()?;
+
+                cmd!(sh, "cargo {command_args...}")
+                    .env("RUST_BACKTRACE", "1")
+                    .run()?;
             }
         }
     };

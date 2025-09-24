@@ -77,10 +77,6 @@ pub fn run_vdf<B: BlockProvider>(
     );
     let vdf_reset_frequency = config.reset_frequency as u64;
 
-    // maintain a state of whether or not this vdf loop should be mining
-    // don't start the VDF right away
-    is_mining_enabled.store(false, std::sync::atomic::Ordering::Relaxed);
-
     loop {
         if shutdown_listener.try_recv().is_ok() {
             tracing::info!("VDF loop shutdown signal received");
@@ -274,7 +270,7 @@ mod tests {
             .try_init();
     }
 
-    #[actix_rt::test]
+    #[tokio::test]
     async fn test_vdf_step() {
         let config = Config::new(NodeConfig::testing());
         let mut hasher = Sha256::new();
@@ -313,7 +309,7 @@ mod tests {
         assert_eq!(checkpoints, checkpoints2, "Should be equal");
     }
 
-    #[actix_rt::test]
+    #[tokio::test]
     async fn test_vdf_service() {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
@@ -328,7 +324,7 @@ mod tests {
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::unbounded_channel::<VdfStep>();
 
-        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -361,8 +357,6 @@ mod tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        is_mining_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
         // wait for some vdf steps
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -433,7 +427,7 @@ mod tests {
         vdf_thread_handler.join().unwrap();
     }
 
-    #[actix_rt::test]
+    #[tokio::test]
     async fn test_vdf_does_not_get_too_far_ahead() {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
@@ -477,8 +471,6 @@ mod tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        is_mining_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
         // wait for some vdf steps
         tokio::time::sleep(Duration::from_millis(500)).await;
 

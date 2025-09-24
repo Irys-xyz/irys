@@ -1,6 +1,5 @@
-use actix::MessageResponse;
 use irys_database::block_header_by_hash;
-use irys_types::DatabaseProvider;
+use irys_types::{BlockIndexItem, DatabaseProvider};
 use reth_db::Database as _;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::{debug, error};
@@ -10,7 +9,7 @@ use crate::BlockIndex;
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
 /// As soon as `block_index` is no longer an actix service this `MessageResponse` and the corresponding
 /// actix dependency in Cargo.toml can be dropped
-#[derive(Debug, Clone, MessageResponse)]
+#[derive(Debug, Clone)]
 pub struct BlockIndexReadGuard {
     block_index_data: Arc<RwLock<BlockIndex>>,
 }
@@ -73,6 +72,16 @@ impl BlockIndexReadGuard {
                 error!("Block index and height do not match!");
             }
         }
+    }
+
+    pub fn get_latest_item_cloned(&self) -> Option<BlockIndexItem> {
+        let rg = self.read();
+        rg.get_latest_item().cloned()
+    }
+
+    pub fn latest_height(&self) -> u64 {
+        let rg = self.read();
+        rg.latest_height()
     }
 
     #[cfg(any(test, feature = "test-utils"))]

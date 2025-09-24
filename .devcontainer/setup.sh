@@ -7,24 +7,7 @@ cat << 'EOF' >> ~/.cargo/config.toml
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 EOF
 
-# remove these once GCC13 stops being in the testing branch (or when we upgrade debian releases)
-cat << 'EOF' >> /etc/apt/sources.list.d/testing.list
-deb http://deb.debian.org/debian testing main
-EOF
-
-cat << 'EOF' >>  /etc/apt/preferences.d/50-local
-Package: *
-Pin: release a=bookworm
-Pin-Priority: 500
-
-Package: *
-Pin: release a=testing
-Pin-Priority: 100
-EOF
-
 sudo apt update
-sudo apt -t testing install -y --no-install-recommends gcc-13 g++-13
-
 
 sudo apt install -y --no-install-recommends \
      curl jq build-essential libssl-dev libffi-dev python3 python3-venv python3-dev python3-pip wget git clang libssl-dev pkg-config libclang-dev libgmp-dev bc zstd

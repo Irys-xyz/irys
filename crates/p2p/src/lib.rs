@@ -24,6 +24,5 @@ pub use gossip_data_handler::GossipDataHandler;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
-pub use peer_network_service::PeerListServiceError;
-pub use peer_network_service::{GetPeerListGuard, PeerNetworkService};
+pub use peer_network_service::{spawn_peer_network_service, PeerListServiceError};
 pub use types::{GossipError, GossipResult};

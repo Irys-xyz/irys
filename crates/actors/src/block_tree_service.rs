@@ -1,5 +1,5 @@
 use crate::{
-    block_index_service::BlockIndexService,
+    block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
     broadcast_mining_service::{
         BroadcastDifficultyUpdate, BroadcastMiningService, BroadcastPartitionsExpiration,
@@ -9,7 +9,7 @@ use crate::{
     reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockMigrationMessage, StorageModuleServiceMessage,
+    StorageModuleServiceMessage,
 };
 use actix::prelude::*;
 use eyre::eyre;
@@ -51,9 +51,6 @@ pub enum BlockTreeServiceMessage {
     BlockValidationFinished {
         block_hash: H256,
         validation_result: ValidationResult,
-    },
-    ReloadCacheFromDb {
-        response: oneshot::Sender<eyre::Result<()>>,
     },
 }
 
@@ -243,49 +240,7 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
             }
-            BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
-                let res = self.reload_cache_from_db().await;
-                let _ = response.send(res);
-            }
         }
-        Ok(())
-    }
-
-    async fn reload_cache_from_db(&self) -> eyre::Result<()> {
-        let replay_data =
-            EpochReplayData::query_replay_data(&self.db, &self.block_index_guard, &self.config)
-                .await?;
-        debug!("Reloading block tree cache from database");
-        let new_block_tree_cache = BlockTree::restore_from_db(
-            self.block_index_guard.clone(),
-            replay_data,
-            self.db.clone(),
-            &self.storage_submodules_config,
-            self.config.clone(),
-        )?;
-        *self.cache.write().expect("cache write lock poisoned") = new_block_tree_cache;
-
-        //  Notify reth service
-        let tip_hash = {
-            let block_index = self.block_index_guard.read();
-
-            match block_index.get_latest_item() {
-                Some(block_index_item) => block_index_item.block_hash,
-                None => {
-                    // if the block index is empty or out of sync, panic to cause a node restart
-                    panic!("the block index is empty or out of sync");
-                }
-            }
-        };
-
-        self.reth_service_actor
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(tip_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .expect("could not send message to `RethServiceActor`");
-
         Ok(())
     }
 
@@ -337,25 +292,21 @@ impl BlockTreeServiceInner {
             &block_header.block_hash, &block_header.height
         );
 
-        // HACK
-        System::set_current(self.system.clone());
-
         let arc_block = Arc::new(block_header);
         let arc_all_txs = Arc::new(all_txs);
 
-        // Let block_index know about the migrated block
-        // TODO: Make block index a tokio service
-        let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: arc_block.clone(),
-            all_txs: arc_all_txs,
-        };
-        // Send and await result so errors propagate to the sender and can panic here
-        match block_index.send(block_finalized_message).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => panic!("BlockIndexService error during migration: {e:?}"),
-            Err(e) => panic!("Failed to send BlockMigrationMessage: {e:?}"),
-        }
+        // Let block_index know about the migrated block (Tokio service)
+        let (tx, rx) = oneshot::channel();
+        self.service_senders
+            .block_index
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: arc_block.clone(),
+                all_txs: arc_all_txs.clone(),
+                response: tx,
+            })?;
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
+            .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
 
         // Let the chunk_migration_service know about the block migration
         self.service_senders

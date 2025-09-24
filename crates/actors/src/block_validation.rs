@@ -12,7 +12,9 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, tx_header_by_txid, SystemLedger};
+use irys_database::{
+    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
+};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
     ExecutionPayloadCache,
@@ -22,10 +24,9 @@ use irys_primitives::CommitmentType;
 use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
-use irys_storage::ii;
+use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
-use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -34,16 +35,19 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
-use irys_types::{get_ingress_proofs, LedgerChunkOffset};
+use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
+use irys_types::{BlockHash, LedgerChunkRange};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
+use nodit::InclusiveInterval as _;
 use openssl::sha;
 use reth::revm::primitives::FixedBytes;
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
+use std::future::Future;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -204,6 +208,8 @@ pub enum PreValidationError {
         "Incorrect Ingress proof count to publish a transaction. Expected: {expected}, Actual: {actual}"
     )]
     IngressProofCountMismatch { expected: usize, actual: usize },
+    #[error("Incorrect number of ingress proofs from assigned owners. Expected {expected}, Actual: {actual}")]
+    AssignedProofCountMismatch { expected: usize, actual: usize },
     #[error("Transaction {tx_id} has invalid ingress proof: {reason}")]
     InvalidIngressProof { tx_id: H256, reason: String },
     #[error("Ingress proof mismatch for transaction {tx_id}")]
@@ -898,25 +904,27 @@ pub fn poa_is_valid(
 }
 
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
-/// generated from the Irys block data.
+/// generated from the Irys block data. This is a pure validation function with no side effects.
+/// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
-    reth_adapter: &IrysRethNodeAdapter,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-) -> eyre::Result<()> {
-    // 1. Validate that the evm block is valid
+) -> eyre::Result<ExecutionData> {
+    // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
-    let engine_api_client = reth_adapter.inner.engine_http_client();
-    let ExecutionData { payload, sidecar } = execution_data;
+    let ExecutionData {
+        payload,
+        sidecar: _,
+    } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
@@ -935,41 +943,6 @@ pub async fn shadow_transactions_are_valid(
             "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
         );
 
-    let versioned_hashes = sidecar
-        .versioned_hashes()
-        .ok_or_eyre("version hashes must be present")?
-        .clone();
-    loop {
-        let payload_status = engine_api_client
-            .new_payload_v4(
-                payload_v3.clone(),
-                versioned_hashes.clone(),
-                block.previous_block_hash.into(),
-                RequestsOrHash::Requests(Requests::new(vec![])),
-            )
-            .await?;
-        match payload_status.status {
-            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error));
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                tracing::debug!(
-                    "syncing extra blocks to validate payload {:?}",
-                    payload_v3.payload_inner.payload_inner.block_num_hash()
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
-                tracing::info!("reth payload already known & is valid");
-                break;
-            }
-            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
-                tracing::info!("accepted a side-chain (fork) payload");
-                break;
-            }
-        }
-    }
     let evm_block: Block = payload_v3.try_into_block()?;
 
     // 2. Extract shadow transactions from the beginning of the block
@@ -1030,7 +1003,70 @@ pub async fn shadow_transactions_are_valid(
     .await?;
 
     // 4. Validate they match
-    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
+
+    // 5. Return the execution data for reuse
+    Ok(execution_data)
+}
+
+/// Submits the EVM payload to reth for execution layer validation.
+/// This should only be called after all consensus layer validations have passed.
+#[tracing::instrument(skip_all, err, fields(
+    block_hash = %block.block_hash,
+    block_height = %block.height,
+    evm_block_hash = %block.evm_block_hash
+))]
+pub async fn submit_payload_to_reth(
+    block: &IrysBlockHeader,
+    reth_adapter: &IrysRethNodeAdapter,
+    execution_data: ExecutionData,
+) -> eyre::Result<()> {
+    let ExecutionData { payload, sidecar } = execution_data;
+
+    let ExecutionPayload::V3(payload_v3) = payload else {
+        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+    };
+
+    let versioned_hashes = sidecar
+        .versioned_hashes()
+        .ok_or_eyre("version hashes must be present")?
+        .clone();
+
+    // Submit to reth execution layer
+    let engine_api_client = reth_adapter.inner.engine_http_client();
+    loop {
+        let payload_status = engine_api_client
+            .new_payload_v4(
+                payload_v3.clone(),
+                versioned_hashes.clone(),
+                block.previous_block_hash.into(),
+                RequestsOrHash::Requests(Requests::new(vec![])),
+            )
+            .await?;
+        match payload_status.status {
+            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
+                return Err(eyre::Report::msg(validation_error));
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
+                tracing::debug!(
+                    "syncing extra blocks to validate payload {:?}",
+                    payload_v3.payload_inner.payload_inner.block_num_hash()
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Valid => {
+                tracing::info!("reth payload already known & is valid");
+                break;
+            }
+            alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                tracing::info!("accepted a side-chain (fork) payload");
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
@@ -1703,15 +1739,32 @@ pub async fn data_txs_are_valid(
                 }
             })?;
 
-            // Loop though all the ingress proofs for the published transaction and pre-validate them
-            for ingress_proof in tx_proofs.iter() {
-                // Validate ingress proof signature and data_root match the transaction
-                let _ = ingress_proof
-                    .pre_validate(&tx_header.data_root)
-                    .map_err(|e| PreValidationError::InvalidIngressProof {
-                        tx_id: tx_header.id,
-                        reason: e.to_string(),
-                    })?;
+            // Validate assigned ingress proofs and get counts
+            let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
+                &tx_proofs,
+                &tx_header,
+                |hash| mempool_block_retriever(hash, service_senders),
+                block_tree_guard,
+                db,
+                config,
+            )
+            .await?;
+
+            let mut expected_assigned_proofs =
+                config.consensus.number_of_ingress_proofs_from_assignees as usize;
+
+            // While the protocol can require X number of assigned proofs, if there
+            // is less than that many assigned to the slot, it still needs to function.
+            if assigned_miners < expected_assigned_proofs {
+                warn!("Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ", expected_assigned_proofs, assigned_miners);
+                expected_assigned_proofs = assigned_miners;
+            }
+
+            if assigned_proofs.len() < expected_assigned_proofs {
+                return Err(PreValidationError::AssignedProofCountMismatch {
+                    expected: expected_assigned_proofs,
+                    actual: assigned_proofs.len(),
+                });
             }
 
             if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
@@ -1946,18 +1999,199 @@ fn process_block_ledgers_with_states(
     Ok(())
 }
 
+async fn mempool_block_retriever(
+    hash: H256,
+    service_senders: &ServiceSenders,
+) -> Option<IrysBlockHeader> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    service_senders
+        .mempool
+        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .expect("MempoolServiceMessage should be delivered");
+    rx.await.expect("mempool service message should succeed")
+}
+
+pub async fn get_assigned_ingress_proofs<F, Fut>(
+    tx_proofs: &[IngressProof],
+    tx_header: &DataTransactionHeader,
+    mempool_block_retriever: F,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+) -> Result<(Vec<IngressProof>, usize), PreValidationError>
+where
+    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
+    Fut: Future<Output = Option<IrysBlockHeader>>,
+{
+    // Returns (assigned_proofs, assigned_miners)
+    let mut assigned_proofs = Vec::new();
+    let mut assigned_miners = 0;
+
+    // Loop through all the ingress proofs for the published transaction and pre-validate them
+    for ingress_proof in tx_proofs.iter() {
+        // Validate ingress proof signature and data_root match the transaction
+        let proof_address = ingress_proof
+            .pre_validate(&tx_header.data_root)
+            .map_err(|e| PreValidationError::InvalidIngressProof {
+                tx_id: tx_header.id,
+                reason: e.to_string(),
+            })?;
+
+        // 1.) is the proof from a miner assigned to store the data in the submit ledger?
+
+        //  a) Get the block hashes from the cached data_root
+        let block_hashes = db
+            .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+            .expect("creating a read tx should succeed")
+            .expect("db query should succeed")
+            .expect("CachedDataRoot should be found for data_root")
+            .block_set;
+
+        //  b) Get the submit ledger offset intervals for each of the blocks
+        let mut block_ranges = Vec::new();
+        for block_hash in block_hashes.iter() {
+            let block_range =
+                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await;
+            block_ranges.push(block_range);
+        }
+
+        //  c) Get the slots the proof address is assigned to store
+        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, block_tree_guard);
+
+        // d) Get the ledger ranges of the slot indexes
+        let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
+            .iter()
+            .map(|index| {
+                let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
+                let start = *index as u64 * num_chunks_in_partition;
+                let end = start + num_chunks_in_partition;
+                let range = LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(start),
+                    LedgerChunkOffset::from(end),
+                ));
+                (*index, range)
+            })
+            .collect();
+
+        // e) Get the number of unique addresses assigned to each slot
+        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, block_tree_guard);
+
+        //  f) are there any intersections of block and slot ranges?
+        let mut is_intersected = false;
+        for block_range in &block_ranges {
+            for (slot_index, slot_range) in &slot_ranges {
+                if block_range.intersection(slot_range).is_some() {
+                    is_intersected = true;
+                    assigned_miners = *slot_address_counts.get(slot_index).unwrap();
+                    break;
+                }
+            }
+            if is_intersected {
+                assigned_proofs.push(ingress_proof.clone());
+                break;
+            }
+        }
+    }
+
+    Ok((assigned_proofs, assigned_miners))
+}
+
+async fn get_ledger_range<F, Fut>(
+    hash: &H256,
+    mempool_block_retriever: F,
+    db: &DatabaseProvider,
+) -> LedgerChunkRange
+where
+    F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
+    Fut: Future<Output = Option<IrysBlockHeader>>,
+{
+    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await;
+    let prev_block_hash = block.previous_block_hash;
+
+    if block.height == 0 {
+        LedgerChunkRange(ii(
+            LedgerChunkOffset::from(0),
+            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
+        ))
+    } else {
+        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await;
+        LedgerChunkRange(ii(
+            LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
+            LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
+        ))
+    }
+}
+
+async fn get_block_by_hash<F, Fut>(
+    hash: &H256,
+    mempool_block_retriever: F,
+    db: &DatabaseProvider,
+) -> IrysBlockHeader
+where
+    F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
+    Fut: Future<Output = Option<IrysBlockHeader>>,
+{
+    let block = mempool_block_retriever(*hash).await;
+
+    // Return the block if we found it in the mempool, otherwise get it from the db
+    if let Some(block) = block {
+        block
+    } else {
+        db.view(|tx| block_header_by_hash(tx, hash, false))
+            .expect("creating a read tx should succeed")
+            .expect("creating a read tx should succeed")
+            .expect("db query should succeed")
+    }
+}
+
+fn get_submit_ledger_slot_assignments(
+    address: &Address,
+    block_tree_guard: &BlockTreeReadGuard,
+) -> Vec<usize> {
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let mut partition_assignments = epoch_snapshot.get_partition_assignments(*address);
+    partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
+    partition_assignments
+        .iter()
+        .map(|pa| pa.slot_index.unwrap())
+        .collect()
+}
+
+fn get_submit_ledger_slot_addresses(
+    slot_indexes: &Vec<usize>,
+    block_tree_guard: &BlockTreeReadGuard,
+) -> HashMap<usize, usize> {
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+
+    let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
+
+    for slot_index in slot_indexes {
+        let num_addresses = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .iter()
+            .filter(|(_hash, pa)| {
+                pa.ledger_id == Some(DataLedger::Submit.into())
+                    && pa.slot_index == Some(*slot_index)
+            })
+            .count();
+
+        num_addresses_per_slot.insert(*slot_index, num_addresses);
+    }
+
+    num_addresses_per_slot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        block_index_service::{BlockIndexService, GetBlockIndexGuardMessage},
-        BlockMigrationMessage,
-    };
-    use actix::{prelude::*, SystemRegistry};
+    use crate::block_index_service::{BlockIndexService, BlockIndexServiceMessage};
+
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
     use irys_testing_utils::utils::temporary_directory;
+    use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
@@ -1969,7 +2203,9 @@ mod tests {
 
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
-        pub block_index_actor: Addr<BlockIndexService>,
+        pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
+        #[expect(dead_code)]
+        pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
@@ -2023,9 +2259,14 @@ mod tests {
                 .expect("Expected to create block index"),
         ));
 
-        let block_index_actor =
-            BlockIndexService::new(block_index.clone(), &consensus_config).start();
-        SystemRegistry::set(block_index_actor.clone());
+        // Spawn Tokio BlockIndex service
+        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
+        let block_index_handle = BlockIndexService::spawn_service(
+            block_index_rx,
+            block_index.clone(),
+            &consensus_config,
+            tokio::runtime::Handle::current(),
+        );
 
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
@@ -2042,16 +2283,17 @@ mod tests {
 
         let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
-        let msg = BlockMigrationMessage {
-            block_header: arc_genesis.clone(),
-            all_txs: Arc::new(vec![]),
-        };
-
-        let block_index_actor = BlockIndexService::from_registry();
-        match block_index_actor.send(msg).await {
-            Ok(_) => info!("Genesis block indexed"),
-            Err(_) => panic!("Failed to index genesis block"),
-        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        block_index_tx
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: arc_genesis.clone(),
+                all_txs: Arc::new(vec![]),
+                response: tx,
+            })
+            .expect("send migrate block");
+        rx.await
+            .expect("Failed to receive migration result")
+            .expect("Failed to index genesis block");
 
         let partition_assignment = epoch_snapshot
             .get_data_partition_assignment(partition_hash)
@@ -2063,7 +2305,8 @@ mod tests {
             data_dir,
             TestContext {
                 block_index,
-                block_index_actor,
+                block_index_tx,
+                block_index_handle,
                 miner_address,
                 epoch_snapshot,
                 partition_hash,
@@ -2302,25 +2545,26 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: block.clone(),
-            all_txs: Arc::clone(&txs),
-        };
-
-        match context
-            .block_index_actor
-            .send(block_finalized_message.clone())
+        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: block.clone(),
+                all_txs: Arc::clone(&txs),
+                response: tx_migrate,
+            })
+            .expect("send migrate block");
+        rx_migrate
             .await
-        {
-            Ok(_) => info!("Second block indexed"),
-            Err(_) => panic!("Failed to index second block"),
-        };
+            .expect("Failed to receive migration result")
+            .expect("Failed to index second block");
 
-        let block_index_guard = context
-            .block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .expect("Failed to get block index guard");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
+            .expect("send get guard");
+        let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
             .partition_assignment
@@ -2561,25 +2805,26 @@ mod tests {
         // Send the block confirmed message
         let block = Arc::new(irys_block);
         let txs = Arc::new(tx_headers);
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: block.clone(),
-            all_txs: Arc::clone(&txs),
-        };
-
-        match context
-            .block_index_actor
-            .send(block_finalized_message.clone())
+        let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: block.clone(),
+                all_txs: Arc::clone(&txs),
+                response: tx_migrate,
+            })
+            .expect("send migrate block");
+        rx_migrate
             .await
-        {
-            Ok(_) => info!("Second block indexed"),
-            Err(_) => panic!("Failed to index second block"),
-        };
+            .expect("Failed to receive migration result")
+            .expect("Failed to index second block");
 
-        let block_index_guard = context
-            .block_index_actor
-            .send(GetBlockIndexGuardMessage)
-            .await
-            .expect("Expected to get block index guard");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        context
+            .block_index_tx
+            .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
+            .expect("send get guard");
+        let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
             .partition_assignment

@@ -47,15 +47,15 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
         // assert each new block that we mine
         assert_eq!(header.height, expected_height);
         assert_eq!(
-            ctx.node_ctx.config.consensus.genesis_price, returned_ema_price,
+            ctx.node_ctx.config.consensus.genesis.genesis_price, returned_ema_price,
             "Genesis price not respected for the expected duration"
         );
         assert_ne!(
-            ctx.node_ctx.config.consensus.genesis_price, header.oracle_irys_price,
+            ctx.node_ctx.config.consensus.genesis.genesis_price, header.oracle_irys_price,
             "Expected the header to contain new & unique oracle irys price"
         );
         assert_ne!(
-            ctx.node_ctx.config.consensus.genesis_price, header.ema_irys_price,
+            ctx.node_ctx.config.consensus.genesis.genesis_price, header.ema_irys_price,
             "Expected the header to contain new & unique EMA irys price"
         );
     }
@@ -74,8 +74,8 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     // (oracle price, EMA price)
     let mut registered_prices = vec![(
-        ctx.node_ctx.config.consensus.genesis_price,
-        ctx.node_ctx.config.consensus.genesis_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price,
     )];
     // mine 6 blocks
     for expected_height in 1..(price_adjustment_interval * 2) {
@@ -109,7 +109,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         "expected the 7th block to be mined (height = 6)"
     );
     assert_ne!(
-        ctx.node_ctx.config.consensus.genesis_price, returned_ema_price,
+        ctx.node_ctx.config.consensus.genesis.genesis_price, returned_ema_price,
         "After the second interval we no longer use the genesis price"
     );
     assert_eq!(

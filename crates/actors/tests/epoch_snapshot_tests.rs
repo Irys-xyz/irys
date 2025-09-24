@@ -1,6 +1,6 @@
-use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
+use actix::{actors::mocker::Mocker, Arbiter};
 use actix::{Actor as _, SystemService as _};
-use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
+
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
@@ -9,7 +9,6 @@ use irys_actors::{
     mining::PartitionMiningActor,
     packing::{PackingActor, PackingRequest},
     services::ServiceSenders,
-    BlockMigrationMessage,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
@@ -31,7 +30,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 #[actix::test]
 async fn genesis_test() {
@@ -49,21 +48,13 @@ async fn genesis_test() {
         add_genesis_commitments(&mut genesis_block, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    // Create epoch service with random miner address
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
-
-    let block_index_actor = BlockIndexService::new(block_index, &config.consensus).start();
-    SystemRegistry::set(block_index_actor);
-
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
         genesis_block.clone(),
-        commitments.clone(),
+        commitments,
         &config,
     );
     let miner_address = config.node_config.miner_address();
@@ -768,12 +759,15 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
-
-    let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
-    SystemRegistry::set(block_index_actor.clone());
+    let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
+        block_index_rx,
+        Arc::new(RwLock::new(
+            BlockIndex::new(&config.node_config).await.unwrap(),
+        )),
+        &config.consensus,
+        tokio::runtime::Handle::current(),
+    );
 
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -799,14 +793,19 @@ async fn epoch_blocks_reinitialization_test() {
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
-    let msg = BlockMigrationMessage {
-        block_header: Arc::new(genesis_block.clone()),
-        all_txs: Arc::new(vec![]),
-    };
-    match block_index_actor.send(msg).await {
-        Ok(_) => info!("Genesis block indexed"),
-        Err(_) => panic!("Failed to index genesis block"),
-    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    block_index_tx
+        .send(
+            irys_actors::block_index_service::BlockIndexServiceMessage::MigrateBlock {
+                block_header: Arc::new(genesis_block.clone()),
+                all_txs: Arc::new(vec![]),
+                response: tx,
+            },
+        )
+        .expect("send migrate block");
+    rx.await
+        .expect("Failed to receive migration result")
+        .expect("Failed to index genesis block");
 
     {
         let mut storage_modules: StorageModuleVec = Vec::new();
@@ -895,10 +894,15 @@ async fn epoch_blocks_reinitialization_test() {
 
     // partitions_guard.read().print_assignments();
 
-    let block_index_guard = block_index_actor
-        .send(GetBlockIndexGuardMessage)
-        .await
-        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    block_index_tx
+        .send(
+            irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard {
+                response: tx,
+            },
+        )
+        .expect("send get block index guard");
+    let block_index_guard = rx.await.unwrap();
 
     debug!(
         "num blocks in block_index: {}",

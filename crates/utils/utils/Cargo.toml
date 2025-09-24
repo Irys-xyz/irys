@@ -12,6 +12,8 @@ authors.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 eyre.workspace = true
+socket2.workspace = true
+
 
 [lints]
 workspace = true

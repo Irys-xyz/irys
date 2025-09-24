@@ -229,7 +229,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .testing_peer_with_assignments(&peer_signer)
         .await?;
     let extra_tx = peer_node
-        .create_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
+        .post_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
         .await?;
 
     // produce an invalid block
@@ -326,10 +326,10 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .testing_peer_with_assignments(&peer_signer)
         .await?;
     let _extra_tx_a = peer_node
-        .create_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
+        .post_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
         .await?;
     let _extra_tx_b = peer_node
-        .create_publish_data_tx(&peer_signer, "Hello, Irys!".as_bytes().to_vec())
+        .post_publish_data_tx(&peer_signer, "Hello, Irys!".as_bytes().to_vec())
         .await?;
 
     // produce an invalid block

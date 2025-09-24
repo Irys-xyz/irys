@@ -133,6 +133,7 @@ pub fn commitment_tx_by_txid<T: DbTx>(
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
     tx_header: &DataTransactionHeader,
+    block_header: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     let key = tx_header.data_root;
 
@@ -143,11 +144,22 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     let mut cached_data_root = result.unwrap_or_else(|| CachedDataRoot {
         data_size: tx_header.data_size,
         txid_set: vec![tx_header.id],
+        block_set: vec![],
     });
 
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
         cached_data_root.txid_set.push(tx_header.id);
+    }
+
+    // If the entry exists and a block header reference was provided, add the block hash reference if necessary
+    if let Some(block_header) = block_header {
+        if !cached_data_root
+            .block_set
+            .contains(&block_header.block_hash)
+        {
+            cached_data_root.block_set.push(block_header.block_hash);
+        }
     }
 
     // Update the database with the modified or new entry
