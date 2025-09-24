@@ -635,7 +635,7 @@ impl BlockTreeServiceInner {
                     .expect("canonical chain cannot be empty");
                 let prune_block_hash = anchors.prune_block.entry.block_hash;
                 let prune_depth_reached = anchors.prune_depth_reached;
-                let pending_chain_update = Some(anchors.clone());
+                let pending_chain_update = Some(anchors);
 
                 // Prune the cache after tip changes.
                 //
@@ -809,8 +809,8 @@ impl BlockTreeServiceInner {
         }
 
         if let Some(anchors) = &pending_chain_update {
-            self.emit_fcu(&anchors);
-            self.emit_block_confirmed(&anchors);
+            self.emit_fcu(anchors);
+            self.emit_block_confirmed(anchors);
             // Handle block migration (move chunks to disk and add to block_index)
             if tip_changed {
                 self.migrate_block(&anchors.migration_block).await;

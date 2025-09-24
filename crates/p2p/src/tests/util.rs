@@ -4,13 +4,12 @@ use crate::{
     BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
-use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use futures::FutureExt as _;
+use futures::{future, FutureExt as _};
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
@@ -415,16 +414,10 @@ impl GossipServiceTestFixture {
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
         let tokio_runtime = tokio::runtime::Handle::current();
-        let reth_peer_sender = {
-            let reth_service_addr = reth_service_addr.clone();
-            Arc::new(move |reth_peer_info: RethPeerInfo| {
-                let addr = reth_service_addr.clone();
-                async move {
-                    let _ = addr.send(reth_peer_info).await;
-                }
-                .boxed()
-            })
-        };
+        let reth_peer_sender = Arc::new(|peer_info: RethPeerInfo| {
+            let _ = peer_info;
+            future::ready(()).boxed()
+        });
 
         let (peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
             db.clone(),

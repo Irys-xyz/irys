@@ -1385,21 +1385,31 @@ fn update_reth_with_initial_block(
 mod tests {
     use super::*;
     use crate::peer_network_service::spawn_peer_network_service_with_client;
-    use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
-    use futures::FutureExt as _;
+    use crate::tests::util::{ApiClientStub, FakeGossipServer};
+    use futures::future::BoxFuture;
+    use futures::{future, FutureExt as _};
+    use irys_types::RethPeerInfo;
+    use std::sync::Arc;
+
+    fn noop_reth_peer_sender() -> Arc<dyn Fn(RethPeerInfo) -> BoxFuture<'static, ()> + Send + Sync>
+    {
+        Arc::new(|peer_info: RethPeerInfo| {
+            let _ = peer_info;
+            future::ready(()).boxed()
+        })
+    }
     use irys_types::BlockHash;
 
     mod catch_up_task {
         use super::*;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use actix::Actor as _;
         use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
             Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -1482,20 +1492,8 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
-            let reth_mock = MockRethServiceActor {};
-            let reth_mock_addr = reth_mock.start();
-
             let tokio_handle = tokio::runtime::Handle::current();
-            let reth_peer_sender = {
-                let reth_mock_addr = reth_mock_addr.clone();
-                Arc::new(move |peer_info: RethPeerInfo| {
-                    let addr = reth_mock_addr.clone();
-                    async move {
-                        let _ = addr.send(peer_info).await;
-                    }
-                    .boxed()
-                })
-            };
+            let reth_peer_sender = noop_reth_peer_sender();
 
             let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
@@ -1610,16 +1608,7 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let runtime_handle = tokio::runtime::Handle::current();
-            let reth_peer_sender = {
-                let reth_mock_addr = reth_mock_addr.clone();
-                Arc::new(move |peer_info: RethPeerInfo| {
-                    let addr = reth_mock_addr.clone();
-                    async move {
-                        let _ = addr.send(peer_info).await;
-                    }
-                    .boxed()
-                })
-            };
+            let reth_peer_sender = noop_reth_peer_sender();
 
             let (_peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
                 db.clone(),
@@ -1684,14 +1673,13 @@ mod tests {
         use crate::tests::util::data_handler_stub;
         use crate::tests::util::{ApiClientStub, FakeGossipServer};
         use crate::types::GossipResponse;
-        use actix::Actor as _;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
             Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
             NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
-            RethPeerInfo, SyncMode,
+            SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1747,23 +1735,13 @@ mod tests {
             });
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
 
             let runtime_handle = tokio::runtime::Handle::current();
-            let reth_peer_sender = {
-                let reth_mock_addr = reth_mock_addr.clone();
-                Arc::new(move |peer_info: RethPeerInfo| {
-                    let addr = reth_mock_addr.clone();
-                    async move {
-                        let _ = addr.send(peer_info).await;
-                    }
-                    .boxed()
-                })
-            };
+            let reth_peer_sender = noop_reth_peer_sender();
 
             let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
@@ -1880,23 +1858,13 @@ mod tests {
             });
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let (reth_tx, _reth_rx) = tokio::sync::mpsc::unbounded_channel();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
                 .expect("can't open temp dir");
             let db = DatabaseProvider(Arc::new(db_env));
 
             let runtime_handle = tokio::runtime::Handle::current();
-            let reth_peer_sender = {
-                let reth_mock_addr = reth_mock_addr.clone();
-                Arc::new(move |peer_info: RethPeerInfo| {
-                    let addr = reth_mock_addr.clone();
-                    async move {
-                        let _ = addr.send(peer_info).await;
-                    }
-                    .boxed()
-                })
-            };
+            let reth_peer_sender = noop_reth_peer_sender();
 
             let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),

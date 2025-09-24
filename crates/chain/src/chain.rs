@@ -1694,7 +1694,7 @@ fn init_peer_list_service(
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList) {
     let reth_peer_sender = {
-        let reth_service = reth_service.clone();
+        let reth_service = reth_service;
         Arc::new(move |reth_peer_info: RethPeerInfo| {
             let reth_service = reth_service.clone();
             async move {

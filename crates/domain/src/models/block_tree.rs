@@ -665,7 +665,7 @@ impl BlockTree {
             fallback_entry.clone()
         };
         let prune_header = if prune_entry.block_hash == fallback_entry.block_hash {
-            fallback_header.clone()
+            fallback_header
         } else {
             header_for(&prune_entry.block_hash)
         };

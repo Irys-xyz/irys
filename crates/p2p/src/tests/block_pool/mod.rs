@@ -6,8 +6,7 @@ use crate::tests::util::{
 };
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
-use actix::Actor as _;
-use futures::FutureExt as _;
+use futures::{future, FutureExt as _};
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -142,22 +141,16 @@ impl MockedServices {
             internal_message_bus: None,
         };
         let (service_senders, service_receivers) = ServiceSenders::new();
-        let reth_service_tx = service_senders.reth_service.clone();
+        let _reth_service_tx = service_senders.reth_service.clone();
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
         let mut block_tree_receiver = service_receivers.block_tree;
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let runtime_handle = tokio::runtime::Handle::current();
-        let reth_peer_sender = {
-            let reth_addr = reth_addr;
-            Arc::new(move |peer_info: RethPeerInfo| {
-                let addr = reth_addr.clone();
-                async move {
-                    let _ = addr.send(peer_info).await;
-                }
-                .boxed()
-            })
-        };
+        let reth_peer_sender = Arc::new(|peer_info: RethPeerInfo| {
+            let _ = peer_info;
+            future::ready(()).boxed()
+        });
 
         let (_peer_network_handle, peer_list_data_guard) = spawn_peer_network_service_with_client(
             db.clone(),
