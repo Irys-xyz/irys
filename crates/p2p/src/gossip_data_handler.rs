@@ -10,6 +10,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, Memp
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
+use irys_primitives::Address;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
@@ -17,6 +18,7 @@ use irys_types::{
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
@@ -311,6 +313,7 @@ where
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
+        debug!("Pulling block {} from the network", block_hash);
         let (source_address, irys_block) = self
             .gossip_client
             .pull_block_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
@@ -325,6 +328,10 @@ where
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
+        debug!(
+            "Pulled block {} from peer {}, sending for processing",
+            block_hash, source_address
+        );
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
@@ -811,5 +818,33 @@ where
             }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
         }
+    }
+
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
+        self.mempool
+            .get_stake_and_pledge_whitelist()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) async fn pull_and_process_stake_and_pledge_whitelist(&self) -> GossipResult<()> {
+        let allowed_miner_addresses = self
+            .gossip_client
+            .clone()
+            .stake_and_pledge_whitelist(&self.peer_list)
+            .await?;
+
+        self.mempool
+            .update_stake_and_pledge_whitelist(HashSet::from_iter(
+                allowed_miner_addresses.into_iter(),
+            ))
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "get_stake_and_pledge_whitelist() errored: {:?}",
+                    e
+                )))
+            })
     }
 }

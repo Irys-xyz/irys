@@ -11,7 +11,7 @@ pub use facade::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
-use crate::block_validation::calculate_perm_storage_total_fee;
+use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -76,6 +76,7 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
+    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -136,6 +137,8 @@ pub enum MempoolServiceMessage {
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
+    UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
+    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
 }
 
 impl Inner {
@@ -255,6 +258,18 @@ impl Inner {
                 MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
                     let response_value = self.remove_from_blacklists(tx_ids).await;
                     if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
+                    self.stake_and_pledge_whitelist.extend(new_entries);
+                    if let Err(e) = response.send(()) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
+                    let whitelist = self.stake_and_pledge_whitelist.clone();
+                    if let Err(e) = tx.send(whitelist) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
@@ -744,7 +759,7 @@ impl Inner {
 
             let mut publish_txids: Vec<H256> = Vec::new();
 
-            // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
+            // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
             for data_root in ingress_proofs.keys() {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
@@ -754,7 +769,7 @@ impl Inner {
                 }
             }
 
-            // Loop though all the pending tx to see which haven't been promoted
+            // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
             // TODO: improve this
             let mut tx_headers = get_data_tx_in_parallel_inner(
@@ -771,7 +786,7 @@ impl Inner {
             .await
             .unwrap_or(vec![]);
 
-            // so the resulting publish_txs & proofs are sorted
+            // Sort the resulting publish_txs & proofs
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
             for tx_header in &tx_headers {
@@ -790,32 +805,128 @@ impl Inner {
                 } else {
                     // If it's not promoted, validate the proofs
 
-                    // Get the proofs for this tx
-                    let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+                    // Get all the proofs for this tx
+                    let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
 
-                    let mut tx_proofs = Vec::new();
-
-                    // Check for the correct number of ingress proofs
-                    if (proofs.len() as u64) < self.config.consensus.number_of_ingress_proofs_total
+                    // Check for minimum number of ingress proofs
+                    if (all_proofs.len() as u64)
+                        < self.config.consensus.number_of_ingress_proofs_total
                     {
-                        // Not enough ingress proofs to promote this tx
                         info!(
                             "Not promoting tx {} - insufficient proofs (got {} wanted {})",
                             &tx_header.id,
-                            &proofs.len(),
+                            &all_proofs.len(),
                             self.config.consensus.number_of_ingress_proofs_total
                         );
                         continue;
-                    } else {
-                        // Collect enough ingress proofs for promotion, but no more
-                        for i in 0..self.config.consensus.number_of_ingress_proofs_total {
-                            tx_proofs.push(proofs[i as usize].1.proof.clone());
-                        }
-
-                        // Update the lists for the publish ledger txid and tx_proofs share an index
-                        publish_txs.push(tx_header.clone());
-                        publish_proofs.append(&mut tx_proofs);
                     }
+
+                    // Convert to IngressProof vector for assignment checking
+                    let all_tx_proofs: Vec<IngressProof> = all_proofs
+                        .iter()
+                        .map(|(_, proof_entry)| proof_entry.proof.clone())
+                        .collect();
+
+                    // Get assigned and unassigned proofs using the existing utility function
+                    let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
+                        &all_tx_proofs,
+                        tx_header,
+                        |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
+                        &self.block_tree_read_guard,
+                        &self.irys_db,
+                        &self.config,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => {
+                            warn!(
+                                "Failed to get assigned proofs for tx {}: {}",
+                                &tx_header.id, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Calculate expected assigned proofs, clamping to available miners
+                    let mut expected_assigned_proofs = self
+                        .config
+                        .consensus
+                        .number_of_ingress_proofs_from_assignees
+                        as usize;
+
+                    if assigned_miners < expected_assigned_proofs {
+                        warn!(
+                            "Clamping expected_assigned_proofs from {} to {} for tx {}",
+                            expected_assigned_proofs, assigned_miners, &tx_header.id
+                        );
+                        expected_assigned_proofs = assigned_miners;
+                    }
+
+                    // Check if we have enough assigned proofs
+                    if assigned_proofs.len() < expected_assigned_proofs {
+                        info!(
+                            "Not promoting tx {} - insufficient assigned proofs (got {} wanted {})",
+                            &tx_header.id,
+                            assigned_proofs.len(),
+                            expected_assigned_proofs
+                        );
+                        continue;
+                    }
+
+                    // Separate assigned and unassigned proofs
+                    let assigned_proof_set: HashSet<_> = assigned_proofs
+                        .iter()
+                        .map(|p| &p.proof.0) // Use signature as unique identifier
+                        .collect();
+
+                    let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
+                        .iter()
+                        .filter(|p| !assigned_proof_set.contains(&p.proof.0))
+                        .cloned()
+                        .collect();
+
+                    // Build the final proof list
+                    let mut final_proofs = Vec::new();
+
+                    // First, add assigned proofs up to the total network limit
+                    // Use all available assigned proofs, but don't exceed the network total
+                    let total_network_limit =
+                        self.config.consensus.number_of_ingress_proofs_total as usize;
+                    let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
+                    final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
+
+                    // Then fill remaining slots with unassigned proofs if needed
+                    let remaining_slots = total_network_limit - final_proofs.len();
+                    if remaining_slots > 0 {
+                        let unassigned_to_use =
+                            std::cmp::min(unassigned_proofs.len(), remaining_slots);
+                        final_proofs.extend_from_slice(&unassigned_proofs[..unassigned_to_use]);
+                    }
+
+                    // Final check - do we have enough total proofs?
+                    if final_proofs.len()
+                        < self.config.consensus.number_of_ingress_proofs_total as usize
+                    {
+                        info!(
+                            "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                            &tx_header.id,
+                            final_proofs.len(),
+                            self.config.consensus.number_of_ingress_proofs_total
+                        );
+                        continue;
+                    }
+
+                    // Success - add this transaction and its proofs
+                    publish_txs.push(tx_header.clone());
+                    publish_proofs.extend(final_proofs.clone()); // Clone to avoid moving final_proofs
+
+                    info!(
+                        "Promoting tx {} with {} assigned proofs and {} total proofs",
+                        &tx_header.id,
+                        assigned_to_use, // Show actual assigned proofs used (capped by network limit)
+                        final_proofs.len()
+                    );
                 }
             }
         }
@@ -1310,6 +1421,10 @@ impl MempoolService {
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
+        let initial_stake_and_pledge_whitelist = config
+            .node_config
+            .initial_stake_and_pledge_whitelist
+            .clone();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -1318,6 +1433,9 @@ impl MempoolService {
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
                 );
+
+                let mut stake_and_pledge_whitelist = HashSet::new();
+                stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
@@ -1334,6 +1452,7 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
+                        stake_and_pledge_whitelist,
                     },
                 };
                 mempool_service

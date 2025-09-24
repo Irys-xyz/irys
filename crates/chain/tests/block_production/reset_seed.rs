@@ -109,9 +109,9 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     let mut ctx_peer1_node = ctx_genesis_node.testing_peer();
     // Setting up mode to full validation sync to check that the reset seed is applied correctly
     //  and all blocks are validated successfully
-    ctx_peer1_node.node_mode = NodeMode::Peer {
-        expected_genesis_hash: ctx_genesis_node.node_ctx.genesis_hash,
-    };
+    ctx_peer1_node.node_mode = NodeMode::Peer;
+    ctx_peer1_node.consensus.get_mut().expected_genesis_hash =
+        Some(ctx_genesis_node.node_ctx.genesis_hash);
     ctx_peer1_node.sync_mode = SyncMode::Full;
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")

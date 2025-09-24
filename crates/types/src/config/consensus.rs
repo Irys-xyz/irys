@@ -50,6 +50,10 @@ pub struct ConsensusConfig {
     /// Genesis-specific config values
     pub genesis: GenesisConfig,
 
+    /// Expected genesis hash (when joining existing networks)
+    #[serde(default)]
+    pub expected_genesis_hash: Option<H256>,
+
     /// The annual cost in USD for storing 1GB of data on the Irys network
     /// Used as the foundation for calculating storage fees
     #[serde(
@@ -419,6 +423,7 @@ impl ConsensusConfig {
                 vdf_next_seed: None,
                 genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             },
+            expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
@@ -529,6 +534,7 @@ impl ConsensusConfig {
                 vdf_next_seed: None,
                 genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
             },
+            expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: 51_872_000,
