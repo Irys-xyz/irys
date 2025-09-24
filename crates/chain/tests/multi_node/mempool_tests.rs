@@ -1159,7 +1159,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .unwrap()
         .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()])));
 
-    // now we gossip B3 back to A
+    // now we send (bypassing gossip) B3 back to A
     // it shouldn't reorg, and should accept the block
     // as well as overriding the ingress proof it has locally with the one from the block
     b_node.send_full_block(&a_node, &b_blk3).await?;
