@@ -1,13 +1,14 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
-use crate::peer_network_service::PeerNetworkService;
+use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
     data_handler_stub, ApiClientStub, BlockDiscoveryStub, FakeGossipServer, MempoolStub,
     MockRethServiceActor,
 };
 use crate::types::GossipResponse;
-use crate::{BlockStatusProvider, GetPeerListGuard};
+use crate::BlockStatusProvider;
 use actix::Actor as _;
+use futures::FutureExt as _;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -18,7 +19,7 @@ use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData,
     GossipDataRequest, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerResponse, PeerScore, VersionRequest, H256,
+    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -144,20 +145,27 @@ impl MockedServices {
         let reth_service = MockRethServiceActor {};
         let reth_addr = reth_service.start();
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list_service = PeerNetworkService::new_with_custom_api_client(
+        let runtime_handle = tokio::runtime::Handle::current();
+        let reth_peer_sender = {
+            let reth_addr = reth_addr;
+            Arc::new(move |peer_info: RethPeerInfo| {
+                let addr = reth_addr.clone();
+                async move {
+                    let _ = addr.send(peer_info).await;
+                }
+                .boxed()
+            })
+        };
+
+        let (_peer_network_handle, peer_list_data_guard) = spawn_peer_network_service_with_client(
             db.clone(),
             config,
             mock_client.clone(),
-            reth_addr,
+            reth_peer_sender,
             receiver,
             sender,
+            runtime_handle,
         );
-        let peer_service_addr = peer_list_service.start();
-        let peer_list_data_guard = peer_service_addr
-            .send(GetPeerListGuard)
-            .await
-            .expect("to get peer list")
-            .expect("to get peer list");
         let execution_payload_provider =
             ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 

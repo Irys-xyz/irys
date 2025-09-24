@@ -1,15 +1,16 @@
-use crate::peer_network_service::{GetPeerListGuard, PeerNetworkService};
+use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::types::GossipResponse;
 use crate::{
     BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
-use actix::{Actor, Addr, Context, Handler};
+use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
+use futures::FutureExt as _;
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
@@ -30,8 +31,8 @@ use irys_types::{
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
     GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
     IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TxChunkOffset, UnpackedChunk,
-    VersionRequest, H256,
+    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
+    UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -361,8 +362,6 @@ impl Default for ApiClientStub {
     }
 }
 
-pub(crate) type PeerListMock = Addr<PeerNetworkService<ApiClientStub, MockRethServiceActor>>;
-
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
@@ -370,7 +369,9 @@ pub(crate) struct GossipServiceTestFixture {
     pub db: DatabaseProvider,
     pub mining_address: Address,
     pub mempool_stub: MempoolStub,
-    pub peer_list: PeerListMock,
+    #[expect(dead_code)]
+    pub peer_network_handle: TokioServiceHandle,
+    pub peer_list: PeerList,
     pub mempool_txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
@@ -427,20 +428,28 @@ impl GossipServiceTestFixture {
         let (service_senders, service_receivers) = ServiceSenders::new();
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_service = PeerNetworkService::new_with_custom_api_client(
+
+        let tokio_runtime = tokio::runtime::Handle::current();
+        let reth_peer_sender = {
+            let reth_service_addr = reth_service_addr.clone();
+            Arc::new(move |reth_peer_info: RethPeerInfo| {
+                let addr = reth_service_addr.clone();
+                async move {
+                    let _ = addr.send(reth_peer_info).await;
+                }
+                .boxed()
+            })
+        };
+
+        let (peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
             db.clone(),
             &config,
             ApiClientStub::new(),
-            reth_service_addr,
+            reth_peer_sender,
             receiver,
             sender,
+            tokio_runtime.clone(),
         );
-        let peer_list = peer_service.start();
-        let peer_list_data_guard = peer_list
-            .send(GetPeerListGuard)
-            .await
-            .expect("to get peer list")
-            .expect("to get peer list");
 
         let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
         let mempool_txs = Arc::clone(&mempool_stub.txs);
@@ -454,8 +463,6 @@ impl GossipServiceTestFixture {
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
-        let tokio_runtime = tokio::runtime::Handle::current();
-
         let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
 
         let task_manager = TaskManager::new(tokio_runtime);
@@ -463,7 +470,7 @@ impl GossipServiceTestFixture {
 
         let mocked_execution_payloads = Arc::new(RwLock::new(HashMap::new()));
         let execution_payload_provider = ExecutionPayloadCache::new(
-            peer_list_data_guard,
+            peer_list.clone(),
             RethBlockProvider::Mock(mocked_execution_payloads),
         );
 
@@ -507,6 +514,7 @@ impl GossipServiceTestFixture {
             db,
             mining_address: config.node_config.miner_address(),
             mempool_stub,
+            peer_network_handle,
             peer_list,
             // block_discovery_stub,
             mempool_txs,
@@ -554,15 +562,10 @@ impl GossipServiceTestFixture {
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: Some(self.service_senders.gossip_broadcast.clone()),
-            block_status_provider: block_status_provider_mock.clone(),
+            block_status_provider: block_status_provider_mock,
         };
 
-        let peer_list = self
-            .peer_list
-            .send(GetPeerListGuard)
-            .await
-            .expect("to get peer list guard")
-            .expect("to get peer list guard");
+        let peer_list = self.peer_list.clone();
         let execution_payload_provider = self.execution_payload_provider.clone();
 
         let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
@@ -605,7 +608,7 @@ impl GossipServiceTestFixture {
 
     /// # Panics
     /// Can panic
-    pub(crate) async fn add_peer(&self, other: &Self) {
+    pub(crate) fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
 
         debug!(
@@ -613,14 +616,8 @@ impl GossipServiceTestFixture {
             other.mining_address, peer, self.gossip_port
         );
 
-        let peer_list_guard = self
-            .peer_list
-            .send(GetPeerListGuard)
-            .await
-            .expect("to get peer list guard")
-            .expect("to get peer list guard");
-
-        peer_list_guard.add_or_update_peer(other.mining_address, peer.clone(), true);
+        self.peer_list
+            .add_or_update_peer(other.mining_address, peer, true);
     }
 }
 

@@ -3,6 +3,7 @@ use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
+use futures::FutureExt as _;
 use irys_actors::block_discovery::{
     BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
 };
@@ -38,8 +39,8 @@ use irys_domain::{
     StorageModule, StorageModuleInfo, StorageModulesReadGuard,
 };
 use irys_p2p::{
-    BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GetPeerListGuard,
-    GossipDataHandler, P2PService, PeerNetworkService, ServiceHandleWithShutdownSignal,
+    spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
+    ChainSyncServiceInner, GossipDataHandler, P2PService, ServiceHandleWithShutdownSignal,
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
@@ -52,8 +53,8 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
     CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, ServiceSet,
-    TokioServiceHandle, H256, U256,
+    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
+    ServiceSet, TokioServiceHandle, H256, U256,
 };
 use irys_types::{BlockHash, EvmBlockHash};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -1009,17 +1010,14 @@ impl IrysNode {
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Spawn peer list service
-        let (peer_list_service, peer_list_arbiter) = init_peer_list_service(
+        let (peer_network_handle, peer_list_guard) = init_peer_list_service(
             &irys_db,
             &config,
             reth_service_actor.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
+            runtime_handle.clone(),
         );
-        let peer_list_guard = peer_list_service
-            .send(GetPeerListGuard)
-            .await?
-            .expect("to get peer list guard");
 
         let execution_payload_cache =
             ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
@@ -1328,9 +1326,7 @@ impl IrysNode {
             services.push(ArbiterEnum::TokioService(mempool_handle));
 
             // 8. Core infrastructure (shutdown last)
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(peer_list_arbiter, "peer_list_arbiter".to_string()),
-            });
+            services.push(ArbiterEnum::TokioService(peer_network_handle));
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()),
             });
@@ -1688,21 +1684,40 @@ fn init_peer_list_service(
     reth_service_addr: Addr<RethServiceActor>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
-) -> (
-    Addr<PeerNetworkService<IrysApiClient, RethServiceActor>>,
-    Arbiter,
-) {
-    let peer_list_arbiter = Arbiter::new();
-    let peer_list_service = PeerNetworkService::new(
+    runtime_handle: Handle,
+) -> (TokioServiceHandle, PeerList) {
+    let reth_peer_sender = {
+        let reth_service_addr = reth_service_addr;
+        Arc::new(move |reth_peer_info: RethPeerInfo| {
+            let addr = reth_service_addr.clone();
+            async move {
+                match addr.send(reth_peer_info).await {
+                    Ok(Ok(())) => {
+                        debug!("Successfully connected to reth peer");
+                    }
+                    Ok(Err(err)) => {
+                        error!("Failed to connect to reth peer: {}", err);
+                    }
+                    Err(mailbox_error) => {
+                        error!(
+                            "Failed to connect to reth peer due to mailbox error: {}",
+                            mailbox_error
+                        );
+                    }
+                }
+            }
+            .boxed()
+        })
+    };
+
+    spawn_peer_network_service(
         irys_db.clone(),
         config,
-        reth_service_addr,
+        reth_peer_sender,
         service_receiver,
         service_sender,
-    );
-    let peer_list_service =
-        PeerNetworkService::start_in_arbiter(&peer_list_arbiter.handle(), |_| peer_list_service);
-    (peer_list_service, peer_list_arbiter)
+        runtime_handle,
+    )
 }
 
 fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>, Arbiter) {
