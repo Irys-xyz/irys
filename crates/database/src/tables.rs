@@ -15,13 +15,13 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
-/// used as pure table values.
+/// Adds wrapper structs for some primitive types so they can derive `Compact` and be used
+/// directly as table values.
 #[macro_export]
 macro_rules! add_wrapper_struct {
 	($(($name:tt, $wrapper:tt)),+) => {
         $(
-            /// Wrapper struct so it can use StructFlags from Compact, when used as pure table values.
+            /// Wrapper struct enabling `Compact` derivation so it can be used directly as a table value.
             #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
             #[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
             pub struct $wrapper(pub $name);
