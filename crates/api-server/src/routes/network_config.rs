@@ -3,7 +3,7 @@ use irys_types::serialization::string_u64;
 use serde::{Deserialize, Serialize};
 
 /// Public variant of StorageConfig, containing network-wide parameters
-/// Primarily used for testing clients, so we don't have to manually sync parameters
+/// Primarily used for testing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicStorageConfig {
@@ -33,7 +33,7 @@ pub async fn get_network_config(state: web::Data<ApiState>) -> HttpResponse {
         .content_type(ContentType::json())
         .json(PublicStorageConfig {
             chunk_size: state.config.consensus.chunk_size,
-            chain_id: state.config.consensus.chunk_size,
+            chain_id: state.config.consensus.chain_id,
             num_chunks_in_partition: state.config.consensus.num_chunks_in_partition,
             num_chunks_in_recall_range: state.config.consensus.num_chunks_in_recall_range,
             num_partitions_per_slot: state.config.consensus.num_partitions_per_slot,
