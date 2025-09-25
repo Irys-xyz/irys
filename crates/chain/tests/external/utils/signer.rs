@@ -3,14 +3,14 @@ use irys_types::{irys::IrysSigner, Address, ConsensusConfig};
 use k256::ecdsa::SigningKey;
 
 #[derive(Debug, Clone)]
-pub struct TestSigner {
+pub(crate) struct TestSigner {
     pub irys_signer: IrysSigner,
     pub address: Address,
     pub name: String,
 }
 
 impl TestSigner {
-    pub fn from_private_key(
+    pub(crate) fn from_private_key(
         private_key_hex: &str,
         name: String,
         config: &ConsensusConfig,
@@ -37,7 +37,7 @@ impl TestSigner {
         })
     }
 
-    pub fn random(name: String, config: &ConsensusConfig) -> Self {
+    pub(crate) fn random(name: String, config: &ConsensusConfig) -> Self {
         let irys_signer = IrysSigner::random_signer(config);
         let address = irys_signer.address();
 
@@ -49,7 +49,7 @@ impl TestSigner {
     }
 }
 
-pub fn load_test_signers_from_env() -> Result<Vec<String>> {
+pub(crate) fn load_test_signers_from_env() -> Result<Vec<String>> {
     // Load private keys from environment variables
     // Format: TEST_SIGNER_KEYS="key1,key2,key3"
     let keys_env = std::env::var("TEST_SIGNER_KEYS");

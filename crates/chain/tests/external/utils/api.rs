@@ -5,11 +5,15 @@ use irys_types::{DataLedger, H256, U256};
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 
-
 /// Make a GET request to the API endpoint
 async fn make_get_request(client: &RemoteNodeClient, endpoint: &str) -> Result<Response> {
     let url = format!("{}/{}/{}", client.url, API_VERSION, endpoint);
-    client.http_client.get(&url).send().await.map_err(Into::into)
+    client
+        .http_client
+        .get(&url)
+        .send()
+        .await
+        .map_err(Into::into)
 }
 
 /// Make a GET request and parse the JSON response
@@ -49,21 +53,22 @@ fn ledger_to_string(ledger: DataLedger) -> &'static str {
     }
 }
 
-
-pub async fn fetch_genesis_info(client: &RemoteNodeClient) -> Result<GenesisResponse> {
+pub(crate) async fn fetch_genesis_info(client: &RemoteNodeClient) -> Result<GenesisResponse> {
     get_json(client, "genesis", "Failed to fetch genesis info").await
 }
 
-pub async fn fetch_network_config(client: &RemoteNodeClient) -> Result<NetworkConfigResponse> {
+pub(crate) async fn fetch_network_config(
+    client: &RemoteNodeClient,
+) -> Result<NetworkConfigResponse> {
     get_json(client, "network/config", "Failed to fetch network config").await
 }
 
-pub async fn fetch_anchor(client: &RemoteNodeClient) -> Result<H256> {
+pub(crate) async fn fetch_anchor(client: &RemoteNodeClient) -> Result<H256> {
     let anchor_resp: AnchorResponse = get_json(client, "anchor", "Failed to fetch anchor").await?;
     Ok(anchor_resp.anchor)
 }
 
-pub async fn fetch_data_price(
+pub(crate) async fn fetch_data_price(
     client: &RemoteNodeClient,
     ledger: DataLedger,
     data_size: usize,
@@ -79,13 +84,13 @@ pub async fn fetch_data_price(
     Ok((perm_fee, term_fee))
 }
 
-pub async fn get_chain_height(client: &RemoteNodeClient) -> Result<u64> {
+pub(crate) async fn get_chain_height(client: &RemoteNodeClient) -> Result<u64> {
     let height_resp: ChainHeightResponse =
         get_json(client, "chain/height", "Failed to get chain height").await?;
     Ok(height_resp.height)
 }
 
-pub async fn get_storage_intervals(
+pub(crate) async fn get_storage_intervals(
     client: &RemoteNodeClient,
     ledger: DataLedger,
     slot_index: usize,
@@ -100,7 +105,7 @@ pub async fn get_storage_intervals(
     get_json(client, &endpoint, "Failed to get storage intervals").await
 }
 
-pub async fn get_ledger_summary(
+pub(crate) async fn get_ledger_summary(
     client: &RemoteNodeClient,
     node_id: &str,
     ledger: DataLedger,
@@ -121,7 +126,7 @@ pub async fn get_ledger_summary(
     }
 }
 
-pub async fn check_transaction_status(
+pub(crate) async fn check_transaction_status(
     client: &RemoteNodeClient,
     tx_id: &H256,
 ) -> Result<TransactionStatusResponse> {
@@ -137,6 +142,7 @@ pub async fn check_transaction_status(
     }
 }
 
-pub async fn get_node_info(client: &RemoteNodeClient) -> Result<NodeInfo> {
+#[expect(dead_code)]
+pub(crate) async fn get_node_info(client: &RemoteNodeClient) -> Result<NodeInfo> {
     get_json(client, "info", "Failed to get node info").await
 }

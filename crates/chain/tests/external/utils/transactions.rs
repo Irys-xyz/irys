@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-pub async fn post_data_transaction(
+pub(crate) async fn post_data_transaction(
     client: &RemoteNodeClient,
     signer: &TestSigner,
     data_size: usize,
@@ -68,7 +68,7 @@ pub async fn post_data_transaction(
     Ok(signed_tx)
 }
 
-pub async fn post_stake_commitment(
+pub(crate) async fn post_stake_commitment(
     client: &RemoteNodeClient,
     signer: &TestSigner,
 ) -> Result<CommitmentTransaction> {
@@ -98,7 +98,8 @@ pub async fn post_stake_commitment(
 }
 
 // TODO: Post pledge functionality
-pub async fn post_pledge_commitments(
+#[expect(dead_code)]
+pub(crate) fn post_pledge_commitments(
     _client: &RemoteNodeClient,
     signer: &TestSigner,
     count: usize,
@@ -136,7 +137,7 @@ async fn post_commitment_transaction(
 }
 
 // TODO:  Use to post individual chunks
-#[allow(dead_code)]
+#[expect(dead_code)]
 async fn post_chunk(
     client: &RemoteNodeClient,
     tx_id: &H256,

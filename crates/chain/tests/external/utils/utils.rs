@@ -1,6 +1,6 @@
 use super::types::ChunkInterval;
 use eyre::Result;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs as _};
 
 pub(crate) fn generate_test_data(size: usize) -> Vec<u8> {
     let mut data = vec![0u8; size];
@@ -68,6 +68,7 @@ pub(crate) fn get_env_duration(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+#[expect(dead_code)]
 pub(crate) fn get_env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .unwrap_or_else(|_| default.to_string())
