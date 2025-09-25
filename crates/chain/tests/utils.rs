@@ -46,8 +46,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
-    SyncMode, H256, U256,
+    partition::PartitionAssignment, Address, DataLedger, EvmBlockHash, GossipBroadcastMessage,
+    H256List, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -64,6 +64,7 @@ use reth::{
     payload::EthBuiltPayload,
     providers::BlockReader as _,
     rpc::types::RpcBlockHash,
+    rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
 use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
@@ -1265,6 +1266,45 @@ impl IrysNodeTest<IrysNodeCtx> {
             &hash,
             &self.name,
             max_retries
+        ))
+    }
+
+    pub async fn wait_for_reth_tag(
+        &self,
+        tag: BlockNumberOrTag,
+        expected_hash: EvmBlockHash,
+        seconds_to_wait: u64,
+    ) -> eyre::Result<EvmBlockHash> {
+        let retries_per_second = 10;
+        let max_retries = seconds_to_wait * retries_per_second;
+        for attempt in 0..max_retries {
+            let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
+            match eth_api.block_by_number(tag.clone(), false).await {
+                Ok(Some(block)) if block.header.hash == expected_hash => {
+                    return Ok(block.header.hash);
+                }
+                Ok(Some(block)) => {
+                    tracing::debug!(
+                        target = "test.reth",
+                        ?tag,
+                        expected = %expected_hash,
+                        actual = %block.header.hash,
+                        attempt,
+                        "reth tag mismatch while waiting"
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("error polling reth {:?} block: {:?}", tag, err);
+                }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        Err(eyre::eyre!(
+            "Reth {:?} block did not reach expected hash {:?} within {}s",
+            tag,
+            expected_hash,
+            seconds_to_wait
         ))
     }
 
