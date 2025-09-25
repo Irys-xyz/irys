@@ -15,8 +15,6 @@ use serde::{Deserialize, Serialize};
 /// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
 pub struct PartitionHashes(pub Vec<PartitionHash>);
 
-
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 pub struct DataRootLRUEntry {
     /// The last block height this data_root was used

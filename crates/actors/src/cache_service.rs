@@ -1,6 +1,5 @@
 use irys_database::{
     db::IrysDatabaseExt as _,
-
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{
         CachedChunks, CachedDataRoots, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
