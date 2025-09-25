@@ -161,7 +161,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     let submodule_path = &peer_sm_infos_before[0].submodules[0].1;
     let params_path = submodule_path.join(PACKING_PARAMS_FILE_NAME);
     let mut params = PackingParams::from_toml(&params_path).expect("packing params to load");
-    params.last_updated_height = None;
+    params.last_updated_height = 1;
     params.write_to_disk(&params_path);
 
     // 5. Mine another epoch to get peer partition assigned to data ledger slot
