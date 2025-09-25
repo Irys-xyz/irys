@@ -300,7 +300,7 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn emit_fcu(&self, anchors: &CanonicalAnchors) {
+    async fn emit_fcu(&self, anchors: &CanonicalAnchors) -> eyre::Result<()> {
         let tip_block = &anchors.head.header;
         debug_assert_eq!(
             anchors.head.entry.block_hash, tip_block.block_hash,
@@ -314,6 +314,8 @@ impl BlockTreeServiceInner {
             "broadcasting canonical chain update",
         );
 
+        let (tx, rx) = oneshot::channel();
+
         self.service_senders
             .reth_service
             .send(RethServiceMessage::ForkChoice {
@@ -322,8 +324,12 @@ impl BlockTreeServiceInner {
                     confirmed_hash: anchors.migration_block.entry.block_hash,
                     finalized_hash: anchors.prune_block.entry.block_hash,
                 },
+                response: tx,
             })
             .expect("Unable to send confirmation FCU message to reth");
+
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
     fn emit_block_confirmed(&self, anchors: &CanonicalAnchors) {
@@ -769,7 +775,7 @@ impl BlockTreeServiceInner {
         }
 
         if let Some(anchors) = &new_canonical_anchors {
-            self.emit_fcu(anchors);
+            self.emit_fcu(anchors).await?;
             self.emit_block_confirmed(anchors);
             // Handle block migration (move chunks to disk and add to block_index)
             if tip_changed {

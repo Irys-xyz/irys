@@ -32,6 +32,7 @@ pub struct ForkChoiceUpdateMessage {
 pub enum RethServiceMessage {
     ForkChoice {
         update: ForkChoiceUpdateMessage,
+        response: oneshot::Sender<()>,
     },
     ConnectToPeer {
         peer: RethPeerInfo,
@@ -150,8 +151,9 @@ impl RethService {
 
     async fn handle_command(&mut self, command: RethServiceMessage) -> eyre::Result<()> {
         match command {
-            RethServiceMessage::ForkChoice { update } => {
+            RethServiceMessage::ForkChoice { update, response } => {
                 self.handle_forkchoice(update).await?;
+                let _ = response.send(());
             }
             RethServiceMessage::ConnectToPeer { peer, response } => {
                 let result = self.connect_to_peer(peer);

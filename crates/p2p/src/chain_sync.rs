@@ -274,7 +274,8 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                         &block_pool.db,
                         &config,
                         &mut reth_service,
-                    );
+                    )
+                    .await;
                 }
 
                 let res = sync_chain(
@@ -1350,32 +1351,42 @@ async fn is_local_index_is_behind_trusted_peers(
 }
 
 // Sends a fork choice update message to the Reth service with the latest block from the block index
-fn update_reth_with_initial_block(
+async fn update_reth_with_initial_block(
     block_index: &BlockIndexReadGuard,
     irys_db: &DatabaseProvider,
     config: &Config,
     reth_service: &mut Option<mpsc::UnboundedSender<RethServiceMessage>>,
 ) {
-    // Read the latest from the block index; if no entries, panic
-    let index_guard = block_index.read();
-    let latest_height = index_guard.latest_height();
-    let head_hash = index_guard
-        .get_item(latest_height)
-        .expect("latest height must exist in block index")
-        .block_hash;
+    let (head_hash, confirmed_hash, finalized_hash) = {
+        // Read the latest from the block index; if no entries, panic
+        let index_guard = block_index.read();
+        let latest_height = index_guard.latest_height();
+        let head_hash = index_guard
+            .get_item(latest_height)
+            .expect("latest height must exist in block index")
+            .block_hash;
 
-    let migration_depth = u64::from(config.consensus.block_migration_depth);
-    let confirmed_hash = index_guard
-        .get_item(latest_height.saturating_sub(migration_depth))
-        .map(|item| item.block_hash)
-        .unwrap_or(head_hash);
+        let genesis_block_hash = config.consensus.expected_genesis_hash.unwrap_or_else(|| {
+            index_guard
+                .get_item(0)
+                .expect("genesis block must exist in block index")
+                .block_hash
+        });
 
-    let prune_depth = config.consensus.block_tree_depth;
-    let finalized_hash = index_guard
-        .get_item(latest_height.saturating_sub(prune_depth))
-        .map(|item| item.block_hash)
-        .unwrap_or(head_hash);
-    drop(index_guard);
+        let migration_depth = u64::from(config.consensus.block_migration_depth);
+        let confirmed_hash = index_guard
+            .get_item(latest_height.saturating_sub(migration_depth))
+            .map(|item| item.block_hash)
+            .unwrap_or(genesis_block_hash);
+
+        let prune_depth = config.consensus.block_tree_depth;
+        let finalized_hash = index_guard
+            .get_item(latest_height.saturating_sub(prune_depth))
+            .map(|item| item.block_hash)
+            .unwrap_or(genesis_block_hash);
+
+        (head_hash, confirmed_hash, finalized_hash)
+    };
 
     let latest_block = database::block_header_by_hash(&irys_db.tx().unwrap(), &head_hash, false)
         .expect("database to be accessible during init")
@@ -1383,6 +1394,7 @@ fn update_reth_with_initial_block(
 
     // update reth service about the latest block data it must use
     if let Some(reth_service_tx) = reth_service {
+        let (tx, rx) = oneshot::channel();
         reth_service_tx
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
@@ -1390,8 +1402,11 @@ fn update_reth_with_initial_block(
                     confirmed_hash,
                     finalized_hash,
                 },
+                response: tx,
             })
             .expect("reth service to be alive at init");
+        rx.await
+            .expect("reth service acknowledgment for initial fork choice");
         debug!("Reth service updated about fork choice");
     }
 }

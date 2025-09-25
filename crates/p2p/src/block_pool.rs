@@ -381,6 +381,8 @@ where
                 finalized = %finalized_hash,
                 "Sending ForkChoiceUpdateMessage to Reth service"
             );
+            let (tx, rx) = oneshot::channel();
+
             reth_service
                 .send(RethServiceMessage::ForkChoice {
                     update: ForkChoiceUpdateMessage {
@@ -388,6 +390,7 @@ where
                         confirmed_hash,
                         finalized_hash,
                     },
+                    response: tx,
                 })
                 .map_err(|err| {
                     BlockPoolError::OtherInternal(format!(
@@ -395,6 +398,13 @@ where
                         err
                     ))
                 })?;
+
+            rx.await.map_err(|err| {
+                BlockPoolError::ForkChoiceFailed(format!(
+                    "Reth service dropped FCU acknowledgment: {:?}",
+                    err
+                ))
+            })?;
         }
 
         // Remove the payload from the cache after it has been processed to prevent excessive memory usage
