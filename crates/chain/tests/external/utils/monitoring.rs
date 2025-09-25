@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-pub async fn get_node_storage_status(
+pub(crate) async fn get_node_storage_status(
     client: &RemoteNodeClient,
     node_name: &str,
 ) -> Result<StorageStatus> {
@@ -54,7 +54,7 @@ pub async fn get_node_storage_status(
     })
 }
 
-pub async fn check_node_storage(
+pub(crate) async fn check_node_storage(
     client: &RemoteNodeClient,
     _node_name: &str,
 ) -> Result<NodeStorageCounts> {
@@ -120,7 +120,7 @@ pub async fn check_node_storage(
     })
 }
 
-pub async fn wait_for_chain_progression(
+pub(crate) async fn wait_for_chain_progression(
     clients: &[RemoteNodeClient],
     target_height: u64,
     timeout_secs: u64,
@@ -157,7 +157,7 @@ pub async fn wait_for_chain_progression(
     ))
 }
 
-pub async fn wait_for_height_sync(clients: &[RemoteNodeClient], timeout: u64) -> Result<()> {
+pub(crate) async fn wait_for_height_sync(clients: &[RemoteNodeClient], timeout: u64) -> Result<()> {
     let start = std::time::Instant::now();
 
     while start.elapsed().as_secs() < timeout {
@@ -188,7 +188,8 @@ pub async fn wait_for_height_sync(clients: &[RemoteNodeClient], timeout: u64) ->
     Err(eyre::eyre!("Timeout waiting for height synchronization"))
 }
 
-pub async fn monitor_storage_sync(
+#[expect(dead_code)]
+pub(crate) async fn monitor_storage_sync(
     clients: &[RemoteNodeClient],
     expected_data_chunks: Option<usize>,
     timeout_secs: u64,
@@ -283,7 +284,8 @@ pub async fn monitor_storage_sync(
     Ok(())
 }
 
-pub fn validate_detailed_sync(
+#[expect(dead_code)]
+pub(crate) fn validate_detailed_sync(
     node_name: &str,
     storage: &NodeStorageCounts,
     expected_data_chunks: usize,
@@ -358,7 +360,7 @@ pub fn validate_detailed_sync(
     }
 }
 
-pub async fn wait_for_node_ready(client: &RemoteNodeClient, node_name: &str) -> Result<()> {
+pub(crate) async fn wait_for_node_ready(client: &RemoteNodeClient, node_name: &str) -> Result<()> {
     let max_retries = 30;
     let mut retries = 0;
 
@@ -376,7 +378,7 @@ pub async fn wait_for_node_ready(client: &RemoteNodeClient, node_name: &str) -> 
 }
 
 /// Check sync status of all nodes against expected chunk counts
-pub async fn check_nodes_sync_status(
+pub(crate) async fn check_nodes_sync_status(
     clients: &[RemoteNodeClient],
     expected_data_chunks: usize,
     expected_packed_slot0: usize,
@@ -454,7 +456,7 @@ pub async fn check_nodes_sync_status(
     Ok(node_sync_status)
 }
 
-pub async fn analyze_cluster_data(clients: &[RemoteNodeClient]) -> Result<()> {
+pub(crate) async fn analyze_cluster_data(clients: &[RemoteNodeClient]) -> Result<()> {
     info!("=== Analyzing Cluster Data ===");
 
     for (i, client) in clients.iter().enumerate() {
@@ -495,7 +497,8 @@ pub async fn analyze_cluster_data(clients: &[RemoteNodeClient]) -> Result<()> {
     Ok(())
 }
 
-pub async fn test_mining_capabilities(clients: &[RemoteNodeClient]) -> Result<()> {
+#[expect(dead_code)]
+pub(crate) async fn test_mining_capabilities(clients: &[RemoteNodeClient]) -> Result<()> {
     info!("Checking if nodes can mine blocks...");
 
     for (i, client) in clients.iter().enumerate() {
