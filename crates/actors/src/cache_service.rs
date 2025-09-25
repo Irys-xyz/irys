@@ -217,6 +217,11 @@ impl ChunkCacheService {
         let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
         while let Some((data_root, cached)) = walker.next().transpose()? {
+            // Skip pruning mempool-only roots (no block inclusion yet)
+            if cached.block_set.is_empty() {
+                debug!(?data_root, "Skipping prune for mempool-only data root");
+                continue;
+            }
             // Compute max block height among all blocks that included this data_root
             let mut max_height: u64 = 0;
             for block_hash in cached.block_set.iter() {
