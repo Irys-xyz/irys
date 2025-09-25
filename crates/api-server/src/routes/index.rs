@@ -39,3 +39,17 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         .content_type(ContentType::json())
         .body(serde_json::to_string_pretty(&node_info).unwrap())
 }
+
+pub async fn genesis_route(state: web::Data<ApiState>) -> HttpResponse {
+    let (chain, _) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
+    let genesis = chain.first().unwrap();
+
+    let genesis_info = serde_json::json!({
+        "genesis_block_hash": genesis.block_hash,
+        "height": genesis.height
+    });
+
+    HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .body(serde_json::to_string_pretty(&genesis_info).unwrap())
+}
