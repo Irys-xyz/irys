@@ -2,8 +2,7 @@ use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, db_cache::DataRootLRUEntry,
-    tables::DataRootLRU, tx_header_by_txid,
+    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
 use irys_types::{
@@ -134,47 +133,6 @@ impl Inner {
         // we don't check account balance here - we check it when we build & validate blocks
 
         let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
-
-        // Update any associated ingress proofs
-        if let Ok(Some(old_expiry)) = read_tx.get::<DataRootLRU>(tx.data_root) {
-            let anchor_expiry_depth = self
-                .config
-                .node_config
-                .consensus_config()
-                .mempool
-                .anchor_expiry_depth as u64;
-            let new_expiry = anchor_height + anchor_expiry_depth;
-
-            if old_expiry.last_height < new_expiry {
-                debug!(
-                    "Updating ingress proof for data root {} expiry from {} -> {}",
-                    &tx.data_root, &old_expiry.last_height, &new_expiry
-                );
-                self.irys_db
-                    .update(|write_tx| {
-                        let updated_expiry = DataRootLRUEntry {
-                            last_height: new_expiry,
-                            ..old_expiry
-                        };
-
-                        write_tx.put::<DataRootLRU>(tx.data_root, updated_expiry)
-                    })
-                    .map_err(|e| {
-                        error!(
-                            "Error updating ingress proof expiry for {} - {}",
-                            &tx.data_root, &e
-                        );
-                        TxIngressError::DatabaseError
-                    })?
-                    .map_err(|e| {
-                        error!(
-                            "Error updating ingress proof expiry for {} - {}",
-                            &tx.data_root, &e
-                        );
-                        TxIngressError::DatabaseError
-                    })?;
-            }
-        }
 
         let mut mempool_state_write_guard = self.mempool_state.write().await;
         mempool_state_write_guard
