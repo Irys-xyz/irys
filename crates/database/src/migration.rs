@@ -120,6 +120,7 @@ mod tests {
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::Database as _;
 
+    // test ensures v0→v1 migration moves representative records to the new DB, clears old DB tables, and sets the schema version.
     #[test]
     fn should_migrate_from_v0_to_v1() -> Result<(), Box<dyn std::error::Error>> {
         // Create separate old and new DBs with no schema version set
