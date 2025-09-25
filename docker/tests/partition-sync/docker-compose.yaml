@@ -36,9 +36,10 @@ services:
       - RUST_LOG=debug
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
+      - ./scripts/start_peer_with_genesis.sh:/app/start_peer_with_genesis.sh:ro
     cap_add:
       - NET_ADMIN
-    command: ["sh", "-c", "sleep 30 && /app/entrypoint.sh"]
+    entrypoint: ["bash", "/app/start_peer_with_genesis.sh"]
 
   test-irys-3:
     build:
@@ -58,9 +59,10 @@ services:
       - RUST_LOG=debug
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
+      - ./scripts/start_peer_with_genesis.sh:/app/start_peer_with_genesis.sh:ro
     cap_add:
       - NET_ADMIN
-    command: ["sh", "-c", "sleep 60 && /app/entrypoint.sh"]
+    entrypoint: ["bash", "/app/start_peer_with_genesis.sh"]
 
 networks:
   test_network:
