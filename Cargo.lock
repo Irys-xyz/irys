@@ -5052,6 +5052,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "semver 1.0.26",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "test-fuzz",
