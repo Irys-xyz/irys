@@ -86,18 +86,18 @@ async fn main() -> eyre::Result<()> {
 
     let args = IrysCli::parse();
 
-    let node_config: NodeConfig = load_config()?;
-
     match args.command {
         Commands::DumpState { .. } => {
             dump_state(cli_init_reth_db(DatabaseEnvKind::RO)?, "./".into())?;
             Ok(())
         }
         Commands::InitState { state_path } => {
+            let node_config: NodeConfig = load_config()?;
             let chain_spec = build_reth_chainspec(&Config::new(node_config.clone()))?;
             init_state(node_config, chain_spec.into(), state_path).await
         }
         Commands::RollbackBlocks { mode } => {
+            let node_config: NodeConfig = load_config()?;
             let db = cli_init_irys_db(DatabaseEnvKind::RW)?;
 
             let block_index = irys_domain::BlockIndex::new(&node_config).await?;
