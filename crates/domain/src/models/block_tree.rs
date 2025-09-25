@@ -405,6 +405,10 @@ impl BlockTree {
             )
         })?;
 
+        // TODO: if we restart when we have a very large amount of blocks,
+        // then actually we would be storing almost all of the block index in memory -
+        // this is because pruning is only called at the very end
+
         // Prune the cache after restoration to ensure correct depth
         // Subtract 1 to ensure we keep exactly `depth` blocks.
         // The cache.prune() implementation does not count `tip` into the depth
