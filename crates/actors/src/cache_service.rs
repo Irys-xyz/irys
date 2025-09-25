@@ -279,3 +279,102 @@ impl ChunkCacheService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eyre::WrapErr as _;
+    use irys_database::{
+        database, open_or_create_db,
+        tables::{CachedDataRoots, IrysTables},
+    };
+    use irys_domain::{BlockIndex, BlockTree};
+    use irys_types::{
+        app_state::DatabaseProvider, Base64, Config, DataTransactionHeader, IrysBlockHeader,
+        NodeConfig, TxChunkOffset, UnpackedChunk,
+    };
+    use std::sync::{Arc, RwLock};
+
+    // This test prevents a regression of bug: mempool-only data roots (with empty block_set)
+    // are pruned once prune_height > 0 and they should not be pruned!
+    #[tokio::test]
+    async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
+        // Minimal config and database
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create a data root cached via mempool path (no block header -> empty block_set)
+        let tx_header = DataTransactionHeader {
+            data_size: 64,
+            ..Default::default()
+        };
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Also cache one chunk + index so pruning is observable
+        let chunk = UnpackedChunk {
+            data_root: tx_header.data_root,
+            data_size: tx_header.data_size,
+            data_path: Base64(vec![]),
+            // Length is irrelevant here; cache_chunk does not validate size
+            bytes: Base64(vec![0_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            eyre::Ok(())
+        })??;
+
+        // Sanity check: entries exist before pruning
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(has_root, "CachedDataRoots missing before prune");
+            Ok(())
+        })??;
+
+        // Build minimal guards (not used by prune_data_root_cache)
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config)
+            .await
+            .wrap_err("failed to build BlockIndex for test")?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+
+        // Construct service (we won't drive the async loop; just call the internal prune)
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let service = ChunkCacheService {
+            config: config.clone(),
+            block_index_guard,
+            block_tree_guard,
+            db: db.clone(),
+            msg_rx: rx,
+            shutdown: shutdown_rx,
+        };
+
+        // Invoke pruning with prune_height > 0 which deletes mempool-only roots with current logic
+        service.prune_data_root_cache(1)?;
+
+        // Desired behavior (post-fix): mempool-only roots should NOT be pruned here.
+        // This assertion will fail today, hence #[ignore] above documents the regression.
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(has_root, "CachedDataRoots was prematurely pruned");
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+}
