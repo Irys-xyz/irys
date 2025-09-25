@@ -1,4 +1,4 @@
-use crate::db_cache::{DataRootLRUEntry, GlobalChunkOffset, PartitionHashes};
+use crate::db_cache::{GlobalChunkOffset, PartitionHashes};
 use crate::metadata::MetadataKey;
 use crate::submodule::tables::RelativeStartOffsets;
 use crate::{
@@ -92,7 +92,6 @@ impl_compression_for_compact!(
     ChunkPathHashes,
     PartitionHashes,
     RelativeStartOffsets,
-    DataRootLRUEntry,
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof
@@ -154,13 +153,7 @@ table IngressProofs {
     type SubKey = Address;
 }
 
-/// Maps a DataRoot to its last-used block height and whether it was used for an ingress proof.
-/// block height is updated every time we receive a valid to-be-promoted transaction with a larger height
-/// Updated by transaction processing logic; pruning/expiry is handled in ChunkCacheService::prune_data_root_cache
-table DataRootLRU {
-    type Key = DataRoot;
-    type Value = DataRootLRUEntry;
-}
+
 
 /// Maps a global (perm) chunk offset to the last block height it was used by a transaction
 /// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks

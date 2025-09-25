@@ -20,7 +20,7 @@ fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
 mod v0_to_v1 {
     use super::*;
     use crate::tables::{
-        CachedChunks, CachedChunksIndex, CachedDataRoots, DataRootLRU, IngressProofs,
+        CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs,
         IrysBlockHeaders, IrysTxHeaders,
     };
     use reth_db::table::Table;
@@ -38,7 +38,6 @@ mod v0_to_v1 {
         move_all_records::<CachedChunksIndex, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedChunks, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<IngressProofs, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<DataRootLRU, TXOld, TXNew>(tx_old, tx_new)?;
 
         crate::set_database_schema_version(tx_new, 1)?;
         Ok(())
@@ -104,12 +103,8 @@ mod tests {
     use crate::db::RethDbWrapper;
     use crate::migration::check_db_version_and_run_migrations_if_needed;
     use crate::open_or_create_db;
-    use crate::{
-        db_cache::DataRootLRUEntry,
-        tables::{DataRootLRU, IrysTables},
-    };
+    use crate::tables::IrysTables;
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::H256;
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::Database as _;
 
@@ -125,36 +120,12 @@ mod tests {
 
         let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
 
-        let write_tx = old_db.tx_mut()?;
-        let key = H256::random();
-        let value = DataRootLRUEntry {
-            last_height: 123,
-            ingress_proof: false,
-        };
-        write_tx.put::<DataRootLRU>(key, value.clone())?;
-        write_tx.commit()?;
-
         assert!(old_version.is_none());
         assert!(new_version.is_none());
-
-        let old_tx = old_db.tx()?;
-        let old_db_value = old_tx.get::<DataRootLRU>(key)?;
-        assert_eq!(old_db_value.unwrap(), value);
-        old_tx.commit()?;
-
-        let new_tx = new_db.tx()?;
-        let new_db_value = new_tx.get::<DataRootLRU>(key)?;
-        assert!(new_db_value.is_none());
-        new_tx.commit()?;
 
         check_db_version_and_run_migrations_if_needed(&old_db, &new_db)?;
 
         let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-
-        let new_tx = new_db.tx()?;
-        let new_db_value = new_tx.get::<DataRootLRU>(key)?;
-        assert_eq!(new_db_value.unwrap(), value);
-        new_tx.commit()?;
 
         assert_eq!(new_version.unwrap(), 1);
 
