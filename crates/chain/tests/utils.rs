@@ -1279,12 +1279,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         let max_retries = seconds_to_wait * retries_per_second;
         for attempt in 0..max_retries {
             let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
-            match eth_api.block_by_number(tag.clone(), false).await {
+            match eth_api.block_by_number(tag, false).await {
                 Ok(Some(block)) if block.header.hash == expected_hash => {
                     return Ok(block.header.hash);
                 }
                 Ok(Some(block)) => {
-                    tracing::debug!(
+                    tracing::error!(
                         target = "test.reth",
                         ?tag,
                         expected = %expected_hash,
@@ -1646,7 +1646,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
-    pub fn get_block_by_height_on_chain(
+    pub fn get_block_by_height_from_index(
         &self,
         height: u64,
         include_chunk: bool,

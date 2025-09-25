@@ -1373,15 +1373,18 @@ async fn update_reth_with_initial_block(
                 .block_hash
         });
 
+        // when we restart reth state from the index, the head is also the confirmed block
         let migration_depth = u64::from(config.consensus.block_migration_depth);
         let confirmed_hash = index_guard
-            .get_item(latest_height.saturating_sub(migration_depth))
+            .get_item(latest_height)
             .map(|item| item.block_hash)
             .unwrap_or(genesis_block_hash);
 
-        let prune_depth = config.consensus.block_tree_depth;
+        // compute the diff from the tip -> expected finalized block
+        let pruned_block_height = latest_height
+            .saturating_sub(migration_depth.abs_diff(config.consensus.block_tree_depth));
         let finalized_hash = index_guard
-            .get_item(latest_height.saturating_sub(prune_depth))
+            .get_item(pruned_block_height)
             .map(|item| item.block_hash)
             .unwrap_or(genesis_block_hash);
 

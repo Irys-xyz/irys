@@ -467,7 +467,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 
     let head_block = genesis_node.get_block_by_height(chain_tip_height).await?;
     let migration_block = genesis_node.get_block_by_height(migration_height).await?;
-    let prune_block = genesis_node.get_block_by_height_on_chain(prune_height, false)?;
+    let prune_block = genesis_node.get_block_by_height_from_index(prune_height, false)?;
 
     for node in [&genesis_node, &peer_node] {
         // Stage 6: validate block index contains migrated block & pruned block
