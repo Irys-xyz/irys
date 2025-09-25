@@ -20,8 +20,8 @@ fn migration_to_v2(_db: &DatabaseEnv) -> Result<(), DatabaseError> {
 mod v0_to_v1 {
     use super::*;
     use crate::tables::{
-        CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs,
-        IrysBlockHeaders, IrysTxHeaders,
+        CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
+        IrysTxHeaders,
     };
     use reth_db::table::Table;
     use reth_db_api::cursor::DbCursorRO as _;
@@ -105,7 +105,6 @@ mod tests {
     use crate::open_or_create_db;
     use crate::tables::IrysTables;
     use irys_testing_utils::utils::temporary_directory;
-    use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::Database as _;
 
     #[test]

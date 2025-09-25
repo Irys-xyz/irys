@@ -2,11 +2,9 @@ use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
-    db_cache::{data_size_to_chunk_count},
+    db_cache::data_size_to_chunk_count,
     submodule::get_data_size_by_data_root,
-    tables::{
-        CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs,
-    },
+    tables::{CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs},
 };
 use irys_types::{
     chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
@@ -349,16 +347,8 @@ impl Inner {
             // we *should* have all the chunks
             // dispatch a ingress proof task
 
-            let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-
-            let latest = canon_chain
-                .0
-                .last()
-                .ok_or(ChunkIngressError::ServiceUninitialized)?;
-
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
-            let latest_height = latest.height;
             let chain_id = self.config.consensus.chain_id;
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
 

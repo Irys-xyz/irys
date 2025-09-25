@@ -1,15 +1,13 @@
 use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use eyre::eyre;
-use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid,
-};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
 };
-use reth_db::{transaction::DbTx as _, transaction::DbTxMut as _, Database as _};
+use reth_db::Database as _;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
@@ -80,7 +78,7 @@ impl Inner {
         self.validate_signature(&tx).await?;
 
         // Validate anchor
-        let anchor_height = self.validate_anchor(&tx).await?;
+        let _anchor_height = self.validate_anchor(&tx).await?;
 
         // Validate ledger type and protocol fees
         let ledger = DataLedger::try_from(tx.ledger_id)
@@ -131,8 +129,6 @@ impl Inner {
         }
 
         // we don't check account balance here - we check it when we build & validate blocks
-
-        let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
 
         let mut mempool_state_write_guard = self.mempool_state.write().await;
         mempool_state_write_guard
