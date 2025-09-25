@@ -1,9 +1,9 @@
 use irys_database::{
     db::IrysDatabaseExt as _,
-    db_cache::DataRootLRUEntry,
+
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{
-        CachedChunks, DataRootLRU, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
+        CachedChunks, CachedDataRoots, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
     },
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
@@ -214,27 +214,41 @@ impl ChunkCacheService {
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
         let mut chunks_pruned: u64 = 0;
         let write_tx = self.db.tx_mut()?;
-        let mut cursor = write_tx.cursor_write::<DataRootLRU>()?;
+        // Iterate all CachedDataRoots and compute the latest block height they were included in
+        let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
-        while let Some((data_root, DataRootLRUEntry { last_height, .. })) =
-            walker.next().transpose()?
-        {
+        while let Some((data_root, cached)) = walker.next().transpose()? {
+            // Compute max block height among all blocks that included this data_root
+            let mut max_height: u64 = 0;
+            for block_hash in cached.block_set.iter() {
+                if let Some(block_header) =
+                    irys_database::block_header_by_hash(&write_tx, block_hash, false)?
+                {
+                    if block_header.height > max_height {
+                        max_height = block_header.height;
+                    }
+                }
+            }
+
             debug!(
-                "Processing data root {} last height: {}, prune height: {}",
-                &data_root, &last_height, &prune_height
+                "Processing data root {} max height: {}, prune height: {}",
+                &data_root, &max_height, &prune_height
             );
-            if last_height < prune_height {
+
+            if max_height < prune_height {
                 debug!(
                     ?data_root,
-                    ?last_height,
+                    ?max_height,
                     ?prune_height,
-                    "expiring ingress proof",
+                    "expiring cached data for data root",
                 );
-                write_tx.delete::<DataRootLRU>(data_root, None)?;
+                // Remove ingress proofs
                 write_tx.delete::<IngressProofs>(data_root, None)?;
-                // delete the cached chunks
+                // Remove cached chunks and index
                 chunks_pruned = chunks_pruned
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
+                // Remove cached data root entry
+                write_tx.delete::<CachedDataRoots>(data_root, None)?;
             }
         }
         debug!(?chunks_pruned, "Pruned chunks");
