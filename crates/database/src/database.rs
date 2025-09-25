@@ -145,6 +145,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         data_size: tx_header.data_size,
         txid_set: vec![tx_header.id],
         block_set: vec![],
+        expiry_height: None,
     });
 
     // If the entry exists, update the timestamp and add the txid if necessary
@@ -160,6 +161,8 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         {
             cached_data_root.block_set.push(block_header.block_hash);
         }
+        // Clear any pre-confirmation expiry once the data_root is included in a block
+        cached_data_root.expiry_height = None;
     }
 
     // Update the database with the modified or new entry

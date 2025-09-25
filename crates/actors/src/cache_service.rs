@@ -217,22 +217,32 @@ impl ChunkCacheService {
         let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
         while let Some((data_root, cached)) = walker.next().transpose()? {
-            // Skip pruning mempool-only roots (no block inclusion yet)
-            if cached.block_set.is_empty() {
-                debug!(?data_root, "Skipping prune for mempool-only data root");
-                continue;
-            }
-            // Compute max block height among all blocks that included this data_root
-            let mut max_height: u64 = 0;
+            // Determine pruning horizon: prefer last inclusion height from block_set,
+            // otherwise fall back to expiry_height (if set). If neither is available, skip pruning.
+            let mut inclusion_max_height: Option<u64> = None;
             for block_hash in cached.block_set.iter() {
                 if let Some(block_header) =
                     irys_database::block_header_by_hash(&write_tx, block_hash, false)?
                 {
-                    if block_header.height > max_height {
-                        max_height = block_header.height;
-                    }
+                    inclusion_max_height = Some(
+                        inclusion_max_height
+                            .map_or(block_header.height, |h| h.max(block_header.height)),
+                    );
                 }
             }
+            let horizon = match (inclusion_max_height, cached.expiry_height) {
+                (Some(h), _) => Some(h),
+                (None, Some(e)) => Some(e),
+                (None, None) => None,
+            };
+            if horizon.is_none() {
+                debug!(
+                    ?data_root,
+                    "Skipping prune for data root without inclusion or expiry"
+                );
+                continue;
+            }
+            let max_height: u64 = horizon.unwrap();
 
             debug!(
                 "Processing data root {} max height: {}, prune height: {}",

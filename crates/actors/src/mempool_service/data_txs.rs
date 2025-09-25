@@ -1,12 +1,15 @@
 use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use eyre::eyre;
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid};
+use irys_database::{
+    block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
+};
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
 };
+use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
@@ -77,8 +80,10 @@ impl Inner {
         // check the result and error handle
         self.validate_signature(&tx).await?;
 
-        // Validate anchor
-        let _anchor_height = self.validate_anchor(&tx).await?;
+        // Validate anchor and compute pre-confirmation expiry horizon
+        let anchor_height = self.validate_anchor(&tx).await?;
+        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+        let expiry_height = anchor_height + anchor_expiry_depth;
 
         // Validate ledger type and protocol fees
         let ledger = DataLedger::try_from(tx.ledger_id)
@@ -137,9 +142,14 @@ impl Inner {
         mempool_state_write_guard.recent_valid_tx.put(tx.id, ());
         drop(mempool_state_write_guard);
 
-        // Cache the data_root in the database
+        // Cache the data_root in the database and set pre-confirmation expiry
         match self.irys_db.update_eyre(|db_tx| {
-            irys_database::cache_data_root(db_tx, &tx, None)?;
+            // Insert/update CachedDataRoot entry
+            let mut cdr = irys_database::cache_data_root(db_tx, &tx, None)?
+                .ok_or_else(|| eyre!("failed to cache data_root"))?;
+            // Set expiry so pruning can remove never-confirmed roots after their anchor window
+            cdr.expiry_height = Some(expiry_height);
+            db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
             Ok(())
         }) {
             Ok(()) => {

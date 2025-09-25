@@ -162,6 +162,7 @@ mod tests {
                 data_size: 1,
                 txid_set: vec![tx_id],
                 block_set: vec![block_hash],
+                expiry_height: None,
             };
             write_tx.put::<CachedDataRoots>(data_root, cdr)?;
 
