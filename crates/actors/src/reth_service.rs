@@ -10,7 +10,7 @@ use reth::{
     tasks::shutdown::Shutdown,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, mpsc::UnboundedSender, oneshot};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 #[derive(Debug)]
 pub struct RethService {
@@ -111,11 +111,14 @@ impl RethService {
             mempool,
         };
 
-        let join_handle = runtime_handle.spawn(async move {
-            if let Err(err) = service.run().await {
-                error!(error = %err, "Reth service terminated with error");
+        let join_handle = runtime_handle.spawn(
+            async move {
+                if let Err(err) = service.run().await {
+                    error!(error = %err, "Reth service terminated with error");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         TokioServiceHandle {
             name: "reth_service".to_string(),
@@ -211,7 +214,7 @@ impl RethService {
             finalized_hash,
         } = fcu;
 
-        info!(
+        tracing::error!(
             head = %head_hash,
             confirmed = %confirmed_hash,
             finalized = %finalized_hash,
@@ -230,7 +233,7 @@ impl RethService {
             .block_by_number(BlockNumberOrTag::Finalized, false)
             .await;
 
-        debug!(
+        tracing::error!(
             latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
             safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
             finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
@@ -258,7 +261,7 @@ impl RethService {
             .block_by_number(BlockNumberOrTag::Finalized, false)
             .await;
 
-        debug!(
+        tracing::error!(
             latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
             safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
             finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),

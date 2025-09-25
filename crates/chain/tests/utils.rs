@@ -1275,9 +1275,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_hash: EvmBlockHash,
         seconds_to_wait: u64,
     ) -> eyre::Result<EvmBlockHash> {
-        let retries_per_second = 10;
-        let max_retries = seconds_to_wait * retries_per_second;
-        for attempt in 0..max_retries {
+        let beginning = Instant::now();
+        let max_duration = Duration::from_secs(seconds_to_wait);
+        for attempt in 0..10 {
+            eyre::ensure!(
+                Instant::now().duration_since(beginning) < max_duration,
+                "timed out"
+            );
+
             let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
             match eth_api.block_by_number(tag, false).await {
                 Ok(Some(block)) if block.header.hash == expected_hash => {

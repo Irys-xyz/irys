@@ -14,9 +14,10 @@ use crate::{
 use actix::prelude::*;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
-    create_epoch_snapshot_for_block, make_block_tree_entry, AnchorBlock, BlockState, BlockTree,
-    BlockTreeEntry, BlockTreeReadGuard, CanonicalAnchors, ChainState, EpochReplayData,
+    block_index_guard::BlockIndexReadGuard, canonical_anchors,
+    create_commitment_snapshot_for_block, create_epoch_snapshot_for_block, make_block_tree_entry,
+    AnchorBlock, BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, CanonicalAnchors,
+    ChainState, EpochReplayData,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
@@ -603,12 +604,14 @@ impl BlockTreeServiceInner {
             let tip_changed = cache.mark_tip(&block_hash)?;
 
             let (epoch_block, reorg_event, canonical_anchors) = if tip_changed {
-                let anchors = cache
-                    .canonical_anchors(
-                        self.config.consensus.block_migration_depth as usize,
-                        self.config.consensus.block_tree_depth as usize,
-                    )
-                    .expect("canonical chain cannot be empty");
+                let block_index_read = self.block_index_guard.read();
+                let anchors = canonical_anchors(
+                    &cache,
+                    &block_index_read,
+                    &self.db,
+                    self.config.consensus.block_migration_depth as usize,
+                    self.config.consensus.block_tree_depth as usize,
+                )?;
                 let new_canonical_anchors = Some(anchors);
 
                 // Prune the cache after tip changes.

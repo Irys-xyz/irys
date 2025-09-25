@@ -2,14 +2,15 @@ use crate::utils::IrysNodeTest;
 use irys_types::NodeConfig;
 use reth::rpc::types::BlockNumberOrTag;
 
-const WAIT_SECS: u64 = 5;
+const WAIT_SECS: u64 = 2;
 const INITIAL_MINED_BLOCKS: u64 = 5;
 const EXTRA_MINED_BLOCKS: u64 = 5;
 
 // Scenario: a single node mines a short chain, extends it beyond the migration/prune depths, stops,
 // and restarts without external sync. After the restart we assert that Reth rebuilds its
 // latest/safe/finalized anchors purely from the block index using the expected migration and prune
-// depths.
+// depths. We then mine one extra block to confirm that the head advances while the safe/finalized
+// anchors stay pinned to the previously indexed blocks until migration catches up.
 #[test_log::test(actix_web::test)]
 async fn reth_restarts_use_block_index_before_sync() -> eyre::Result<()> {
     let genesis_config = NodeConfig::testing().with_consensus(|cons| {
@@ -81,16 +82,48 @@ async fn reth_restarts_use_block_index_before_sync() -> eyre::Result<()> {
         )
         .await?;
 
+    assert_ne!(
+        genesis_head.evm_block_hash,
+        genesis_safe_block.evm_block_hash
+    );
+    assert_ne!(
+        genesis_finalized_block.evm_block_hash,
+        genesis_safe_block.evm_block_hash
+    );
     let genesis_node = genesis_node.stop().await.start().await;
+    tracing::error!(old_head = ?genesis_safe_block.evm_block_hash);
+    tracing::error!(old_head = ?genesis_head.evm_block_hash);
 
     genesis_node
         .wait_for_reth_tag(
             BlockNumberOrTag::Latest,
-            // latest block becomes equal to the safe block
+            // latest block becomes equal to the safe block on restart
             genesis_safe_block.evm_block_hash,
             WAIT_SECS,
         )
         .await?;
+    genesis_node
+        .wait_for_reth_tag(
+            BlockNumberOrTag::Safe,
+            genesis_safe_block.evm_block_hash,
+            WAIT_SECS,
+        )
+        .await?;
+    genesis_node
+        .wait_for_reth_tag(
+            BlockNumberOrTag::Finalized,
+            genesis_finalized_block.evm_block_hash,
+            WAIT_SECS,
+        )
+        .await?;
+
+    // Mine one more block post-restart and ensure Reth advances only the head.
+    tracing::error!("mining");
+    let new_head = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_for_reth_tag(BlockNumberOrTag::Latest, new_head.evm_block_hash, WAIT_SECS)
+        .await?;
+    // the other tags remain as is
     genesis_node
         .wait_for_reth_tag(
             BlockNumberOrTag::Safe,

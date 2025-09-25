@@ -235,10 +235,9 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
-        let mut reth_service = self.reth_service.clone();
+        let reth_service = self.reth_service.clone();
         let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
         let start_sync_from_height = self.block_index.read().latest_height();
-        let block_index = self.block_index.clone();
 
         tokio::spawn(
             async move {
@@ -259,23 +258,13 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 }
 
                 if let Err(err) = block_pool
-                    .repair_missing_payloads_if_any(reth_service.clone(), Arc::clone(&gossip_data_handler))
+                    .repair_missing_payloads_if_any(reth_service, Arc::clone(&gossip_data_handler))
                     .await
                 {
                     error!(
                         "Sync task: Failed to repair missing payloads before starting sync: {:?}",
                         err
                     );
-                }
-
-                if is_initial_sync {
-                    update_reth_with_initial_block(
-                        &block_index,
-                        &block_pool.db,
-                        &config,
-                        &mut reth_service,
-                    )
-                    .await;
                 }
 
                 let res = sync_chain(
@@ -1347,70 +1336,6 @@ async fn is_local_index_is_behind_trusted_peers(
         Err(ChainSyncError::Network(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),
         ))
-    }
-}
-
-// Sends a fork choice update message to the Reth service with the latest block from the block index
-async fn update_reth_with_initial_block(
-    block_index: &BlockIndexReadGuard,
-    irys_db: &DatabaseProvider,
-    config: &Config,
-    reth_service: &mut Option<mpsc::UnboundedSender<RethServiceMessage>>,
-) {
-    let (head_hash, confirmed_hash, finalized_hash) = {
-        // Read the latest from the block index; if no entries, panic
-        let index_guard = block_index.read();
-        let latest_height = index_guard.latest_height();
-        let head_hash = index_guard
-            .get_item(latest_height)
-            .expect("latest height must exist in block index")
-            .block_hash;
-
-        let genesis_block_hash = config.consensus.expected_genesis_hash.unwrap_or_else(|| {
-            index_guard
-                .get_item(0)
-                .expect("genesis block must exist in block index")
-                .block_hash
-        });
-
-        // when we restart reth state from the index, the head is also the confirmed block
-        let migration_depth = u64::from(config.consensus.block_migration_depth);
-        let confirmed_hash = index_guard
-            .get_item(latest_height)
-            .map(|item| item.block_hash)
-            .unwrap_or(genesis_block_hash);
-
-        // compute the diff from the tip -> expected finalized block
-        let pruned_block_height = latest_height
-            .saturating_sub(migration_depth.abs_diff(config.consensus.block_tree_depth));
-        let finalized_hash = index_guard
-            .get_item(pruned_block_height)
-            .map(|item| item.block_hash)
-            .unwrap_or(genesis_block_hash);
-
-        (head_hash, confirmed_hash, finalized_hash)
-    };
-
-    let latest_block = database::block_header_by_hash(&irys_db.tx().unwrap(), &head_hash, false)
-        .expect("database to be accessible during init")
-        .expect("at least the genesis block header must be in the database");
-
-    // update reth service about the latest block data it must use
-    if let Some(reth_service_tx) = reth_service {
-        let (tx, rx) = oneshot::channel();
-        reth_service_tx
-            .send(RethServiceMessage::ForkChoice {
-                update: ForkChoiceUpdateMessage {
-                    head_hash: latest_block.block_hash,
-                    confirmed_hash,
-                    finalized_hash,
-                },
-                response: tx,
-            })
-            .expect("reth service to be alive at init");
-        rx.await
-            .expect("reth service acknowledgment for initial fork choice");
-        debug!("Reth service updated about fork choice");
     }
 }
 
