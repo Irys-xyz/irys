@@ -191,10 +191,9 @@ impl ApiClient {
         slot_index: usize,
         cancel_token: &CancellationToken,
     ) -> Result<ChunkCounts> {
-        let data_endpoint =
-            format!("/observability/storage/intervals/{ledger}/{slot_index}/{DATA_CHUNK_TYPE}");
+        let data_endpoint = format!("/storage/intervals/{ledger}/{slot_index}/{DATA_CHUNK_TYPE}");
         let entropy_endpoint =
-            format!("/observability/storage/intervals/{ledger}/{slot_index}/{ENTROPY_CHUNK_TYPE}");
+            format!("/storage/intervals/{ledger}/{slot_index}/{ENTROPY_CHUNK_TYPE}");
 
         let data_intervals: StorageIntervalsResponse = self
             .get_with_cancellation(node_url, &data_endpoint, Some(cancel_token))

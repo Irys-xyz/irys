@@ -14,7 +14,7 @@ pub enum AppScreen {
 #[derive(Debug, Clone)]
 pub enum MenuSelection {
     Nodes,
-    PartitionSync,
+    DataSync,
     Mempool,
     Mining,
     Metrics,
@@ -249,13 +249,13 @@ mod tests {
     #[test]
     fn test_menu_selection_debug() {
         let nodes = MenuSelection::Nodes;
-        let partition_sync = MenuSelection::PartitionSync;
+        let data_sync = MenuSelection::DataSync;
         let metrics = MenuSelection::Metrics;
         let logs = MenuSelection::Logs;
         let settings = MenuSelection::Settings;
 
         assert!(format!("{nodes:?}").contains("Nodes"));
-        assert!(format!("{partition_sync:?}").contains("PartitionSync"));
+        assert!(format!("{data_sync:?}").contains("DataSync"));
         assert!(format!("{metrics:?}").contains("Metrics"));
         assert!(format!("{logs:?}").contains("Logs"));
         assert!(format!("{settings:?}").contains("Settings"));
