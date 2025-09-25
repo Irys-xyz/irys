@@ -38,9 +38,9 @@ impl Default for MainMenu {
                 "Node monitoring and management",
             ),
             (
-                MenuSelection::PartitionSync,
-                "Partition Sync",
-                "Partition data synchronization status",
+                MenuSelection::DataSync,
+                "Data Sync",
+                "Data synchronization status",
             ),
             (
                 MenuSelection::Mempool,
@@ -146,7 +146,7 @@ impl MainMenu {
 
         let menu_name = match app_state.current_menu {
             MenuSelection::Nodes => "Nodes",
-            MenuSelection::PartitionSync => "Partition Sync",
+            MenuSelection::DataSync => "Data Sync",
             MenuSelection::Mempool => "Mempool",
             MenuSelection::Mining => "Mining",
             MenuSelection::Metrics => "Metrics",
@@ -222,7 +222,7 @@ impl MainMenu {
     fn render_content(&self, frame: &mut Frame, area: Rect, app_state: &mut AppState) {
         match app_state.current_menu {
             MenuSelection::Nodes => self.render_nodes_view(frame, area, app_state),
-            MenuSelection::PartitionSync => self.render_partition_sync_view(frame, area, app_state),
+            MenuSelection::DataSync => self.render_data_sync_view(frame, area, app_state),
             MenuSelection::Mempool => self.render_mempool_view(frame, area, app_state),
             MenuSelection::Mining => self.render_mining_view(frame, area, app_state),
             MenuSelection::Metrics => self.render_metrics_view(frame, area, app_state),
@@ -588,14 +588,14 @@ impl MainMenu {
         }
     }
 
-    fn render_partition_sync_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
+    fn render_data_sync_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(area);
 
         let title = Paragraph::new(vec![Line::from(vec![Span::styled(
-            "Cluster Partition Data Sync Monitor",
+            "Cluster Data Sync Monitor",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),

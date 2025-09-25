@@ -135,8 +135,8 @@ impl App {
                     {
                         self.refresh_data().await?;
 
-                        // Also refresh observability data if in PartitionSync view
-                        if matches!(self.state.current_menu, state::MenuSelection::PartitionSync) {
+                        // Also refresh observability data if in DataSync view
+                        if matches!(self.state.current_menu, state::MenuSelection::DataSync) {
                             self.refresh_observability_data().await?;
                         }
 
@@ -340,8 +340,8 @@ impl App {
                     )
                     .await;
 
-                    // Also refresh observability data if in PartitionSync view
-                    if matches!(self.state.current_menu, state::MenuSelection::PartitionSync) {
+                    // Also refresh observability data if in DataSync view
+                    if matches!(self.state.current_menu, state::MenuSelection::DataSync) {
                         let _ = tokio::time::timeout(
                             tokio::time::Duration::from_millis(50),
                             self.refresh_observability_data(),
@@ -432,7 +432,7 @@ impl App {
                             }
                         }
                     }
-                    state::MenuSelection::PartitionSync => {
+                    state::MenuSelection::DataSync => {
                         self.state.select_previous_node();
                     }
                     _ => {
@@ -449,7 +449,7 @@ impl App {
                             }
                         }
                     }
-                    state::MenuSelection::PartitionSync => {
+                    state::MenuSelection::DataSync => {
                         self.state.select_next_node();
                     }
                     _ => {
@@ -466,8 +466,8 @@ impl App {
                     if let Some(selection) = self.menu.get_selected() {
                         self.state.current_menu = selection.clone();
 
-                        // Fetch observability data when entering PartitionSync view
-                        if matches!(selection, state::MenuSelection::PartitionSync) {
+                        // Fetch observability data when entering DataSync view
+                        if matches!(selection, state::MenuSelection::DataSync) {
                             let _ = self.refresh_observability_data().await;
                         }
 
@@ -750,7 +750,7 @@ impl App {
             if let Some(mempool) = data.mempool_status {
                 node_state.mempool_status = Some(mempool);
             }
-            // Don't update chunk_counts here - only fetch when needed for PartitionSync view
+            // Don't update chunk_counts here - only fetch when needed for DataSync view
         }
 
         node_state.last_updated = chrono::Utc::now();
@@ -814,7 +814,7 @@ impl App {
                     node_state.metrics.peer_count = node_state.peers.len();
                 }
 
-                // Don't fetch chunk_counts here - only needed for PartitionSync view
+                // Don't fetch chunk_counts here - only needed for DataSync view
             }
 
             node_state.last_updated = chrono::Utc::now();
