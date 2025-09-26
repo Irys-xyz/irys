@@ -1,11 +1,10 @@
 use alloy_primitives::B256;
+use irys_reth::chainspec::IrysChainHardforks;
 use irys_types::{
     partition::PartitionHash, Config, DataTransactionLedger, GenesisConfig, H256List,
     IrysBlockHeader, IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
 };
 use reth_chainspec::{ChainSpec, ChainSpecBuilder};
-
-use super::chain::IRYS_TESTNET;
 
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
@@ -77,10 +76,10 @@ pub fn build_unsigned_irys_genesis_block(
 }
 
 pub fn build_reth_chainspec(config: &Config) -> eyre::Result<ChainSpec> {
-    let cs = ChainSpecBuilder::mainnet()
+    let spec = ChainSpecBuilder::mainnet()
         .chain(config.consensus.reth.chain)
         .genesis(config.consensus.reth.genesis.clone())
-        .with_forks(IRYS_TESTNET.hardforks.clone())
+        .with_forks(IrysChainHardforks::irys_testnet().into_chain_hardforks())
         .build();
-    Ok(cs)
+    Ok(spec)
 }
