@@ -16,8 +16,8 @@ use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, canonical_anchors,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block, make_block_tree_entry,
-    AnchorBlock, BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, CanonicalAnchors,
-    ChainState, EpochReplayData,
+    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, CanonicalAnchors, ChainState,
+    EpochReplayData,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
@@ -302,16 +302,11 @@ impl BlockTreeServiceInner {
     }
 
     async fn emit_fcu(&self, anchors: &CanonicalAnchors) -> eyre::Result<()> {
-        let tip_block = &anchors.head.header;
-        debug_assert_eq!(
-            anchors.head.entry.block_hash, tip_block.block_hash,
-            "canonical chain head mismatch with staged tip",
-        );
-
+        let tip_block = &anchors.head;
         debug!(
-            head = %anchors.head.entry.block_hash,
-            migration = %anchors.migration_block.entry.block_hash,
-            prune = %anchors.prune_block.entry.block_hash,
+            head = %tip_block.block_hash,
+            migration = %anchors.migration_block.block_hash,
+            prune = %anchors.prune_block.block_hash,
             "broadcasting canonical chain update",
         );
 
@@ -321,9 +316,9 @@ impl BlockTreeServiceInner {
             .reth_service
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
-                    head_hash: anchors.head.entry.block_hash,
-                    confirmed_hash: anchors.migration_block.entry.block_hash,
-                    finalized_hash: anchors.prune_block.entry.block_hash,
+                    head_hash: anchors.head.block_hash,
+                    confirmed_hash: anchors.migration_block.block_hash,
+                    finalized_hash: anchors.prune_block.block_hash,
                 },
                 response: tx,
             })
@@ -334,7 +329,7 @@ impl BlockTreeServiceInner {
     }
 
     fn emit_block_confirmed(&self, anchors: &CanonicalAnchors) {
-        let tip_block = Arc::clone(&anchors.head.header);
+        let tip_block = Arc::clone(&anchors.head);
         self.service_senders
             .mempool
             .send(MempoolServiceMessage::BlockConfirmed(tip_block))
@@ -345,9 +340,9 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn migrate_block(&self, anchor: &AnchorBlock) {
-        let block_hash = anchor.entry.block_hash;
-        let migration_height = anchor.entry.height;
+    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) {
+        let block_hash = block.block_hash;
+        let migration_height = block.height;
 
         // Check if the block is already in the block index
         let binding = self.block_index_guard.clone();
@@ -374,7 +369,7 @@ impl BlockTreeServiceInner {
 
         // todo: instead of setting the poa chunk *here* (and causing unnecessary clones),
         // it should be done in the downstream recipients of the `BlockMigratedEvent`.
-        let mut block_for_event = (*anchor.header).clone();
+        let mut block_for_event = (**block).clone();
         block_for_event.poa.chunk = None;
         let migrated_block = Arc::new(block_for_event);
         debug!(hash = %block_hash, height = migration_height, "migrating irys block");
@@ -392,7 +387,7 @@ impl BlockTreeServiceInner {
             debug!("No reorg subscribers: {:?}", e);
         }
 
-        self.send_block_migration_message(anchor.header.clone())
+        self.send_block_migration_message(Arc::clone(block))
             .await
             .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
             .unwrap();

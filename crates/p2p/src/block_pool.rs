@@ -382,9 +382,9 @@ where
                     "Canonical anchors unavailable while emitting FCU".to_string(),
                 )
             })?;
-            let head_hash = anchors.head.entry.block_hash;
-            let confirmed_hash = anchors.migration_block.entry.block_hash;
-            let finalized_hash = anchors.prune_block.entry.block_hash;
+            let head_hash = anchors.head.block_hash;
+            let confirmed_hash = anchors.migration_block.block_hash;
+            let finalized_hash = anchors.prune_block.block_hash;
             debug!(
                 head = %head_hash,
                 confirmed = %confirmed_hash,

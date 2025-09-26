@@ -23,51 +23,56 @@ use eyre::{bail, eyre, Result};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader};
 
-/// Compute canonical fork-choice anchors by combining the in-memory block tree with the
-/// persisted block index.
+/// CanonicalAnchors captures the head plus safe/finalized anchor blocks used for fork choice.
+/// `head` tracks the current canonical tip broadcast to downstream services.
+/// `migration_block` marks the migration depth to block index.
+/// `prune_block` marks the prune depth of the block tree.
+#[derive(Debug, Clone)]
+pub struct CanonicalAnchors {
+    pub head: Arc<IrysBlockHeader>,
+    pub migration_block: Arc<IrysBlockHeader>,
+    pub prune_block: Arc<IrysBlockHeader>,
+}
+/// Computes canonical fork-choice anchors from the live block tree state
 ///
-/// The migration and prune anchors are selected from the block tree when sufficient depth is
-/// available. If the tree cache is shallower than the requested depth, the block index is used to
-/// determine the correct fallback block. Should the requested depth not exist in the index yet,
-/// the genesis (height 0) entry is returned instead.
+/// - `head` is the latest validated canonical tip from the block tree and only advances when the
+///   canonical head changes.
+/// - `migration_block` (confirmed) is the block scheduled for migration into the block index at the
+///   configured `migration_depth` behind the head.
+/// - `prune_block` (finalized) is the block due to be pruned from the block tree once migration
+///   completes, `block_tree_depth` behind the head.
+///
+/// If the in-memory cache is shallower than the requested depth (happens right after the node starts up),
+/// the function falls back to the persisted block index for historical headers.
 pub fn canonical_anchors(
     block_tree: &block_tree::BlockTree,
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
     migration_depth: usize,
     prune_depth: usize,
-) -> Result<block_tree::CanonicalAnchors> {
+) -> Result<CanonicalAnchors> {
     let (canonical_chain, _) = block_tree.get_canonical_chain();
     if canonical_chain.is_empty() {
         bail!("canonical chain is empty while computing anchors");
     }
 
-    let head_entry = canonical_chain
-        .last()
-        .ok_or_else(|| eyre!("canonical chain missing head entry"))?
-        .clone();
-    let head_header = load_header(block_tree, database, head_entry.block_hash)?;
-    let head_anchor = block_tree::AnchorBlock {
-        entry: head_entry.clone(),
-        header: head_header,
-    };
-
-    let head_height = head_entry.height;
+    let head_height = tree_head_height(&canonical_chain)?;
+    let tree_safe_height = tree_safe_height(&canonical_chain, migration_depth)?;
     let index_safe_height = block_index.latest_height();
-    let migration_depth_u64 = migration_depth as u64;
-    let prune_depth_u64 = prune_depth as u64;
-    let depth_delta = prune_depth_u64.saturating_sub(migration_depth_u64);
+    let migration_height =
+        compute_migration_height(head_height, tree_safe_height, index_safe_height);
+    let depth_delta = prune_depth.saturating_sub(migration_depth) as u64;
+    let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta);
 
-    let tree_safe_height = if canonical_chain.len() > migration_depth {
-        canonical_chain[canonical_chain.len() - 1 - migration_depth].height
-    } else {
-        canonical_chain.first().unwrap().height
-    };
-    let mut migration_height = tree_safe_height.max(index_safe_height);
-    if migration_height > head_height {
-        migration_height = head_height;
-    }
-    let migration_block = anchor_for_height(
+    let head_block = anchor_at_height(
+        head_height,
+        &canonical_chain,
+        block_tree,
+        block_index,
+        database,
+    )?;
+
+    let migration_block = anchor_at_height(
         migration_height,
         &canonical_chain,
         block_tree,
@@ -75,15 +80,7 @@ pub fn canonical_anchors(
         database,
     )?;
 
-    let index_final_height = index_safe_height.saturating_sub(depth_delta);
-    let mut prune_height = migration_height.saturating_sub(depth_delta);
-    if prune_height < index_final_height {
-        prune_height = index_final_height;
-    }
-    if prune_height > migration_height {
-        prune_height = migration_height;
-    }
-    let prune_block = anchor_for_height(
+    let prune_block = anchor_at_height(
         prune_height,
         &canonical_chain,
         block_tree,
@@ -91,101 +88,72 @@ pub fn canonical_anchors(
         database,
     )?;
 
-    let migration_depth_reached =
-        head_height.saturating_sub(migration_height) >= migration_depth_u64;
-    let prune_depth_reached = migration_height.saturating_sub(prune_height) >= depth_delta;
-
-    Ok(block_tree::CanonicalAnchors {
-        head: head_anchor,
+    Ok(CanonicalAnchors {
+        head: head_block,
         migration_block,
         prune_block,
-        migration_depth_reached,
-        prune_depth_reached,
     })
 }
 
-fn anchor_for_height(
+fn anchor_at_height(
     height: u64,
     canonical_chain: &[block_tree::BlockTreeEntry],
     block_tree: &block_tree::BlockTree,
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
-) -> Result<block_tree::AnchorBlock> {
+) -> Result<Arc<IrysBlockHeader>> {
     if let Some(entry) = canonical_chain.iter().find(|entry| entry.height == height) {
         let header = load_header(block_tree, database, entry.block_hash)?;
-        return Ok(block_tree::AnchorBlock {
-            entry: entry.clone(),
-            header,
-        });
+        return Ok(header);
     }
 
-    let index_item = block_index
-        .get_item(height)
-        .ok_or_else(|| eyre!("missing block index entry at height {height}"))?;
-    let header = load_header_from_db(database, index_item.block_hash)?;
-    let entry = block_tree::make_block_tree_entry(header.as_ref());
-
-    Ok(block_tree::AnchorBlock { entry, header })
+    anchor_from_index_height(block_index, database, height)
 }
 
+/// Computes canonical fork-choice anchors using only the block index — mirroring the values that
+/// would have been in effect before shutdown (except for the `head`, which gets rolled back).
+///
+/// During startup the block tree is empty, so:
+/// - `head` resolves to the latest block index entry (the prior canonical head).
+/// - `migration_block` mirrors that same entry to match the “confirmed” head just before shutdown.
+/// - `prune_block` is derived from the index at `block_tree_depth` behind the tip so the finalized
+///   marker aligns with the state before shutdown.
 pub fn canonical_anchors_from_index(
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
     migration_depth: usize,
     prune_depth: usize,
-) -> Result<block_tree::CanonicalAnchors> {
+) -> Result<CanonicalAnchors> {
     if block_index.num_blocks() == 0 {
         bail!("block index is empty while computing canonical anchors");
     }
 
-    let latest_height = block_index.latest_height();
-    let migration_depth_u64 = migration_depth as u64;
-    let prune_depth_u64 = prune_depth as u64;
-    let chain_len = latest_height.saturating_add(1);
+    let head_height = block_index.latest_height();
+    let migration_height = head_height;
+    let depth_delta = prune_depth.saturating_sub(migration_depth) as u64;
+    let prune_height = head_height.saturating_sub(depth_delta);
 
-    let head_height = latest_height;
+    let head_block = anchor_from_index_height(block_index, database, head_height)?;
+    let migration_block = anchor_from_index_height(block_index, database, migration_height)?;
+    let prune_block = anchor_from_index_height(block_index, database, prune_height)?;
 
-    let head_item = block_index
-        .get_item(head_height)
-        .ok_or_else(|| eyre!("missing block index entry at height {head_height}"))?;
-    let head_header = load_header_from_db(database, head_item.block_hash)?;
-    let head_entry = block_tree::make_block_tree_entry(head_header.as_ref());
-    let head_anchor = block_tree::AnchorBlock {
-        entry: head_entry.clone(),
-        header: head_header.clone(),
-    };
-
-    let migration_depth_reached = chain_len > migration_depth_u64;
-
-    let depth_delta = prune_depth_u64.saturating_sub(migration_depth_u64);
-    let finalized_height = head_height.saturating_sub(depth_delta);
-
-    let finalize_item = block_index
-        .get_item(finalized_height)
-        .ok_or_else(|| eyre!("missing block index entry at height {finalized_height}"))?;
-    let finalize_header = if finalized_height == head_height {
-        head_header
-    } else {
-        load_header_from_db(database, finalize_item.block_hash)?
-    };
-    let finalize_entry = if finalized_height == head_height {
-        head_entry
-    } else {
-        block_tree::make_block_tree_entry(finalize_header.as_ref())
-    };
-
-    let prune_depth_reached = chain_len > prune_depth_u64;
-
-    Ok(block_tree::CanonicalAnchors {
-        head: head_anchor.clone(),
-        migration_block: head_anchor,
-        prune_block: block_tree::AnchorBlock {
-            entry: finalize_entry,
-            header: finalize_header,
-        },
-        migration_depth_reached,
-        prune_depth_reached,
+    Ok(CanonicalAnchors {
+        head: head_block,
+        migration_block,
+        prune_block,
     })
+}
+
+fn anchor_from_index_height(
+    block_index: &block_index::BlockIndex,
+    database: &DatabaseProvider,
+    height: u64,
+) -> Result<Arc<IrysBlockHeader>> {
+    let index_item = block_index
+        .get_item(height)
+        .ok_or_else(|| eyre!("missing block index entry at height {height}"))?;
+    let header = load_header_from_db(database, index_item.block_hash)?;
+    Ok(header)
 }
 
 fn load_header(
@@ -209,4 +177,39 @@ fn load_header_from_db(
         .ok_or_else(|| eyre!("block {hash} not found in database while loading anchor header"))?;
 
     Ok(Arc::new(header))
+}
+
+fn tree_head_height(canonical_chain: &[block_tree::BlockTreeEntry]) -> Result<u64> {
+    canonical_chain
+        .last()
+        .map(|entry| entry.height)
+        .ok_or_else(|| eyre!("canonical chain missing head entry"))
+}
+
+fn tree_safe_height(
+    canonical_chain: &[block_tree::BlockTreeEntry],
+    migration_depth: usize,
+) -> Result<u64> {
+    if canonical_chain.len() > migration_depth {
+        Ok(canonical_chain[canonical_chain.len() - 1 - migration_depth].height)
+    } else {
+        canonical_chain
+            .first()
+            .map(|entry| entry.height)
+            .ok_or_else(|| eyre!("canonical chain missing genesis entry"))
+    }
+}
+
+fn compute_migration_height(
+    head_height: u64,
+    tree_safe_height: u64,
+    index_safe_height: u64,
+) -> u64 {
+    tree_safe_height.max(index_safe_height).min(head_height)
+}
+
+fn compute_prune_height(migration_height: u64, index_safe_height: u64, depth_delta: u64) -> u64 {
+    let index_final_height = index_safe_height.saturating_sub(depth_delta);
+    let desired_prune = migration_height.saturating_sub(depth_delta);
+    desired_prune.max(index_final_height).min(migration_height)
 }

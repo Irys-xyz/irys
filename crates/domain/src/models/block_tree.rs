@@ -17,25 +17,6 @@ use crate::{
     CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
 };
 
-#[derive(Debug, Clone)]
-pub struct AnchorBlock {
-    pub entry: BlockTreeEntry,
-    pub header: Arc<IrysBlockHeader>,
-}
-
-/// CanonicalAnchors captures the head plus safe/finalized anchor blocks used for fork choice.
-/// `head` tracks the current canonical tip broadcast to downstream services.
-/// `migration_block` marks the migration depth to block index.
-/// `prune_block` marks the prune depth of the block tree.
-#[derive(Debug, Clone)]
-pub struct CanonicalAnchors {
-    pub head: AnchorBlock,
-    pub migration_block: AnchorBlock,
-    pub prune_block: AnchorBlock,
-    pub migration_depth_reached: bool,
-    pub prune_depth_reached: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockTreeEntry {
     pub block_hash: BlockHash,

@@ -1244,9 +1244,9 @@ impl IrysNode {
             .reth_service
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
-                    head_hash: initial_anchors.head.entry.block_hash,
-                    confirmed_hash: initial_anchors.migration_block.entry.block_hash,
-                    finalized_hash: initial_anchors.prune_block.entry.block_hash,
+                    head_hash: initial_anchors.head.block_hash,
+                    confirmed_hash: initial_anchors.migration_block.block_hash,
+                    finalized_hash: initial_anchors.prune_block.block_hash,
                 },
                 response: fcu_tx,
             })
@@ -1256,9 +1256,9 @@ impl IrysNode {
             .map_err(|err| eyre::eyre!("reth service dropped initial FCU acknowledgment: {err}"))?;
 
         debug!(
-            head = %initial_anchors.head.entry.block_hash,
-            confirmed = %initial_anchors.migration_block.entry.block_hash,
-            finalized = %initial_anchors.prune_block.entry.block_hash,
+            head = %initial_anchors.head.block_hash,
+            confirmed = %initial_anchors.migration_block.block_hash,
+            finalized = %initial_anchors.prune_block.block_hash,
             "Initial fork choice update applied to Reth"
         );
 
