@@ -1803,12 +1803,12 @@ async fn stake_and_pledge(
 
     // now check the canonical state
 
-    let (is_historically_staked, commitment_snapshot) = {
+    let (is_historically_staked, epoch_snapshot, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);
         let commitment_snapshot = (*block_tree_guard.canonical_commitment_snapshot()).clone();
-        (is_historically_staked, commitment_snapshot)
+        (is_historically_staked, epoch_snapshot, commitment_snapshot)
     };
 
     // check the commitment snapshot (pending commitment txs for the next epoch rollup)
@@ -1848,13 +1848,14 @@ async fn stake_and_pledge(
             .count()
     };
 
-    // get the number of pending commitment txs for partitions, if the count is >= the unassigned len, do nothing
-    let pending_pledges = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
-    let to_pledge_count = unassigned_modules.saturating_sub(pending_pledges);
+    // get the number of pending & historic commitment txs for partitions, if the count is >= the unassigned len, do nothing
+    let pending_pledge_count = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
+    let historic_pledge_count = epoch_snapshot.get_partition_assignments(address).len();
+    let to_pledge_count = unassigned_modules.saturating_sub(pending_pledge_count).saturating_sub(historic_pledge_count);
 
     debug!(
         "Found {} SMs without partition assignments ({} pending pledges)",
-        &to_pledge_count, &pending_pledges
+        &to_pledge_count, &pending_pledge_count
     );
 
     for idx in 0..to_pledge_count {
