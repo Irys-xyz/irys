@@ -666,7 +666,7 @@ where
                     {
                         if !matches!(err, TxIngressError::Skipped) {
                             warn!(
-                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}",
+                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
                                 current_block_hash, err
                             );
                             self.blocks_cache
@@ -687,7 +687,7 @@ where
                     {
                         if !matches!(err, TxIngressError::Skipped) {
                             warn!(
-                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}",
+                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
                                 current_block_hash, err
                             );
                             self.blocks_cache
