@@ -16,7 +16,7 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
     BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
-    PeerNetworkError, IrysTransactionResponse,
+    IrysTransactionResponse, PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -644,7 +644,8 @@ where
         if !cached_txs.is_empty() {
             debug!(
                 "Block pool: Sending {} cached txs for block {:?} to mempool",
-                cached_txs.len(), current_block_hash
+                cached_txs.len(),
+                current_block_hash
             );
         } else {
             debug!(
@@ -667,7 +668,10 @@ where
                     }
                 }
                 IrysTransactionResponse::Storage(storage_tx) => {
-                    if let Err(err) = self.mempool.handle_data_transaction_ingress(storage_tx).await
+                    if let Err(err) = self
+                        .mempool
+                        .handle_data_transaction_ingress(storage_tx)
+                        .await
                     {
                         error!(
                             "Block pool: Failed to send storage tx to mempool for block {:?}: {:?}",
