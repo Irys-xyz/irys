@@ -390,4 +390,81 @@ mod tests {
 
         Ok(())
     }
+
+    // Ensure that an expired, never-confirmed data root (expiry_height set; empty block_set)
+    // is pruned when prune_height exceeds expiry.
+    #[tokio::test]
+    async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
+        // Minimal config and database
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create a data root cached via mempool path (no block header -> empty block_set)
+        let tx_header = DataTransactionHeader {
+            data_size: 64,
+            ..Default::default()
+        };
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Set expiry_height to 5 (arbitrary) so prune_height > expiry will trigger deletion
+        db.update(|wtx| {
+            let mut cdr = wtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
+            cdr.expiry_height = Some(5);
+            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
+            eyre::Ok(())
+        })??;
+
+        // Sanity: it exists
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(has_root, "CachedDataRoots missing before prune");
+            Ok(())
+        })??;
+
+        // Build minimal guards (not used by prune_data_root_cache)
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config)
+            .await
+            .wrap_err("failed to build BlockIndex for test")?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let service = ChunkCacheService {
+            config: config.clone(),
+            block_index_guard,
+            block_tree_guard,
+            db: db.clone(),
+            msg_rx: rx,
+            shutdown: shutdown_rx,
+        };
+
+        // Prune with prune_height greater than expiry (6 > 5) -> should delete
+        service.prune_data_root_cache(6)?;
+
+        // Verify it was pruned
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(!has_root, "CachedDataRoots should have been pruned");
+            Ok(())
+        })??;
+
+        Ok(())
+    }
 }
