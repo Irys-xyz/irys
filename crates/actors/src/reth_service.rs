@@ -214,7 +214,7 @@ impl RethService {
             finalized_hash,
         } = fcu;
 
-        tracing::error!(
+        tracing::debug!(
             head = %head_hash,
             confirmed = %confirmed_hash,
             finalized = %finalized_hash,
@@ -223,20 +223,18 @@ impl RethService {
         let handle = self.handle.clone();
         let eth_api = handle.inner.eth_api();
 
-        let latest = eth_api
-            .block_by_number(BlockNumberOrTag::Latest, false)
-            .await;
+        let get_blocks = async || {
+            let latest_before = eth_api.block_by_number(BlockNumberOrTag::Latest, false);
+            let safe_before = eth_api.block_by_number(BlockNumberOrTag::Safe, false);
+            let finalized_before = eth_api.block_by_number(BlockNumberOrTag::Finalized, false);
+            futures::try_join!(latest_before, safe_before, finalized_before)
+        };
+        let (latest_before, safe_before, finalized_before) = get_blocks().await?;
 
-        let safe = eth_api.block_by_number(BlockNumberOrTag::Safe, false).await;
-
-        let finalized = eth_api
-            .block_by_number(BlockNumberOrTag::Finalized, false)
-            .await;
-
-        tracing::error!(
-            latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-            safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-            finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+        tracing::debug!(
+            latest_block = ?latest_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            safe_block = ?safe_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            finalized_block = ?finalized_before.as_ref().map(|b| (b.header.number, b.header.hash)),
             "Reth state before fork choice update"
         );
 
@@ -250,23 +248,27 @@ impl RethService {
 
         debug!("Fork choice update sent to Reth, fetching current state");
 
-        let eth_api = handle.inner.eth_api();
-        let latest = eth_api
-            .block_by_number(BlockNumberOrTag::Latest, false)
-            .await;
-
-        let safe = eth_api.block_by_number(BlockNumberOrTag::Safe, false).await;
-
-        let finalized = eth_api
-            .block_by_number(BlockNumberOrTag::Finalized, false)
-            .await;
-
-        tracing::error!(
-            latest_block = ?latest.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-            safe_block = ?safe.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
-            finalized_block = ?finalized.as_ref().ok().and_then(|b| b.as_ref()).map(|b| (b.header.number, b.header.hash)),
+        let (latest_after, safe_after, finalized_after) = get_blocks().await?;
+        tracing::debug!(
+            latest_block = ?latest_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            safe_block = ?safe_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            finalized_block = ?finalized_after.as_ref().map(|b| (b.header.number, b.header.hash)),
             "Reth state after fork choice update"
         );
+
+        eyre::ensure!(
+            head_hash == latest_after.unwrap().header.hash,
+            "head hashes don't match post FCU"
+        );
+        eyre::ensure!(
+            confirmed_hash == safe_after.unwrap().header.hash,
+            "safe/confirmed hashes don't match post FCU"
+        );
+        eyre::ensure!(
+            finalized_hash == finalized_after.unwrap().header.hash,
+            "finalized hashes don't match post FCU"
+        );
+
         Ok(fcu)
     }
 
