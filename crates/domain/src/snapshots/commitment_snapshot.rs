@@ -138,7 +138,10 @@ impl CommitmentSnapshot {
         let signer = &commitment_tx.signer;
         let tx_type = &commitment_tx.commitment_type;
 
-        debug!("add_commitment() called for tx {}, address {}", commitment_tx.id, &signer);
+        debug!(
+            "add_commitment() called for tx {}, address {}",
+            commitment_tx.id, &signer
+        );
 
         // Early return for unsupported commitment types
         if !matches!(
