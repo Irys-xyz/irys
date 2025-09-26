@@ -23,12 +23,12 @@ use eyre::{bail, eyre, Result};
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader};
 
-/// CanonicalAnchors captures the head plus safe/finalized anchor blocks used for fork choice.
+/// ForkChoiceMarkers captures the head plus safe/finalized anchor blocks used for fork choice.
 /// `head` tracks the current canonical tip broadcast to downstream services.
 /// `migration_block` marks the migration depth to block index.
 /// `prune_block` marks the prune depth of the block tree.
 #[derive(Debug, Clone)]
-pub struct CanonicalAnchors {
+pub struct ForkChoiceMarkers {
     pub head: Arc<IrysBlockHeader>,
     pub migration_block: Arc<IrysBlockHeader>,
     pub prune_block: Arc<IrysBlockHeader>,
@@ -44,13 +44,13 @@ pub struct CanonicalAnchors {
 ///
 /// If the in-memory cache is shallower than the requested depth (happens right after the node starts up),
 /// the function falls back to the persisted block index for historical headers.
-pub fn canonical_anchors(
+pub fn fork_choice_markers(
     block_tree: &block_tree::BlockTree,
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
     migration_depth: usize,
     prune_depth: usize,
-) -> Result<CanonicalAnchors> {
+) -> Result<ForkChoiceMarkers> {
     let (canonical_chain, _) = block_tree.get_canonical_chain();
     if canonical_chain.is_empty() {
         bail!("canonical chain is empty while computing anchors");
@@ -64,7 +64,7 @@ pub fn canonical_anchors(
     let depth_delta = prune_depth.saturating_sub(migration_depth) as u64;
     let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta);
 
-    let head_block = anchor_at_height(
+    let head_block = block_at_height(
         head_height,
         &canonical_chain,
         block_tree,
@@ -72,7 +72,7 @@ pub fn canonical_anchors(
         database,
     )?;
 
-    let migration_block = anchor_at_height(
+    let migration_block = block_at_height(
         migration_height,
         &canonical_chain,
         block_tree,
@@ -80,7 +80,7 @@ pub fn canonical_anchors(
         database,
     )?;
 
-    let prune_block = anchor_at_height(
+    let prune_block = block_at_height(
         prune_height,
         &canonical_chain,
         block_tree,
@@ -88,14 +88,14 @@ pub fn canonical_anchors(
         database,
     )?;
 
-    Ok(CanonicalAnchors {
+    Ok(ForkChoiceMarkers {
         head: head_block,
         migration_block,
         prune_block,
     })
 }
 
-fn anchor_at_height(
+fn block_at_height(
     height: u64,
     canonical_chain: &[block_tree::BlockTreeEntry],
     block_tree: &block_tree::BlockTree,
@@ -107,7 +107,7 @@ fn anchor_at_height(
         return Ok(header);
     }
 
-    anchor_from_index_height(block_index, database, height)
+    marker_from_index_height(block_index, database, height)
 }
 
 /// Computes canonical fork-choice anchors using only the block index — mirroring the values that
@@ -118,12 +118,12 @@ fn anchor_at_height(
 /// - `migration_block` mirrors that same entry to match the “confirmed” head just before shutdown.
 /// - `prune_block` is derived from the index at `block_tree_depth` behind the tip so the finalized
 ///   marker aligns with the state before shutdown.
-pub fn canonical_anchors_from_index(
+pub fn fork_choice_markers_from_index(
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
     migration_depth: usize,
     prune_depth: usize,
-) -> Result<CanonicalAnchors> {
+) -> Result<ForkChoiceMarkers> {
     if block_index.num_blocks() == 0 {
         bail!("block index is empty while computing canonical anchors");
     }
@@ -133,18 +133,18 @@ pub fn canonical_anchors_from_index(
     let depth_delta = prune_depth.saturating_sub(migration_depth) as u64;
     let prune_height = head_height.saturating_sub(depth_delta);
 
-    let head_block = anchor_from_index_height(block_index, database, head_height)?;
-    let migration_block = anchor_from_index_height(block_index, database, migration_height)?;
-    let prune_block = anchor_from_index_height(block_index, database, prune_height)?;
+    let head_block = marker_from_index_height(block_index, database, head_height)?;
+    let migration_block = marker_from_index_height(block_index, database, migration_height)?;
+    let prune_block = marker_from_index_height(block_index, database, prune_height)?;
 
-    Ok(CanonicalAnchors {
+    Ok(ForkChoiceMarkers {
         head: head_block,
         migration_block,
         prune_block,
     })
 }
 
-fn anchor_from_index_height(
+fn marker_from_index_height(
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
     height: u64,

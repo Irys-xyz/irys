@@ -34,7 +34,7 @@ use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
-    canonical_anchors_from_index, reth_provider, BlockIndex, BlockIndexReadGuard,
+    fork_choice_markers_from_index, reth_provider, BlockIndex, BlockIndexReadGuard,
     BlockTreeReadGuard, ChunkProvider, ChunkType, EpochReplayData, ExecutionPayloadCache,
     IrysRethProvider, IrysRethProviderInner, PeerList, StorageModule, StorageModuleInfo,
     StorageModulesReadGuard,
@@ -1231,7 +1231,7 @@ impl IrysNode {
         // set up initial FCU states on reth
         let initial_anchors = {
             let block_index = block_index_guard.read();
-            canonical_anchors_from_index(
+            fork_choice_markers_from_index(
                 &block_index,
                 &irys_db,
                 config.consensus.block_migration_depth as usize,

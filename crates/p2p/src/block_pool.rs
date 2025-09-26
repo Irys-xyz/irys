@@ -12,7 +12,7 @@ use irys_database::db::IrysDatabaseExt as _;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
-use irys_domain::{canonical_anchors, chain_sync_state::ChainSyncState, CanonicalAnchors};
+use irys_domain::{chain_sync_state::ChainSyncState, fork_choice_markers, ForkChoiceMarkers};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
     PeerNetworkError,
@@ -256,12 +256,12 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
-    fn current_canonical_anchors(&self) -> Option<CanonicalAnchors> {
+    fn current_canonical_anchors(&self) -> Option<ForkChoiceMarkers> {
         let migration_depth = self.config.consensus.block_migration_depth as usize;
         let prune_depth = self.config.consensus.block_tree_depth as usize;
         let tree = self.block_status_provider.block_tree_read_guard().read();
         let index = self.block_status_provider.block_index_read_guard().read();
-        match canonical_anchors(&tree, &index, &self.db, migration_depth, prune_depth) {
+        match fork_choice_markers(&tree, &index, &self.db, migration_depth, prune_depth) {
             Ok(anchors) => Some(anchors),
             Err(err) => {
                 error!(

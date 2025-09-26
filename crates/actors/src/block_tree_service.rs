@@ -14,10 +14,9 @@ use crate::{
 use actix::prelude::*;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    block_index_guard::BlockIndexReadGuard, canonical_anchors,
-    create_commitment_snapshot_for_block, create_epoch_snapshot_for_block, make_block_tree_entry,
-    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, CanonicalAnchors, ChainState,
-    EpochReplayData,
+    block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
+    create_epoch_snapshot_for_block, fork_choice_markers, make_block_tree_entry, BlockState,
+    BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData, ForkChoiceMarkers,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
@@ -301,7 +300,7 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    async fn emit_fcu(&self, anchors: &CanonicalAnchors) -> eyre::Result<()> {
+    async fn emit_fcu(&self, anchors: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &anchors.head;
         debug!(
             head = %tip_block.block_hash,
@@ -328,7 +327,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
-    fn emit_block_confirmed(&self, anchors: &CanonicalAnchors) {
+    fn emit_block_confirmed(&self, anchors: &ForkChoiceMarkers) {
         let tip_block = Arc::clone(&anchors.head);
         self.service_senders
             .mempool
@@ -600,7 +599,7 @@ impl BlockTreeServiceInner {
 
             let (epoch_block, reorg_event, canonical_anchors) = if tip_changed {
                 let block_index_read = self.block_index_guard.read();
-                let anchors = canonical_anchors(
+                let anchors = fork_choice_markers(
                     &cache,
                     &block_index_read,
                     &self.db,
