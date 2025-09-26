@@ -1,4 +1,5 @@
 pub mod ema_forks;
+pub mod epoch_replay;
 pub mod fork_recovery;
 pub mod fork_recovery_epoch;
 pub mod mempool_tests;

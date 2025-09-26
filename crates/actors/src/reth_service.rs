@@ -289,8 +289,7 @@ impl Handler<ForkChoiceUpdateMessage> for RethServiceActor {
                 fcu
             })
             .map_err(|e: eyre::Error, _, _| {
-                error!(error = %e, "Error processing RethServiceActor ForkChoiceUpdateMessage");
-                std::process::abort();
+                panic!("Error processing RethServiceActor ForkChoiceUpdateMessage {:?}", &e);
             }),
         ))
     }
