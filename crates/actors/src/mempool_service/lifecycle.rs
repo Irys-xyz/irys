@@ -179,6 +179,53 @@ impl Inner {
         Ok(())
     }
 
+    /// Clears the promotion state for a data transaction in the mempool when its prior
+    /// promotion occurred on an orphaned fork. This should only be invoked from reorg
+    /// handling code paths to ensure that promotion state is rolled back correctly for
+    /// transactions that are no longer promoted on the new canonical chain.
+    ///
+    /// Behavior:
+    /// - Fast-path: If the transaction header exists in `mempool_state.valid_submit_ledger_tx`,
+    ///   set `promoted_height` to `None` and update `recent_valid_tx`.
+    /// - Fallback: If the header is not in the mempool, attempt to load it from the database.
+    ///   If found, set `promoted_height` to `None` and insert it into the mempool as a valid
+    ///   submit transaction.
+    /// - Logging: Emits debug logs on success and a warning if the transaction cannot be found
+    ///   in either the mempool or the database.
+    ///
+    /// Notes:
+    /// - This method only mutates in-memory mempool state. It does not persist changes to the DB.
+    /// - Do not call from normal ingress paths; promotion state should be preserved during ingress.
+    /// - Intended usage is within reorg handlers (e.g., `handle_confirmed_data_tx_reorg`) to
+    ///   revert promotion for txs promoted on orphaned forks.
+    async fn mark_unpromoted_in_mempool(&self, txid: H256) {
+        // Try fast-path: clear in-place if present in the mempool
+        {
+            let mut state = self.mempool_state.write().await;
+            if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
+                header.promoted_height = None;
+                state.recent_valid_tx.put(txid, ());
+                tracing::debug!(%txid, "Cleared promoted_height in mempool");
+                return;
+            }
+        }
+
+        // Fallback: try to load from DB and insert back into mempool
+        if let Ok(read_tx) = self.read_tx() {
+            if let Some(mut header) = tx_header_by_txid(&read_tx, &txid).unwrap_or(None) {
+                header.promoted_height = None;
+
+                let mut state = self.mempool_state.write().await;
+                state.valid_submit_ledger_tx.insert(txid, header.clone());
+                state.recent_valid_tx.put(txid, ());
+                tracing::debug!(%txid, "Inserted unpromoted header into mempool from DB");
+                return;
+            }
+        }
+
+        tracing::warn!(%txid, "Could not clear promoted_height: tx not found in mempool or DB");
+    }
+
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
@@ -531,7 +578,7 @@ impl Inner {
             }
         }
 
-        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
+        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, clear promotion state in mempool (promoted_height = None)
 
         // get the confirmed (but not published) publish ledger txs from the old fork
         let orphaned_confirmed_publish_txs = orphaned_confirmed_ledger_txs
@@ -540,18 +587,10 @@ impl Inner {
             .unwrap_or_default();
 
         // these txs have been confirmed, but NOT migrated
-        {
-            let mut mempool_state_write_guard = self.mempool_state.write().await;
-
-            for tx in orphaned_confirmed_publish_txs {
-                debug!("reorging orphaned publish tx: {}", &tx);
-                // if the tx is in `valid_submit_ledger_tx`, update it so `ingress_proofs` is `none`
-                // note: sometimes txs are *not* in this list, and I don't currently understand why
-                mempool_state_write_guard
-                    .valid_submit_ledger_tx
-                    .entry(tx)
-                    .and_modify(|tx| tx.promoted_height = None);
-            }
+        for tx in orphaned_confirmed_publish_txs {
+            debug!("reorging orphaned publish tx: {}", &tx);
+            // Clear promotion state for txs that were promoted on an orphaned fork
+            self.mark_unpromoted_in_mempool(tx).await;
         }
 
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork
