@@ -1,16 +1,14 @@
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
+use irys_actors::reth_service::RethServiceMessage;
 use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
-use irys_database::database;
-use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, DatabaseProvider, EvmBlockHash,
-    NodeMode, PeerListItem, SyncMode, TokioServiceHandle,
+    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
+    PeerListItem, SyncMode, TokioServiceHandle,
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;

@@ -10,7 +10,7 @@ use reth::{
     tasks::shutdown::Shutdown,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, mpsc::UnboundedSender, oneshot};
-use tracing::{debug, error, info, Instrument};
+use tracing::{debug, error, info, Instrument as _};
 
 #[derive(Debug)]
 pub struct RethService {

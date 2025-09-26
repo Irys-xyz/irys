@@ -30,7 +30,6 @@ use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader};
 /// available. If the tree cache is shallower than the requested depth, the block index is used to
 /// determine the correct fallback block. Should the requested depth not exist in the index yet,
 /// the genesis (height 0) entry is returned instead.
-#[must_use]
 pub fn canonical_anchors(
     block_tree: &block_tree::BlockTree,
     block_index: &block_index::BlockIndex,
@@ -50,7 +49,7 @@ pub fn canonical_anchors(
     let head_header = load_header(block_tree, database, head_entry.block_hash)?;
     let head_anchor = block_tree::AnchorBlock {
         entry: head_entry.clone(),
-        header: head_header.clone(),
+        header: head_header,
     };
 
     let head_height = head_entry.height;
@@ -165,12 +164,12 @@ pub fn canonical_anchors_from_index(
         .get_item(finalized_height)
         .ok_or_else(|| eyre!("missing block index entry at height {finalized_height}"))?;
     let finalize_header = if finalized_height == head_height {
-        head_header.clone()
+        head_header
     } else {
         load_header_from_db(database, finalize_item.block_hash)?
     };
     let finalize_entry = if finalized_height == head_height {
-        head_entry.clone()
+        head_entry
     } else {
         block_tree::make_block_tree_entry(finalize_header.as_ref())
     };
