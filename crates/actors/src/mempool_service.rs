@@ -1172,7 +1172,7 @@ impl Inner {
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
-            info!("Tx {} signature is valid", &tx.id());
+            info!("Tx {} signature is valid for signer {}", &tx.id(), &tx.signer());
             Ok(())
         } else {
             let mempool_state = &self.mempool_state;

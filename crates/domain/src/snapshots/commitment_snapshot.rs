@@ -135,9 +135,10 @@ impl CommitmentSnapshot {
             .get(&commitment_tx.signer)
             .map(std::vec::Vec::len)
             .unwrap_or_default();
-        debug!("add_commitment() called for {}", commitment_tx.id);
         let signer = &commitment_tx.signer;
         let tx_type = &commitment_tx.commitment_type;
+
+        debug!("add_commitment() called for tx {}, address {}", commitment_tx.id, &signer);
 
         // Early return for unsupported commitment types
         if !matches!(
