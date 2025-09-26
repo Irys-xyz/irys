@@ -1052,37 +1052,26 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
-    // AT THIS POINT WE HAVE SOME NAUNCES AS TO THE STATE!
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
-    let processed_block_confirmed_prior_to_ingress_proofs = {
-        // If A processes BlockConfirmed for B’s block before ingress proofs:
-        //  - A finds B’s tx in the block’s Publish ledger and sets promoted_height on B’s header.
-        //  - get_publish_txs_and_proofs filters B’s tx (already promoted).
-        //  - Publish candidates usually show only A’s orphaned tx (until A gossips/promotes it), giving shape 1,1,0.
-        //
-        // If A processes ingress proofs (and data_root→txid mapping) first:
-        //  - A sees B’s tx as eligible to promote (enough proofs, promoted_height is None).
-        //  - Publish candidates can include both A’s orphaned tx and B’s tx, giving 1,2,0.
-        assert_eq!(
-            a1_b2_reorg_mempool_txs.submit_tx.len(),
-            1,
-            "In either state we expected 1 submit tx from the mempool shape"
-        );
-        if a1_b2_reorg_mempool_txs.publish_tx.txs.len() == 1 {
-            // A processed BlockConfirmed for B’s block before ingress proofs
-            true
-        } else if a1_b2_reorg_mempool_txs.publish_tx.txs.len() == 2 {
-            // A processed ingress proofs (and data_root→txid mapping) first
-            false
-        } else {
-            panic!("unexpected best mempool txs shape");
-        }
-    };
+
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.submit_tx.len(),
+        1,
+        "In either state we expected 1 submit tx from the mempool shape"
+    );
 
     // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
         a1_b2_reorg_mempool_txs.submit_tx,
-        vec![a_blk1_tx1.header.clone()]
+        vec![a_blk1_tx1.header.clone()],
+        "We expected 1 submit tx from the mempool shape and for it to be {:?}",
+        a_blk1_tx1.header.clone()
+    );
+
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.publish_tx.txs.len(),
+        1,
+        "unexpected best mempool txs shape"
     );
 
     let a_blk1_tx1_proof1 = {
@@ -1185,29 +1174,16 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     );
 
     // Wait for the "best mempool txs" to settle to expected shape
-    if processed_block_confirmed_prior_to_ingress_proofs {
-        a_node
-            .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
-            .await?;
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
 
-        // (a second check) assert that nothing is in the mempool
-        let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
-        assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
-        assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
-        assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
-        assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
-    } else {
-        a_node
-            .wait_for_mempool_best_txs_shape(0, 1, 0, seconds_to_wait.try_into()?) // this is sometimes 0,1,0 when the earlier shape is 1,2,0
-            .await?;
-
-        // (a second check) assert that one tx is in the mempool
-        let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
-        assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
-        assert_eq!(a_b_blk3_mempool_txs.publish_tx.txs.len(), 1);
-        assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_some());
-        assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
-    }
+    // (a second check) assert that nothing is in the mempool
+    let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+    assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
+    assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
+    assert!(a_b_blk3_mempool_txs.commitment_tx.is_empty());
 
     // get a_blk1_tx1 from a, it should have b_blk3's ingress proof
     let a_blk1_tx1_b_blk3_tx1 = a_node
