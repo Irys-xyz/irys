@@ -15,8 +15,8 @@ use actix::prelude::*;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
-    create_epoch_snapshot_for_block, fork_choice_markers, make_block_tree_entry, BlockState,
-    BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData, ForkChoiceMarkers,
+    create_epoch_snapshot_for_block, forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry,
+    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
@@ -300,12 +300,12 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    async fn emit_fcu(&self, anchors: &ForkChoiceMarkers) -> eyre::Result<()> {
-        let tip_block = &anchors.head;
+    async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
+        let tip_block = &markers.head;
         debug!(
             head = %tip_block.block_hash,
-            migration = %anchors.migration_block.block_hash,
-            prune = %anchors.prune_block.block_hash,
+            migration = %markers.migration_block.block_hash,
+            prune = %markers.prune_block.block_hash,
             "broadcasting canonical chain update",
         );
 
@@ -315,9 +315,9 @@ impl BlockTreeServiceInner {
             .reth_service
             .send(RethServiceMessage::ForkChoice {
                 update: ForkChoiceUpdateMessage {
-                    head_hash: anchors.head.block_hash,
-                    confirmed_hash: anchors.migration_block.block_hash,
-                    finalized_hash: anchors.prune_block.block_hash,
+                    head_hash: markers.head.block_hash,
+                    confirmed_hash: markers.migration_block.block_hash,
+                    finalized_hash: markers.prune_block.block_hash,
                 },
                 response: tx,
             })
@@ -327,8 +327,8 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
-    fn emit_block_confirmed(&self, anchors: &ForkChoiceMarkers) {
-        let tip_block = Arc::clone(&anchors.head);
+    fn emit_block_confirmed(&self, markers: &ForkChoiceMarkers) {
+        let tip_block = Arc::clone(&markers.head);
         self.service_senders
             .mempool
             .send(MempoolServiceMessage::BlockConfirmed(tip_block))
@@ -545,7 +545,7 @@ impl BlockTreeServiceInner {
             return Ok(());
         }
 
-        let (arc_block, epoch_block, reorg_event, tip_changed, state, new_canonical_anchors) = {
+        let (arc_block, epoch_block, reorg_event, tip_changed, state, new_canonical_markers) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -597,16 +597,16 @@ impl BlockTreeServiceInner {
 
             let tip_changed = cache.mark_tip(&block_hash)?;
 
-            let (epoch_block, reorg_event, canonical_anchors) = if tip_changed {
+            let (epoch_block, reorg_event, fcu_markers) = if tip_changed {
                 let block_index_read = self.block_index_guard.read();
-                let anchors = fork_choice_markers(
+                let markers = ForkChoiceMarkers::from_block_tree(
                     &cache,
                     &block_index_read,
                     &self.db,
                     self.config.consensus.block_migration_depth as usize,
                     self.config.consensus.block_tree_depth as usize,
                 )?;
-                let new_canonical_anchors = Some(anchors);
+                let new_fcu_markers = Some(markers);
 
                 // Prune the cache after tip changes.
                 //
@@ -719,7 +719,7 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (new_epoch_block, Some(event), new_canonical_anchors)
+                    (new_epoch_block, Some(event), new_fcu_markers)
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -736,7 +736,7 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (new_epoch_block, None, new_canonical_anchors)
+                    (new_epoch_block, None, new_fcu_markers)
                 }
             } else {
                 (None, None, None)
@@ -753,7 +753,7 @@ impl BlockTreeServiceInner {
                 reorg_event,
                 tip_changed,
                 state,
-                canonical_anchors,
+                fcu_markers,
             )
         }; // RwLockWriteGuard is dropped here, before the await
 
@@ -771,12 +771,12 @@ impl BlockTreeServiceInner {
             }
         }
 
-        if let Some(anchors) = &new_canonical_anchors {
-            self.emit_fcu(anchors).await?;
-            self.emit_block_confirmed(anchors);
+        if let Some(markers) = &new_canonical_markers {
+            self.emit_fcu(markers).await?;
+            self.emit_block_confirmed(markers);
             // Handle block migration (move chunks to disk and add to block_index)
             if tip_changed {
-                self.migrate_block(&anchors.migration_block).await;
+                self.migrate_block(&markers.migration_block).await;
             }
         }
 
@@ -794,6 +794,7 @@ impl BlockTreeServiceInner {
             parent_block.diff != arc_block.diff
         };
         if parent_diff_changed {
+            // todo: good opportunity to get rid of actix here
             // Ensure we are in the Actix system context before accessing the registry
             System::set_current(self.system.clone());
             let mining_broadcaster_addr = BroadcastMiningService::from_registry();

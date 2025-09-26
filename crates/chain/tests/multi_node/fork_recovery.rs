@@ -388,7 +388,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .await?;
 
     let _ = genesis_node
-        .wait_for_reth_tag(
+        .wait_for_reth_marker(
             BlockNumberOrTag::Latest,
             canonical_block_level2.evm_block_hash,
             seconds_to_wait as u64,
@@ -401,7 +401,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
     let fork_block_level3 = peer_node.get_block_by_height(fork_height + 2).await?;
 
     let _ = peer_node
-        .wait_for_reth_tag(
+        .wait_for_reth_marker(
             BlockNumberOrTag::Latest,
             fork_block_level3.evm_block_hash,
             seconds_to_wait as u64,
@@ -421,7 +421,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .await?;
 
     let _ = genesis_node
-        .wait_for_reth_tag(
+        .wait_for_reth_marker(
             BlockNumberOrTag::Latest,
             canonical_block_level2.evm_block_hash,
             seconds_to_wait as u64,
@@ -522,14 +522,14 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 
         // reth internal tracking state matches the expected irys heights
         let _ = node
-            .wait_for_reth_tag(
+            .wait_for_reth_marker(
                 BlockNumberOrTag::Latest,
                 head_block.evm_block_hash,
                 seconds_to_wait as u64,
             )
             .await?;
         let safe_hash = node
-            .wait_for_reth_tag(
+            .wait_for_reth_marker(
                 BlockNumberOrTag::Safe,
                 migration_block.evm_block_hash,
                 seconds_to_wait as u64,
@@ -540,7 +540,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
             "reth safe tag should reference migration block"
         );
         let _ = node
-            .wait_for_reth_tag(
+            .wait_for_reth_marker(
                 BlockNumberOrTag::Finalized,
                 prune_block.evm_block_hash,
                 seconds_to_wait as u64,

@@ -1269,7 +1269,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         ))
     }
 
-    pub async fn wait_for_reth_tag(
+    pub async fn wait_for_reth_marker(
         &self,
         tag: BlockNumberOrTag,
         expected_hash: EvmBlockHash,

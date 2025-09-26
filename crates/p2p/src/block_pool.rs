@@ -9,10 +9,13 @@ use irys_actors::MempoolFacade;
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::chain_sync_state::ChainSyncState;
+
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
+
+use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
-use irys_domain::{chain_sync_state::ChainSyncState, fork_choice_markers, ForkChoiceMarkers};
 use irys_types::{
     BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
     PeerNetworkError,
@@ -256,21 +259,13 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
-    fn current_canonical_anchors(&self) -> Option<ForkChoiceMarkers> {
+    #[tracing::instrument(skip_all, err)]
+    fn fcu_markers(&self) -> eyre::Result<ForkChoiceMarkers> {
         let migration_depth = self.config.consensus.block_migration_depth as usize;
         let prune_depth = self.config.consensus.block_tree_depth as usize;
         let tree = self.block_status_provider.block_tree_read_guard().read();
         let index = self.block_status_provider.block_index_read_guard().read();
-        match fork_choice_markers(&tree, &index, &self.db, migration_depth, prune_depth) {
-            Ok(anchors) => Some(anchors),
-            Err(err) => {
-                error!(
-                    ?err,
-                    "Failed to compute canonical anchors from block tree and index"
-                );
-                None
-            }
-        }
+        ForkChoiceMarkers::from_block_tree(&tree, &index, &self.db, migration_depth, prune_depth)
     }
 
     pub(crate) fn new(
@@ -377,14 +372,12 @@ where
         );
 
         if let Some(reth_service) = reth_service {
-            let anchors = self.current_canonical_anchors().ok_or_else(|| {
-                BlockPoolError::OtherInternal(
-                    "Canonical anchors unavailable while emitting FCU".to_string(),
-                )
+            let fcu_markers = self.fcu_markers().map_err(|_err| {
+                BlockPoolError::OtherInternal("FCU marker computation failed".to_string())
             })?;
-            let head_hash = anchors.head.block_hash;
-            let confirmed_hash = anchors.migration_block.block_hash;
-            let finalized_hash = anchors.prune_block.block_hash;
+            let head_hash = fcu_markers.head.block_hash;
+            let confirmed_hash = fcu_markers.migration_block.block_hash;
+            let finalized_hash = fcu_markers.prune_block.block_hash;
             debug!(
                 head = %head_hash,
                 confirmed = %confirmed_hash,

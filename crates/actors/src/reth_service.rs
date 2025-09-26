@@ -43,11 +43,10 @@ pub enum RethServiceMessage {
     },
 }
 
-// - safe and finalized are <= head (ancestors or equal).
-// - finalized never decreases; safe virtually never decreases.
-// - Reorgs never cross your finalized point (by policy/design).
-// - If chain height < k_safe, safe = head (or genesis).
-// - finalized only points to blocks already in your non-reorgable index.
+// Represents the fork-choice hashes we feed to Reth. Each field is an ancestor of `head`:
+// - `head_hash`: current canonical tip (latest block we want Reth to follow).
+// - `confirmed_hash`: migration/safe block, roughly `migration_depth` behind head.
+// - `finalized_hash`: prune/finalized block, `block_tree_depth` behind the confirmed block.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForkChoiceUpdate {
     pub head_hash: B256,
