@@ -55,7 +55,7 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
     #[error("Block {0:?} is a part of a pruned fork")]
     ForkedBlock(BlockHash),
-    #[error("Transaction validation for the block {} failed: {:?}")]
+    #[error("Transaction validation for the block {0:?} failed: {1:?}")]
     TransactionValidationFailed(BlockHash, TxIngressError),
 }
 
