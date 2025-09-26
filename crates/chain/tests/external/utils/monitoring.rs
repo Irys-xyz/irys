@@ -130,7 +130,7 @@ pub(crate) async fn wait_for_chain_progression(
     let start = std::time::Instant::now();
 
     while start.elapsed().as_secs() < timeout_secs {
-        let heights_futures = clients.iter().map(|c| get_chain_height(c));
+        let heights_futures = clients.iter().map(get_chain_height);
         let heights: Vec<u64> = join_all(heights_futures)
             .await
             .into_iter()
@@ -161,7 +161,7 @@ pub(crate) async fn wait_for_height_sync(clients: &[RemoteNodeClient], timeout: 
     let start = std::time::Instant::now();
 
     while start.elapsed().as_secs() < timeout {
-        let heights_futures = clients.iter().map(|c| get_chain_height(c));
+        let heights_futures = clients.iter().map(get_chain_height);
         let heights: Vec<u64> = join_all(heights_futures)
             .await
             .into_iter()

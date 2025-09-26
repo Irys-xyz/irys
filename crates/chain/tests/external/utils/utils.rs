@@ -3,7 +3,7 @@ use eyre::Result;
 use std::net::{SocketAddr, ToSocketAddrs as _};
 
 pub(crate) fn generate_test_data(size: usize) -> Vec<u8> {
-    let mut data = vec![0u8; size];
+    let mut data = vec![0_u8; size];
     for (i, byte) in data.iter_mut().enumerate() {
         *byte = (i % 256) as u8;
     }

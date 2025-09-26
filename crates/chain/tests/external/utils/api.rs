@@ -77,7 +77,7 @@ pub(crate) async fn fetch_data_price(
     let price_resp: PriceResponse = get_json(client, &endpoint, "Failed to fetch price").await?;
 
     // Parse the string prices to U256
-    use std::str::FromStr;
+    use std::str::FromStr as _;
     let perm_fee = U256::from_str(&price_resp.perm_fee)?;
     let term_fee = U256::from_str(&price_resp.term_fee)?;
 

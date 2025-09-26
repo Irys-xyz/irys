@@ -265,8 +265,7 @@ impl reth_codecs::Compact for CommitmentType {
             }
             COMMITMENT_TYPE_UNSTAKE => (Self::Unstake, &buf[TYPE_DISCRIMINANT_SIZE..]),
             _ => panic!(
-                "CommitmentType::from_compact: unknown commitment type discriminant: {}",
-                type_id
+                "CommitmentType::from_compact: unknown commitment type discriminant: {type_id}"
             ),
         }
     }

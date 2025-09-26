@@ -576,7 +576,7 @@ impl fmt::Display for IrysBlockHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
         match serde_json::to_string_pretty(self) {
-            Ok(json) => write!(f, "{}", json), // Write the JSON string to the formatter
+            Ok(json) => write!(f, "{json}"), // Write the JSON string to the formatter
             Err(_) => write!(f, "Failed to serialize IrysBlockHeader"), // Handle serialization errors
         }
     }

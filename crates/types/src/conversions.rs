@@ -46,8 +46,7 @@ mod tests {
                 let result = parse_address(address_str);
                 assert!(
                     result.is_ok(),
-                    "Failed to parse valid address: {}",
-                    address_str
+                    "Failed to parse valid address: {address_str}"
                 );
             }
         }
@@ -58,8 +57,7 @@ mod tests {
                 let result = parse_address(address_str);
                 assert!(
                     result.is_err(),
-                    "Should have failed to parse invalid address: {}",
-                    address_str
+                    "Should have failed to parse invalid address: {address_str}"
                 );
                 assert!(matches!(
                     result.unwrap_err(),
