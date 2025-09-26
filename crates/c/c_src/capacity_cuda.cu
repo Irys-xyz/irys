@@ -116,6 +116,7 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
     // Get the index of the current thread - as we are using a 1D grid, we only need to get the index of the current block.
     // The index of the current thread is then the index of the block times the number of threads per block plus the index of the current thread in the block.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // int stride = gridDim.x * blockDim.x;
     if (idx < chunks_count) {
         unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
         __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
@@ -125,11 +126,30 @@ __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsi
     }
 }
 
+// __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned int packing_sha_1_5_s) {
+//     // Get the index of the current thread
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     int stride = gridDim.x * blockDim.x;  // Total number of threads in the grid
+    
+//     // Grid-stride loop - each thread processes multiple chunks if needed
+//     for (int chunk_idx = idx; chunk_idx < chunks_count; chunk_idx += stride) {
+//         unsigned char *output = chunks + chunk_idx * DATA_CHUNK_SIZE;
+//         __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
+        
+//         // Copy the base chunk_id and modify the offset
+//         memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
+//         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + chunk_idx;
+        
+//         compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
+//     }
+// }
+
+
 /**
  * Computes the entropy chunks for the given list of chunks.
  * The entropy chunks are computed in parallel using the GPU.
  */
-extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset_start, unsigned long int chain_id, long int chunks_count, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *chunks, unsigned int packing_sha_1_5_s)
+extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset_start, unsigned long int chain_id, long int chunks_count, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *chunks, unsigned int packing_sha_1_5_s, int blocks, int threads_per_block)
 {
     unsigned char *d_chunks;
     unsigned char *d_chunk_id;
@@ -160,10 +180,39 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
         printf("cudaMalloc failed\n");  
         return CUDA_ERROR;
     }
+    // Create CUDA events
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+
 
     // Launch kernel
-    int blocks = (chunks_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    compute_entropy_chunks_cuda_kernel<<<blocks, THREADS_PER_BLOCK>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, packing_sha_1_5_s);
+    // int blocks = (chunks_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    // int blocks = 160;
+    // int threads_per_block = 256; 
+    // int blocks = 40;
+    // int threads_per_block = 128;
+    // Record start event
+    cudaEventRecord(start);
+    printf("%ix%i\n", threads_per_block, blocks);
+    compute_entropy_chunks_cuda_kernel<<<blocks, threads_per_block>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, packing_sha_1_5_s);
+
+    // Record stop event
+    cudaEventRecord(stop);
+    
+    // Wait for the stop event to complete
+    cudaEventSynchronize(stop);
+    
+    // Calculate elapsed time
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    
+    printf("Kernel execution time: %.3f ms\n", milliseconds);
+    
+    // Clean up events
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     // Check for errors after kernel launch
     cudaError_t err = cudaGetLastError();
