@@ -112,37 +112,38 @@ __device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t
  * Computes the entropy chunks for the given list of chunks.
  * The entropy chunks are computed in parallel using the GPU.
  */
-__global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned int packing_sha_1_5_s) {
-    // Get the index of the current thread - as we are using a 1D grid, we only need to get the index of the current block.
-    // The index of the current thread is then the index of the block times the number of threads per block plus the index of the current thread in the block.
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // int stride = gridDim.x * blockDim.x;
-    if (idx < chunks_count) {
-        unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
-        __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
-        memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
-        *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + idx;
-        compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
-    }
-}
-
 // __global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned int packing_sha_1_5_s) {
-//     // Get the index of the current thread
+//     // Get the index of the current thread - as we are using a 1D grid, we only need to get the index of the current block.
+//     // The index of the current thread is then the index of the block times the number of threads per block plus the index of the current thread in the block.
 //     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-//     int stride = gridDim.x * blockDim.x;  // Total number of threads in the grid
-    
-//     // Grid-stride loop - each thread processes multiple chunks if needed
-//     for (int chunk_idx = idx; chunk_idx < chunks_count; chunk_idx += stride) {
-//         unsigned char *output = chunks + chunk_idx * DATA_CHUNK_SIZE;
+//     // int stride = gridDim.x * blockDim.x;
+//     if (idx < chunks_count) {
+//         unsigned char *output = chunks + idx * DATA_CHUNK_SIZE;
 //         __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
-        
-//         // Copy the base chunk_id and modify the offset
 //         memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
-//         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + chunk_idx;
-        
+//         *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + idx;
 //         compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
 //     }
 // }
+
+__global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned int packing_sha_1_5_s) {
+    // Get the index of the current thread
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;  // Total number of threads in the grid
+    
+    // Grid-stride loop - each thread processes multiple chunks if needed
+    // this prevents packing corruption issues if the number of chunks exceeds the number of threads allocated (block num * threads per block)
+    for (int chunk_idx = idx; chunk_idx < chunks_count; chunk_idx += stride) {
+        unsigned char *output = chunks + chunk_idx * DATA_CHUNK_SIZE;
+        __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
+        
+        // Copy the base chunk_id and modify the offset
+        memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
+        *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + chunk_idx;
+        
+        compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
+    }
+}
 
 
 /**
