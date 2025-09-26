@@ -6,7 +6,7 @@ use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
-use irys_actors::MempoolFacade;
+use irys_actors::{MempoolFacade, TxIngressError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
@@ -55,6 +55,8 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
     #[error("Block {0:?} is a part of a pruned fork")]
     ForkedBlock(BlockHash),
+    #[error("Transaction validation for the block {} failed: {:?}")]
+    TransactionValidationFailed(BlockHash, TxIngressError),
 }
 
 impl From<PeerNetworkError> for BlockPoolError {
@@ -653,6 +655,7 @@ where
                 current_block_hash
             );
         }
+
         for tx in cached_txs {
             match tx {
                 IrysTransactionResponse::Commitment(commitment_tx) => {
@@ -661,10 +664,19 @@ where
                         .handle_commitment_transaction_ingress(commitment_tx)
                         .await
                     {
-                        error!(
-                            "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}",
-                            current_block_hash, err
-                        );
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}",
+                                current_block_hash, err
+                            );
+                            self.blocks_cache
+                                .remove_block(&block_header.block_hash)
+                                .await;
+                            return Err(BlockPoolError::TransactionValidationFailed(
+                                current_block_hash,
+                                err,
+                            ));
+                        }
                     }
                 }
                 IrysTransactionResponse::Storage(storage_tx) => {
@@ -673,10 +685,19 @@ where
                         .handle_data_transaction_ingress(storage_tx)
                         .await
                     {
-                        error!(
-                            "Block pool: Failed to send storage tx to mempool for block {:?}: {:?}",
-                            current_block_hash, err
-                        );
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}",
+                                current_block_hash, err
+                            );
+                            self.blocks_cache
+                                .remove_block(&block_header.block_hash)
+                                .await;
+                            return Err(BlockPoolError::TransactionValidationFailed(
+                                current_block_hash,
+                                err,
+                            ));
+                        }
                     }
                 }
             }
