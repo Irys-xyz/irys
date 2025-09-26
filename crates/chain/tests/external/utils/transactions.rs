@@ -5,7 +5,7 @@ use super::{
     utils::generate_test_data,
 };
 use eyre::Result;
-use irys_api_client::ApiClient;
+use irys_api_client::ApiClient as _;
 use irys_types::{CommitmentTransaction, DataLedger, DataTransaction, H256};
 use serde::Serialize;
 use std::time::Duration;

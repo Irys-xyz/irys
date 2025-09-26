@@ -44,7 +44,7 @@ pub mod u64_stringify {
 
         // Parse string back to u128
         s.parse::<u64>()
-            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {}", e)))
+            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {e}")))
     }
 }
 
@@ -350,7 +350,7 @@ pub mod address_base58_stringify {
 
         // Decode the base58 string into bytes
         let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
+            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {e:?}")))?;
 
         // Ensure the byte array is exactly 20 bytes
         if bytes.len() != 20 {
@@ -502,7 +502,7 @@ pub trait DecodeHash: Sized {
 impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
         let bytes = FromBase58::from_base58(base58_string)
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))?;
+            .map_err(|e| format!("Failed to decode from base58 {e:?}"))?;
         let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
             format!(
                 "Invalid H256 length: expected 32 bytes, got {}",

@@ -407,7 +407,7 @@ pub enum PeerNetworkError {
 
 impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
     fn from(err: SendError<PeerNetworkServiceMessage>) -> Self {
-        Self::InternalSendError(format!("Failed to send a message: {:?}", err))
+        Self::InternalSendError(format!("Failed to send a message: {err:?}"))
     }
 }
 
@@ -480,8 +480,7 @@ impl PeerNetworkSender {
 
         receiver.await.map_err(|recv_error| {
             PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
+                "Failed to receive response: {recv_error:?}"
             ))
         })?
     }
@@ -502,8 +501,7 @@ impl PeerNetworkSender {
 
         receiver.await.map_err(|recv_error| {
             PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
+                "Failed to receive response: {recv_error:?}"
             ))
         })?
     }
@@ -524,8 +522,7 @@ impl PeerNetworkSender {
 
         receiver.await.map_err(|recv_error| {
             PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
+                "Failed to receive response: {recv_error:?}"
             ))
         })?
     }
