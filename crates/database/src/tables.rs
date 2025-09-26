@@ -153,8 +153,6 @@ table IngressProofs {
     type SubKey = Address;
 }
 
-
-
 /// Maps a global (perm) chunk offset to the last block height it was used by a transaction
 /// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks
 table ProgrammableDataLRU {

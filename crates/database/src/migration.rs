@@ -1,35 +1,16 @@
 use crate::db::{IrysDatabaseExt as _, RethDbWrapper};
-use crate::db_cache::CachedDataRoot;
+
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
     Database as _, DatabaseEnv, DatabaseError,
 };
-use crate::tables::CachedDataRoots;
-use reth_db_api::cursor::DbCursorRO as _;
+
 use std::fmt::Debug;
 use tracing::debug;
 
 /// Bump this every time you need to migrate data
-const CURRENT_DB_VERSION: u32 = 2;
-
-/// Example migration step to version 2
-fn migration_to_v2(db: &DatabaseEnv) -> Result<(), DatabaseError> {
-    // Rewrite all CachedDataRoots entries so they're re-encoded with the new format
-    db.update(|tx| {
-        let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
-        let walker = cursor.walk(None)?;
-        for row in walker {
-            let (key, value) = row?;
-            // value.expiry_height will be Some(_) if already set in newer DBs
-            // or None (via serde default) if coming from older DBs without the field.
-            let updated: CachedDataRoot = value;
-            tx.put::<CachedDataRoots>(key, updated)?;
-        }
-        // Bump schema version to 2
-        crate::set_database_schema_version(tx, 2)
-    })?
-}
+const CURRENT_DB_VERSION: u32 = 1;
 
 mod v0_to_v1 {
     use super::*;
@@ -37,6 +18,7 @@ mod v0_to_v1 {
         CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
         IrysTxHeaders,
     };
+    use reth_db::cursor::DbCursorRO as _;
     use reth_db::table::Table;
 
     pub(crate) fn migrate<TXOld, TXNew>(tx_old: &TXOld, tx_new: &TXNew) -> Result<(), DatabaseError>
@@ -89,13 +71,7 @@ pub fn check_db_version_and_run_migrations_if_needed(
     debug!("Current database version: {:?}", CURRENT_DB_VERSION);
     if let Some(v) = version {
         // A version exists. If it’s less than CURRENT_DB_VERSION, apply sequential migrations.
-        if v < CURRENT_DB_VERSION {
-            for next_version in (v + 1)..=CURRENT_DB_VERSION {
-                if next_version == 2 {
-                    migration_to_v2(new_db)?
-                }
-            }
-        }
+        if v < CURRENT_DB_VERSION {}
     } else {
         debug!("No DB schema version information found in the new database. Applying initial migration from v0 to v1.");
         old_db.update_eyre(|tx_old| {
@@ -104,15 +80,6 @@ pub fn check_db_version_and_run_migrations_if_needed(
                 Ok(())
             })
         })?;
-
-        // After initializing to v1, apply remaining migrations up to CURRENT_DB_VERSION
-        if CURRENT_DB_VERSION >= 2 {
-            for next_version in 2..=CURRENT_DB_VERSION {
-                if next_version == 2 {
-                    migration_to_v2(new_db)?
-                }
-            }
-        }
     }
 
     Ok(())
@@ -272,9 +239,9 @@ mod tests {
         )??;
         assert_eq!(old_counts_post, (0, 0, 0, 0, 0, 0));
 
-        // Schema version should be set to CURRENT_DB_VERSION (2)
+        // Schema version should be set to CURRENT_DB_VERSION (1)
         let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(new_version.unwrap(), 2);
+        assert_eq!(new_version.unwrap(), 1);
 
         Ok(())
     }
