@@ -1,9 +1,12 @@
 use crate::db::{IrysDatabaseExt as _, RethDbWrapper};
+use crate::db_cache::CachedDataRoot;
 use crate::reth_db::{
     table::TableImporter,
     transaction::{DbTx, DbTxMut},
     Database as _, DatabaseEnv, DatabaseError,
 };
+use crate::tables::CachedDataRoots;
+use reth_db_api::cursor::DbCursorRO as _;
 use std::fmt::Debug;
 use tracing::debug;
 
@@ -12,10 +15,6 @@ const CURRENT_DB_VERSION: u32 = 2;
 
 /// Example migration step to version 2
 fn migration_to_v2(db: &DatabaseEnv) -> Result<(), DatabaseError> {
-    use crate::db_cache::CachedDataRoot;
-    use crate::tables::CachedDataRoots;
-    use reth_db_api::cursor::DbCursorRO as _;
-
     // Rewrite all CachedDataRoots entries so they're re-encoded with the new format
     db.update(|tx| {
         let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
@@ -39,7 +38,6 @@ mod v0_to_v1 {
         IrysTxHeaders,
     };
     use reth_db::table::Table;
-    use reth_db_api::cursor::DbCursorRO as _;
 
     pub(crate) fn migrate<TXOld, TXNew>(tx_old: &TXOld, tx_new: &TXNew) -> Result<(), DatabaseError>
     where
