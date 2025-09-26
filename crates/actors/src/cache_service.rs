@@ -310,7 +310,7 @@ mod tests {
     };
     use std::sync::{Arc, RwLock};
 
-    // This test prevents a regression of bug: mempool-only data roots (with empty block_set)
+    // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
     // are pruned once prune_height > 0 and they should not be pruned!
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
@@ -339,7 +339,6 @@ mod tests {
             data_root: tx_header.data_root,
             data_size: tx_header.data_size,
             data_path: Base64(vec![]),
-            // Length is irrelevant here; cache_chunk does not validate size
             bytes: Base64(vec![0_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
@@ -379,11 +378,10 @@ mod tests {
             shutdown: shutdown_rx,
         };
 
-        // Invoke pruning with prune_height > 0 which deletes mempool-only roots with current logic
+        // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
         service.prune_data_root_cache(1)?;
 
-        // Desired behavior (post-fix): mempool-only roots should NOT be pruned here.
-        // This assertion will fail today, hence #[ignore] above documents the regression.
+        // Ensure root still exists
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots was prematurely pruned");
