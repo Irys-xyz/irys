@@ -1054,12 +1054,6 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
 
-    assert_eq!(
-        a1_b2_reorg_mempool_txs.submit_tx.len(),
-        1,
-        "In either state we expected 1 submit tx from the mempool shape"
-    );
-
     // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
         a1_b2_reorg_mempool_txs.submit_tx,
