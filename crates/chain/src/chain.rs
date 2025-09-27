@@ -967,10 +967,13 @@ impl IrysNode {
         let storage_submodules_config =
             StorageSubmodulesConfig::load(config.node_config.base_directory.clone())?;
 
-        let p2p_service = P2PService::new(
+        // Create a shared GossipClient instance
+        let gossip_client = Arc::new(irys_p2p::GossipClient::new(
+            Duration::from_secs(5),
             config.node_config.miner_address(),
-            receivers.gossip_broadcast,
-        );
+        ));
+
+        let p2p_service = P2PService::new(receivers.gossip_broadcast, Arc::clone(&gossip_client));
         let sync_state = p2p_service.sync_state.clone();
 
         // start the block tree service
@@ -1018,7 +1021,9 @@ impl IrysNode {
             reth_service_actor.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
+            Arc::clone(&gossip_client),
             runtime_handle.clone(),
+
         );
 
         let execution_payload_cache =

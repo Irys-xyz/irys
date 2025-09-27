@@ -6,7 +6,7 @@ use crate::tests::util::{
     MockRethServiceActor,
 };
 use crate::types::GossipResponse;
-use crate::BlockStatusProvider;
+use crate::{BlockStatusProvider, GetPeerListGuard, GossipClient};
 use actix::Actor as _;
 use futures::FutureExt as _;
 use irys_actors::services::ServiceSenders;
