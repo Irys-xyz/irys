@@ -122,7 +122,10 @@ impl ApiClientExt for IrysApiClient {
                     None::<&()>,
                 )
                 .await?;
-            if status.map(|s| s.is_promoted).unwrap_or(false) {
+            if status
+                .map(|s| s.promotion_height.is_some())
+                .unwrap_or(false)
+            {
                 return Ok(());
             }
             sleep(Duration::from_millis(200)).await;

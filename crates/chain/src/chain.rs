@@ -3,6 +3,7 @@ use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
+use eyre::{ensure, Context as _};
 use futures::FutureExt as _;
 use irys_actors::block_discovery::{
     BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
@@ -81,6 +82,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc::{self};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
+use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
 #[derive(Debug, Clone)]
@@ -642,6 +644,7 @@ impl IrysNode {
             tokio_runtime.handle().clone(),
         )?;
 
+        let handle = tokio_runtime.handle().clone();
         // start reth
         let reth_thread = Self::init_reth_thread(
             self.config.clone(),
@@ -683,33 +686,52 @@ impl IrysNode {
 
         // Call stake_and_pledge after mempool service is initialized
         if ctx.config.node_config.stake_pledge_drives {
-            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-            let mut validation_tracker = BlockValidationTracker::new(
-                ctx.block_tree_guard.clone(),
-                ctx.service_senders.clone(),
-                MAX_WAIT_TIME,
-            );
-            // wait for any pending blocks to finish validating
-            let latest_hash = validation_tracker.wait_for_validation().await?;
-
-            {
-                let btrg = ctx.block_tree_guard.read();
-                debug!(
-                    "Checking stakes & pledges at height {}, latest hash: {}",
-                    btrg.get_canonical_chain().0.last().unwrap().height,
-                    &latest_hash
+            let block_tree_guard = ctx.block_tree_guard.clone();
+            let service_senders = ctx.service_senders.clone();
+            let config = ctx.config.clone();
+            let storage_modules = ctx.storage_modules_guard.clone();
+            let mempool_pledge_provider = ctx.mempool_pledge_provider.clone();
+            let latest_block = Arc::clone(&latest_block);
+            // this is a task as we don't want to block startup, & it lets us gosip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
+            handle.spawn(async {
+                // sleep for a bit so that peers have a chance to gossip us blocks
+                sleep(Duration::from_secs(2)).await;
+                let config = config;
+                let latest_block = latest_block;
+                const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+                let mut validation_tracker = BlockValidationTracker::new(
+                    block_tree_guard.clone(),
+                    service_senders,
+                    MAX_WAIT_TIME,
                 );
-            };
-            // TODO: add code to proactively grab the latest head block from peers
-            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
-            stake_and_pledge(
-                &ctx.config,
-                ctx.block_tree_guard.clone(),
-                ctx.storage_modules_guard.clone(),
-                latest_block.block_hash,
-                ctx.mempool_pledge_provider.clone(),
-            )
-            .await?;
+                // wait for any pending blocks to finish validating
+                let latest_hash = validation_tracker
+                    .wait_for_validation()
+                    .await
+                    .context("Unable to wait for validation to finish")
+                    .unwrap();
+
+                {
+                    let btrg = block_tree_guard.read();
+                    debug!(
+                        "Checking stakes & pledges at height {}, latest hash: {}",
+                        btrg.get_canonical_chain().0.last().unwrap().height,
+                        &latest_hash
+                    );
+                };
+                // TODO: add code to proactively grab the latest head block from peers
+                // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
+                stake_and_pledge(
+                    &config,
+                    block_tree_guard,
+                    storage_modules,
+                    latest_block.block_hash,
+                    mempool_pledge_provider,
+                )
+                .await
+                .context("Unable to automatically stake & pledge")
+                .unwrap()
+            });
         }
 
         Ok(ctx)
@@ -1795,20 +1817,20 @@ async fn stake_and_pledge(
     let api_uri = config.node_config.local_api_url();
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment_tx", api_uri);
 
-        client.post(url).send_json(commitment_tx).await
+        client.post(url).json(commitment_tx).send().await
     };
 
     // now check the canonical state
 
-    let (is_historically_staked, commitment_snapshot) = {
+    let (is_historically_staked, epoch_snapshot, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);
         let commitment_snapshot = (*block_tree_guard.canonical_commitment_snapshot()).clone();
-        (is_historically_staked, commitment_snapshot)
+        (is_historically_staked, epoch_snapshot, commitment_snapshot)
     };
 
     // check the commitment snapshot (pending commitment txs for the next epoch rollup)
@@ -1839,22 +1861,27 @@ async fn stake_and_pledge(
         latest_block_hash
     };
 
-    // get all SMs without a partition assignment
-
-    let unassigned_modules = {
+    // get all SMs with and without a partition assignment
+    let (assigned_modules, unassigned_modules): (Vec<Arc<StorageModule>>, Vec<Arc<StorageModule>>) = {
         let sms = storage_modules_guard.read();
         sms.iter()
-            .filter(|&sm| sm.partition_assignment().is_none())
-            .count()
+            .cloned()
+            .partition(|sm| sm.partition_assignment().is_some())
     };
 
-    // get the number of pending commitment txs for partitions, if the count is >= the unassigned len, do nothing
-    let pending_pledges = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
-    let to_pledge_count = unassigned_modules.saturating_sub(pending_pledges);
+    // get the number of pending & historic commitment txs for partitions, if the count is >= the unassigned len, do nothing
+    let pending_pledge_count = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
+    let historic_pledge_count = epoch_snapshot.get_partition_assignments(address).len();
+    let to_pledge_count = unassigned_modules
+        .len()
+        .saturating_sub(pending_pledge_count);
+
+    ensure!(historic_pledge_count == assigned_modules.len(), "Historic pledge count ({}) and assigned module count ({}) are different! this indicates an issue with storage module partition assignment logic!\nDEBUG\n historic_pledges {:?}, assigned_modules: {:?}, unassigned modules: {:?}",
+&historic_pledge_count, assigned_modules.len(), epoch_snapshot.get_partition_assignments(address), assigned_modules, unassigned_modules  );
 
     debug!(
-        "Found {} SMs without partition assignments ({} pending pledges)",
-        &to_pledge_count, &pending_pledges
+        "Found {} SMs without partition assignments ({} pending pledges, {} historic, {} assigned SMs) - sending {} pledges",
+        &unassigned_modules.len(), &pending_pledge_count, &historic_pledge_count, &assigned_modules.len(), &to_pledge_count
     );
 
     for idx in 0..to_pledge_count {

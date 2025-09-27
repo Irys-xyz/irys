@@ -1,7 +1,7 @@
 use irys_database::{
     commitment_tx_by_txid, open_or_create_db,
     reth_db::{Database as _, DatabaseEnv},
-    tables::{IngressProofs, IrysTables, IrysTxHeaders},
+    tables::{IngressProofs, IrysDataTxHeaders, IrysTables},
     walk_all,
 };
 
@@ -24,7 +24,7 @@ fn _promotion_debug() -> eyre::Result<()> {
     let read_tx = db.tx()?;
     let ingress_proofs = walk_all::<IngressProofs, _>(&read_tx)?;
     dbg!(ingress_proofs);
-    let storage_transactions = walk_all::<IrysTxHeaders, _>(&read_tx)?;
+    let storage_transactions = walk_all::<IrysDataTxHeaders, _>(&read_tx)?;
     dbg!(storage_transactions);
 
     Ok(())
