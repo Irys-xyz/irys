@@ -50,11 +50,17 @@ impl Inner {
 
     pub async fn handle_data_tx_ingress_message(
         &mut self,
-        mut tx: DataTransactionHeader,
+        tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
 
-        tx.promoted_height = None;
+        if tx.promoted_height.is_some() {
+            warn!(
+                "Ingressed tx {:?} has promoted_height set to {:?}; preserving existing promotion state",
+                tx.id,
+                tx.promoted_height
+            );
+        }
 
         {
             let mempool_state_read_guard = self.mempool_state.read().await;
