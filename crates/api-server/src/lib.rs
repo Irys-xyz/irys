@@ -15,8 +15,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
-    post_version, price, proxy::proxy, tx,
+    block, block_index, chain, commitment, get_chunk, index, ledger, mempool, mining,
+    network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -26,6 +26,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
 use crate::routes::anchor;
+
+/// API version prefix for all routes
+pub const API_VERSION: &str = "v1";
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -50,7 +53,7 @@ impl ApiState {
 }
 
 pub fn routes() -> impl HttpServiceFactory {
-    web::scope("v1")
+    web::scope(API_VERSION)
         .wrap(middleware::Logger::default())
         .route("/", web::get().to(index::info_route))
         .route("/block/{block_tag}", web::get().to(block::get_block))
@@ -73,6 +76,7 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
+        .route("/genesis", web::get().to(index::genesis_route))
         .route(
             "/network/config",
             web::get().to(network_config::get_network_config),
@@ -107,6 +111,28 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
+        // Chain endpoints
+        .route("/chain/height", web::get().to(chain::get_height))
+        // Ledger endpoints
+        .route(
+            "/ledger/submit/{node_id}/summary",
+            web::get().to(ledger::get_submit_summary),
+        )
+        .route(
+            "/ledger/publish/{node_id}/summary",
+            web::get().to(ledger::get_publish_summary),
+        )
+        // Storage endpoints
+        .route(
+            "/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
+            web::get().to(storage::get_intervals),
+        )
+        .route(
+            "/mempool/status",
+            web::get().to(mempool::get_mempool_status),
+        )
+        // Mining endpoint
+        .route("/mining/info", web::get().to(mining::get_mining_info))
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {

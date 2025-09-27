@@ -337,9 +337,7 @@ mod tests {
         let diff_ms = (expected_ms - actual_ms).abs();
         assert!(
             diff_ms <= tolerance_ms,
-            "Difference {}ms exceeds tolerance {}ms",
-            diff_ms,
-            tolerance_ms
+            "Difference {diff_ms}ms exceeds tolerance {tolerance_ms}ms"
         );
     }
 
@@ -400,7 +398,7 @@ mod tests {
         seed: H256,
         difficulty: U256,
     ) -> (f64, H256) {
-        println!(" mining {} blocks...", num_blocks);
+        println!(" mining {num_blocks} blocks...");
         // Mine num_blocks an record their block times
         let mut block_times: Vec<f64> = Vec::new();
         let mut internal_seed = seed;
@@ -495,8 +493,7 @@ mod tests {
         // Verify adjustment status
         assert_eq!(
             stats.is_adjusted, should_adjust,
-            "Adjustment mismatch for {}% difference (time_multiplier: {})",
-            expected_percent, time_multiplier
+            "Adjustment mismatch for {expected_percent}% difference (time_multiplier: {time_multiplier})"
         );
 
         // Verify percent calculation

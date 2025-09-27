@@ -787,8 +787,7 @@ mod tests {
             .to_string();
         assert!(
             err.contains("Invalid target_offset: out of bounds"),
-            "expected 'Invalid target_offset: out of bounds', got: {}",
-            err
+            "expected 'Invalid target_offset: out of bounds', got: {err}"
         );
     }
 }

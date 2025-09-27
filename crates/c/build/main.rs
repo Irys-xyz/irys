@@ -27,11 +27,11 @@ fn main() {
 
 fn env_inner(name: &str) -> Option<OsString> {
     let var = env::var_os(name);
-    println!("cargo:rerun-if-env-changed={}", name);
+    println!("cargo:rerun-if-env-changed={name}");
 
     match var {
-        Some(ref v) => println!("{} = {}", name, v.to_string_lossy()),
-        None => println!("{} unset", name),
+        Some(ref v) => println!("{name} = {}", v.to_string_lossy()),
+        None => println!("{name} unset"),
     }
 
     var
@@ -39,7 +39,7 @@ fn env_inner(name: &str) -> Option<OsString> {
 
 fn env(name: &str) -> Option<OsString> {
     let prefix = env::var("TARGET").unwrap().to_uppercase().replace('-', "_");
-    let prefixed = format!("{}_{}", prefix, name);
+    let prefixed = format!("{prefix}_{name}");
     env_inner(&prefixed).or_else(|| env_inner(name))
 }
 

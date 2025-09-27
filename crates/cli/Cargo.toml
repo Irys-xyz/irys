@@ -24,5 +24,6 @@ irys-chain.workspace = true
 irys-config.workspace = true
 tokio.workspace = true
 irys-domain.workspace = true
+irys-tui.workspace = true
 [lints]
 workspace = true
