@@ -8,8 +8,9 @@ runs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         components: rustfmt,clippy,cargo,llvm-tools-preview
+        cache: false
+
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         cache-all-crates: true
-        rust-cache: "buildjet" # allows for fast cache compresson & restoration on self-hosted runners
