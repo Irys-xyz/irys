@@ -659,6 +659,7 @@ where
         for tx in cached_txs {
             match tx {
                 IrysTransactionResponse::Commitment(commitment_tx) => {
+                    let id = commitment_tx.id;
                     if let Err(err) = self
                         .mempool
                         .handle_commitment_transaction_ingress(commitment_tx)
@@ -666,8 +667,8 @@ where
                     {
                         if !matches!(err, TxIngressError::Skipped) {
                             warn!(
-                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
-                                current_block_hash, err
+                                "Block pool: Failed to send commitment tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
+                                &id, &current_block_hash, err
                             );
                             self.blocks_cache
                                 .remove_block(&block_header.block_hash)
@@ -680,6 +681,7 @@ where
                     }
                 }
                 IrysTransactionResponse::Storage(storage_tx) => {
+                    let id = storage_tx.id;
                     if let Err(err) = self
                         .mempool
                         .handle_data_transaction_ingress(storage_tx)
@@ -687,8 +689,8 @@ where
                     {
                         if !matches!(err, TxIngressError::Skipped) {
                             warn!(
-                                "Block pool: Failed to send commitment tx to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
-                                current_block_hash, err
+                                "Block pool: Failed to send storage tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
+                                &id, current_block_hash, err
                             );
                             self.blocks_cache
                                 .remove_block(&block_header.block_hash)

@@ -563,8 +563,9 @@ where
                 .add_tx_for_block(block_hash, tx_response)
                 .await;
 
+            // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
             debug!(
-                "Stored fetched transaction {:?} for block {:?} into BlockPool cache",
+                "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
                 tx_id, block_hash
             );
             // Record that we have seen this transaction from the peer that served it
