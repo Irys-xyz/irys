@@ -132,7 +132,6 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
                 shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
-                reth_service: genesis_block_prod.reth_service.clone(),
                 beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
             }),

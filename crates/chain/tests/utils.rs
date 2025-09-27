@@ -46,8 +46,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, DataLedger, GossipBroadcastMessage, H256List,
-    SyncMode, H256, U256,
+    partition::PartitionAssignment, Address, DataLedger, EvmBlockHash, GossipBroadcastMessage,
+    H256List, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -64,6 +64,7 @@ use reth::{
     payload::EthBuiltPayload,
     providers::BlockReader as _,
     rpc::types::RpcBlockHash,
+    rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
 use reth_db::{cursor::*, Database as _};
 use sha2::{Digest as _, Sha256};
@@ -340,7 +341,7 @@ impl IrysNodeTest<()> {
     fn get_span(&self) -> tracing::Span {
         match &self.name {
             Some(name) => error_span!("NODE", name = %name),
-            None => tracing::Span::none(),
+            None => error_span!("NODE", name = "genesis"),
         }
     }
 
@@ -1063,7 +1064,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
-        let height = self.get_canonical_chain_height().await;
+        let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
         let hash = self.wait_until_height(height + 1, 10).await?;
         self.get_block_by_hash(&hash)
@@ -1077,7 +1078,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 num_blocks as u64,
             )))
             .unwrap();
-        let height = self.get_canonical_chain_height().await;
+        let height = self.get_max_difficulty_block().height;
         self.node_ctx.start_mining()?;
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
@@ -1265,6 +1266,50 @@ impl IrysNodeTest<IrysNodeCtx> {
             &hash,
             &self.name,
             max_retries
+        ))
+    }
+
+    pub async fn wait_for_reth_marker(
+        &self,
+        tag: BlockNumberOrTag,
+        expected_hash: EvmBlockHash,
+        seconds_to_wait: u64,
+    ) -> eyre::Result<EvmBlockHash> {
+        let beginning = Instant::now();
+        let max_duration = Duration::from_secs(seconds_to_wait);
+        for attempt in 0..10 {
+            eyre::ensure!(
+                Instant::now().duration_since(beginning) < max_duration,
+                "timed out"
+            );
+
+            let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
+            match eth_api.block_by_number(tag, false).await {
+                Ok(Some(block)) if block.header.hash == expected_hash => {
+                    return Ok(block.header.hash);
+                }
+                Ok(Some(block)) => {
+                    tracing::error!(
+                        target = "test.reth",
+                        ?tag,
+                        expected = %expected_hash,
+                        actual = %block.header.hash,
+                        attempt,
+                        "reth tag mismatch while waiting"
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("error polling reth {:?} block: {:?}", tag, err);
+                }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        Err(eyre::eyre!(
+            "Reth {:?} block did not reach expected hash {:?} within {}s",
+            tag,
+            expected_hash,
+            seconds_to_wait
         ))
     }
 
@@ -1606,7 +1651,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
     }
 
-    pub fn get_block_by_height_on_chain(
+    pub fn get_block_by_height_from_index(
         &self,
         height: u64,
         include_chunk: bool,
