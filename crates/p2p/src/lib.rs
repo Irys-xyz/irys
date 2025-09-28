@@ -2,6 +2,8 @@ mod block_pool;
 mod block_status_provider;
 mod cache;
 mod chain_sync;
+mod circuit_breaker;
+mod dedup_cache;
 mod gossip_client;
 mod gossip_data_handler;
 mod gossip_service;
@@ -24,5 +26,6 @@ pub use gossip_data_handler::GossipDataHandler;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+pub use types::{GossipError, GossipResult, NetErr};
 pub use peer_network_service::{spawn_peer_network_service, PeerListServiceError};
-pub use types::{GossipError, GossipResult};
+

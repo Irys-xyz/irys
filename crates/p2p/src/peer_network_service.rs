@@ -109,9 +109,9 @@ where
 {
     db: DatabaseProvider,
     currently_running_announcements: HashSet<SocketAddr>,
-    successful_announcements: Cache<SocketAddr, AnnouncementFinishedMessage>,
-    failed_announcements: HashMap<SocketAddr, AnnouncementFinishedMessage>,
-    gossip_client: GossipClient,
+    successful_announcements: Cache<SocketAddr, AnnounceFinished>,
+    failed_announcements: HashMap<SocketAddr, AnnounceFinished>,
+    gossip_client: Arc<GossipClient>,
     irys_api_client: A,
     chain_id: u64,
     peer_address: PeerAddress,
@@ -201,10 +201,7 @@ where
                 .time_to_live(SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL)
                 .build(),
             failed_announcements: HashMap::new(),
-            gossip_client: GossipClient::new(
-                Duration::from_secs(5),
-                config.node_config.miner_address(),
-            ),
+            gossip_client,
             irys_api_client,
             chain_id: config.consensus.chain_id,
             peer_address,
@@ -434,8 +431,10 @@ where
             peer_list,
         ));
 
+
         tokio::spawn(async move {
             (reth_peer_sender)(reth_peer_info).await;
+
         });
     }
     async fn handle_handshake_request(&self, handshake: HandshakeMessage) {
@@ -1235,6 +1234,7 @@ mod tests {
             true,
             None,
         );
+
         peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
         assert_eq!(
             peer_list
@@ -1252,6 +1252,7 @@ mod tests {
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+
         let (mining_addr1, mut peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
             8081,
@@ -1305,6 +1306,7 @@ mod tests {
         }
     }
 
+
     #[test]
     async fn test_announce_yourself_to_all_peers() {
         let (sender, mut receiver) = PeerNetworkSender::new_with_receiver();
@@ -1329,6 +1331,7 @@ mod tests {
         PeerNetworkService::<IrysApiClient>::spawn_announce_yourself_to_all_peers_task(
             known_peers,
             sender,
+            gossip_client,
         );
         let mut api_addrs = Vec::new();
         while let Ok(message) = receiver.try_recv() {
@@ -1424,9 +1427,11 @@ mod tests {
             .await;
         sleep(Duration::from_millis(50)).await;
 
+
         debug!("Handshake test: Checking API calls after a forced handshake");
         assert_eq!(harness.api_client.calls().await.len(), 2);
     }
+
 
     #[test]
     async fn test_reth_sender_receives_reth_peer_info() {
@@ -1530,6 +1535,7 @@ mod tests {
             true,
             None,
         );
+    
         peer_list.add_or_update_peer(addr1, peer1.clone(), true);
         peer_list.add_or_update_peer(addr2, peer2.clone(), true);
         sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
@@ -1563,6 +1569,7 @@ mod tests {
         } = new_handle;
         shutdown_signal.fire();
         let _ = handle.await;
+
     }
 
     #[test]

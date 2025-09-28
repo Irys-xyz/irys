@@ -1,5 +1,5 @@
 use crate::gossip_data_handler::GossipDataHandler;
-use crate::{BlockPool, GossipError, GossipResult};
+use crate::{BlockPool, GossipError, GossipResult, NetErr};
 use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
@@ -40,7 +40,7 @@ pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
         match err {
-            GossipError::Network(msg) => Self::Network(msg),
+            GossipError::Network(net_err) => Self::Network(net_err.to_string()),
             GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
             GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
             GossipError::Internal(internal_err) => {
@@ -1230,15 +1230,16 @@ async fn get_block_index(
             peers_to_fetch_index_from.retain(|peer| peer.0 != to_remove);
         };
 
-        let (miner_address, top_peer) =
-            peers_to_fetch_index_from
-                .choose(&mut rand::thread_rng())
-                .ok_or(GossipError::Network("No peers available".to_string()))?;
+        let (miner_address, top_peer) = peers_to_fetch_index_from
+            .choose(&mut rand::thread_rng())
+            .ok_or(GossipError::Network(NetErr::Other(
+            "No peers available".to_string(),
+        )))?;
 
         let should_remove = match api_client
             .node_info(top_peer.address.api)
             .await
-            .map_err(|network_error| GossipError::Network(network_error.to_string()))
+            .map_err(|network_error| GossipError::Network(NetErr::Other(network_error.to_string())))
         {
             Ok(info) => {
                 if info.is_syncing {
@@ -1387,6 +1388,7 @@ mod tests {
     use super::*;
     use crate::peer_network_service::spawn_peer_network_service_with_client;
     use crate::tests::util::{ApiClientStub, FakeGossipServer, MockRethServiceActor};
+    use crate::GossipClient;
     use futures::FutureExt as _;
     use irys_types::BlockHash;
 
@@ -1485,7 +1487,6 @@ mod tests {
 
             let reth_mock = MockRethServiceActor {};
             let reth_mock_addr = reth_mock.start();
-
             let tokio_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = {
                 let reth_mock_addr = reth_mock_addr.clone();
