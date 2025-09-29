@@ -528,32 +528,32 @@ impl PeerListDataInner {
         if let Some(peer) = self.persistent_peers_cache.get_mut(mining_addr) {
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(1);
                 }
                 ScoreIncreaseReason::ValidData => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(3);
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(1);
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(2);
                 }
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(mining_addr) {
             // Update score in purgatory
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(1);
                 }
                 ScoreIncreaseReason::ValidData => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(3);
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(1);
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_by(2);
                 }
             }
 
@@ -962,10 +962,10 @@ mod tests {
         }
 
         #[rstest]
-        #[case(ScoreIncreaseReason::ValidData, 51)]
+        #[case(ScoreIncreaseReason::ValidData, 53)]
         #[case(ScoreIncreaseReason::Online, 51)]
         #[case(ScoreIncreaseReason::DataRequest, 51)]
-        #[case(ScoreIncreaseReason::TimelyResponse, 51)]
+        #[case(ScoreIncreaseReason::TimelyResponse, 52)]
         fn test_increase_peer_score(
             #[case] reason: ScoreIncreaseReason,
             #[case] expected_score: u16,
@@ -1013,7 +1013,7 @@ mod tests {
 
             peer_list.increase_peer_score(&addr, ScoreIncreaseReason::ValidData);
             let after_increase_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
-            assert_eq!(after_increase_score, 51);
+            assert_eq!(after_increase_score, 53);
 
             peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
 
