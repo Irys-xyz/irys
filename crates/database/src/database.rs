@@ -5,7 +5,7 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
-    IrysBlockHeaders, IrysCommitments, IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
+    IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -95,9 +95,9 @@ pub fn block_header_by_hash<T: DbTx>(
     Ok(block)
 }
 
-/// Inserts a [`DataTransactionHeader`] into [`IrysTxHeaders`]
+/// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
-    Ok(tx.put::<IrysTxHeaders>(tx_header.id, tx_header.clone().into())?)
+    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
 /// Gets a [`DataTransactionHeader`] by it's [`IrysTransactionId`]
@@ -106,7 +106,7 @@ pub fn tx_header_by_txid<T: DbTx>(
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
     Ok(tx
-        .get::<IrysTxHeaders>(*txid)?
+        .get::<IrysDataTxHeaders>(*txid)?
         .map(DataTransactionHeader::from))
 }
 
@@ -145,6 +145,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         data_size: tx_header.data_size,
         txid_set: vec![tx_header.id],
         block_set: vec![],
+        expiry_height: None,
     });
 
     // If the entry exists, update the timestamp and add the txid if necessary
@@ -160,6 +161,8 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         {
             cached_data_root.block_set.push(block_header.block_hash);
         }
+        // Clear any pre-confirmation expiry once the data_root is included in a block
+        cached_data_root.expiry_height = None;
     }
 
     // Update the database with the modified or new entry

@@ -216,7 +216,6 @@ pub async fn get_tx_local_start_offset(
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PromotionStatus {
-    pub is_promoted: bool,
     #[serde(default, with = "option_u64_stringify")]
     pub promotion_height: Option<u64>,
 }
@@ -253,14 +252,7 @@ pub async fn get_tx_promotion_status(
 
     // Report its promoted status
 
-    Ok(web::Json(match tx_header.promoted_height {
-        Some(height) => PromotionStatus {
-            is_promoted: true,
-            promotion_height: Some(height),
-        },
-        None => PromotionStatus {
-            is_promoted: false,
-            promotion_height: None,
-        },
+    Ok(web::Json(PromotionStatus {
+        promotion_height: tx_header.promoted_height,
     }))
 }
