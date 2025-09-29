@@ -4,6 +4,7 @@ pub mod chain_sync_state;
 pub mod chunk_provider;
 pub mod circular_buffer;
 pub mod execution_payload_cache;
+pub mod forkchoice_markers;
 pub mod peer_list;
 pub mod reth_provider;
 pub mod storage_module;

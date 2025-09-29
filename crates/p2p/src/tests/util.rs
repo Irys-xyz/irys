@@ -4,13 +4,12 @@ use crate::{
     BlockPool, BlockStatusProvider, GossipCache, GossipClient, GossipDataHandler, P2PService,
     ServiceHandleWithShutdownSignal, SyncChainServiceMessage,
 };
-use actix::{Actor, Context, Handler};
 use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
-use futures::FutureExt as _;
+use futures::{future, FutureExt as _};
 use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
@@ -389,21 +388,6 @@ pub(crate) struct GossipServiceTestFixture {
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MockRethServiceActor {}
-
-impl Actor for MockRethServiceActor {
-    type Context = Context<Self>;
-}
-
-impl Handler<RethPeerInfo> for MockRethServiceActor {
-    type Result = eyre::Result<()>;
-
-    fn handle(&mut self, _msg: RethPeerInfo, _ctx: &mut Self::Context) -> Self::Result {
-        Ok(())
-    }
-}
-
 impl GossipServiceTestFixture {
     /// # Panics
     /// Can panic
@@ -422,24 +406,18 @@ impl GossipServiceTestFixture {
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let mock_reth_service = MockRethServiceActor {};
-        let reth_service_addr = mock_reth_service.start();
-
         let (service_senders, service_receivers) = ServiceSenders::new();
+        let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
+        let gossip_broadcast_rx = service_receivers.gossip_broadcast;
+        let block_tree_rx = service_receivers.block_tree;
 
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
         let tokio_runtime = tokio::runtime::Handle::current();
-        let reth_peer_sender = {
-            let reth_service_addr = reth_service_addr.clone();
-            Arc::new(move |reth_peer_info: RethPeerInfo| {
-                let addr = reth_service_addr.clone();
-                async move {
-                    let _ = addr.send(reth_peer_info).await;
-                }
-                .boxed()
-            })
-        };
+        let reth_peer_sender = Arc::new(|peer_info: RethPeerInfo| {
+            let _ = peer_info;
+            future::ready(()).boxed()
+        });
 
         let (peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
             db.clone(),
@@ -478,7 +456,7 @@ impl GossipServiceTestFixture {
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
         let vdf_state = vdf_state_stub;
-        let mut vdf_receiver = service_receivers.vdf_fast_forward;
+        let mut vdf_receiver = vdf_fast_forward_rx;
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
@@ -496,7 +474,7 @@ impl GossipServiceTestFixture {
             }
         });
 
-        let mut block_tree_receiver = service_receivers.block_tree;
+        let mut block_tree_receiver = block_tree_rx;
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
@@ -516,7 +494,6 @@ impl GossipServiceTestFixture {
             mempool_stub,
             peer_network_handle,
             peer_list,
-            // block_discovery_stub,
             mempool_txs,
             mempool_chunks,
             discovery_blocks,
@@ -527,7 +504,7 @@ impl GossipServiceTestFixture {
             execution_payload_provider,
             config,
             service_senders,
-            gossip_receiver: Some(service_receivers.gossip_broadcast),
+            gossip_receiver: Some(gossip_broadcast_rx),
             sync_tx,
             _sync_rx: Some(sync_rx),
         }

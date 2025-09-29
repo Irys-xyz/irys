@@ -8,6 +8,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
+    reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
 };
@@ -67,6 +68,7 @@ pub struct ServiceReceivers {
     pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
+    pub reth_service: UnboundedReceiver<RethServiceMessage>,
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
@@ -87,6 +89,7 @@ pub struct ServiceSendersInner {
     pub block_index: UnboundedSender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
+    pub reth_service: UnboundedSender<RethServiceMessage>,
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
@@ -115,6 +118,8 @@ impl ServiceSendersInner {
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
             unbounded_channel::<BlockProducerCommand>();
+        let (reth_service_sender, reth_service_receiver) =
+            unbounded_channel::<RethServiceMessage>();
         // Create broadcast channel for reorg events
         let (reorg_sender, reorg_receiver) = broadcast::channel::<ReorgEvent>(100);
         let (block_migrated_sender, block_migrated_receiver) =
@@ -137,6 +142,7 @@ impl ServiceSendersInner {
             block_index: block_index_sender,
             validation_service: validation_sender,
             block_producer: block_producer_sender,
+            reth_service: reth_service_sender,
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
             block_state_events: block_state_sender,
@@ -155,6 +161,7 @@ impl ServiceSendersInner {
             block_index: block_index_receiver,
             validation_service: validation_receiver,
             block_producer: block_producer_receiver,
+            reth_service: reth_service_receiver,
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
             block_state_events: block_state_receiver,
