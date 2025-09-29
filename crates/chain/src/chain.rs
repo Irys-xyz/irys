@@ -1,8 +1,9 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use actix::{Actor as _, Addr, Arbiter, System, SystemRegistry};
+use actix::{Actor as _, Arbiter, System, SystemRegistry};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
+use eyre::{ensure, Context as _};
 use futures::FutureExt as _;
 use irys_actors::block_discovery::{
     BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
@@ -18,10 +19,10 @@ use irys_actors::{
     broadcast_mining_service::BroadcastMiningService,
     cache_service::ChunkCacheService,
     chunk_migration_service::ChunkMigrationService,
-    mempool_service::{MempoolService, MempoolServiceFacadeImpl},
+    mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining::{MiningControl, PartitionMiningActor},
     packing::{PackingActor, PackingRequest},
-    reth_service::{GetPeeringInfoMessage, RethServiceActor},
+    reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
 };
@@ -33,6 +34,7 @@ use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::chain_sync_state::ChainSyncState;
+use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
     EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
@@ -81,6 +83,7 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc::{self};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
+use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
 
 #[derive(Debug, Clone)]
@@ -308,6 +311,8 @@ impl IrysNode {
         }
 
         let config = Config::new(node_config);
+        config.validate()?;
+
         Ok(Self {
             config,
             http_listener,
@@ -640,6 +645,7 @@ impl IrysNode {
             tokio_runtime.handle().clone(),
         )?;
 
+        let handle = tokio_runtime.handle().clone();
         // start reth
         let reth_thread = Self::init_reth_thread(
             self.config.clone(),
@@ -681,33 +687,52 @@ impl IrysNode {
 
         // Call stake_and_pledge after mempool service is initialized
         if ctx.config.node_config.stake_pledge_drives {
-            const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-            let mut validation_tracker = BlockValidationTracker::new(
-                ctx.block_tree_guard.clone(),
-                ctx.service_senders.clone(),
-                MAX_WAIT_TIME,
-            );
-            // wait for any pending blocks to finish validating
-            let latest_hash = validation_tracker.wait_for_validation().await?;
-
-            {
-                let btrg = ctx.block_tree_guard.read();
-                debug!(
-                    "Checking stakes & pledges at height {}, latest hash: {}",
-                    btrg.get_canonical_chain().0.last().unwrap().height,
-                    &latest_hash
+            let block_tree_guard = ctx.block_tree_guard.clone();
+            let service_senders = ctx.service_senders.clone();
+            let config = ctx.config.clone();
+            let storage_modules = ctx.storage_modules_guard.clone();
+            let mempool_pledge_provider = ctx.mempool_pledge_provider.clone();
+            let latest_block = Arc::clone(&latest_block);
+            // this is a task as we don't want to block startup, & it lets us gosip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
+            handle.spawn(async {
+                // sleep for a bit so that peers have a chance to gossip us blocks
+                sleep(Duration::from_secs(2)).await;
+                let config = config;
+                let latest_block = latest_block;
+                const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
+                let mut validation_tracker = BlockValidationTracker::new(
+                    block_tree_guard.clone(),
+                    service_senders,
+                    MAX_WAIT_TIME,
                 );
-            };
-            // TODO: add code to proactively grab the latest head block from peers
-            // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
-            stake_and_pledge(
-                &ctx.config,
-                ctx.block_tree_guard.clone(),
-                ctx.storage_modules_guard.clone(),
-                latest_block.block_hash,
-                ctx.mempool_pledge_provider.clone(),
-            )
-            .await?;
+                // wait for any pending blocks to finish validating
+                let latest_hash = validation_tracker
+                    .wait_for_validation()
+                    .await
+                    .context("Unable to wait for validation to finish")
+                    .unwrap();
+
+                {
+                    let btrg = block_tree_guard.read();
+                    debug!(
+                        "Checking stakes & pledges at height {}, latest hash: {}",
+                        btrg.get_canonical_chain().0.last().unwrap().height,
+                        &latest_hash
+                    );
+                };
+                // TODO: add code to proactively grab the latest head block from peers
+                // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
+                stake_and_pledge(
+                    &config,
+                    block_tree_guard,
+                    storage_modules,
+                    latest_block.block_hash,
+                    mempool_pledge_provider,
+                )
+                .await
+                .context("Unable to automatically stake & pledge")
+                .unwrap()
+            });
         }
 
         Ok(ctx)
@@ -926,11 +951,25 @@ impl IrysNode {
         );
 
         // start reth service
-        let (reth_service_actor, reth_arbiter) =
-            init_reth_service(&irys_db, reth_node_adapter.clone(), service_senders.clone());
-        debug!("Reth Service Actor initialized");
+        let reth_service_task = init_reth_service(
+            &irys_db,
+            reth_node_adapter.clone(),
+            service_senders.mempool.clone(),
+            receivers.reth_service,
+            runtime_handle.clone(),
+        );
+        debug!("Reth service initialized");
         // Get the correct Reth peer info
-        let reth_peering = reth_service_actor.send(GetPeeringInfoMessage {}).await??;
+        let (peering_tx, peering_rx) = oneshot::channel();
+        service_senders
+            .reth_service
+            .send(RethServiceMessage::GetPeeringInfo {
+                response: peering_tx,
+            })
+            .expect("Reth service channel should be open");
+        let reth_peering = peering_rx
+            .await
+            .expect("Reth service to respond with peering info")?;
 
         // overwrite config as we now have reth peering information
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
@@ -980,7 +1019,6 @@ impl IrysNode {
             &storage_submodules_config,
             &config,
             &service_senders,
-            reth_service_actor.clone(),
             runtime_handle.clone(),
         );
 
@@ -1013,7 +1051,7 @@ impl IrysNode {
         let (peer_network_handle, peer_list_guard) = init_peer_list_service(
             &irys_db,
             &config,
-            reth_service_actor.clone(),
+            service_senders.reth_service.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
             runtime_handle.clone(),
@@ -1149,7 +1187,6 @@ impl IrysNode {
             broadcast_mining_actor.clone(),
             price_oracle,
             reth_node_adapter.clone(),
-            reth_service_actor.clone(),
             receivers.block_producer,
             reth_node.provider.clone(),
             shadow_tx_store.clone(),
@@ -1209,8 +1246,42 @@ impl IrysNode {
             Arc::clone(&block_pool),
             gossip_data_handler,
             (chain_sync_tx, chain_sync_rx),
-            reth_service_actor.clone(),
+            service_senders.reth_service.clone(),
             Arc::clone(&is_vdf_mining_enabled),
+        );
+
+        // set up initial FCU states on reth
+        let fcu_markers = {
+            let block_index = block_index_guard.read();
+            ForkChoiceMarkers::from_index(
+                &block_index,
+                &irys_db,
+                config.consensus.block_migration_depth as usize,
+                config.consensus.block_tree_depth as usize,
+            )?
+        };
+
+        let (fcu_tx, fcu_rx) = oneshot::channel();
+        service_senders
+            .reth_service
+            .send(RethServiceMessage::ForkChoice {
+                update: ForkChoiceUpdateMessage {
+                    head_hash: fcu_markers.head.block_hash,
+                    confirmed_hash: fcu_markers.migration_block.block_hash,
+                    finalized_hash: fcu_markers.prune_block.block_hash,
+                },
+                response: fcu_tx,
+            })
+            .map_err(|err| eyre::eyre!("failed to enqueue initial FCU for reth service: {err}"))?;
+        fcu_rx
+            .await
+            .map_err(|err| eyre::eyre!("reth service dropped initial FCU acknowledgment: {err}"))?;
+
+        debug!(
+            head = %fcu_markers.head.block_hash,
+            confirmed = %fcu_markers.migration_block.block_hash,
+            finalized = %fcu_markers.prune_block.block_hash,
+            "Initial fork choice update applied to Reth"
         );
 
         // set up IrysNodeCtx
@@ -1218,7 +1289,6 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 packing: packing_actor_addr,
-                reth: reth_service_actor,
             },
             reward_curve,
             reth_handle: reth_node.clone(),
@@ -1327,9 +1397,7 @@ impl IrysNode {
 
             // 8. Core infrastructure (shutdown last)
             services.push(ArbiterEnum::TokioService(peer_network_handle));
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(reth_arbiter, "reth_arbiter".to_string()),
-            });
+            services.push(ArbiterEnum::TokioService(reth_service_task));
         }
 
         let server = run_server(
@@ -1527,7 +1595,6 @@ impl IrysNode {
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-        reth_service_actor: actix::Addr<RethServiceActor>,
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
@@ -1547,7 +1614,6 @@ impl IrysNode {
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
             shadow_tx_store,
-            reth_service: reth_service_actor,
             beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
         });
@@ -1634,7 +1700,7 @@ impl IrysNode {
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
-        reth_service_addr: Addr<RethServiceActor>,
+        reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
@@ -1646,7 +1712,7 @@ impl IrysNode {
             block_index_guard,
             block_pool,
             gossip_data_handler,
-            Some(reth_service_addr),
+            Some(reth_service),
             is_vdf_mining_enabled,
         );
 
@@ -1681,28 +1747,35 @@ fn read_latest_block_data(
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
-    reth_service_addr: Addr<RethServiceActor>,
+    reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList) {
     let reth_peer_sender = {
-        let reth_service_addr = reth_service_addr;
+        let reth_service = reth_service;
         Arc::new(move |reth_peer_info: RethPeerInfo| {
-            let addr = reth_service_addr.clone();
+            let reth_service = reth_service.clone();
             async move {
-                match addr.send(reth_peer_info).await {
+                let (response_tx, response_rx) = oneshot::channel();
+
+                if let Err(send_error) = reth_service.send(RethServiceMessage::ConnectToPeer {
+                    peer: reth_peer_info,
+                    response: response_tx,
+                }) {
+                    error!(%send_error, "Failed to enqueue connect-to-peer request for reth service");
+                    return;
+                }
+
+                match response_rx.await {
                     Ok(Ok(())) => {
                         debug!("Successfully connected to reth peer");
                     }
                     Ok(Err(err)) => {
-                        error!("Failed to connect to reth peer: {}", err);
+                        error!(error = %err, "Reth service failed to connect to peer");
                     }
-                    Err(mailbox_error) => {
-                        error!(
-                            "Failed to connect to reth peer due to mailbox error: {}",
-                            mailbox_error
-                        );
+                    Err(recv_error) => {
+                        error!(%recv_error, "Reth service connect-to-peer response channel closed");
                     }
                 }
             }
@@ -1736,18 +1809,17 @@ fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>,
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    service_senders: ServiceSenders,
-) -> (actix::Addr<RethServiceActor>, Arbiter) {
-    let reth_service = RethServiceActor::new(
+    mempool_sender: tokio::sync::mpsc::UnboundedSender<MempoolServiceMessage>,
+    reth_rx: tokio::sync::mpsc::UnboundedReceiver<RethServiceMessage>,
+    runtime_handle: tokio::runtime::Handle,
+) -> TokioServiceHandle {
+    irys_actors::reth_service::RethService::spawn_service(
         reth_node_adapter,
         irys_db.clone(),
-        service_senders.mempool.clone(),
-    );
-    let reth_arbiter = Arbiter::new();
-    let reth_service_actor =
-        RethServiceActor::start_in_arbiter(&reth_arbiter.handle(), |_| reth_service);
-    SystemRegistry::set(reth_service_actor.clone());
-    (reth_service_actor, reth_arbiter)
+        mempool_sender,
+        reth_rx,
+        runtime_handle,
+    )
 }
 
 async fn init_reth_db(
@@ -1783,6 +1855,19 @@ async fn stake_and_pledge(
     latest_block_hash: BlockHash,
     mempool_pledge_provider: Arc<MempoolPledgeProvider>,
 ) -> eyre::Result<()> {
+    // get all SMs with and without a partition assignment
+    let (assigned_modules, unassigned_modules): (Vec<Arc<StorageModule>>, Vec<Arc<StorageModule>>) = {
+        let sms = storage_modules_guard.read();
+        sms.iter()
+            .cloned()
+            .partition(|sm| sm.partition_assignment().is_some())
+    };
+
+    if unassigned_modules.is_empty() {
+        debug!("No unassigned modules locally, skipping...");
+        return Ok(());
+    }
+
     debug!("Checking Stake & Pledge status");
     // NOTE: this assumes we're caught up with the chain
     // primarily for the anchor used for the produced txs
@@ -1793,20 +1878,20 @@ async fn stake_and_pledge(
     let api_uri = config.node_config.local_api_url();
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment_tx", api_uri);
 
-        client.post(url).send_json(commitment_tx).await
+        client.post(url).json(commitment_tx).send().await
     };
 
     // now check the canonical state
 
-    let (is_historically_staked, commitment_snapshot) = {
+    let (is_historically_staked, epoch_snapshot, commitment_snapshot) = {
         let block_tree_guard = block_tree_guard.read();
         let epoch_snapshot = block_tree_guard.canonical_epoch_snapshot();
         let is_historically_staked = epoch_snapshot.is_staked(address);
         let commitment_snapshot = (*block_tree_guard.canonical_commitment_snapshot()).clone();
-        (is_historically_staked, commitment_snapshot)
+        (is_historically_staked, epoch_snapshot, commitment_snapshot)
     };
 
     // check the commitment snapshot (pending commitment txs for the next epoch rollup)
@@ -1837,23 +1922,20 @@ async fn stake_and_pledge(
         latest_block_hash
     };
 
-    // get all SMs without a partition assignment
-
-    let unassigned_modules = {
-        let sms = storage_modules_guard.read();
-        sms.iter()
-            .filter(|&sm| sm.partition_assignment().is_none())
-            .count()
-    };
-
-    // get the number of pending commitment txs for partitions, if the count is >= the unassigned len, do nothing
-    let pending_pledges = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
-    let to_pledge_count = unassigned_modules.saturating_sub(pending_pledges);
+    // get the number of pending & historic commitment txs for partitions, if the count is >= the unassigned len, do nothing
+    let pending_pledge_count = pending_commitments.map(|pc| pc.pledges.len()).unwrap_or(0);
+    let historic_pledge_count = epoch_snapshot.get_partition_assignments(address).len();
+    let to_pledge_count = unassigned_modules
+        .len()
+        .saturating_sub(pending_pledge_count);
 
     debug!(
-        "Found {} SMs without partition assignments ({} pending pledges)",
-        &to_pledge_count, &pending_pledges
+        "Found {} SMs without partition assignments ({} pending pledges, {} historic, {} assigned SMs) - sending {} pledges",
+        &unassigned_modules.len(), &pending_pledge_count, &historic_pledge_count, &assigned_modules.len(), &to_pledge_count
     );
+
+    ensure!(historic_pledge_count == assigned_modules.len(), "Historic pledge count ({}) and assigned module count ({}) are different! this indicates an issue with storage module partition assignment logic!\nDEBUG\n historic_pledges {:?}, assigned_modules: {:?}, unassigned modules: {:?}",
+&historic_pledge_count, assigned_modules.len(), epoch_snapshot.get_partition_assignments(address), assigned_modules, unassigned_modules  );
 
     for idx in 0..to_pledge_count {
         // post a pledge tx

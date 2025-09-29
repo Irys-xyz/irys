@@ -129,6 +129,7 @@ impl StorageModuleServiceInner {
         let _span = span.enter();
 
         // Read the current storage modules once, outside the loop
+        // this is the current state of the storage modules prior of the partition assignments update
         let modules_snapshot: Vec<Arc<StorageModule>> =
             { self.storage_modules.read().unwrap().clone() };
         let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();

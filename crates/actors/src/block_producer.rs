@@ -2,7 +2,6 @@ use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
     mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -138,8 +137,6 @@ pub struct BlockProducerInner {
     pub reth_provider: NodeProvider,
     /// Shadow tx store
     pub shadow_tx_store: ShadowTxStore,
-    /// Reth service actor
-    pub reth_service: Addr<RethServiceActor>,
     /// Reth beacon engine handle
     pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
@@ -954,15 +951,6 @@ pub trait BlockProdStrategy {
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
-        let _res = self
-            .inner()
-            .reth_service
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(irys_block.evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .await??;
 
         let block = Arc::new(irys_block);
         Ok(Some((block, stats)))

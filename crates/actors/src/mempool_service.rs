@@ -809,14 +809,27 @@ impl Inner {
                     let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
 
                     // Check for minimum number of ingress proofs
-                    if (all_proofs.len() as u64)
-                        < self.config.consensus.number_of_ingress_proofs_total
-                    {
+                    let total_miners = self
+                        .block_tree_read_guard
+                        .read()
+                        .canonical_epoch_snapshot()
+                        .commitment_state
+                        .stake_commitments
+                        .len();
+
+                    // Take the smallest value, the configured total proofs count or the number
+                    // of staked miners that can produce a valid proof.
+                    let proofs_per_tx = std::cmp::min(
+                        self.config.consensus.number_of_ingress_proofs_total as usize,
+                        total_miners,
+                    );
+
+                    if all_proofs.len() < proofs_per_tx {
                         info!(
                             "Not promoting tx {} - insufficient proofs (got {} wanted {})",
                             &tx_header.id,
                             &all_proofs.len(),
-                            self.config.consensus.number_of_ingress_proofs_total
+                            proofs_per_tx
                         );
                         continue;
                     }
@@ -1051,6 +1064,8 @@ impl Inner {
 
             // insert block into mempool without poa
             let mut block_without_chunk = (*block).clone();
+            // todo: would there be any harm in leaving the PoA chunk in,
+            // and storing Arc<IrysBlockHeader> in the `prevalidated_blocks`?
             block_without_chunk.poa.chunk = None;
             mempool_state_guard
                 .prevalidated_blocks
@@ -1159,7 +1174,11 @@ impl Inner {
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
-            info!("Tx {} signature is valid", &tx.id());
+            info!(
+                "Tx {} signature is valid for signer {}",
+                &tx.id(),
+                &tx.signer()
+            );
             Ok(())
         } else {
             let mempool_state = &self.mempool_state;
