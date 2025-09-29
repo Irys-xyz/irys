@@ -194,7 +194,7 @@ impl PeerList {
     }
 
     /// Subscribe to peer lifecycle/activity events.
-    pub fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent> {
+    pub fn subscribe_to_peer_events(&self) -> broadcast::Receiver<PeerEvent> {
         let guard = self.read();
         guard.peer_events.subscribe()
     }
@@ -224,7 +224,7 @@ impl PeerList {
         }
 
         // Slow path: subscribe and wait for the next BecameActive event
-        let mut rx = self.subscribe_peer_events();
+        let mut rx = self.subscribe_to_peer_events();
         loop {
             match rx.recv().await {
                 Ok(PeerEvent::BecameActive { .. }) => return,
@@ -232,7 +232,7 @@ impl PeerList {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     warn!("peer events channel closed while waiting for active peers");
                     tokio::time::sleep(Duration::from_millis(200)).await;
-                    rx = self.subscribe_peer_events();
+                    rx = self.subscribe_to_peer_events();
                 }
             }
         }
