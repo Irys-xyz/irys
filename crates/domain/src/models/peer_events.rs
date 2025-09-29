@@ -12,4 +12,19 @@ pub enum PeerEvent {
         mining_addr: Address,
         peer: PeerListItem,
     },
+    /// Emitted when a peer transitions from active/online to inactive or offline
+    BecameInactive {
+        mining_addr: Address,
+        peer: PeerListItem,
+    },
+    /// Emitted when a peer's important metadata changes (e.g., address/handshake refresh)
+    PeerUpdated {
+        mining_addr: Address,
+        peer: PeerListItem,
+    },
+    /// Emitted when a peer (usually unstaked) is removed from all caches
+    PeerRemoved {
+        mining_addr: Address,
+        peer: PeerListItem,
+    },
 }
