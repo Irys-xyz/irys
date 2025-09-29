@@ -16,7 +16,7 @@ mod v0_to_v1 {
     use super::*;
     use crate::tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
-        IrysTxHeaders,
+        IrysDataTxHeaders,
     };
     use reth_db::cursor::DbCursorRO as _;
     use reth_db::table::Table;
@@ -28,7 +28,7 @@ mod v0_to_v1 {
     {
         debug!("Migrating from v0 to v1");
         move_all_records::<IrysBlockHeaders, TXOld, TXNew>(tx_old, tx_new)?;
-        move_all_records::<IrysTxHeaders, TXOld, TXNew>(tx_old, tx_new)?;
+        move_all_records::<IrysDataTxHeaders, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedDataRoots, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedChunksIndex, TXOld, TXNew>(tx_old, tx_new)?;
         move_all_records::<CachedChunks, TXOld, TXNew>(tx_old, tx_new)?;
@@ -96,7 +96,7 @@ mod tests {
     use crate::tables::IrysTables;
     use crate::tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
-        IrysTxHeaders,
+        IrysDataTxHeaders,
     };
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
@@ -140,9 +140,9 @@ mod tests {
             };
             write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
 
-            // IrysTxHeaders (non-dupsort)
+            // IrysDataTxHeaders (non-dupsort)
             let tx_header = DataTransactionHeader::default();
-            write_tx.put::<IrysTxHeaders>(tx_id, tx_header.into())?;
+            write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.into())?;
 
             // CachedDataRoots (non-dupsort)
             let cdr = CachedDataRoot {
@@ -182,7 +182,7 @@ mod tests {
             |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
                 Ok((
                     tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysTxHeaders>()?,
+                    tx.entries::<IrysDataTxHeaders>()?,
                     tx.entries::<CachedDataRoots>()?,
                     tx.entries::<CachedChunksIndex>()?,
                     tx.entries::<CachedChunks>()?,
@@ -196,7 +196,7 @@ mod tests {
             |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
                 Ok((
                     tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysTxHeaders>()?,
+                    tx.entries::<IrysDataTxHeaders>()?,
                     tx.entries::<CachedDataRoots>()?,
                     tx.entries::<CachedChunksIndex>()?,
                     tx.entries::<CachedChunks>()?,
@@ -214,7 +214,7 @@ mod tests {
             |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
                 Ok((
                     tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysTxHeaders>()?,
+                    tx.entries::<IrysDataTxHeaders>()?,
                     tx.entries::<CachedDataRoots>()?,
                     tx.entries::<CachedChunksIndex>()?,
                     tx.entries::<CachedChunks>()?,
@@ -229,7 +229,7 @@ mod tests {
             |tx| -> eyre::Result<(usize, usize, usize, usize, usize, usize)> {
                 Ok((
                     tx.entries::<IrysBlockHeaders>()?,
-                    tx.entries::<IrysTxHeaders>()?,
+                    tx.entries::<IrysDataTxHeaders>()?,
                     tx.entries::<CachedDataRoots>()?,
                     tx.entries::<CachedChunksIndex>()?,
                     tx.entries::<CachedChunks>()?,

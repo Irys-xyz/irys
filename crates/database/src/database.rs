@@ -5,7 +5,7 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
-    IrysBlockHeaders, IrysCommitments, IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
+    IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -95,9 +95,9 @@ pub fn block_header_by_hash<T: DbTx>(
     Ok(block)
 }
 
-/// Inserts a [`DataTransactionHeader`] into [`IrysTxHeaders`]
+/// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
-    Ok(tx.put::<IrysTxHeaders>(tx_header.id, tx_header.clone().into())?)
+    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
 /// Gets a [`DataTransactionHeader`] by it's [`IrysTransactionId`]
@@ -106,7 +106,7 @@ pub fn tx_header_by_txid<T: DbTx>(
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
     Ok(tx
-        .get::<IrysTxHeaders>(*txid)?
+        .get::<IrysDataTxHeaders>(*txid)?
         .map(DataTransactionHeader::from))
 }
 

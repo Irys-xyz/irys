@@ -116,7 +116,7 @@ table IrysPoAChunks {
 }
 
 /// Stores confirmed transaction headers
-table IrysTxHeaders {
+table IrysDataTxHeaders {
     type Key = H256;
     type Value = CompactTxHeader;
 }

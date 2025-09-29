@@ -6,7 +6,7 @@ use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
 use irys_actors::services::ServiceSenders;
-use irys_actors::MempoolFacade;
+use irys_actors::{MempoolFacade, TxIngressError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
@@ -16,7 +16,7 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
     BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
-    PeerNetworkError,
+    IrysTransactionResponse, PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -55,6 +55,8 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
     #[error("Block {0:?} is a part of a pruned fork")]
     ForkedBlock(BlockHash),
+    #[error("Transaction validation for the block {0:?} failed: {1:?}")]
+    TransactionValidationFailed(BlockHash, TxIngressError),
 }
 
 impl From<PeerNetworkError> for BlockPoolError {
@@ -113,6 +115,8 @@ struct BlockCacheInner {
     pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, HashSet<BlockHash>>,
     pub(crate) blocks: LruCache<BlockHash, CachedBlock>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
+    /// Per-block fetched transactions cache. Groups transactions by the block they belong to.
+    pub(crate) txs_by_block: LruCache<BlockHash, Vec<IrysTransactionResponse>>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +188,14 @@ impl BlockCacheGuard {
             .await
             .change_block_processing_status(block_hash, is_processing);
     }
+
+    async fn add_tx_for_block(&self, block_hash: BlockHash, tx: IrysTransactionResponse) {
+        self.inner.write().await.add_tx_for_block(block_hash, tx);
+    }
+
+    async fn take_txs_for_block(&self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
+        self.inner.write().await.take_txs_for_block(block_hash)
+    }
 }
 
 impl BlockCacheInner {
@@ -194,6 +206,7 @@ impl BlockCacheInner {
             ),
             blocks: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
             requested_blocks: HashSet::new(),
+            txs_by_block: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
         }
     }
 
@@ -244,11 +257,25 @@ impl BlockCacheInner {
             if set_is_empty {
                 self.orphaned_blocks_by_parent.pop(&parent_hash);
             }
+            // Remove any transactions cached for this block
+            let _ = self.txs_by_block.pop(block_hash);
         }
     }
 
     fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.blocks.get(block_hash).cloned()
+    }
+
+    fn add_tx_for_block(&mut self, block_hash: BlockHash, tx: IrysTransactionResponse) {
+        if let Some(vec) = self.txs_by_block.get_mut(&block_hash) {
+            vec.push(tx);
+        } else {
+            self.txs_by_block.put(block_hash, vec![tx]);
+        }
+    }
+
+    fn take_txs_for_block(&mut self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
+        self.txs_by_block.pop(block_hash).unwrap_or_default()
     }
 }
 
@@ -611,6 +638,73 @@ where
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
+        // Send cached transactions (if any) to the mempool before handling the block
+        let cached_txs = self
+            .blocks_cache
+            .take_txs_for_block(&block_header.block_hash)
+            .await;
+        if !cached_txs.is_empty() {
+            debug!(
+                "Block pool: Sending {} cached txs for block {:?} to mempool",
+                cached_txs.len(),
+                current_block_hash
+            );
+        } else {
+            debug!(
+                "Block pool: No cached txs for block {:?} to send to mempool",
+                current_block_hash
+            );
+        }
+
+        for tx in cached_txs {
+            match tx {
+                IrysTransactionResponse::Commitment(commitment_tx) => {
+                    let id = commitment_tx.id;
+                    if let Err(err) = self
+                        .mempool
+                        .handle_commitment_transaction_ingress(commitment_tx)
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to send commitment tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
+                                &id, &current_block_hash, err
+                            );
+                            self.blocks_cache
+                                .remove_block(&block_header.block_hash)
+                                .await;
+                            return Err(BlockPoolError::TransactionValidationFailed(
+                                current_block_hash,
+                                err,
+                            ));
+                        }
+                    }
+                }
+                IrysTransactionResponse::Storage(storage_tx) => {
+                    let id = storage_tx.id;
+                    if let Err(err) = self
+                        .mempool
+                        .handle_data_transaction_ingress(storage_tx)
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to send storage tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
+                                &id, current_block_hash, err
+                            );
+                            self.blocks_cache
+                                .remove_block(&block_header.block_hash)
+                                .await;
+                            return Err(BlockPoolError::TransactionValidationFailed(
+                                current_block_hash,
+                                err,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         if let Err(block_discovery_error) = self
             .block_discovery
             .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
@@ -876,6 +970,17 @@ where
     /// Remove block from cache - for orphan block processing
     pub(crate) async fn remove_block_from_cache(&self, block_hash: &BlockHash) {
         self.blocks_cache.remove_block(block_hash).await;
+        // Remove associated transactions as well
+        self.blocks_cache.take_txs_for_block(block_hash).await;
+    }
+
+    /// Add a transaction fetched for a specific block into the per-block cache
+    pub(crate) async fn add_tx_for_block(
+        &self,
+        block_hash: BlockHash,
+        tx: IrysTransactionResponse,
+    ) {
+        self.blocks_cache.add_tx_for_block(block_hash, tx).await;
     }
 }
 
