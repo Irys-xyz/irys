@@ -4933,6 +4933,7 @@ dependencies = [
  "k256",
  "modular-bitfield",
  "rand 0.8.5",
+ "reqwest 0.12.15",
  "reth",
  "reth-cli-util",
  "reth-db",
@@ -5082,7 +5083,6 @@ dependencies = [
 name = "irys-p2p"
 version = "0.1.0"
 dependencies = [
- "actix",
  "actix-rt",
  "actix-web",
  "async-trait",

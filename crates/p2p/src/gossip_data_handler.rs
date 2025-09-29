@@ -553,38 +553,24 @@ where
                 return Err(GossipError::Network(err_msg));
             };
 
-            // Process the fetched transaction immediately
-            let (tx_id, mempool_response) = match tx_response {
-                IrysTransactionResponse::Commitment(commitment_tx) => {
-                    let id = commitment_tx.id;
-                    (
-                        id,
-                        self.mempool
-                            .handle_commitment_transaction_ingress(commitment_tx)
-                            .await,
-                    )
-                }
-                IrysTransactionResponse::Storage(tx) => {
-                    let id = tx.id;
-                    (id, self.mempool.handle_data_transaction_ingress(tx).await)
-                }
+            // Store the fetched transaction in the BlockPool's per-block cache
+            let tx_id = match &tx_response {
+                IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
+                IrysTransactionResponse::Storage(tx) => tx.id,
             };
 
-            match mempool_response.map_err(GossipError::from) {
-                Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
-                    debug!("Transaction {:?} sent to mempool", tx_id);
-                    // Record that we have seen this transaction from the peer that served it
-                    self.cache
-                        .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
-                }
-                Err(error) => {
-                    error!(
-                        "Error when sending transaction {:?} to mempool: {:?}",
-                        tx_id, error
-                    );
-                    return Err(error);
-                }
-            }
+            self.block_pool
+                .add_tx_for_block(block_hash, tx_response)
+                .await;
+
+            // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
+            debug!(
+                "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
+                tx_id, block_hash
+            );
+            // Record that we have seen this transaction from the peer that served it
+            self.cache
+                .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
         }
 
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();

@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, DataTransaction, IrysTransactionCommon as _, NodeConfig, H256, U256};
+use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -334,6 +335,225 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Simulates a shallow fork produced by a single peer while gossip is disabled.
+/// The peer begins mining first, the genesis node continues extending the canonical chain,
+/// and the fork overtakes the main chain once gossip resumes.
+/// Assertions cover:
+/// - Block index alignment with reth FCU state.
+/// - Reth FCU propagation (`Latest`, `Safe`, `Finalized`) matching the canonical/migrated blocks.
+/// - Reth latest tags on both nodes reflect their respective fork tips before the reorg.
+#[test_log::test(actix_web::test)]
+async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
+    let num_blocks_in_epoch = 3;
+    let block_tree_depth: u64 = 6;
+    let block_migration_depth: u32 = 4;
+
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_tree_depth = block_tree_depth;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
+    let peer_node = genesis_node
+        .testing_peer_with_assignments_and_name(peer_config, "PEER")
+        .await?;
+
+    let base_height = genesis_node.get_canonical_chain_height().await;
+
+    // Stage 1: peer mines a private fork with gossip disabled
+    peer_node.gossip_disable();
+
+    peer_node.mine_blocks_without_gossip(1).await?;
+    let fork_height = base_height + 1;
+    let fork_block_level1 = peer_node.get_block_by_height(fork_height).await?;
+
+    // Stage 2: genesis extends the canonical chain while unaware of the fork
+    genesis_node.gossip_disable();
+    let canonical_block_level1 = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_until_height(canonical_block_level1.height, seconds_to_wait)
+        .await?;
+
+    let canonical_block_level2 = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_until_height(canonical_block_level2.height, seconds_to_wait)
+        .await?;
+
+    let _ = genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Latest,
+            canonical_block_level2.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
+    // Stage 3: peer privately extends the fork beyond canonical length and ensures its Reth view is updated
+    peer_node.mine_blocks_without_gossip(2).await?;
+    let fork_block_level2 = peer_node.get_block_by_height(fork_height + 1).await?;
+    let fork_block_level3 = peer_node.get_block_by_height(fork_height + 2).await?;
+
+    let _ = peer_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Latest,
+            fork_block_level3.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
+    let fork_arc_level1 = Arc::new(fork_block_level1.clone());
+    let fork_arc_level2 = Arc::new(fork_block_level2.clone());
+    let fork_arc_level3 = Arc::new(fork_block_level3.clone());
+
+    // Stage 4: peer reveals the first fork block (still not longer than canonical)
+    peer_node.gossip_enable();
+    genesis_node.gossip_enable();
+    peer_node.gossip_block_to_peers(&fork_arc_level1)?;
+    genesis_node
+        .wait_for_block(&fork_block_level1.block_hash, seconds_to_wait)
+        .await?;
+
+    let _ = genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Latest,
+            canonical_block_level2.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
+    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
+
+    // Stage 5: peer gossips additional fork blocks to overtake canonical tip
+    peer_node.gossip_block_to_peers(&fork_arc_level2)?;
+    genesis_node
+        .wait_for_block(&fork_block_level2.block_hash, seconds_to_wait)
+        .await?;
+    peer_node.gossip_block_to_peers(&fork_arc_level3)?;
+    genesis_node
+        .wait_for_block(&fork_block_level3.block_hash, seconds_to_wait)
+        .await?;
+
+    let reorg_event = reorg_future.await?;
+
+    let extension_height = fork_height + 2;
+    genesis_node
+        .wait_until_height(extension_height, seconds_to_wait)
+        .await?;
+    peer_node
+        .wait_until_height(extension_height, seconds_to_wait)
+        .await?;
+
+    let chain_tip_height = genesis_node.get_canonical_chain_height().await;
+    assert_eq!(
+        chain_tip_height, extension_height,
+        "expected tip to match fork extension height"
+    );
+
+    let migration_depth_u64 = block_migration_depth as u64;
+    let prune_depth_u64 = block_tree_depth;
+    let migration_height = chain_tip_height.saturating_sub(migration_depth_u64);
+    let prune_height = chain_tip_height.saturating_sub(prune_depth_u64);
+
+    genesis_node
+        .wait_until_block_index_height(migration_height, seconds_to_wait)
+        .await?;
+
+    let head_block = genesis_node.get_block_by_height(chain_tip_height).await?;
+    let migration_block = genesis_node.get_block_by_height(migration_height).await?;
+    let prune_block = genesis_node.get_block_by_height_from_index(prune_height, false)?;
+
+    for node in [&genesis_node, &peer_node] {
+        // Stage 6: validate block index contains migrated block & pruned block
+        {
+            let block_index_guard = node.node_ctx.block_index_guard.read();
+            let migrated_entry = block_index_guard
+                .get_item(migration_height)
+                .expect("migration height missing from block index");
+            assert_eq!(
+                migrated_entry.block_hash, migration_block.block_hash,
+                "migration height should match canonical block"
+            );
+
+            let latest_entry = block_index_guard
+                .get_latest_item()
+                .expect("block index should have at least one entry");
+            assert_eq!(
+                latest_entry.block_hash, migration_block.block_hash,
+                "latest block index entry should align with migration block"
+            );
+
+            let pruned_entry = block_index_guard
+                .get_item(prune_height)
+                .expect("prune height missing from block index");
+            assert_eq!(
+                pruned_entry.block_hash, prune_block.block_hash,
+                "prune height should track canonical block"
+            );
+        }
+
+        // Stage 7: block tree does not contain pruned block
+        {
+            let block_tree_guard = node.node_ctx.block_tree_guard.read();
+            let (canonical_entries, _) = block_tree_guard.get_canonical_chain();
+            let last_entry = canonical_entries.first().unwrap();
+            let last_entry = block_tree_guard.get_block(&last_entry.block_hash).unwrap();
+            assert_eq!(
+                last_entry.height,
+                prune_height + 1,
+                "tip height should be exactly one greater than pruned block height"
+            );
+            assert_eq!(
+                last_entry.previous_block_hash, prune_block.block_hash,
+                "tip should reference the pruned block as its parent"
+            );
+            let pruned_block_in_tree = block_tree_guard.get_block(&prune_block.block_hash);
+            assert!(
+                pruned_block_in_tree.is_none(),
+                "block at prune depth should be removed from block tree"
+            );
+        }
+
+        // reth internal tracking state matches the expected irys heights
+        let _ = node
+            .wait_for_reth_marker(
+                BlockNumberOrTag::Latest,
+                head_block.evm_block_hash,
+                seconds_to_wait as u64,
+            )
+            .await?;
+        let safe_hash = node
+            .wait_for_reth_marker(
+                BlockNumberOrTag::Safe,
+                migration_block.evm_block_hash,
+                seconds_to_wait as u64,
+            )
+            .await?;
+        assert_eq!(
+            safe_hash, migration_block.evm_block_hash,
+            "reth safe tag should reference migration block"
+        );
+        let _ = node
+            .wait_for_reth_marker(
+                BlockNumberOrTag::Finalized,
+                prune_block.evm_block_hash,
+                seconds_to_wait as u64,
+            )
+            .await?;
+    }
+
+    assert_eq!(reorg_event.new_tip, head_block.block_hash);
+
+    tokio::join!(genesis_node.stop(), peer_node.stop());
+    Ok(())
+}
+
 /// Reorg where there are 3 forks and the tip moves across all of them as each is extended longer than the other.
 ///   We need to verify that
 ///    - commitment txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
@@ -447,8 +667,18 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    node_a
+        .wait_until_height(a_block2.height, seconds_to_wait)
+        .await?;
+
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    node_b
+        .wait_until_height(b_block3.height, seconds_to_wait)
+        .await?;
 
     // check how many txs made it into each block, we expect no more than 2
     assert_eq!(
@@ -648,8 +878,6 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///    - tests new balance changes are applied based on the new canonical branch
 #[test_log::test(actix_web::test)]
 async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
-    initialize_tracing();
-
     //
     // Stage 0: SETUP AND STARTUP
     //
@@ -837,7 +1065,14 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    node_a
+        .wait_until_height(a_block2.height, seconds_to_wait)
+        .await?;
+
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
 
     // post chunks so txs go from submit ledger to publish ledger in block 3
     node_b
@@ -849,6 +1084,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // Mine the heightest block on any node so far, on Node B
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    node_b
+        .wait_until_height(b_block3.height, seconds_to_wait)
+        .await?;
 
     // check how many txs made it into each block, we expect no more than 1
     assert_eq!(
