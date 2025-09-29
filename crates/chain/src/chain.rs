@@ -29,7 +29,7 @@ use irys_actors::{
 use irys_actors::{ActorAddresses, BlockValidationTracker, DataSyncService, StorageModuleService};
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
-use irys_config::chain::chainspec::{build_reth_chainspec, build_unsigned_irys_genesis_block};
+use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
@@ -46,6 +46,7 @@ use irys_p2p::{
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+use irys_reth_node_bridge::irys_reth::chainspec::irys_chain_spec;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
@@ -227,7 +228,7 @@ impl Clone for StopGuard {
 
 async fn start_reth_node(
     task_executor: TaskExecutor,
-    chainspec: ChainSpec,
+    chainspec: Arc<ChainSpec>,
     config: Config,
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
@@ -235,7 +236,7 @@ async fn start_reth_node(
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
-        Arc::new(chainspec.clone()),
+        chainspec.clone(),
         task_executor.clone(),
         config.node_config.clone(),
         latest_block,
@@ -573,7 +574,10 @@ impl IrysNode {
         let mut block_index = BlockIndex::new(&config.node_config)
             .await
             .expect("initializing a new block index should be doable");
-        let reth_chainspec = build_reth_chainspec(config)?;
+        let reth_chainspec = irys_chain_spec(
+            config.consensus.reth.chain,
+            config.consensus.reth.genesis.clone(),
+        )?;
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments) = self
@@ -835,7 +839,7 @@ impl IrysNode {
         reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<()>,
         irys_provider: IrysRethProvider,
-        reth_chainspec: ChainSpec,
+        reth_chainspec: Arc<ChainSpec>,
         latest_block_height: u64,
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,

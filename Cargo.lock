@@ -5328,6 +5328,7 @@ dependencies = [
  "futures",
  "hex",
  "irys-primitives",
+ "irys-reth",
  "k256",
  "modular-bitfield",
  "nodit",
