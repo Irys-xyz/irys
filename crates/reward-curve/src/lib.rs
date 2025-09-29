@@ -238,6 +238,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn decay_factor_q_cutoff_behavior() -> Result<()> {
+        // With half_life = 1, q = t/half_life = t
+        // q = 59 -> non-zero; q >= 60 -> zero (since TOKEN_SCALE / 2^q truncates to 0)
+        let non_zero = decay_factor(59, 1)?;
+        assert!(non_zero > U256::zero(), "q=59 should be non-zero");
+
+        let zero_60 = decay_factor(60, 1)?;
+        assert!(zero_60.is_zero(), "q=60 should be zero");
+
+        let zero_100 = decay_factor(100, 1)?;
+        assert!(zero_100.is_zero(), "q=100 should be zero");
+
+        Ok(())
+    }
+
     /// new_ts < prev_ts => error.
     #[test]
     fn reward_between_invalid_interval_errors() {
