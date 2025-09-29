@@ -68,7 +68,8 @@ fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
     // Compute 2^-q
     let decay_q_fp18 = if q == 0 {
         TOKEN_SCALE
-    } else if q >= 256 {
+    // Since TOKEN_SCALE = 1e18 and 2^60 ≈ 1.15e18, TOKEN_SCALE / 2^q == 0 for q >= 60
+    } else if q >= 60 {
         U256::zero() // result underflows to zero
     } else {
         safe_div(TOKEN_SCALE, U256::one() << q)?
