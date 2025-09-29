@@ -62,6 +62,8 @@ pub struct StorageModuleServiceInner {
     submodules_config: StorageSubmodulesConfig,
     service_senders: ServiceSenders,
     config: Config,
+    // Track when a storage module first becomes ready to sync (has entropy)
+    sm_entropy_ready: std::collections::HashMap<usize, bool>,
 }
 
 impl StorageModuleServiceInner {
@@ -80,6 +82,13 @@ impl StorageModuleServiceInner {
                 Err(err) => panic!("{}", err),
             };
 
+        let sm_entropy_ready = {
+            let sms = storage_modules.read().unwrap();
+            sms.iter()
+                .map(|sm| (sm.id, false))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
         Self {
             storage_modules,
             block_index,
@@ -88,6 +97,7 @@ impl StorageModuleServiceInner {
             submodules_config,
             service_senders,
             config,
+            sm_entropy_ready,
         }
     }
 
@@ -104,7 +114,7 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
-    fn tick(&self) {
+    fn tick(&mut self) {
         // Check to see if any of the storage modules are ready to be flushed to disk
         let storage_modules = {
             let guard = self.storage_modules.read().unwrap();
@@ -115,6 +125,27 @@ impl StorageModuleServiceInner {
             if sm.last_pending_write().elapsed() > Duration::from_secs(5) {
                 if let Err(e) = sm.force_sync_pending_chunks() {
                     error!("Couldn't flush pending chunks: {}", e);
+                }
+            }
+
+            // Broadcast to DataSync when a storage module first becomes ready to sync
+            // Conditions: assigned to a data ledger AND now has any entropy intervals
+            if let Some(pa) = sm.partition_assignment() {
+                if pa.ledger_id.is_some() {
+                    let has_entropy = !sm
+                        .get_intervals(irys_domain::ChunkType::Entropy)
+                        .is_empty();
+                    let entry = self.sm_entropy_ready.entry(sm.id).or_insert(false);
+                    if has_entropy && !*entry {
+                        *entry = true;
+                        if let Err(e) = self
+                            .service_senders
+                            .data_sync
+                            .send(DataSyncServiceMessage::SyncPartitions)
+                        {
+                            error!("Failed to notify DataSync about storage module readiness: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -153,6 +184,9 @@ impl StorageModuleServiceInner {
                 // Record this storage module as needing packing, the protocol will always assign a new partition_hash
                 // to capacity for 1 epoch so we can schedule this formerly unassigned storage module for packing
                 packing_modules.push(existing.clone());
+
+                // Reset readiness tracking for this storage module so we emit readiness when entropy appears
+                self.sm_entropy_ready.insert(existing.id, false);
 
                 // Skip any further validations for now
                 continue;
@@ -205,6 +239,9 @@ impl StorageModuleServiceInner {
                     // Update the storage modules partition assignment (and packing params toml)
                     // to match ledger/capacity reassignment
                     existing.assign_partition(info_pa, update_height);
+
+                    // Reset readiness tracking on any reassignment so we can emit readiness once entropy is present again
+                    self.sm_entropy_ready.insert(existing.id, false);
 
                     if ledger_before.is_some() && info_pa.ledger_id.is_none() {
                         // This storage module is expiring from LedgerSlot->Capacity

@@ -13,7 +13,7 @@ use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
@@ -36,9 +36,6 @@ pub struct DataSyncServiceInner {
     pub chunk_fetcher_factory: ChunkFetcherFactory,
     pub service_senders: ServiceSenders,
     pub config: Config,
-    // Lightweight periodic reconciliation to account for storage module readiness/assignment changes
-    last_orchestration_check: Instant,
-    orchestration_check_interval: Duration,
 }
 
 pub enum DataSyncServiceMessage {
@@ -84,8 +81,6 @@ impl DataSyncServiceInner {
             chunk_orchestrators: Default::default(),
             service_senders,
             config,
-            last_orchestration_check: Instant::now(),
-            orchestration_check_interval: Duration::from_secs(2),
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -95,8 +90,7 @@ impl DataSyncServiceInner {
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
-                self.sync_peer_partition_assignments();
-                self.update_orchestrator_peers();
+                self.synchronize_peers_and_orchestrators();
             }
             DataSyncServiceMessage::ChunkCompleted {
                 storage_module_id,
@@ -129,12 +123,6 @@ impl DataSyncServiceInner {
             orchestrator.tick()?;
         }
         self.optimize_peer_concurrency();
-        // Periodically reconcile orchestrators and peer managers to catch
-        // cases where storage modules become ready or assignments change
-        if self.last_orchestration_check.elapsed() >= self.orchestration_check_interval {
-            self.synchronize_peers_and_orchestrators();
-            self.last_orchestration_check = Instant::now();
-        }
         Ok(())
     }
 
