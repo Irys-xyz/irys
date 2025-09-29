@@ -5,7 +5,7 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
-use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     build_user_agent, Address, AnnouncementFinishedMessage, Config, DatabaseProvider,
     GossipDataRequest, HandshakeMessage, PeerAddress, PeerFilterMode, PeerListItem,
@@ -20,8 +20,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -950,6 +950,7 @@ pub fn spawn_peer_network_service(
     reth_peer_sender: RethPeerSender,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
+    peer_events: broadcast::Sender<PeerEvent>,
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList) {
     spawn_peer_network_service_with_client(
@@ -959,6 +960,7 @@ pub fn spawn_peer_network_service(
         reth_peer_sender,
         service_receiver,
         service_sender,
+        peer_events,
         runtime_handle,
     )
 }
@@ -970,13 +972,14 @@ pub(crate) fn spawn_peer_network_service_with_client<A>(
     reth_peer_sender: RethPeerSender,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
+    peer_events: broadcast::Sender<PeerEvent>,
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList)
 where
     A: ApiClient,
 {
-    let peer_list =
-        PeerList::new(config, &db, service_sender.clone()).expect("Failed to load peer list data");
+    let peer_list = PeerList::new(config, &db, service_sender.clone(), peer_events)
+        .expect("Failed to load peer list data");
 
     let inner = Arc::new(PeerNetworkServiceInner::new(
         db,
@@ -1197,7 +1200,13 @@ mod tests {
                     .boxed()
                 })
             };
-            let peer_list = PeerList::new(&config, &db, sender.clone()).expect("peer list");
+            let peer_list = PeerList::new(
+                &config,
+                &db,
+                sender.clone(),
+                tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+            )
+            .expect("peer list");
             let inner = Arc::new(PeerNetworkServiceInner::new(
                 db,
                 config.clone(),
@@ -1228,7 +1237,13 @@ mod tests {
         let config: Config = NodeConfig::testing().into();
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let peer_list = PeerList::new(
+            &config,
+            &db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
         let (mining_addr, peer) = create_test_peer(
             "0x1234567890123456789012345678901234567890",
             8080,
@@ -1251,7 +1266,13 @@ mod tests {
         let config: Config = NodeConfig::testing().into();
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let peer_list = PeerList::new(
+            &config,
+            &db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
         let (mining_addr1, mut peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
             8081,
@@ -1478,6 +1499,7 @@ mod tests {
             reth_sender,
             receiver,
             sender,
+            tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle,
         );
         let (addr, peer) = create_test_peer(
@@ -1516,6 +1538,7 @@ mod tests {
             reth_sender.clone(),
             receiver,
             sender,
+            tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle.clone(),
         );
         let (addr1, peer1) = create_test_peer(
@@ -1548,6 +1571,7 @@ mod tests {
             reth_sender,
             receiver2,
             sender2,
+            tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle,
         );
         assert!(new_peer_list
@@ -1571,7 +1595,13 @@ mod tests {
         let config: Config = NodeConfig::testing().into();
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let peer_list = PeerList::new(
+            &config,
+            &db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
         let wait_list = peer_list.clone();
         let wait_handle = tokio::spawn(async move {
             wait_list.wait_for_active_peers().await;
@@ -1596,7 +1626,13 @@ mod tests {
         let config: Config = NodeConfig::testing().into();
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let peer_list = PeerList::new(
+            &config,
+            &db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
         let wait_list = peer_list.clone();
         let result = timeout(Duration::from_millis(200), async move {
             wait_list.wait_for_active_peers().await;
@@ -1651,7 +1687,13 @@ mod tests {
         let config: Config = NodeConfig::testing().into();
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list = PeerList::new(&config, &db, sender).expect("peer list");
+        let peer_list = PeerList::new(
+            &config,
+            &db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
         let (mining_addr, peer) = create_test_peer(
             "0x9999999999999999999999999999999999999999",
             9500,
