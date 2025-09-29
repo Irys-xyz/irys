@@ -555,7 +555,7 @@ impl StorageModuleService {
                     .await
                     .expect("StorageModule Service encountered an irrecoverable error")
             }
-                .instrument(tracing::Span::current()),
+            .instrument(tracing::Span::current()),
         );
 
         TokioServiceHandle {
