@@ -1064,6 +1064,8 @@ impl Inner {
 
             // insert block into mempool without poa
             let mut block_without_chunk = (*block).clone();
+            // todo: would there be any harm in leaving the PoA chunk in,
+            // and storing Arc<IrysBlockHeader> in the `prevalidated_blocks`?
             block_without_chunk.poa.chunk = None;
             mempool_state_guard
                 .prevalidated_blocks

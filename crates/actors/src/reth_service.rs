@@ -132,10 +132,13 @@ impl RethService {
 
         loop {
             tokio::select! {
+                biased;
+
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for Reth service");
                     break;
                 }
+
                 command = self.cmd_rx.recv() => {
                     match command {
                         Some(command) => self.handle_command(command).await?,

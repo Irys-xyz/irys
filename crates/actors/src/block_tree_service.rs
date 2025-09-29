@@ -275,7 +275,7 @@ impl BlockTreeServiceInner {
         let arc_block = block_header;
         let arc_all_txs = Arc::new(all_txs);
 
-        // Let block_index know about the migrated block (Tokio service)
+        // Let block_index know about the migrated block
         let (tx, rx) = oneshot::channel();
         self.service_senders
             .block_index
@@ -366,17 +366,12 @@ impl BlockTreeServiceInner {
             }
         }
 
-        // todo: instead of setting the poa chunk *here* (and causing unnecessary clones),
-        // it should be done in the downstream recipients of the `BlockMigratedEvent`.
-        let mut block_for_event = (**block).clone();
-        block_for_event.poa.chunk = None;
-        let migrated_block = Arc::new(block_for_event);
-        debug!(hash = %block_hash, height = migration_height, "migrating irys block");
+        debug!(hash = %block.block_hash, height = block.height, "migrating irys block");
 
         // NOTE: order of events is very important! block migration event
         // writes chunks to db, which is expected by `send_block_migration_message`.
         let block_migrated_event = BlockMigratedEvent {
-            block: migrated_block,
+            block: Arc::clone(&block),
         };
         if let Err(e) = self
             .service_senders
@@ -386,7 +381,7 @@ impl BlockTreeServiceInner {
             debug!("No reorg subscribers: {:?}", e);
         }
 
-        self.send_block_migration_message(Arc::clone(block))
+        self.send_block_migration_message(Arc::clone(&block))
             .await
             .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
             .unwrap();
