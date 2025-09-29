@@ -14,7 +14,6 @@ use reth_chainspec::{
     hardfork, make_genesis_header, BaseFeeParams, BaseFeeParamsKind, Chain, ChainHardforks,
     ChainSpec, EthereumHardfork, ForkCondition,
 };
-use reth_ethereum_forks::Hardfork as _;
 use reth_primitives_traits::SealedHeader;
 
 hardfork!(
@@ -39,13 +38,10 @@ impl From<IrysHardforksInConfig> for BTreeMap<String, serde_json::Value> {
 
         match serialized {
             serde_json::Value::Object(map) => map.into_iter().collect(),
-            // If the struct stops serializing as a JSON object, we keep behavior predictable.
             _ => {
-                debug_assert!(
-                    false,
+                panic!(
                     "IrysHardforksInConfig should serialize to a JSON object so it can be stored in OtherFields"
                 );
-                BTreeMap::new()
             }
         }
     }
@@ -192,6 +188,14 @@ pub fn irys_chain_spec(chain: Chain, genesis: Genesis) -> eyre::Result<Arc<Chain
     };
     let genesis_header = make_genesis_header(&genesis, &hardforks.inner);
     let header_hash = genesis_header.hash_slow();
+    let blob_params = BlobParams {
+        target_blob_count: 0,
+        max_blob_count: 0,
+        // must use 1 here as this variable is used for blob fee
+        // market calculations within reth - we get division by 0 panics otherwise
+        update_fraction: 1,
+        min_blob_fee: 0,
+    };
     let chainspec = ChainSpec {
         chain,
         genesis,
@@ -203,26 +207,11 @@ pub fn irys_chain_spec(chain: Chain, genesis: Genesis) -> eyre::Result<Arc<Chain
         genesis_header: SealedHeader::new(genesis_header, header_hash),
         // Blobs are useful for when other L2s will be built on top of irys, so irys can be treated as a data availability layer
         // But it requires irys to gossip blob sidecars.
-        // todo: once we implement handling of blob sidecars, L2s will be cheaper. But requires extra work.
+        // todo: once we implement handling of blob sidecars, L2s will be cheaper. But requires extra work on the CL.
         blob_params: BlobScheduleBlobParams {
-            cancun: BlobParams {
-                target_blob_count: 0,
-                max_blob_count: 0,
-                update_fraction: 0,
-                min_blob_fee: 0,
-            },
-            prague: BlobParams {
-                target_blob_count: 0,
-                max_blob_count: 0,
-                update_fraction: 0,
-                min_blob_fee: 0,
-            },
-            osaka: BlobParams {
-                target_blob_count: 0,
-                max_blob_count: 0,
-                update_fraction: 0,
-                min_blob_fee: 0,
-            },
+            cancun: blob_params,
+            prague: blob_params,
+            osaka: blob_params,
             scheduled: vec![],
         },
     };

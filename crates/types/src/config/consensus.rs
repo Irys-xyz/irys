@@ -399,28 +399,34 @@ impl ConsensusConfig {
         Amount::token(cost_per_chunk_per_epoch)
     }
 
-    // this is a config used for testing
     pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
         const CHUNK_SIZE: u64 = 32;
+        const SHA1_DIFFICULTY: u64 = 70_000;
+        const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
+        const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
+
+        let base = Self::testnet();
+
+        let difficulty_adjustment = DifficultyAdjustmentConfig {
+            block_time: DEFAULT_BLOCK_TIME,
+            difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)
+                * 14,
+            ..base.difficulty_adjustment
+        };
+
+        let vdf = VdfConsensusConfig {
+            sha_1s_difficulty: SHA1_DIFFICULTY,
+            ..base.vdf
+        };
 
         Self {
-            difficulty_adjustment: DifficultyAdjustmentConfig {
-                block_time: DEFAULT_BLOCK_TIME,
-                difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000)
-                    .div_ceil(DEFAULT_BLOCK_TIME)
-                    * 14,
-                max_difficulty_adjustment_factor: dec!(4),
-                min_difficulty_adjustment_factor: dec!(0.25),
-            },
             chunk_size: CHUNK_SIZE,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
-            block_migration_depth: 6,
-            block_tree_depth: 50,
-            entropy_packing_iterations: 1000,
-            ..Self::testnet()
+            num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
+            num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
+            difficulty_adjustment,
+            vdf,
+            ..base
         }
     }
 
