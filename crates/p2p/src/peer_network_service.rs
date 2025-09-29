@@ -1012,8 +1012,6 @@ mod tests {
         ))
     }
 
-    fn reset_global_state() {}
-
     #[derive(Clone)]
     struct TestApiClient {
         inner: Arc<TestApiClientInner>,
@@ -1293,7 +1291,6 @@ mod tests {
 
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let config: Config = NodeConfig::testing().into();
         let harness = TestHarness::new(temp_dir.path(), config);
@@ -1321,7 +1318,6 @@ mod tests {
 
     #[test]
     async fn should_prevent_infinite_handshake_loop() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
@@ -1380,7 +1376,6 @@ mod tests {
 
     #[test]
     async fn test_reth_sender_receives_reth_peer_info() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let config: Config = NodeConfig::testing().into();
         let harness = TestHarness::new(temp_dir.path(), config);
@@ -1557,7 +1552,6 @@ mod tests {
 
     #[test]
     async fn test_staked_unstaked_peer_flush_behavior() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
