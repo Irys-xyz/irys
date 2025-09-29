@@ -371,7 +371,7 @@ impl BlockTreeServiceInner {
         // NOTE: order of events is very important! block migration event
         // writes chunks to db, which is expected by `send_block_migration_message`.
         let block_migrated_event = BlockMigratedEvent {
-            block: Arc::clone(&block),
+            block: Arc::clone(block),
         };
         if let Err(e) = self
             .service_senders
@@ -381,7 +381,7 @@ impl BlockTreeServiceInner {
             debug!("No reorg subscribers: {:?}", e);
         }
 
-        self.send_block_migration_message(Arc::clone(&block))
+        self.send_block_migration_message(Arc::clone(block))
             .await
             .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
             .unwrap();
