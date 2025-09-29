@@ -84,28 +84,6 @@ impl IrysChainHardforks {
         self.inner
     }
 
-    /// Returns a hardfork configuration matching the current Irys mainnet expectations.
-    pub fn irys_mainnet() -> Self {
-        Self::irys_testnet()
-    }
-
-    /// Returns a hardfork configuration for the Irys testnet (all forks active immediately).
-    pub fn irys_testnet() -> Self {
-        let mut hardforks = ChainHardforks::default();
-
-        for (fork, condition) in [
-            // add new hardforks here
-            (IrysHardfork::Frontier, ForkCondition::ZERO_BLOCK),
-        ] {
-            hardforks.insert(fork, condition);
-            for (corresponding_eth_hf, fork_condition) in fork.ethereum_hardfork_mapping() {
-                hardforks.insert(*corresponding_eth_hf, *fork_condition);
-            }
-        }
-
-        Self { inner: hardforks }
-    }
-
     /// Returns a mutable reference to the inner [`ChainHardforks`].
     pub fn inner_mut(&mut self) -> &mut ChainHardforks {
         &mut self.inner
