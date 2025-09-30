@@ -1081,6 +1081,30 @@ impl EpochSnapshot {
     pub fn is_staked(&self, miner_address: Address) -> bool {
         self.commitment_state.is_staked(miner_address)
     }
+
+    // NON CANONICAL HASH
+    // SHOULD BE USED FOR DEBUGGING ONLY
+    pub fn get_hash(&self) -> String {
+        let mut hasher = std::hash::DefaultHasher::new();
+        use std::hash::Hash as _;
+        self.ledgers.hash(&mut hasher);
+        self.partition_assignments.hash(&mut hasher);
+        self.all_active_partitions.hash(&mut hasher);
+        self.unassigned_partitions.hash(&mut hasher);
+        self.commitment_state.hash(&mut hasher);
+        self.previous_epoch_block
+            .as_ref()
+            .map(|blk| blk.block_hash)
+            .unwrap_or(H256::zero())
+            .hash(&mut hasher);
+        self.expired_partition_infos.hash(&mut hasher);
+        self.epoch_height.hash(&mut hasher);
+        use std::hash::Hasher as _;
+
+        let res = hasher.finish();
+        use base58::ToBase58 as _;
+        res.to_le_bytes().to_base58()
+    }
 }
 
 /// SHA256 hash the message parameter
