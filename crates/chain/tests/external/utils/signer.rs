@@ -15,13 +15,9 @@ impl TestSigner {
         name: String,
         config: &ConsensusConfig,
     ) -> Result<Self> {
-        // Parse hex private key
         let key_bytes = hex::decode(private_key_hex.trim_start_matches("0x"))?;
-
-        // Create signing key
         let signing_key = SigningKey::from_slice(&key_bytes)?;
 
-        // Create IrysSigner
         let irys_signer = IrysSigner {
             signer: signing_key,
             chain_id: config.chain_id,
@@ -49,9 +45,9 @@ impl TestSigner {
     }
 }
 
+/// Load private keys from environment variables
+/// Format: TEST_SIGNER_KEYS="key1,key2,key3"
 pub(crate) fn load_test_signers_from_env() -> Result<Vec<String>> {
-    // Load private keys from environment variables
-    // Format: TEST_SIGNER_KEYS="key1,key2,key3"
     let keys_env = std::env::var("TEST_SIGNER_KEYS");
 
     match keys_env {

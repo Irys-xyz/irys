@@ -20,7 +20,6 @@ pub(crate) fn count_chunks_in_intervals(intervals: &[ChunkInterval]) -> usize {
 pub(crate) fn parse_url_to_socket_addr(url_str: &str) -> Result<SocketAddr> {
     let url_str = url_str.trim_end_matches('/');
 
-    // Parse URL to extract host and port
     if let Some(host_port) = url_str.strip_prefix("http://") {
         parse_host_port(host_port)
     } else if let Some(host_port) = url_str.strip_prefix("https://") {
@@ -31,13 +30,18 @@ pub(crate) fn parse_url_to_socket_addr(url_str: &str) -> Result<SocketAddr> {
 }
 
 fn parse_host_port(host_port: &str) -> Result<SocketAddr> {
-    // Try to parse as socket address directly
     if let Ok(addr) = host_port.parse::<SocketAddr>() {
         return Ok(addr);
     }
 
-    // Try to resolve hostname
     let addrs: Vec<SocketAddr> = host_port.to_socket_addrs()?.collect();
+
+    // Prefer IPv4 for compatibility with test environments
+    let ipv4_addr = addrs.iter().find(|addr| addr.is_ipv4());
+    if let Some(&addr) = ipv4_addr {
+        return Ok(addr);
+    }
+
     addrs
         .into_iter()
         .next()

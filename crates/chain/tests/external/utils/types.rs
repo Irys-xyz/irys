@@ -1,5 +1,6 @@
-use irys_types::H256;
+use irys_types::{partition::PartitionAssignment, H256};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GenesisResponse {
@@ -8,16 +9,18 @@ pub(crate) struct GenesisResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AnchorResponse {
-    pub anchor: H256,
-    pub block_height: u64,
+    pub block_hash: H256,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct PriceResponse {
-    pub price: String,
     pub perm_fee: String,
     pub term_fee: String,
+    pub ledger: u32,
+    pub bytes: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -117,18 +120,69 @@ pub(crate) struct DetailedSyncValidation {
     pub sync_details: String,
 }
 
-// Structures for future Phase 2 implementation
+/// Structures for partition assignment verification
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct PartitionAssignment {
-    pub ledger_id: Option<u32>,
-    pub slot_index: usize,
-    pub partition_index: usize,
+pub(crate) struct PartitionAssignmentsResponse {
+    pub node_id: String,
+    pub assignments: Vec<PartitionAssignment>,
+    pub epoch_height: u64,
+    pub assignment_status: AssignmentStatus,
+    pub hash_analysis: HashAnalysis,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum AssignmentStatus {
+    FullyAssigned,
+    PartiallyAssigned { assigned: usize, total: usize },
+    Unassigned,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct HashAnalysis {
+    pub total_hashes: usize,
+    pub unique_hashes: usize,
+    pub zero_hashes: usize,
+    pub duplicate_hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct EpochInfoResponse {
+    pub current_epoch: u64,
+    pub epoch_block_height: u64,
+    pub total_active_partitions: usize,
+    pub unassigned_partitions: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct EpochInfo {
     pub current_epoch: u64,
     pub partition_assignments: Vec<PartitionAssignment>,
+}
+
+/// Structures for slot replica verification
+#[derive(Debug, Clone)]
+pub(crate) struct SlotReplicaInfo {
+    pub slot_index: usize,
+    pub ledger: irys_types::DataLedger,
+    pub replicas: Vec<SlotReplica>,
+    pub replica_count: usize,
+    pub is_fully_replicated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SlotReplica {
+    pub node_address: String,
+    pub partition_hash: irys_types::H256,
+}
+
+#[derive(Debug)]
+pub(crate) struct SlotReplicaSummary {
+    pub total_slots: usize,
+    pub fully_replicated_slots: usize,
+    pub under_replicated_slots: usize,
+    pub over_replicated_slots: usize,
+    pub expected_replicas: usize,
+    pub slots: Vec<SlotReplicaInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,4 +194,47 @@ pub(crate) struct MiningRequest {
 pub(crate) struct MiningResponse {
     pub blocks_mined: u32,
     pub latest_height: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ChunkCountsResponse {
+    pub ledger: String,
+    pub slot_index: usize,
+    pub data_chunks: usize,
+    pub packed_chunks: usize,
+}
+
+/// Types for assignment-based validation
+#[derive(Debug, Clone)]
+pub(crate) struct NodeAssignmentInfo {
+    pub node_address: String,
+    /// Slot indices assigned to Publish ledger
+    pub publish_slots: Vec<usize>,
+    /// Slot indices assigned to Submit ledger
+    pub submit_slots: Vec<usize>,
+    /// Count of capacity assignments
+    pub capacity_assignments: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NodeExpectedStorage {
+    pub node_address: String,
+    /// Expected data chunks per slot (slot_index -> chunk_count)
+    pub expected_publish_data: BTreeMap<usize, usize>,
+    /// Expected packed chunks per slot (slot_index -> chunk_count)
+    pub expected_publish_packed: BTreeMap<usize, usize>,
+    /// Expected data chunks per slot (slot_index -> chunk_count)
+    pub expected_submit_data: BTreeMap<usize, usize>,
+    /// Expected packed chunks per slot (slot_index -> chunk_count)
+    pub expected_submit_packed: BTreeMap<usize, usize>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NodeSyncValidationResult {
+    pub node_name: String,
+    pub node_address: String,
+    pub is_synced: bool,
+    pub details: String,
+    pub assignment_info: NodeAssignmentInfo,
+    pub expected_storage: NodeExpectedStorage,
 }

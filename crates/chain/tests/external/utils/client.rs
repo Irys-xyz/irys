@@ -14,7 +14,6 @@ pub(crate) struct RemoteNodeClient {
 
 impl RemoteNodeClient {
     pub(crate) fn new(url: String, http_client: Client) -> Result<Self> {
-        // Validate URL is parseable
         let _ = parse_url_to_socket_addr(&url)?;
 
         Ok(Self {
