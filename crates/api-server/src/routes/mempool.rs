@@ -23,7 +23,7 @@ pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpRespon
             }
             .into()),
             _ => Err(ApiError::Internal {
-                err: format!("Failed to get mempool status: {:?}", err),
+                err: format!("Failed to get mempool status: {err:?}"),
             }
             .into()),
         },
