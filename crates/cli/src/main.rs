@@ -42,6 +42,10 @@ pub enum Commands {
         /// Configuration file path (contains both TUI settings and nodes list)
         #[arg(short, long)]
         config: Option<String>,
+
+        /// Record node info to SQLite database (irys-tui-records.db)
+        #[arg(short, long)]
+        record: bool,
     },
 }
 
@@ -184,7 +188,11 @@ async fn main() -> eyre::Result<()> {
 
             Ok(())
         }
-        Commands::Tui { node_urls, config } => {
+        Commands::Tui {
+            node_urls,
+            config,
+            record,
+        } => {
             // Check if we have any node configuration
             if node_urls.is_empty() && config.is_none() {
                 eprintln!("Error: No nodes specified.");
@@ -202,9 +210,14 @@ async fn main() -> eyre::Result<()> {
             // Initialize terminal
             let mut terminal = irys_tui::utils::terminal::init()?;
 
-            // Create and run the TUI app
-            let mut app = irys_tui::app::App::new(node_urls, config)?;
-            let app_result = app.run(&mut terminal).await;
+            // Create and run the TUI app with optional recording
+            let app_result = if record {
+                let mut app = irys_tui::app::App::new(node_urls, config)?.start_recording().await?;
+                app.run(&mut terminal).await
+            } else {
+                let mut app = irys_tui::app::App::new(node_urls, config)?;
+                app.run(&mut terminal).await
+            };
 
             // Restore terminal on exit
             irys_tui::utils::terminal::restore()?;

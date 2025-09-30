@@ -1,8 +1,13 @@
-use crate::api::models::{MempoolStatus, MiningInfo, NodeMetrics, PeerInfo};
+use crate::{
+    api::models::{
+        BlockTreeForksResponse, MempoolStatus, MiningInfo, NodeConfig, NodeMetrics, PeerInfo,
+    },
+    types::NodeUrl,
+};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::sync::Arc;
 
-/// Duration in seconds for the splash screen timeout
 const SPLASH_TIMEOUT_SECS: u64 = 3;
 
 #[derive(Debug, Clone)]
@@ -17,19 +22,23 @@ pub enum MenuSelection {
     DataSync,
     Mempool,
     Mining,
+    Forks,
     Metrics,
+    Config,
     Logs,
     Settings,
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeState {
-    pub url: String,
-    pub alias: Option<String>,
+    pub url: NodeUrl,
+    pub alias: Option<Arc<str>>,
     pub metrics: NodeMetrics,
     pub peers: Vec<PeerInfo>,
     pub mempool_status: Option<MempoolStatus>,
     pub mining_info: Option<MiningInfo>,
+    pub fork_info: Option<BlockTreeForksResponse>,
+    pub config: Option<NodeConfig>,
     pub last_updated: DateTime<Utc>,
     pub is_reachable: bool,
     pub response_time_ms: Option<u64>,
@@ -40,11 +49,7 @@ pub struct NodeState {
 }
 
 impl NodeState {
-    /// Creates a new NodeState with default values for the given URL.
-    ///
-    /// The node starts in an unreachable state with empty metrics.
-    /// Call refresh methods to populate with actual data from the node.
-    pub fn new(url: String) -> Self {
+    pub fn new(url: NodeUrl) -> Self {
         Self {
             url,
             alias: None,
@@ -52,6 +57,8 @@ impl NodeState {
             peers: Vec::new(),
             mempool_status: None,
             mining_info: None,
+            fork_info: None,
+            config: None,
             last_updated: Utc::now(),
             is_reachable: false,
             response_time_ms: None,
@@ -62,21 +69,21 @@ impl NodeState {
 
     pub fn display_name(&self) -> String {
         if let Some(alias) = &self.alias {
-            alias.clone()
+            alias.to_string()
         } else {
             // Extract hostname:port from URL for cleaner display
-            self.url
+            self.url.as_str()
                 .replace("http://", "")
                 .replace("https://", "")
                 .split('/')
                 .next()
-                .unwrap_or(&self.url)
+                .unwrap_or(self.url.as_str())
                 .to_string()
         }
     }
 
     pub fn set_alias(&mut self, alias: Option<String>) {
-        self.alias = alias;
+        self.alias = alias.map(|s| Arc::from(s.as_str()));
     }
 }
 
@@ -87,13 +94,13 @@ pub struct AppState {
     /// Start time for splash screen animation timing
     pub splash_start_time: Option<std::time::Instant>,
     /// URL of the primary/initial node
-    pub primary_node_url: String,
+    pub primary_node_url: NodeUrl,
     /// Currently selected menu in the main interface
     pub current_menu: MenuSelection,
     /// Map of all monitored nodes keyed by their URLs
-    pub nodes: HashMap<String, NodeState>,
+    pub nodes: HashMap<NodeUrl, NodeState>,
     /// URL of the currently selected/focused node
-    pub selected_node: Option<String>,
+    pub selected_node: Option<NodeUrl>,
     /// Index of the currently focused node box for scrolling (used in Nodes view)
     pub focused_node_index: usize,
     /// Auto-refresh interval in seconds
@@ -106,10 +113,12 @@ pub struct AppState {
     pub is_refreshing: bool,
     /// Flag to signal the application should exit
     pub should_quit: bool,
+    /// Whether recording mode is enabled
+    pub is_recording: bool,
 }
 
 impl AppState {
-    pub fn new(primary_url: String) -> Self {
+    pub fn new(primary_url: NodeUrl) -> Self {
         Self {
             screen: AppScreen::Splash,
             splash_start_time: Some(std::time::Instant::now()),
@@ -118,11 +127,12 @@ impl AppState {
             nodes: HashMap::new(),
             selected_node: Some(primary_url),
             focused_node_index: 0,
-            refresh_interval_secs: 30,
+            refresh_interval_secs: 10,
             auto_refresh: true,
             time_since_last_refresh: std::time::Duration::from_secs(0),
             is_refreshing: false,
             should_quit: false,
+            is_recording: false,
         }
     }
 
@@ -139,7 +149,7 @@ impl AppState {
     }
 
     /// Adds a new node to the monitoring list.
-    pub fn add_node(&mut self, url: String) {
+    pub fn add_node(&mut self, url: NodeUrl) {
         let node_state = NodeState::new(url.clone());
         self.nodes.insert(url.clone(), node_state);
         if self.selected_node.is_none() {
@@ -148,9 +158,9 @@ impl AppState {
     }
 
     /// Removes a node from the monitoring list.
-    pub fn remove_node(&mut self, url: &str) {
+    pub fn remove_node(&mut self, url: &NodeUrl) {
         self.nodes.remove(url);
-        if self.selected_node.as_ref() == Some(&url.to_string()) {
+        if self.selected_node.as_ref() == Some(url) {
             self.selected_node = self.nodes.keys().next().cloned();
         }
     }
@@ -165,7 +175,7 @@ impl AppState {
             return;
         }
 
-        let node_urls: Vec<String> = self.nodes.keys().cloned().collect();
+        let node_urls: Vec<NodeUrl> = self.nodes.keys().cloned().collect();
 
         if let Some(current_url) = &self.selected_node {
             if let Some(current_index) = node_urls.iter().position(|url| url == current_url) {
@@ -182,7 +192,7 @@ impl AppState {
             return;
         }
 
-        let node_urls: Vec<String> = self.nodes.keys().cloned().collect();
+        let node_urls: Vec<NodeUrl> = self.nodes.keys().cloned().collect();
 
         if let Some(current_url) = &self.selected_node {
             if let Some(current_index) = node_urls.iter().position(|url| url == current_url) {
@@ -199,17 +209,17 @@ impl AppState {
     }
 
     pub fn get_selected_node_url(&self) -> Option<String> {
-        self.selected_node.clone()
+        self.selected_node.as_ref().map(|url| url.as_str().to_string())
     }
 
-    pub fn set_node_alias(&mut self, url: &str, alias: Option<String>) {
+    pub fn set_node_alias(&mut self, url: &NodeUrl, alias: Option<String>) {
         if let Some(node) = self.nodes.get_mut(url) {
             node.set_alias(alias);
         }
     }
 
     pub fn get_node_urls(&self) -> Vec<String> {
-        self.nodes.keys().cloned().collect()
+        self.nodes.keys().map(|k| k.as_str().to_string()).collect()
     }
 
     /// Increases the refresh interval by 1 second, up to a maximum of 60 seconds.
@@ -271,7 +281,6 @@ mod tests {
         assert!(!node.is_reachable);
         assert_eq!(node.response_time_ms, None);
         assert!(node.peers.is_empty());
-        // last_updated should be recent (within last few seconds)
         assert!(node.last_updated <= Utc::now());
         assert!(
             Utc::now()
@@ -304,26 +313,21 @@ mod tests {
     fn test_node_state_set_alias() {
         let mut node = NodeState::new("http://localhost:1984".to_string());
 
-        // Test setting an alias
         node.set_alias(Some("Test Node".to_string()));
         assert_eq!(node.alias, Some("Test Node".to_string()));
 
-        // Test clearing an alias
         node.set_alias(None);
         assert_eq!(node.alias, None);
     }
 
     #[test]
     fn test_node_state_display_name_edge_cases() {
-        // Test with just hostname
         let node1 = NodeState::new("localhost".to_string());
         assert_eq!(node1.display_name(), "localhost");
 
-        // Test with empty URL (shouldn't happen but handle gracefully)
         let node2 = NodeState::new(String::new());
         assert_eq!(node2.display_name(), "");
 
-        // Test with malformed URL
         let node3 = NodeState::new("not-a-url".to_string());
         assert_eq!(node3.display_name(), "not-a-url");
     }
@@ -339,7 +343,7 @@ mod tests {
         assert!(matches!(app_state.current_menu, MenuSelection::Nodes));
         assert!(app_state.nodes.is_empty());
         assert_eq!(app_state.selected_node, Some(primary_url));
-        assert_eq!(app_state.refresh_interval_secs, 30);
+        assert_eq!(app_state.refresh_interval_secs, 10);
         assert!(app_state.auto_refresh);
         assert_eq!(
             app_state.time_since_last_refresh,
@@ -667,7 +671,7 @@ mod tests {
         let mut app_state = AppState::new("http://localhost:1984".to_string());
 
         // Default is 30
-        assert_eq!(app_state.refresh_interval_secs, 30);
+        assert_eq!(app_state.refresh_interval_secs, 10);
 
         // Increase by 1
         app_state.increase_refresh_interval();
@@ -688,7 +692,7 @@ mod tests {
         let mut app_state = AppState::new("http://localhost:1984".to_string());
 
         // Default is 30
-        assert_eq!(app_state.refresh_interval_secs, 30);
+        assert_eq!(app_state.refresh_interval_secs, 10);
 
         // Decrease by 1
         app_state.decrease_refresh_interval();

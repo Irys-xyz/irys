@@ -443,6 +443,8 @@ doc-overindented-list-items = "allow"
 unused-async = "deny"
 large-enum-variant = "allow"
 doc-lazy-continuation = "allow"
+result-large-err = "allow"
+uninlined-format-args = "allow"
 # to enable in the future
 type-complexity = "allow"
 needless-range-loop = "allow"

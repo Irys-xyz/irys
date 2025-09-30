@@ -21,7 +21,7 @@ pub struct NodeConfig {
 }
 
 fn default_refresh_interval() -> u64 {
-    30
+    10
 }
 
 fn default_connection_timeout() -> u64 {

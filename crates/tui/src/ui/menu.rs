@@ -52,7 +52,13 @@ impl Default for MainMenu {
                 "Mining",
                 "Mining status and difficulty",
             ),
+            (
+                MenuSelection::Forks,
+                "Forks",
+                "Block tree forks and competing blocks",
+            ),
             (MenuSelection::Metrics, "Metrics", "Performance metrics"),
+            (MenuSelection::Config, "Config", "Node configuration"),
             (MenuSelection::Logs, "Logs", "System logs and events"),
             (
                 MenuSelection::Settings,
@@ -149,7 +155,9 @@ impl MainMenu {
             MenuSelection::DataSync => "Data Sync",
             MenuSelection::Mempool => "Mempool",
             MenuSelection::Mining => "Mining",
+            MenuSelection::Forks => "Forks",
             MenuSelection::Metrics => "Metrics",
+            MenuSelection::Config => "Config",
             MenuSelection::Logs => "Logs",
             MenuSelection::Settings => "Settings",
         };
@@ -164,33 +172,46 @@ impl MainMenu {
             "↻ OFF".to_string()
         };
 
-        let mode_info = Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    menu_name,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    refresh_display,
-                    Style::default().fg(if app_state.is_refreshing {
-                        Color::Yellow
-                    } else if app_state.auto_refresh {
-                        Color::Green
-                    } else {
-                        Color::Gray
-                    }),
-                ),
-            ]),
-            Line::from(vec![Span::styled(
-                format!("Nodes: {}", app_state.nodes.len()),
-                Style::default().fg(Color::Cyan),
-            )]),
-        ])
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(ratatui::layout::Alignment::Center);
+        let mut first_line = vec![
+            Span::styled(
+                menu_name,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                refresh_display,
+                Style::default().fg(if app_state.is_refreshing {
+                    Color::Yellow
+                } else if app_state.auto_refresh {
+                    Color::Green
+                } else {
+                    Color::Gray
+                }),
+            ),
+        ];
+
+        if app_state.is_recording {
+            first_line.push(Span::raw("  "));
+            first_line.push(Span::styled(
+                "● REC",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let mut lines = vec![Line::from(first_line)];
+
+        let second_line = vec![Span::styled(
+            format!("Nodes: {}", app_state.nodes.len()),
+            Style::default().fg(Color::Cyan),
+        )];
+
+        lines.push(Line::from(second_line));
+
+        let mode_info = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL))
+            .alignment(ratatui::layout::Alignment::Center);
 
         frame.render_widget(mode_info, title_chunks[1]);
     }
@@ -225,23 +246,21 @@ impl MainMenu {
             MenuSelection::DataSync => self.render_data_sync_view(frame, area, app_state),
             MenuSelection::Mempool => self.render_mempool_view(frame, area, app_state),
             MenuSelection::Mining => self.render_mining_view(frame, area, app_state),
+            MenuSelection::Forks => self.render_forks_view(frame, area, app_state),
             MenuSelection::Metrics => self.render_metrics_view(frame, area, app_state),
+            MenuSelection::Config => self.render_config_view(frame, area, app_state),
             MenuSelection::Logs => self.render_logs_view(frame, area, app_state),
             MenuSelection::Settings => self.render_settings_view(frame, area, app_state),
         }
     }
 
     fn render_nodes_view(&self, frame: &mut Frame, area: Rect, app_state: &mut AppState) {
-        // Split the area vertically: small banner at top, nodes grid below
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(5), Constraint::Min(0)])
             .split(area);
 
-        // Render cluster health banner at the top
         self.render_cluster_health_banner(frame, chunks[0], app_state);
-
-        // Render full nodes grid below with all the original node details
         self.render_nodes_grid(frame, chunks[1], app_state);
     }
 
@@ -331,7 +350,6 @@ impl MainMenu {
     }
 
     fn render_nodes_grid(&self, frame: &mut Frame, area: Rect, app_state: &mut AppState) {
-        // Handle case where there are no nodes
         if app_state.nodes.is_empty() {
             let no_nodes_msg = Paragraph::new(vec![
                 Line::from(""),
@@ -351,7 +369,6 @@ impl MainMenu {
             return;
         }
 
-        // Render the original full nodes view with all details
         let nodes_per_row = 3;
         let node_count = app_state.nodes.len();
         let rows_needed = node_count.div_ceil(nodes_per_row);
@@ -367,7 +384,7 @@ impl MainMenu {
             .constraints(row_constraints)
             .split(area);
 
-        let node_urls: Vec<String> = app_state.nodes.keys().cloned().collect();
+        let node_urls: Vec<_> = app_state.nodes.keys().cloned().collect();
 
         let mut node_index = 0;
         for row_idx in 0..rows_needed {
@@ -385,7 +402,7 @@ impl MainMenu {
                     let url = &node_urls[node_index];
                     if let Some(node) = app_state.nodes.get_mut(url) {
                         let is_focused = node_index == app_state.focused_node_index;
-                        self.render_node_card(frame, cols[col_idx], url, node, is_focused);
+                        self.render_node_card(frame, cols[col_idx], url.as_str(), node, is_focused);
                     }
                     node_index += 1;
                 }
@@ -588,6 +605,103 @@ impl MainMenu {
         }
     }
 
+    /// Renders detailed node information in a card-style format
+    /// Used by detail views (DataSync, Mempool, Mining, etc.) to match the Nodes page style
+    fn render_node_detail_card(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        node_state: &crate::app::state::NodeState,
+        title: &str,
+        custom_lines: Vec<Line>,
+    ) {
+        let (status_color, status_text, status_bg) = if node_state.is_reachable {
+            (Color::White, "Online", Color::Green)
+        } else {
+            (Color::White, "Offline", Color::Red)
+        };
+
+        let mut lines = vec![];
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                node_state.url.as_ref(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!(" {status_text} "),
+                Style::default()
+                    .fg(status_color)
+                    .bg(status_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        lines.push(Line::from(""));
+
+        // Node Info section
+        lines.push(Line::from(vec![Span::styled(
+            "Node Info:",
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )]));
+
+        if let Some(info) = &node_state.metrics.info {
+            lines.push(Line::from(vec![
+                Span::styled("height: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(&info.height),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("peerCount: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(info.peer_count.to_string()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("chainId: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(&info.chain_id),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("isSyncing: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(info.is_syncing.to_string()),
+            ]));
+        } else {
+            lines.push(Line::from("No node info available"));
+        }
+
+        lines.push(Line::from(""));
+
+        // Custom content section (specific to each view)
+        if !custom_lines.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.extend(custom_lines);
+        }
+
+        let border_style = if node_state.is_reachable {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+
+        let node_card = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(node_state.display_name())
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: false });
+
+        frame.render_widget(node_card, area);
+    }
+
     fn render_data_sync_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -614,133 +728,114 @@ impl MainMenu {
             return;
         }
 
-        let constraints: Vec<Constraint> = (0..node_count)
-            .map(|_| Constraint::Length(8))
-            .chain(std::iter::once(Constraint::Min(1)))
-            .collect();
+        // Use grid layout like Nodes view
+        let nodes_per_row = 3;
+        let rows_needed = node_count.div_ceil(nodes_per_row);
+        let node_height = 14_u16; // Height for data sync cards
 
-        let node_chunks = Layout::default()
+        let mut row_constraints = vec![];
+        for _ in 0..rows_needed {
+            row_constraints.push(Constraint::Length(node_height));
+        }
+        row_constraints.push(Constraint::Min(0));
+
+        let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(constraints)
+            .constraints(row_constraints)
             .split(chunks[1]);
 
-        for (i, (_node_url, node_state)) in app_state.nodes.iter().enumerate() {
-            let display_name = node_state.display_name();
+        let node_list: Vec<_> = app_state.nodes.iter().collect();
 
-            let mut node_lines = Vec::new();
-
-            if node_state.is_reachable {
-                let mut info_spans = vec![
-                    Span::styled(
-                        "Node:",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(display_name.clone(), Style::default().fg(Color::Cyan)),
-                ];
-
-                if let Some(chain_height) = &node_state.metrics.chain_height {
-                    info_spans.extend(vec![
-                        Span::raw("  Height: "),
-                        Span::styled(
-                            chain_height.height.to_string(),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                    ]);
-                }
-
-                if let Some(info) = &node_state.metrics.info {
-                    info_spans.extend(vec![
-                        Span::raw("  Peers: "),
-                        Span::styled(
-                            info.peer_count.to_string(),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                    ]);
-                }
-                node_lines.push(Line::from(info_spans));
-
-                let chunk_counts = &node_state.metrics.chunk_counts;
-
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Publish:",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!(
-                        "  Data={:3} Packed={:3}",
-                        chunk_counts.publish_0.data, chunk_counts.publish_0.packed
-                    )),
-                ]));
-
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Submit(0):",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!(
-                        " Data={:3} Packed={:3}",
-                        chunk_counts.submit_0.data, chunk_counts.submit_0.packed
-                    )),
-                ]));
-
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Submit(1):",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!(
-                        " Data={:3} Packed={:3}",
-                        chunk_counts.submit_1.data, chunk_counts.submit_1.packed
-                    )),
-                ]));
-            } else {
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Node:",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(display_name.clone(), Style::default().fg(Color::Red)),
-                ]));
-                node_lines.push(Line::from(vec![Span::styled(
-                    "ERROR - Node offline or unreachable",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )]));
+        let mut node_index = 0;
+        for row_idx in 0..rows_needed {
+            if row_idx >= rows.len() {
+                break;
             }
 
-            let node_widget = Paragraph::new(node_lines)
-                .block(
-                    Block::default()
-                        .title(display_name)
-                        .borders(Borders::ALL)
-                        .border_style(if node_state.is_reachable {
-                            Style::default().fg(Color::Green)
-                        } else {
-                            Style::default().fg(Color::Red)
-                        }),
-                )
-                .wrap(ratatui::widgets::Wrap { trim: true });
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                ])
+                .split(rows[row_idx]);
 
-            if i < node_chunks.len() {
-                frame.render_widget(node_widget, node_chunks[i]);
+            for col_idx in 0..nodes_per_row {
+                if node_index < node_list.len() {
+                    let (_url, node_state) = node_list[node_index];
+
+                    // Prepare custom lines for data sync details
+                    let mut custom_lines = Vec::new();
+
+                    if node_state.is_reachable {
+                        let chunk_counts = &node_state.metrics.chunk_counts;
+
+                        custom_lines.push(Line::from(vec![
+                            Span::styled(
+                                "Publish: ",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(format!(
+                                "Data={:3} Packed={:3}",
+                                chunk_counts.publish_0.data, chunk_counts.publish_0.packed
+                            )),
+                        ]));
+
+                        custom_lines.push(Line::from(vec![
+                            Span::styled(
+                                "Submit(0): ",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(format!(
+                                "Data={:3} Packed={:3}",
+                                chunk_counts.submit_0.data, chunk_counts.submit_0.packed
+                            )),
+                        ]));
+
+                        custom_lines.push(Line::from(vec![
+                            Span::styled(
+                                "Submit(1): ",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(format!(
+                                "Data={:3} Packed={:3}",
+                                chunk_counts.submit_1.data, chunk_counts.submit_1.packed
+                            )),
+                        ]));
+
+                        // Display total chunk offsets (from blockchain)
+                        let total_offsets = &node_state.metrics.total_chunk_offsets;
+                        custom_lines.push(Line::from(vec![
+                            Span::styled(
+                                "Max Offsets: ",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(format!(
+                                "Pub={} Sub={}",
+                                total_offsets
+                                    .publish
+                                    .map(|o| o.to_string())
+                                    .unwrap_or_else(|| "None".to_string()),
+                                total_offsets
+                                    .submit
+                                    .map(|o| o.to_string())
+                                    .unwrap_or_else(|| "None".to_string())
+                            )),
+                        ]));
+                    }
+
+                    self.render_node_detail_card(
+                        frame,
+                        cols[col_idx],
+                        node_state,
+                        "Data Sync Details:",
+                        custom_lines,
+                    );
+
+                    node_index += 1;
+                }
             }
-        }
-
-        if let Some(help_chunk) = node_chunks.get(node_count) {
-            let help_widget = Paragraph::new("Press 'r' to refresh immediately, 'q' to quit")
-                .alignment(ratatui::layout::Alignment::Center);
-            frame.render_widget(help_widget, *help_chunk);
         }
     }
 
@@ -770,192 +865,139 @@ impl MainMenu {
             return;
         }
 
-        // Calculate height needed for each node (approximately 12 lines per node)
-        let node_height = 12_u16;
-        let constraints: Vec<Constraint> = (0..node_count)
-            .map(|_| Constraint::Length(node_height))
-            .chain(std::iter::once(Constraint::Min(1)))
-            .collect();
+        // Use grid layout like Nodes view
+        let nodes_per_row = 3;
+        let rows_needed = node_count.div_ceil(nodes_per_row);
+        let node_height = 14_u16; // Height for mempool cards
 
-        let node_chunks = Layout::default()
+        let mut row_constraints = vec![];
+        for _ in 0..rows_needed {
+            row_constraints.push(Constraint::Length(node_height));
+        }
+        row_constraints.push(Constraint::Min(0));
+
+        let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(constraints)
+            .constraints(row_constraints)
             .split(chunks[1]);
 
-        for (i, (_node_url, node_state)) in app_state.nodes.iter().enumerate() {
-            let display_name = node_state.display_name();
+        let node_list: Vec<_> = app_state.nodes.iter().collect();
 
-            let mut node_lines = Vec::new();
-
-            if node_state.is_reachable {
-                // Node header with status
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Node: ",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(display_name.clone(), Style::default().fg(Color::Cyan)),
-                    Span::raw("  "),
-                    Span::styled(
-                        " ONLINE ",
-                        Style::default()
-                            .fg(Color::White)
-                            .bg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-
-                if let Some(mempool_status) = &node_state.mempool_status {
-                    // Transaction counts
-                    node_lines.push(Line::from(vec![
-                        Span::styled(
-                            "Transactions: ",
-                            Style::default()
-                                .fg(Color::Blue)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!(
-                            "Data={} Commitment={}",
-                            mempool_status.data_tx_count, mempool_status.commitment_tx_count
-                        )),
-                    ]));
-
-                    // Pending items
-                    node_lines.push(Line::from(vec![
-                        Span::styled(
-                            "Pending: ",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!(
-                            "Chunks={} Pledges={}",
-                            mempool_status.pending_chunks_count,
-                            mempool_status.pending_pledges_count
-                        )),
-                    ]));
-
-                    // Recent transactions
-                    node_lines.push(Line::from(vec![
-                        Span::styled(
-                            "Recent: ",
-                            Style::default()
-                                .fg(Color::Magenta)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!(
-                            "Valid={} Invalid={}",
-                            mempool_status.recent_valid_tx_count,
-                            mempool_status.recent_invalid_tx_count
-                        )),
-                    ]));
-
-                    // Total data size
-                    let size_mb = mempool_status.data_tx_total_size as f64 / (1024.0 * 1024.0);
-                    node_lines.push(Line::from(vec![
-                        Span::styled(
-                            "Total Data Size: ",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!("{size_mb:.2} MB")),
-                    ]));
-
-                    // Pool utilization indicator
-                    let utilization = if mempool_status.data_tx_count > 100 {
-                        ("HIGH", Color::Red)
-                    } else if mempool_status.data_tx_count > 50 {
-                        ("MEDIUM", Color::Yellow)
-                    } else {
-                        ("LOW", Color::Green)
-                    };
-
-                    node_lines.push(Line::from(vec![
-                        Span::styled(
-                            "Pool Utilization: ",
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!(" {} ", utilization.0),
-                            Style::default()
-                                .fg(Color::White)
-                                .bg(utilization.1)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-
-                    // Last update time
-                    let elapsed = chrono::Utc::now()
-                        .signed_duration_since(node_state.last_updated)
-                        .num_seconds();
-                    node_lines.push(Line::from(vec![
-                        Span::styled("Last Updated: ", Style::default().fg(Color::Gray)),
-                        Span::styled(format!("{elapsed}s ago"), Style::default().fg(Color::Gray)),
-                    ]));
-                } else {
-                    node_lines.push(Line::from(vec![Span::styled(
-                        "No mempool data available",
-                        Style::default().fg(Color::Yellow),
-                    )]));
-                    node_lines.push(Line::from(vec![Span::styled(
-                        "Press 'r' to refresh",
-                        Style::default().fg(Color::Gray),
-                    )]));
-                }
-            } else {
-                // Offline node
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Node: ",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(display_name.clone(), Style::default().fg(Color::Red)),
-                    Span::raw("  "),
-                    Span::styled(
-                        " OFFLINE ",
-                        Style::default()
-                            .fg(Color::White)
-                            .bg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                node_lines.push(Line::from(vec![Span::styled(
-                    "ERROR - Node offline or unreachable",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )]));
+        let mut node_index = 0;
+        for row_idx in 0..rows_needed {
+            if row_idx >= rows.len() {
+                break;
             }
 
-            let node_widget = Paragraph::new(node_lines)
-                .block(
-                    Block::default()
-                        .title(display_name)
-                        .borders(Borders::ALL)
-                        .border_style(if node_state.is_reachable {
-                            Style::default().fg(Color::Green)
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                ])
+                .split(rows[row_idx]);
+
+            for col_idx in 0..nodes_per_row {
+                if node_index < node_list.len() {
+                    let (_url, node_state) = node_list[node_index];
+
+                    // Prepare custom lines for mempool details
+                    let mut custom_lines = Vec::new();
+
+                    if node_state.is_reachable {
+                        if let Some(mempool_status) = &node_state.mempool_status {
+                            // Transaction counts
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Transactions: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!(
+                                    "Data={} Commitment={}",
+                                    mempool_status.data_tx_count,
+                                    mempool_status.commitment_tx_count
+                                )),
+                            ]));
+
+                            // Pending items
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Pending: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!(
+                                    "Chunks={} Pledges={}",
+                                    mempool_status.pending_chunks_count,
+                                    mempool_status.pending_pledges_count
+                                )),
+                            ]));
+
+                            // Recent transactions
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Recent: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!(
+                                    "Valid={} Invalid={}",
+                                    mempool_status.recent_valid_tx_count,
+                                    mempool_status.recent_invalid_tx_count
+                                )),
+                            ]));
+
+                            // Total data size
+                            let size_mb =
+                                mempool_status.data_tx_total_size as f64 / (1024.0 * 1024.0);
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Total Size: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!("{size_mb:.2} MB")),
+                            ]));
+
+                            // Pool utilization indicator
+                            let utilization = if mempool_status.data_tx_count > 100 {
+                                ("HIGH", Color::Red)
+                            } else if mempool_status.data_tx_count > 50 {
+                                ("MEDIUM", Color::Yellow)
+                            } else {
+                                ("LOW", Color::Green)
+                            };
+
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Utilization: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!(" {} ", utilization.0),
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .bg(utilization.1)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
                         } else {
-                            Style::default().fg(Color::Red)
-                        }),
-                )
-                .wrap(ratatui::widgets::Wrap { trim: true });
+                            custom_lines.push(Line::from(vec![Span::styled(
+                                "No mempool data available",
+                                Style::default().fg(Color::Yellow),
+                            )]));
+                        }
+                    }
 
-            if i < node_chunks.len() {
-                frame.render_widget(node_widget, node_chunks[i]);
+                    self.render_node_detail_card(
+                        frame,
+                        cols[col_idx],
+                        node_state,
+                        "Mempool Details:",
+                        custom_lines,
+                    );
+
+                    node_index += 1;
+                }
             }
-        }
-
-        if let Some(help_chunk) = node_chunks.get(node_count) {
-            let help_widget = Paragraph::new(
-                "Press 'r' to refresh immediately, 't' to toggle auto-refresh, 'q' to quit",
-            )
-            .alignment(ratatui::layout::Alignment::Center);
-            frame.render_widget(help_widget, *help_chunk);
         }
     }
 
@@ -985,136 +1027,326 @@ impl MainMenu {
             return;
         }
 
-        // Calculate height needed for each node (approximately 15 lines per node for mining info)
-        let node_height = 15_u16;
-        let constraints: Vec<Constraint> = (0..node_count)
-            .map(|_| Constraint::Length(node_height))
-            .chain(std::iter::once(Constraint::Min(1)))
-            .collect();
+        // Use grid layout like Nodes view
+        let nodes_per_row = 3;
+        let rows_needed = node_count.div_ceil(nodes_per_row);
+        let node_height = 16_u16; // Height for mining cards (slightly taller due to more content)
 
-        let node_chunks = Layout::default()
+        let mut row_constraints = vec![];
+        for _ in 0..rows_needed {
+            row_constraints.push(Constraint::Length(node_height));
+        }
+        row_constraints.push(Constraint::Min(0));
+
+        let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(constraints)
+            .constraints(row_constraints)
             .split(chunks[1]);
 
-        for (i, (_node_url, node_state)) in app_state.nodes.iter().enumerate() {
-            let display_name = node_state.display_name();
+        let node_list: Vec<_> = app_state.nodes.iter().collect();
 
-            let mut node_lines = Vec::new();
+        let mut node_index = 0;
+        for row_idx in 0..rows_needed {
+            if row_idx >= rows.len() {
+                break;
+            }
 
-            if node_state.is_reachable {
-                // Node header with status
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Node: ",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&display_name, Style::default().fg(Color::Green)),
-                    Span::raw(" ● "),
-                    Span::styled("Online", Style::default().fg(Color::Green)),
-                ]));
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                ])
+                .split(rows[row_idx]);
 
-                if let Some(mining_info) = &node_state.mining_info {
-                    // Block information
-                    node_lines.push(Line::from(vec![
-                        Span::styled("Block Height: ", Style::default().fg(Color::Cyan)),
-                        Span::raw(mining_info.block_height.to_string()),
-                        Span::raw("  "),
-                        Span::styled("Hash: ", Style::default().fg(Color::Cyan)),
-                        Span::raw(truncate_hash(&mining_info.block_hash, 16)),
-                    ]));
+            for col_idx in 0..nodes_per_row {
+                if node_index < node_list.len() {
+                    let (_url, node_state) = node_list[node_index];
 
-                    // Difficulty information
-                    node_lines.push(Line::from(vec![
-                        Span::styled("Difficulty: ", Style::default().fg(Color::Yellow)),
-                        Span::raw(truncate_hash(&mining_info.current_difficulty, 20)),
-                    ]));
+                    // Prepare custom lines for mining details
+                    let mut custom_lines = Vec::new();
 
-                    node_lines.push(Line::from(vec![
-                        Span::styled("Cumulative: ", Style::default().fg(Color::Yellow)),
-                        Span::raw(truncate_hash(&mining_info.cumulative_difficulty, 20)),
-                    ]));
-
-                    // Mining rewards
-                    node_lines.push(Line::from(vec![
-                        Span::styled("Miner: ", Style::default().fg(Color::Magenta)),
-                        Span::raw(truncate_hash(&mining_info.miner_address, 16)),
-                        Span::raw("  "),
-                        Span::styled("Reward: ", Style::default().fg(Color::Magenta)),
-                        Span::raw(&mining_info.reward_amount),
-                    ]));
-
-                    // VDF information if available
-                    if let Some(vdf_obj) = mining_info.vdf_limiter_info.as_object() {
-                        if let Some(global_step) = vdf_obj.get("globalStepNumber") {
-                            node_lines.push(Line::from(vec![
-                                Span::styled("VDF Step: ", Style::default().fg(Color::Blue)),
-                                Span::raw(global_step.to_string()),
+                    if node_state.is_reachable {
+                        if let Some(mining_info) = &node_state.mining_info {
+                            // Block information
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Block Height: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(mining_info.block_height.to_string()),
                             ]));
-                        }
-                        if let Some(vdf_diff) = vdf_obj.get("vdfDifficulty") {
-                            if !vdf_diff.is_null() {
-                                node_lines.push(Line::from(vec![
-                                    Span::styled(
-                                        "VDF Difficulty: ",
-                                        Style::default().fg(Color::Blue),
-                                    ),
-                                    Span::raw(vdf_diff.to_string()),
-                                ]));
+
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Block Hash: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(truncate_hash(&mining_info.block_hash, 20)),
+                            ]));
+
+                            // Difficulty information
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Difficulty: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(truncate_hash(&mining_info.current_difficulty, 20)),
+                            ]));
+
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Cumulative: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(truncate_hash(&mining_info.cumulative_difficulty, 20)),
+                            ]));
+
+                            // Mining rewards
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Miner: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(truncate_hash(&mining_info.miner_address, 16)),
+                            ]));
+
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Reward: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(&mining_info.reward_amount),
+                            ]));
+
+                            // VDF information if available
+                            if let Some(vdf_obj) = mining_info.vdf_limiter_info.as_object() {
+                                if let Some(global_step) = vdf_obj.get("globalStepNumber") {
+                                    custom_lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "VDF Step: ",
+                                            Style::default().add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::raw(global_step.to_string()),
+                                    ]));
+                                }
+                                if let Some(vdf_diff) = vdf_obj.get("vdfDifficulty") {
+                                    if !vdf_diff.is_null() {
+                                        custom_lines.push(Line::from(vec![
+                                            Span::styled(
+                                                "VDF Difficulty: ",
+                                                Style::default().add_modifier(Modifier::BOLD),
+                                            ),
+                                            Span::raw(vdf_diff.to_string()),
+                                        ]));
+                                    }
+                                }
                             }
+
+                            // Block timestamp
+                            let timestamp_secs = mining_info.block_timestamp / 1000;
+                            let datetime =
+                                chrono::DateTime::from_timestamp(timestamp_secs as i64, 0)
+                                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                                    .unwrap_or_else(|| "Invalid timestamp".to_string());
+
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Block Time: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(datetime),
+                            ]));
+                        } else {
+                            custom_lines.push(Line::from(vec![Span::styled(
+                                "Mining info not available",
+                                Style::default().fg(Color::Yellow),
+                            )]));
                         }
                     }
 
-                    // Block timestamp
-                    let timestamp_secs = mining_info.block_timestamp / 1000;
-                    let datetime = chrono::DateTime::from_timestamp(timestamp_secs as i64, 0)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_else(|| "Invalid timestamp".to_string());
+                    self.render_node_detail_card(
+                        frame,
+                        cols[col_idx],
+                        node_state,
+                        "Mining Details:",
+                        custom_lines,
+                    );
 
-                    node_lines.push(Line::from(vec![
-                        Span::styled("Block Time: ", Style::default().fg(Color::Gray)),
-                        Span::raw(datetime),
-                    ]));
-                } else {
-                    node_lines.push(Line::from(vec![Span::styled(
-                        "Mining info not available",
-                        Style::default().fg(Color::Yellow),
-                    )]));
+                    node_index += 1;
                 }
-            } else {
-                // Node is not reachable
-                node_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Node: ",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&display_name, Style::default().fg(Color::Red)),
-                    Span::raw(" ● "),
-                    Span::styled("Offline", Style::default().fg(Color::Red)),
-                ]));
-                node_lines.push(Line::from(vec![Span::styled(
-                    "Unable to connect to node",
-                    Style::default().fg(Color::DarkGray),
-                )]));
+            }
+        }
+    }
+
+    fn render_forks_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
+        let title = Paragraph::new(vec![Line::from(vec![Span::styled(
+            "Block Tree Forks - Competing Blocks at Same Height",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )])])
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(title, chunks[0]);
+
+        let node_count = app_state.nodes.len();
+        if node_count == 0 {
+            let no_nodes = Paragraph::new("No nodes configured")
+                .block(Block::default().title("Nodes").borders(Borders::ALL))
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(no_nodes, chunks[1]);
+            return;
+        }
+
+        // Use grid layout like other views
+        let nodes_per_row = 3;
+        let rows_needed = node_count.div_ceil(nodes_per_row);
+        let node_height = 18_u16; // Height for fork cards (taller due to fork details)
+
+        let mut row_constraints = vec![];
+        for _ in 0..rows_needed {
+            row_constraints.push(Constraint::Length(node_height));
+        }
+        row_constraints.push(Constraint::Min(0));
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(row_constraints)
+            .split(chunks[1]);
+
+        let node_list: Vec<_> = app_state.nodes.iter().collect();
+
+        let mut node_index = 0;
+        for row_idx in 0..rows_needed {
+            if row_idx >= rows.len() {
+                break;
             }
 
-            // Render the node block
-            let node_block =
-                Paragraph::new(node_lines)
-                    .block(Block::default().borders(Borders::ALL).border_style(
-                        Style::default().fg(if node_state.is_reachable {
-                            Color::Green
-                        } else {
-                            Color::Red
-                        }),
-                    ))
-                    .alignment(ratatui::layout::Alignment::Left);
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                ])
+                .split(rows[row_idx]);
 
-            frame.render_widget(node_block, node_chunks[i]);
+            for col_idx in 0..nodes_per_row {
+                if node_index < node_list.len() {
+                    let (_url, node_state) = node_list[node_index];
+
+                    // Prepare custom lines for fork details
+                    let mut custom_lines = Vec::new();
+
+                    if node_state.is_reachable {
+                        if let Some(fork_info) = &node_state.fork_info {
+                            // Tip information
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Tip Height: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(fork_info.current_tip_height.to_string()),
+                            ]));
+
+                            custom_lines.push(Line::from(vec![
+                                Span::styled(
+                                    "Tip Hash: ",
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(truncate_hash(&fork_info.current_tip_hash, 20)),
+                            ]));
+
+                            // Fork status
+                            if fork_info.total_fork_count == 0 {
+                                custom_lines.push(Line::from(vec![Span::styled(
+                                    "✓ No forks detected",
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                )]));
+                            } else {
+                                custom_lines.push(Line::from(vec![Span::styled(
+                                    format!("⚠ {} fork(s) detected", fork_info.total_fork_count),
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                )]));
+
+                                // Show first fork details if available
+                                if let Some(first_fork) = fork_info.forks.first() {
+                                    custom_lines.push(Line::from(""));
+                                    custom_lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "Fork at height: ",
+                                            Style::default().add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::styled(
+                                            first_fork.height.to_string(),
+                                            Style::default().fg(Color::Yellow),
+                                        ),
+                                    ]));
+                                    custom_lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "Competing blocks: ",
+                                            Style::default().add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::styled(
+                                            first_fork.block_count.to_string(),
+                                            Style::default().fg(Color::Red),
+                                        ),
+                                    ]));
+
+                                    // Show up to 2 competing blocks
+                                    for (idx, block) in first_fork.blocks.iter().take(2).enumerate()
+                                    {
+                                        let block_marker = if block.is_tip { "★" } else { "" };
+                                        custom_lines.push(Line::from(vec![
+                                            Span::raw(format!(
+                                                "  {}Block {}: ",
+                                                block_marker,
+                                                idx + 1
+                                            )),
+                                            Span::raw(truncate_hash(&block.block_hash, 12)),
+                                        ]));
+                                    }
+
+                                    if first_fork.blocks.len() > 2 {
+                                        custom_lines.push(Line::from(vec![Span::styled(
+                                            format!(
+                                                "  ... and {} more",
+                                                first_fork.blocks.len() - 2
+                                            ),
+                                            Style::default().fg(Color::Gray),
+                                        )]));
+                                    }
+                                }
+                            }
+                        } else {
+                            custom_lines.push(Line::from(vec![Span::styled(
+                                "Loading fork data...",
+                                Style::default().fg(Color::Gray),
+                            )]));
+                        }
+                    }
+
+                    self.render_node_detail_card(
+                        frame,
+                        cols[col_idx],
+                        node_state,
+                        "Fork Details:",
+                        custom_lines,
+                    );
+
+                    node_index += 1;
+                }
+            }
         }
     }
 
@@ -1128,6 +1360,150 @@ impl MainMenu {
         let logs = Paragraph::new("Logs view - to be implemented")
             .block(Block::default().title("Logs").borders(Borders::ALL));
         frame.render_widget(logs, area);
+    }
+
+    fn render_config_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+
+        let title = Paragraph::new(vec![Line::from(vec![Span::styled(
+            "Node Configurations",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )])])
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(title, chunks[0]);
+
+        let node_count = app_state.nodes.len();
+        if node_count == 0 {
+            let no_nodes = Paragraph::new("No nodes configured")
+                .block(Block::default().title("Nodes").borders(Borders::ALL))
+                .alignment(ratatui::layout::Alignment::Center);
+            frame.render_widget(no_nodes, chunks[1]);
+            return;
+        }
+
+        // Use grid layout like Nodes view
+        let nodes_per_row = 3;
+        let rows_needed = node_count.div_ceil(nodes_per_row);
+        let node_height = 14_u16; // Height for config cards
+
+        let mut row_constraints = vec![];
+        for _ in 0..rows_needed {
+            row_constraints.push(Constraint::Length(node_height));
+        }
+        row_constraints.push(Constraint::Min(0));
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(row_constraints)
+            .split(chunks[1]);
+
+        let node_list: Vec<_> = app_state.nodes.iter().collect();
+
+        let mut node_index = 0;
+        for row_idx in 0..rows_needed {
+            if row_idx >= rows.len() {
+                break;
+            }
+
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(33),
+                    Constraint::Percentage(34),
+                ])
+                .split(rows[row_idx]);
+
+            for col_idx in 0..nodes_per_row {
+                if node_index < node_list.len() {
+                    let (_url, node_state) = node_list[node_index];
+
+                    // Prepare custom lines for config details
+                    let mut custom_lines = Vec::new();
+
+                    if let Some(config) = &node_state.config {
+                        // Mempool Config section
+                        custom_lines.push(Line::from(vec![Span::styled(
+                            "Mempool:",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )]));
+
+                        custom_lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("Anchor Expiry: ", Style::default()),
+                            Span::styled(
+                                format!("{}", config.mempool.anchor_expiry_depth),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]));
+
+                        custom_lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("Migration Depth: ", Style::default()),
+                            Span::styled(
+                                format!("{}", config.mempool.block_migration_depth),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]));
+
+                        custom_lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("Max Data Txs: ", Style::default()),
+                            Span::styled(
+                                format!("{}", config.mempool.max_data_txs_per_block),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]));
+
+                        // Node Config section
+                        custom_lines.push(Line::from(vec![Span::styled(
+                            "Network:",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )]));
+
+                        custom_lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("Mode: ", Style::default()),
+                            Span::styled(&config.node.node_mode, Style::default().fg(Color::Cyan)),
+                            Span::raw(" | "),
+                            Span::styled("HTTP: ", Style::default()),
+                            Span::styled(
+                                format!("{}", config.node.http_port),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            Span::raw(" | "),
+                            Span::styled("P2P: ", Style::default()),
+                            Span::styled(
+                                format!("{}", config.node.p2p_port),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                        ]));
+                    } else {
+                        custom_lines.push(Line::from(vec![Span::styled(
+                            "Config not available",
+                            Style::default().fg(Color::Yellow),
+                        )]));
+                    }
+
+                    self.render_node_detail_card(
+                        frame,
+                        cols[col_idx],
+                        node_state,
+                        "Configuration:",
+                        custom_lines,
+                    );
+
+                    node_index += 1;
+                }
+            }
+        }
     }
 
     fn render_settings_view(&self, frame: &mut Frame, area: Rect, app_state: &AppState) {
@@ -1153,9 +1529,21 @@ impl MainMenu {
                     Style::default().fg(Color::Cyan),
                 ),
             ]),
+            Line::from(vec![
+                Span::raw("Recording: "),
+                Span::styled(
+                    if app_state.is_recording { "ON" } else { "OFF" },
+                    Style::default().fg(if app_state.is_recording {
+                        Color::Green
+                    } else {
+                        Color::Gray
+                    }),
+                ),
+            ]),
             Line::from(""),
             Line::from("Press 'q' to quit"),
             Line::from("Press 'r' to refresh"),
+            Line::from("Press 'c' to toggle recording"),
             Line::from("Press '↑/↓' to navigate menu"),
         ];
 
@@ -1187,14 +1575,14 @@ impl MainMenu {
 
         let status_text = if matches!(app_state.current_menu, MenuSelection::Nodes) {
             format!(
-                " Nodes: {} | Focus: {} | Tab:Switch ↑↓:Scroll | a:Add e:Alias d:Delete | Refresh: {} t:Toggle +/-:Adjust r:Manual | q:Quit ",
+                " Nodes: {} | Focus: {} | Tab:Switch ↑↓:Scroll | a:Add e:Alias d:Delete | Refresh: {} t:Toggle +/-:Adjust r:Manual | c:Record | q:Quit ",
                 app_state.nodes.len(),
                 app_state.focused_node_index + 1,
                 refresh_status
             )
         } else {
             format!(
-                " Nodes: {} | Selected: {} | a:Add e:Alias d:Delete | Refresh: {} t:Toggle +/-:Adjust r:Manual | q:Quit ",
+                " Nodes: {} | Selected: {} | a:Add e:Alias d:Delete | Refresh: {} t:Toggle +/-:Adjust r:Manual | c:Record | q:Quit ",
                 app_state.nodes.len(),
                 selected_name,
                 refresh_status

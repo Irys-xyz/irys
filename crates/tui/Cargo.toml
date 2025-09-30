@@ -12,6 +12,7 @@ authors.workspace = true
 name = "irys-tui"
 path = "src/bin/main.rs"
 
+
 [dependencies]
 # TUI Framework
 ratatui = "0.28"
@@ -37,6 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 eyre = "0.6"
+thiserror = "2.0"
 
 # Async
 futures = "0.3"
@@ -50,6 +52,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # URL handling
 url = "2.5"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 
 
 [dev-dependencies]

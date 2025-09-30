@@ -83,6 +83,7 @@ pub struct NodeMetrics {
     pub chain_height: Option<ChainHeight>,
     pub peer_count: usize,
     pub chunk_counts: PartitionChunkCounts,
+    pub total_chunk_offsets: TotalChunkOffsets,
     pub last_updated: DateTime<Utc>,
     pub response_times: Vec<u64>,
     pub error_count: u32,
@@ -94,6 +95,12 @@ pub struct PartitionChunkCounts {
     pub publish_0: ChunkCounts,
     pub submit_0: ChunkCounts,
     pub submit_1: ChunkCounts,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TotalChunkOffsets {
+    pub publish: Option<u64>,
+    pub submit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +149,7 @@ impl Default for NodeMetrics {
             chain_height: None,
             peer_count: 0,
             chunk_counts: PartitionChunkCounts::default(),
+            total_chunk_offsets: TotalChunkOffsets::default(),
             last_updated: Utc::now(),
             response_times: Vec::new(),
             error_count: 0,
@@ -180,4 +188,82 @@ impl NodeMetrics {
                 .average_response_time()
                 .is_some_and(|t| t < MAX_HEALTHY_RESPONSE_TIME_MS)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockAtHeight {
+    pub block_hash: String,
+    pub cumulative_diff: String,
+    pub timestamp: u128,
+    pub solution_hash: String,
+    pub is_tip: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkInfo {
+    pub height: u64,
+    pub block_count: usize,
+    pub blocks: Vec<BlockAtHeight>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockTreeForksResponse {
+    pub current_tip_height: u64,
+    pub current_tip_hash: String,
+    pub forks: Vec<ForkInfo>,
+    pub total_fork_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeConfig {
+    pub consensus: ConsensusConfig,
+    pub mempool: MempoolConfig,
+    pub vdf: VdfConfig,
+    pub node: NodeBasicConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsensusConfig {
+    pub chain_id: u64,
+    pub chunk_size: u64,
+    pub num_chunks_in_partition: u64,
+    pub num_chunks_in_recall_range: u64,
+    pub num_partitions_per_slot: u64,
+    pub entropy_packing_iterations: u32,
+    pub block_migration_depth: u32,
+    pub block_tree_depth: u64,
+    pub max_data_txs_per_block: u64,
+    pub max_commitment_txs_per_block: u64,
+    pub anchor_expiry_depth: u8,
+    pub commitment_fee: u64,
+    pub block_time: u64,
+    pub num_blocks_in_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MempoolConfig {
+    pub anchor_expiry_depth: u8,
+    pub block_migration_depth: u32,
+    pub max_data_txs_per_block: u64,
+    pub max_commitment_txs_per_block: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VdfConfig {
+    pub parallel_verification_thread_limit: usize,
+    pub reset_frequency: usize,
+    pub num_checkpoints_in_vdf_step: usize,
+    pub max_allowed_vdf_fork_steps: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeBasicConfig {
+    pub node_mode: String,
+    pub http_port: u16,
+    pub p2p_port: u16,
 }
