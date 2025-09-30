@@ -46,8 +46,9 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, DataLedger, EvmBlockHash, GossipBroadcastMessage,
-    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, Address, BlockHash, DataLedger, DataTransactionLedger,
+    EvmBlockHash, GossipBroadcastMessage, H256List, IrysAddress, NetworkConfigWithDefaults as _,
+    SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -78,6 +79,168 @@ use std::{
 use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument};
+
+/// Helper: craft a data PoA SolutionContext from a real mempool tx (first chunk)
+pub async fn craft_data_poa_solution_from_tx(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    tx: &DataTransaction,
+    partition_hash: H256,
+    miner_addr: Address,
+) -> eyre::Result<SolutionContext> {
+    // Compute slot_index from parent epoch snapshot (prev block)
+    let head_height = node.get_canonical_chain_height().await;
+    let prev_block = node.get_block_by_height(head_height).await?;
+    let parent_epoch_snapshot = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_epoch_snapshot(&prev_block.block_hash)
+        .ok_or_else(|| eyre!("parent epoch snapshot not found"))?;
+    let pa = parent_epoch_snapshot
+        .partition_assignments
+        .get_assignment(partition_hash)
+        .ok_or_else(|| eyre!("partition assignment missing for {}", partition_hash))?;
+    let slot_index =
+        pa.slot_index
+            .ok_or_else(|| eyre!("slot index missing for {}", partition_hash))? as u64;
+
+    let slot_start = slot_index
+        * node.node_ctx.config.consensus.num_partitions_per_slot
+        * node.node_ctx.config.consensus.num_chunks_in_partition;
+
+    let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks as u64;
+
+    eyre::ensure!(
+        prev_total_chunks >= slot_start,
+        "prev_total_chunks {} is before slot_start {} for partition {}",
+        prev_total_chunks,
+        slot_start,
+        partition_hash
+    );
+
+    let partition_chunk_offset_u64 = prev_total_chunks - slot_start;
+    let partition_chunk_offset: u32 = u32::try_from(partition_chunk_offset_u64).map_err(|_| {
+        eyre!(
+            "partition_chunk_offset {} doesn't fit u32",
+            partition_chunk_offset_u64
+        )
+    })?;
+
+    // tx_path for a single-tx block (we'll ensure block_chunk_offset=0)
+    let (_tx_root, tx_paths) = DataTransactionLedger::merklize_tx_root(&[tx.header.clone()]);
+    let tx_path_bytes = tx_paths[0].proof.clone();
+
+    // Use first chunk of the tx
+    let chunk_size = node.node_ctx.config.consensus.chunk_size as usize;
+    let data_bytes = tx
+        .data
+        .as_ref()
+        .ok_or_else(|| eyre!("tx.data not available"))?
+        .0
+        .clone();
+    let mut poa_chunk = data_bytes
+        .get(0..std::cmp::min(chunk_size, data_bytes.len()))
+        .ok_or_else(|| eyre!("empty tx data"))?
+        .to_vec();
+
+    // Compute entropy and XOR to build PoA chunk
+    let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    compute_entropy_chunk(
+        miner_addr,
+        partition_chunk_offset as u64,
+        partition_hash.into(),
+        node.node_ctx.config.consensus.entropy_packing_iterations,
+        chunk_size,
+        &mut entropy_chunk,
+        node.node_ctx.config.consensus.chain_id,
+    );
+    for i in 0..poa_chunk.len() {
+        poa_chunk[i] ^= entropy_chunk[i];
+    }
+
+    // Fetch VDF steps and build checkpoints for (step-1, step)
+    let vdf_steps_guard = node.node_ctx.vdf_steps_guard.clone();
+    let mut tries = 0_u8;
+    let mut current_step = vdf_steps_guard.read().global_step;
+    while vdf_steps_guard
+        .read()
+        .get_steps(ii(current_step.saturating_sub(1), current_step))
+        .is_err()
+        && tries < 20
+    {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        current_step = vdf_steps_guard.read().global_step;
+        tries += 1;
+    }
+    let steps = vdf_steps_guard
+        .read()
+        .get_steps(ii(current_step.saturating_sub(1), current_step))?;
+
+    // Compute checkpoints for (current_step - 1)
+    let mut hasher = Sha256::new();
+    let mut salt = irys_types::U256::from(step_number_to_salt_number(
+        &node.node_ctx.config.vdf,
+        current_step.saturating_sub(1),
+    ));
+    let mut seed0 = steps[0];
+    let mut checkpoints: Vec<H256> =
+        vec![H256::default(); node.node_ctx.config.vdf.num_checkpoints_in_vdf_step];
+    vdf_sha(
+        &mut hasher,
+        &mut salt,
+        &mut seed0,
+        node.node_ctx.config.vdf.num_checkpoints_in_vdf_step,
+        node.node_ctx.config.vdf.num_iterations_per_checkpoint(),
+        &mut checkpoints,
+    );
+
+    // Build solution_hash = sha256(poa_chunk || offset_le || vdf_output)
+    let mut hasher_sol = Sha256::new();
+    hasher_sol.update(&poa_chunk);
+    hasher_sol.update(partition_chunk_offset.to_le_bytes());
+    hasher_sol.update(steps[1].as_bytes());
+    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+
+    // Use first chunk proof from tx
+    let data_path_bytes = tx
+        .proofs
+        .first()
+        .ok_or_else(|| eyre!("tx missing first chunk proof"))?
+        .proof
+        .clone();
+
+    Ok(SolutionContext {
+        partition_hash,
+        chunk_offset: partition_chunk_offset,
+        mining_address: miner_addr,
+        tx_path: Some(tx_path_bytes),
+        data_path: Some(data_path_bytes),
+        chunk: poa_chunk,
+        vdf_step: current_step,
+        checkpoints: H256List(checkpoints),
+        seed: Seed(steps[1]),
+        solution_hash,
+    })
+}
+
+/// Helper: submit a mining solution to the block producer and return the built block
+pub async fn submit_solution_to_block_producer(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    solution: SolutionContext,
+) -> eyre::Result<Arc<IrysBlockHeader>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    node.node_ctx
+        .service_senders
+        .block_producer
+        .send(BlockProducerCommand::SolutionFound {
+            solution,
+            response: tx,
+        })?;
+    match rx.await?? {
+        Some((block, _payload)) => Ok(block),
+        None => Err(eyre!("block producer returned None")),
+    }
+}
 
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
