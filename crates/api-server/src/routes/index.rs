@@ -41,15 +41,24 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
 }
 
 pub async fn genesis_route(state: web::Data<ApiState>) -> HttpResponse {
-    let (chain, _) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
-    let genesis = chain.first().unwrap();
+    let genesis_hash = state
+        .block_index
+        .read()
+        .get_item(0)
+        .map(|item| item.block_hash);
 
-    let genesis_info = serde_json::json!({
-        "genesis_block_hash": genesis.block_hash,
-        "height": genesis.height
-    });
+    if let Some(hash) = genesis_hash {
+        let genesis_info = serde_json::json!({
+            "genesis_block_hash": hash,
+            "height": 0
+        });
 
-    HttpResponse::Ok()
-        .content_type(ContentType::json())
-        .body(serde_json::to_string_pretty(&genesis_info).unwrap())
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .body(serde_json::to_string_pretty(&genesis_info).unwrap())
+    } else {
+        HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Genesis block not found in block index"
+        }))
+    }
 }

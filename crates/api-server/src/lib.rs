@@ -15,8 +15,9 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, chain, commitment, get_chunk, index, ledger, mempool, mining,
-    network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    block, block_index, block_tree, chain, commitment, full_config, get_chunk, index, ledger,
+    mempool, mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy,
+    storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -64,6 +65,10 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(block_index::block_index_route),
         )
         .route(
+            "/block_tree/forks",
+            web::get().to(block_tree::get_block_tree_forks),
+        )
+        .route(
             "/commitment_tx",
             web::post().to(commitment::post_commitment_tx),
         )
@@ -83,6 +88,7 @@ pub fn routes() -> impl HttpServiceFactory {
             "/network/config",
             web::get().to(network_config::get_network_config),
         )
+        .route("/config", web::get().to(full_config::get_full_config))
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route(
             "/price/commitment/stake",
@@ -124,10 +130,28 @@ pub fn routes() -> impl HttpServiceFactory {
             "/ledger/publish/{node_id}/summary",
             web::get().to(ledger::get_publish_summary),
         )
+        .route(
+            "/ledger/submit/{node_id}/assignments",
+            web::get().to(ledger::get_submit_assignments),
+        )
+        .route(
+            "/ledger/publish/{node_id}/assignments",
+            web::get().to(ledger::get_publish_assignments),
+        )
+        .route(
+            "/ledger/{node_id}/assignments",
+            web::get().to(ledger::get_all_assignments),
+        )
+        // Epoch endpoints
+        .route("/epoch/current", web::get().to(ledger::get_current_epoch))
         // Storage endpoints
         .route(
             "/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
             web::get().to(storage::get_intervals),
+        )
+        .route(
+            "/storage/counts/{ledger}/{slot_index}",
+            web::get().to(storage::get_chunk_counts),
         )
         .route(
             "/mempool/status",

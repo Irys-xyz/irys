@@ -1,8 +1,10 @@
 pub mod anchor;
 pub mod block;
 pub mod block_index;
+pub mod block_tree;
 pub mod chain;
 pub mod commitment;
+pub mod full_config;
 pub mod get_chunk;
 pub mod index;
 pub mod ledger;
