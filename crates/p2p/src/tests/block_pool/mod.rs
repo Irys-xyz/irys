@@ -159,6 +159,7 @@ impl MockedServices {
             reth_peer_sender,
             receiver,
             sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
             runtime_handle,
         );
         let execution_payload_provider =

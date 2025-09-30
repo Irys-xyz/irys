@@ -1056,6 +1056,7 @@ impl IrysNode {
             service_senders.reth_service.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
+            service_senders.peer_events.clone(),
             runtime_handle.clone(),
         );
 
@@ -1754,6 +1755,7 @@ fn init_peer_list_service(
     reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
+    peer_events: tokio::sync::broadcast::Sender<irys_domain::PeerEvent>,
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList) {
     let reth_peer_sender = {
@@ -1793,6 +1795,7 @@ fn init_peer_list_service(
         reth_peer_sender,
         service_receiver,
         service_sender,
+        peer_events,
         runtime_handle,
     )
 }
