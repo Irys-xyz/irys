@@ -1,5 +1,3 @@
-use std::{sync::LazyLock, time::Instant};
-
 use crate::ApiState;
 use actix_web::{
     http::header::ContentType,
@@ -8,8 +6,6 @@ use actix_web::{
 };
 use irys_domain::get_canonical_chain;
 use irys_types::{NodeInfo, H256};
-
-pub static STARTED_AT: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
     let (block_index_height, block_index_hash) = {
@@ -36,7 +32,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         pending_blocks: blocks as u64,
         is_syncing: state.sync_state.is_syncing(),
         current_sync_height: state.sync_state.sync_target_height(),
-        uptime_secs: STARTED_AT.elapsed().as_secs(),
+        uptime_secs: state.started_at.elapsed().as_secs(),
     };
 
     HttpResponse::Ok()
