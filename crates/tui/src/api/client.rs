@@ -254,7 +254,7 @@ impl ApiClient {
         if let Some(data_ledgers) = block.get("dataLedgers").and_then(|v| v.as_array()) {
             for ledger in data_ledgers {
                 if let (Some(ledger_id), Some(total_chunks_str)) = (
-                    ledger.get("ledgerId").and_then(|v| v.as_u64()),
+                    ledger.get("ledgerId").and_then(serde_json::Value::as_u64),
                     ledger.get("totalChunks").and_then(|v| v.as_str()),
                 ) {
                     if let Ok(total_chunks) = total_chunks_str.parse::<u64>() {

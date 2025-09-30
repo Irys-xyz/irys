@@ -395,85 +395,6 @@ pub(crate) async fn wait_for_node_ready(client: &RemoteNodeClient, node_name: &s
     Ok(())
 }
 
-/// Check sync status of all nodes against expected chunk counts
-pub(crate) async fn check_nodes_sync_status(
-    clients: &[RemoteNodeClient],
-    expected_data_chunks: usize,
-    expected_packed_slot0: usize,
-    expected_packed_slot1: usize,
-) -> Result<Vec<(String, bool)>> {
-    let mut node_sync_status = Vec::new();
-
-    for (i, client) in clients.iter().enumerate() {
-        let node_name = if i == 0 {
-            "Node0(Genesis)".to_string()
-        } else {
-            format!("Node{i}")
-        };
-
-        // Check node storage
-        let storage = check_node_storage(client, &node_name).await?;
-
-        // Check Publish(0)
-        let publish_data: usize = storage
-            .publish_slots
-            .iter()
-            .filter(|s| s.slot_index == 0)
-            .map(|s| s.data_chunks)
-            .sum();
-        let publish_packed: usize = storage
-            .publish_slots
-            .iter()
-            .filter(|s| s.slot_index == 0)
-            .map(|s| s.packed_chunks)
-            .sum();
-
-        // Check Submit(0)
-        let submit0_data: usize = storage
-            .submit_slots
-            .iter()
-            .filter(|s| s.slot_index == 0)
-            .map(|s| s.data_chunks)
-            .sum();
-        let submit0_packed: usize = storage
-            .submit_slots
-            .iter()
-            .filter(|s| s.slot_index == 0)
-            .map(|s| s.packed_chunks)
-            .sum();
-
-        // Check Submit(1)
-        let submit1_data: usize = storage
-            .submit_slots
-            .iter()
-            .filter(|s| s.slot_index == 1)
-            .map(|s| s.data_chunks)
-            .sum();
-        let submit1_packed: usize = storage
-            .submit_slots
-            .iter()
-            .filter(|s| s.slot_index == 1)
-            .map(|s| s.packed_chunks)
-            .sum();
-
-        // For remote test, we check if nodes have synced the expected data
-        let is_synced = (publish_data == expected_data_chunks
-            && publish_packed == expected_packed_slot0)
-            && (submit0_data == expected_data_chunks && submit0_packed == expected_packed_slot0)
-            && (submit1_data == 0 && submit1_packed == expected_packed_slot1);
-
-        node_sync_status.push((node_name.clone(), is_synced));
-
-        // Log sync status
-        info!(
-            "{} chunks - Publish(0): data={}, packed={} | Submit(0): data={}, packed={} | Submit(1): data={}, packed={}",
-            node_name, publish_data, publish_packed, submit0_data, submit0_packed, submit1_data, submit1_packed
-        );
-    }
-
-    Ok(node_sync_status)
-}
-
 pub(crate) async fn analyze_cluster_data(clients: &[RemoteNodeClient]) -> Result<()> {
     info!("=== Analyzing Cluster Data ===");
 
@@ -626,7 +547,6 @@ pub(crate) async fn get_node_assignment_info(
 
     let mut publish_slots = Vec::new();
     let mut submit_slots = Vec::new();
-    let mut capacity_assignments = 0;
 
     for assignment in &assignments_resp.assignments {
         match assignment.ledger_id {
@@ -640,7 +560,7 @@ pub(crate) async fn get_node_assignment_info(
                     submit_slots.push(slot_idx); // DataLedger::Submit = 1
                 }
             }
-            None => capacity_assignments += 1,
+            None => {} // capacity assignment
             _ => warn!("Unknown ledger_id: {:?}", assignment.ledger_id),
         }
     }
@@ -650,10 +570,8 @@ pub(crate) async fn get_node_assignment_info(
     submit_slots.sort();
 
     Ok(NodeAssignmentInfo {
-        node_address: node_address.to_string(),
         publish_slots,
         submit_slots,
-        capacity_assignments,
     })
 }
 
@@ -694,7 +612,6 @@ pub(crate) fn calculate_expected_storage(
     }
 
     NodeExpectedStorage {
-        node_address: assignment_info.node_address.clone(),
         expected_publish_data,
         expected_publish_packed,
         expected_submit_data,
@@ -806,11 +723,9 @@ pub(crate) async fn validate_node_storage_against_assignments(
 
     Ok(NodeSyncValidationResult {
         node_name: node_name.to_string(),
-        node_address: assignment_info.node_address.clone(),
         is_synced: is_fully_synced,
         details,
         assignment_info: assignment_info.clone(),
-        expected_storage: expected_storage.clone(),
     })
 }
 

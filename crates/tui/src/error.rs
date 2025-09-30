@@ -97,7 +97,7 @@ pub type TuiResult<T> = Result<T, TuiError>;
 /// Conversion from eyre::Error for backward compatibility
 impl From<eyre::Error> for TuiError {
     fn from(err: eyre::Error) -> Self {
-        TuiError::Other(err.to_string())
+        Self::Other(err.to_string())
     }
 }
 

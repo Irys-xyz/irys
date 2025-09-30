@@ -28,7 +28,7 @@ use crate::external::utils::{
     transactions::*,
     types::AssignmentStatus,
     utils::{
-        create_consensus_config_from_response, get_env_bool, get_env_duration, parse_node_urls,
+        create_consensus_config_from_response, get_env_duration, parse_node_urls,
     },
 };
 
@@ -39,7 +39,6 @@ const EXPECTED_PACKED_SLOT1: usize = 60; // Partition size limit
 const LEDGER_SYNC_TIMEOUT_SECS: u64 = 200; // 95% of txs appear within 30s, 99.9% within 180s
 const LEDGER_POLL_INTERVAL_SECS: u64 = 2;
 const GENESIS_INITIAL_HEIGHT: u64 = 20;
-const PEER_START_HEIGHT: u64 = 40; // Docker MIN_HEIGHT for irys-2, irys-3
 const DATA_VERIFICATION_HEIGHT: u64 = 50; // Peers at 40 + 1-2 epochs for assignments
 const GENESIS_FINAL_HEIGHT: u64 = 60; // Min height for full multi-node validation
 const REPLICA_WAIT_MAX_ATTEMPTS: usize = 30; // 30 * 2s = 60s for async replica assignment
@@ -212,7 +211,7 @@ async fn sync_partition_data_remote_test() -> Result<()> {
         .unwrap_or("0");
     let sync_height = info_resp
         .get("currentSyncHeight")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
     if sync_height <= 1 {
@@ -265,11 +264,11 @@ async fn sync_partition_data_remote_test() -> Result<()> {
 
         let publish_data_chunks = publish_result
             .get("data_chunks")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let publish_packed_chunks = publish_result
             .get("packed_chunks")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         // Check Submit(0) ledger for data
@@ -283,11 +282,11 @@ async fn sync_partition_data_remote_test() -> Result<()> {
 
         let submit_data_chunks = submit_result
             .get("data_chunks")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let submit_packed_chunks = submit_result
             .get("packed_chunks")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         if publish_data_chunks == 0 && submit_data_chunks == 0 {
@@ -356,7 +355,7 @@ async fn sync_partition_data_remote_test() -> Result<()> {
             .unwrap_or("0");
         let sync_height = info_resp
             .get("currentSyncHeight")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
 
         if sync_height <= 1 {
@@ -697,7 +696,7 @@ async fn sync_partition_data_remote_test() -> Result<()> {
         }
 
         let node_addresses_strings: Vec<String> =
-            node_addresses.iter().map(|s| s.to_string()).collect();
+            node_addresses.iter().map(std::string::ToString::to_string).collect();
         let validation_results = match check_nodes_sync_status_by_assignment(
             &clients,
             &node_addresses_strings,

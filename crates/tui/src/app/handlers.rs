@@ -177,7 +177,7 @@ impl EventHandlers {
 
     fn handle_edit_alias(state: &AppState, input_handler: &mut InputHandler) {
         let url_to_edit = if matches!(state.current_menu, MenuSelection::Nodes) {
-            let node_urls: Vec<String> = state.nodes.keys().map(|k| k.to_string()).collect();
+            let node_urls: Vec<String> = state.nodes.keys().map(std::string::ToString::to_string).collect();
             if state.focused_node_index < node_urls.len() {
                 Some(node_urls[state.focused_node_index].clone())
             } else {
@@ -192,7 +192,7 @@ impl EventHandlers {
                 let current_alias = state
                     .nodes
                     .get(&node_url)
-                    .and_then(|node| node.alias.as_ref().map(|a| a.to_string()));
+                    .and_then(|node| node.alias.as_ref().map(std::string::ToString::to_string));
                 input_handler.start_set_alias(url, current_alias);
             }
         }
@@ -200,7 +200,7 @@ impl EventHandlers {
 
     fn handle_delete_node(state: &AppState, input_handler: &mut InputHandler) {
         let url_to_delete = if matches!(state.current_menu, MenuSelection::Nodes) {
-            let node_urls: Vec<String> = state.nodes.keys().map(|k| k.to_string()).collect();
+            let node_urls: Vec<String> = state.nodes.keys().map(std::string::ToString::to_string).collect();
             if state.focused_node_index < node_urls.len() {
                 Some(node_urls[state.focused_node_index].clone())
             } else {

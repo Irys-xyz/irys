@@ -33,16 +33,6 @@ impl TestSigner {
         })
     }
 
-    pub(crate) fn random(name: String, config: &ConsensusConfig) -> Self {
-        let irys_signer = IrysSigner::random_signer(config);
-        let address = irys_signer.address();
-
-        Self {
-            irys_signer,
-            address,
-            name,
-        }
-    }
 }
 
 /// Load private keys from environment variables

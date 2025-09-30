@@ -80,13 +80,6 @@ pub(crate) fn get_env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-pub(crate) fn get_env_bool(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .unwrap_or_else(|_| default.to_string())
-        .parse::<bool>()
-        .unwrap_or(default)
-}
-
 pub(crate) fn create_consensus_config_from_response(
     resp: &super::types::NetworkConfigResponse,
 ) -> irys_types::ConsensusConfig {

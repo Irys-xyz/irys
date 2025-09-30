@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_node_state_new() {
-        let url = "http://localhost:1984".to_string();
+        let url = NodeUrl::new("http://localhost:1984").unwrap();
         let node = NodeState::new(url.clone());
 
         assert_eq!(node.url, url);
@@ -292,29 +292,29 @@ mod tests {
 
     #[test]
     fn test_node_state_display_name_without_alias() {
-        let node = NodeState::new("http://localhost:1984".to_string());
+        let node = NodeState::new(NodeUrl::new("http://localhost:1984").unwrap());
         assert_eq!(node.display_name(), "localhost:1984");
 
-        let node2 = NodeState::new("https://api.irys.xyz:443".to_string());
+        let node2 = NodeState::new(NodeUrl::new("https://api.irys.xyz:443").unwrap());
         assert_eq!(node2.display_name(), "api.irys.xyz:443");
 
-        let node3 = NodeState::new("http://192.168.1.100:8080/path".to_string());
+        let node3 = NodeState::new(NodeUrl::new("http://192.168.1.100:8080/path").unwrap());
         assert_eq!(node3.display_name(), "192.168.1.100:8080");
     }
 
     #[test]
     fn test_node_state_display_name_with_alias() {
-        let mut node = NodeState::new("http://localhost:1984".to_string());
+        let mut node = NodeState::new(NodeUrl::new("http://localhost:1984").unwrap());
         node.set_alias(Some("Main Node".to_string()));
         assert_eq!(node.display_name(), "Main Node");
     }
 
     #[test]
     fn test_node_state_set_alias() {
-        let mut node = NodeState::new("http://localhost:1984".to_string());
+        let mut node = NodeState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
         node.set_alias(Some("Test Node".to_string()));
-        assert_eq!(node.alias, Some("Test Node".to_string()));
+        assert_eq!(node.alias.as_deref(), Some("Test Node"));
 
         node.set_alias(None);
         assert_eq!(node.alias, None);
@@ -322,19 +322,22 @@ mod tests {
 
     #[test]
     fn test_node_state_display_name_edge_cases() {
-        let node1 = NodeState::new("localhost".to_string());
+        // Test URL with just domain (no path)
+        let node1 = NodeState::new(NodeUrl::new("http://localhost").unwrap());
         assert_eq!(node1.display_name(), "localhost");
 
-        let node2 = NodeState::new(String::new());
-        assert_eq!(node2.display_name(), "");
+        // Test URL with IP address
+        let node2 = NodeState::new(NodeUrl::new("http://127.0.0.1").unwrap());
+        assert_eq!(node2.display_name(), "127.0.0.1");
 
-        let node3 = NodeState::new("not-a-url".to_string());
-        assert_eq!(node3.display_name(), "not-a-url");
+        // Test URL with subdomain
+        let node3 = NodeState::new(NodeUrl::new("https://node.example.com").unwrap());
+        assert_eq!(node3.display_name(), "node.example.com");
     }
 
     #[test]
     fn test_app_state_new() {
-        let primary_url = "http://localhost:1984".to_string();
+        let primary_url = NodeUrl::new("http://localhost:1984").unwrap();
         let app_state = AppState::new(primary_url.clone());
 
         assert!(matches!(app_state.screen, AppScreen::Splash));
@@ -355,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_app_state_is_splash_finished() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
         // Should not be finished immediately
         assert!(!app_state.is_splash_finished());
@@ -367,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_app_state_transition_to_main() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
         assert!(matches!(app_state.screen, AppScreen::Splash));
         assert!(app_state.splash_start_time.is_some());
@@ -380,8 +383,8 @@ mod tests {
 
     #[test]
     fn test_app_state_add_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let new_node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let new_node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         app_state.add_node(new_node_url.clone());
 
@@ -391,10 +394,10 @@ mod tests {
 
     #[test]
     fn test_app_state_add_node_sets_selection_when_none() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
         app_state.selected_node = None;
 
-        let new_node_url = "http://localhost:1985".to_string();
+        let new_node_url = NodeUrl::new("http://localhost:1985").unwrap();
         app_state.add_node(new_node_url.clone());
 
         assert_eq!(app_state.selected_node, Some(new_node_url));
@@ -402,8 +405,8 @@ mod tests {
 
     #[test]
     fn test_app_state_remove_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         app_state.add_node(node_url.clone());
         assert!(app_state.nodes.contains_key(&node_url));
@@ -414,9 +417,9 @@ mod tests {
 
     #[test]
     fn test_app_state_remove_selected_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node1_url = "http://localhost:1985".to_string();
-        let node2_url = "http://localhost:1986".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node1_url = NodeUrl::new("http://localhost:1985").unwrap();
+        let node2_url = NodeUrl::new("http://localhost:1986").unwrap();
 
         app_state.add_node(node1_url.clone());
         app_state.add_node(node2_url);
@@ -431,8 +434,8 @@ mod tests {
 
     #[test]
     fn test_app_state_remove_last_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         app_state.add_node(node_url.clone());
         app_state.selected_node = Some(node_url.clone());
@@ -445,8 +448,8 @@ mod tests {
 
     #[test]
     fn test_app_state_get_selected_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         // No selected node returns None
         app_state.selected_node = None;
@@ -463,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_app_state_select_next_node_empty() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
         app_state.selected_node = None;
 
         app_state.select_next_node();
@@ -474,9 +477,9 @@ mod tests {
 
     #[test]
     fn test_app_state_select_next_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node1_url = "http://localhost:1985".to_string();
-        let node2_url = "http://localhost:1986".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node1_url = NodeUrl::new("http://localhost:1985").unwrap();
+        let node2_url = NodeUrl::new("http://localhost:1986").unwrap();
 
         app_state.add_node(node1_url.clone());
         app_state.add_node(node2_url);
@@ -492,8 +495,8 @@ mod tests {
 
     #[test]
     fn test_app_state_select_next_node_wraps_around() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         app_state.add_node(node_url.clone());
         app_state.selected_node = Some(node_url.clone());
@@ -506,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_app_state_select_previous_node_empty() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
         app_state.selected_node = None;
 
         app_state.select_previous_node();
@@ -517,9 +520,9 @@ mod tests {
 
     #[test]
     fn test_app_state_select_previous_node() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node1_url = "http://localhost:1985".to_string();
-        let node2_url = "http://localhost:1986".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node1_url = NodeUrl::new("http://localhost:1985").unwrap();
+        let node2_url = NodeUrl::new("http://localhost:1986").unwrap();
 
         app_state.add_node(node1_url.clone());
         app_state.add_node(node2_url);
@@ -535,8 +538,8 @@ mod tests {
 
     #[test]
     fn test_app_state_select_previous_node_with_no_selection() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         app_state.add_node(node_url.clone());
         app_state.selected_node = None;
@@ -549,8 +552,8 @@ mod tests {
 
     #[test]
     fn test_app_state_get_selected_node_url() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         // No selection
         app_state.selected_node = None;
@@ -558,21 +561,21 @@ mod tests {
 
         // With selection
         app_state.selected_node = Some(node_url.clone());
-        assert_eq!(app_state.get_selected_node_url(), Some(node_url));
+        assert_eq!(app_state.get_selected_node_url(), Some(node_url.as_str().to_string()));
     }
 
     #[test]
     fn test_app_state_set_node_alias() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node_url = "http://localhost:1985".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node_url = NodeUrl::new("http://localhost:1985").unwrap();
 
         app_state.add_node(node_url.clone());
 
         // Set alias
         app_state.set_node_alias(&node_url, Some("Test Node".to_string()));
         assert_eq!(
-            app_state.nodes[&node_url].alias,
-            Some("Test Node".to_string())
+            app_state.nodes[&node_url].alias.as_deref(),
+            Some("Test Node")
         );
 
         // Clear alias
@@ -582,8 +585,8 @@ mod tests {
 
     #[test]
     fn test_app_state_set_node_alias_nonexistent() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let nonexistent_url = "http://localhost:9999".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let nonexistent_url = NodeUrl::new("http://localhost:9999").unwrap();
 
         // Should not panic when setting alias for non-existent node
         app_state.set_node_alias(&nonexistent_url, Some("Test".to_string()));
@@ -594,9 +597,9 @@ mod tests {
 
     #[test]
     fn test_app_state_get_node_urls() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node1_url = "http://localhost:1985".to_string();
-        let node2_url = "http://localhost:1986".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node1_url = NodeUrl::new("http://localhost:1985").unwrap();
+        let node2_url = NodeUrl::new("http://localhost:1986").unwrap();
 
         // Empty initially
         assert!(app_state.get_node_urls().is_empty());
@@ -606,16 +609,16 @@ mod tests {
 
         let urls = app_state.get_node_urls();
         assert_eq!(urls.len(), 2);
-        assert!(urls.contains(&node1_url));
-        assert!(urls.contains(&node2_url));
+        assert!(urls.contains(&node1_url.as_str().to_string()));
+        assert!(urls.contains(&node2_url.as_str().to_string()));
     }
 
     #[test]
     fn test_node_selection_cycling_with_multiple_nodes() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node1_url = "http://localhost:1985".to_string();
-        let node2_url = "http://localhost:1986".to_string();
-        let node3_url = "http://localhost:1987".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node1_url = NodeUrl::new("http://localhost:1985").unwrap();
+        let node2_url = NodeUrl::new("http://localhost:1986").unwrap();
+        let node3_url = NodeUrl::new("http://localhost:1987").unwrap();
 
         app_state.add_node(node1_url.clone());
         app_state.add_node(node2_url);
@@ -644,9 +647,9 @@ mod tests {
 
     #[test]
     fn test_node_selection_cycling_backwards() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
-        let node1_url = "http://localhost:1985".to_string();
-        let node2_url = "http://localhost:1986".to_string();
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        let node1_url = NodeUrl::new("http://localhost:1985").unwrap();
+        let node2_url = NodeUrl::new("http://localhost:1986").unwrap();
 
         app_state.add_node(node1_url.clone());
         app_state.add_node(node2_url);
@@ -668,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_increase_refresh_interval() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
         // Default is 30
         assert_eq!(app_state.refresh_interval_secs, 10);
@@ -689,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_decrease_refresh_interval() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
         // Default is 30
         assert_eq!(app_state.refresh_interval_secs, 10);
@@ -710,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_toggle_auto_refresh() {
-        let mut app_state = AppState::new("http://localhost:1984".to_string());
+        let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
         // Default is true
         assert!(app_state.auto_refresh);

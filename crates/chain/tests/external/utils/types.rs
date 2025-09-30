@@ -166,13 +166,11 @@ pub(crate) struct SlotReplicaInfo {
     pub ledger: irys_types::DataLedger,
     pub replicas: Vec<SlotReplica>,
     pub replica_count: usize,
-    pub is_fully_replicated: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SlotReplica {
     pub node_address: String,
-    pub partition_hash: irys_types::H256,
 }
 
 #[derive(Debug)]
@@ -207,18 +205,14 @@ pub(crate) struct ChunkCountsResponse {
 /// Types for assignment-based validation
 #[derive(Debug, Clone)]
 pub(crate) struct NodeAssignmentInfo {
-    pub node_address: String,
     /// Slot indices assigned to Publish ledger
     pub publish_slots: Vec<usize>,
     /// Slot indices assigned to Submit ledger
     pub submit_slots: Vec<usize>,
-    /// Count of capacity assignments
-    pub capacity_assignments: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct NodeExpectedStorage {
-    pub node_address: String,
     /// Expected data chunks per slot (slot_index -> chunk_count)
     pub expected_publish_data: BTreeMap<usize, usize>,
     /// Expected packed chunks per slot (slot_index -> chunk_count)
@@ -232,9 +226,7 @@ pub(crate) struct NodeExpectedStorage {
 #[derive(Debug, Clone)]
 pub(crate) struct NodeSyncValidationResult {
     pub node_name: String,
-    pub node_address: String,
     pub is_synced: bool,
     pub details: String,
     pub assignment_info: NodeAssignmentInfo,
-    pub expected_storage: NodeExpectedStorage,
 }

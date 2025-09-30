@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use eyre::{Context, Result};
+use eyre::{Context as _, Result};
 use sqlx::sqlite::SqlitePool;
 use std::path::Path;
 
@@ -62,7 +62,7 @@ impl Database {
 
     async fn initialize_schema(&self) -> Result<()> {
         sqlx::query(
-            r#"
+            "
             CREATE TABLE IF NOT EXISTS node_info_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -77,14 +77,14 @@ impl Database {
                 current_sync_height INTEGER,
                 raw_json TEXT
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await
         .context("Failed to create node_info_records table")?;
 
         sqlx::query(
-            r#"
+            "
             CREATE TABLE IF NOT EXISTS mempool_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -98,14 +98,14 @@ impl Database {
                 data_tx_total_size INTEGER,
                 raw_json TEXT
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await
         .context("Failed to create mempool_records table")?;
 
         sqlx::query(
-            r#"
+            "
             CREATE TABLE IF NOT EXISTS mining_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -121,14 +121,14 @@ impl Database {
                 hashrate_7d REAL,
                 raw_json TEXT
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await
         .context("Failed to create mining_records table")?;
 
         sqlx::query(
-            r#"
+            "
             CREATE TABLE IF NOT EXISTS fork_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -140,14 +140,14 @@ impl Database {
                 total_forked_blocks INTEGER,
                 raw_json TEXT
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await
         .context("Failed to create fork_records table")?;
 
         sqlx::query(
-            r#"
+            "
             CREATE TABLE IF NOT EXISTS data_sync_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -159,14 +159,14 @@ impl Database {
                 sync_speed_mbps REAL,
                 raw_json TEXT
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await
         .context("Failed to create data_sync_records table")?;
 
         sqlx::query(
-            r#"
+            "
             CREATE TABLE IF NOT EXISTS metrics_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -178,7 +178,7 @@ impl Database {
                 storage_used_gb REAL,
                 raw_json TEXT
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await
@@ -230,13 +230,13 @@ impl Database {
         let timestamp = Utc::now();
 
         sqlx::query(
-            r#"
+            "
             INSERT INTO node_info_records (
                 timestamp, node_url, node_type, height, block_hash,
                 block_index_height, block_index_hash, pending_blocks,
                 peer_count, current_sync_height, raw_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(timestamp)
         .bind(node_url)
@@ -265,13 +265,13 @@ impl Database {
         let timestamp = Utc::now();
 
         sqlx::query(
-            r#"
+            "
             INSERT INTO mempool_records (
                 timestamp, node_url, data_tx_count, commitment_tx_count,
                 pending_chunks_count, pending_pledges_count, recent_valid_tx_count,
                 recent_invalid_tx_count, data_tx_total_size, raw_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(timestamp)
         .bind(node_url)
@@ -299,13 +299,13 @@ impl Database {
         let timestamp = Utc::now();
 
         sqlx::query(
-            r#"
+            "
             INSERT INTO mining_records (
                 timestamp, node_url, block_height, block_hash, block_timestamp,
                 current_difficulty, cumulative_difficulty, last_diff_adjustment_timestamp,
                 hashrate_1h, hashrate_24h, hashrate_7d, raw_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(timestamp)
         .bind(node_url)
@@ -315,9 +315,9 @@ impl Database {
         .bind(&info.current_difficulty)
         .bind(&info.cumulative_difficulty)
         .bind(info.last_diff_adjustment_timestamp as i64)
-        .bind(0.0f64) // hashrate_1h - not available in current API
-        .bind(0.0f64) // hashrate_24h - not available in current API
-        .bind(0.0f64) // hashrate_7d - not available in current API
+        .bind(0.0_f64) // hashrate_1h - not available in current API
+        .bind(0.0_f64) // hashrate_24h - not available in current API
+        .bind(0.0_f64) // hashrate_7d - not available in current API
         .bind(raw_json)
         .execute(&self.pool)
         .await
@@ -339,12 +339,12 @@ impl Database {
         let timestamp = Utc::now();
 
         sqlx::query(
-            r#"
+            "
             INSERT INTO fork_records (
                 timestamp, node_url, current_tip_height, current_tip_hash,
                 fork_count, max_fork_depth, total_forked_blocks, raw_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(timestamp)
         .bind(node_url)
@@ -374,12 +374,12 @@ impl Database {
         let timestamp = Utc::now();
 
         sqlx::query(
-            r#"
+            "
             INSERT INTO data_sync_records (
                 timestamp, node_url, sync_height, total_data_chunks,
                 total_packed_chunks, sync_progress, sync_speed_mbps, raw_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(timestamp)
         .bind(node_url)
@@ -409,12 +409,12 @@ impl Database {
         let timestamp = Utc::now();
 
         sqlx::query(
-            r#"
+            "
             INSERT INTO metrics_records (
                 timestamp, node_url, uptime_percentage, avg_response_time_ms,
                 error_count, total_chunks, storage_used_gb, raw_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(timestamp)
         .bind(node_url)
@@ -433,11 +433,11 @@ impl Database {
 
     pub async fn get_latest_records(&self, limit: usize) -> Result<Vec<NodeInfoRecord>> {
         let records = sqlx::query_as::<_, NodeInfoRecord>(
-            r#"
+            "
             SELECT * FROM node_info_records
             ORDER BY timestamp DESC
             LIMIT ?
-            "#,
+            ",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -453,12 +453,12 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<NodeInfoRecord>> {
         let records = sqlx::query_as::<_, NodeInfoRecord>(
-            r#"
+            "
             SELECT * FROM node_info_records
             WHERE node_url = ?
             ORDER BY timestamp DESC
             LIMIT ?
-            "#,
+            ",
         )
         .bind(node_url)
         .bind(limit as i64)

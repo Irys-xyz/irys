@@ -51,13 +51,11 @@ impl EventHandler {
                     }
                 }
             }
+        } else if self.last_refresh.elapsed() >= self.refresh_interval {
+            self.last_refresh = Instant::now();
+            Ok(AppEvent::Refresh)
         } else {
-            if self.last_refresh.elapsed() >= self.refresh_interval {
-                self.last_refresh = Instant::now();
-                Ok(AppEvent::Refresh)
-            } else {
-                Ok(AppEvent::Tick)
-            }
+            Ok(AppEvent::Tick)
         }
     }
 }

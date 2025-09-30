@@ -13,15 +13,14 @@
 //! These assumptions are hardcoded as constants and should not be used in production.
 
 use super::{
-    api::{check_transaction_status, fetch_anchor, fetch_data_price, fetch_network_config},
+    api::{check_transaction_status, fetch_anchor, fetch_data_price},
     client::RemoteNodeClient,
     signer::TestSigner,
     utils::generate_test_data,
 };
 use eyre::Result;
 use irys_api_client::ApiClient as _;
-use irys_types::{Address, CommitmentTransaction, DataLedger, DataTransaction, PledgeDataProvider};
-use serde::Deserialize;
+use irys_types::{DataLedger, DataTransaction};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -52,7 +51,7 @@ pub(crate) async fn post_data_transaction(
 
     // CRITICAL: Test environment requires 3x higher permanent fees to ensure
     // ingress proof rewards are covered. Production uses different calculation.
-    perm_fee = perm_fee * INGRESS_FEE_MULTIPLIER;
+    perm_fee *= INGRESS_FEE_MULTIPLIER;
 
     info!("Got fees - perm: {}, term: {}", perm_fee, term_fee);
 
@@ -98,110 +97,6 @@ pub(crate) async fn post_data_transaction(
     }
 
     Ok(signed_tx)
-}
-
-pub(crate) async fn post_stake_commitment(
-    client: &RemoteNodeClient,
-    signer: &TestSigner,
-) -> Result<CommitmentTransaction> {
-    info!("Posting stake commitment from {}", signer.name);
-
-    let anchor = fetch_anchor(client).await.map_err(|e| {
-        warn!("Failed to fetch anchor: {}", e);
-        e
-    })?;
-
-    let config_resp = fetch_network_config(client).await.map_err(|e| {
-        warn!("Failed to fetch network config: {}", e);
-        e
-    })?;
-
-    let config = super::utils::create_consensus_config_from_response(&config_resp);
-
-    let commitment = CommitmentTransaction::new_stake(&config, anchor);
-
-    let signed_commitment = signer.irys_signer.sign_commitment(commitment)?;
-    info!("Created stake commitment: {:?}", signed_commitment.id);
-
-    post_commitment_transaction(client, &signed_commitment).await?;
-    info!("Posted stake commitment successfully");
-
-    Ok(signed_commitment)
-}
-
-pub(crate) async fn post_pledge_commitment(
-    client: &RemoteNodeClient,
-    signer: &TestSigner,
-) -> Result<CommitmentTransaction> {
-    post_pledge_commitment_with_count(client, signer, 0).await
-}
-
-pub(crate) async fn post_pledge_commitment_with_count(
-    client: &RemoteNodeClient,
-    signer: &TestSigner,
-    pledge_count: u64,
-) -> Result<CommitmentTransaction> {
-    info!(
-        "Posting pledge commitment {} from {}",
-        pledge_count + 1,
-        signer.name
-    );
-
-    let anchor = fetch_anchor(client).await.map_err(|e| {
-        warn!("Failed to fetch anchor for pledge: {}", e);
-        e
-    })?;
-    debug!("Got anchor: {:?}", anchor);
-
-    let config_resp = fetch_network_config(client).await.map_err(|e| {
-        warn!("Failed to fetch network config for pledge: {}", e);
-        e
-    })?;
-    debug!("Got network config");
-    let config = super::utils::create_consensus_config_from_response(&config_resp);
-
-    let signer_address = signer.irys_signer.address();
-    debug!("Using pledge count {} for testing", pledge_count);
-
-    let commitment =
-        CommitmentTransaction::new_pledge(&config, anchor, &pledge_count, signer_address).await;
-    info!(
-        "Created pledge with value: {} (count: {})",
-        commitment.value, pledge_count
-    );
-
-    let signed_commitment = signer.irys_signer.sign_commitment(commitment)?;
-    info!("Created pledge commitment: {:?}", signed_commitment.id);
-
-    post_commitment_transaction(client, &signed_commitment).await?;
-    info!("Posted pledge commitment successfully");
-
-    Ok(signed_commitment)
-}
-
-async fn post_transaction_header(client: &RemoteNodeClient, tx: &DataTransaction) -> Result<()> {
-    let socket_addr = client.socket_addr()?;
-
-    client
-        .api_client
-        .post_transaction(socket_addr, tx.header.clone())
-        .await?;
-
-    Ok(())
-}
-
-async fn post_commitment_transaction(
-    client: &RemoteNodeClient,
-    commitment: &CommitmentTransaction,
-) -> Result<()> {
-    let socket_addr = client.socket_addr()?;
-
-    client
-        .api_client
-        .post_commitment_transaction(socket_addr, commitment.clone())
-        .await?;
-
-    Ok(())
 }
 
 pub(crate) async fn post_chunk(
@@ -254,94 +149,13 @@ pub(crate) async fn post_transaction_chunks(
     Ok(())
 }
 
-/// Response from pledge price endpoint
-#[derive(Debug, Deserialize)]
-struct PledgePriceResponse {
-    pledge_count: u64,
-    #[expect(dead_code)]
-    price: String,
-}
+async fn post_transaction_header(client: &RemoteNodeClient, tx: &DataTransaction) -> Result<()> {
+    let socket_addr = client.socket_addr()?;
 
-/// A pledge provider that queries the remote node for pledge counts
-struct RemotePledgeProvider {
-    client: RemoteNodeClient,
-    address: Address,
-}
-
-impl RemotePledgeProvider {
-    fn new(client: RemoteNodeClient, address: Address) -> Self {
-        Self { client, address }
-    }
-
-    async fn fetch_pledge_count(&self) -> Result<u64> {
-        let url = format!(
-            "{}/price/commitment/pledge/{}",
-            self.client.url,
-            format!("{:?}", self.address)
-        );
-
-        let response = self.client.http_client.get(&url).send().await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(eyre::eyre!("Failed to fetch pledge count: {}", error_text));
-        }
-
-        let resp: PledgePriceResponse = response.json().await?;
-        Ok(resp.pledge_count)
-    }
-}
-
-#[async_trait::async_trait]
-impl PledgeDataProvider for RemotePledgeProvider {
-    async fn pledge_count(&self, _user_address: Address) -> u64 {
-        // Use the address provided at construction time
-        self.fetch_pledge_count().await.unwrap_or(0)
-    }
-}
-
-/// Post multiple pledges for a signer
-pub(crate) async fn post_multiple_pledges(
-    client: &RemoteNodeClient,
-    signer: &TestSigner,
-    count: usize,
-) -> Result<Vec<CommitmentTransaction>> {
-    let mut pledges = Vec::new();
-    for i in 0..count {
-        info!("Posting pledge {} of {} for {}", i + 1, count, signer.name);
-        match post_pledge_commitment_with_count(client, signer, i as u64).await {
-            Ok(pledge) => {
-                info!("{} pledge {} posted: {:?}", signer.name, i + 1, pledge.id);
-                pledges.push(pledge);
-            }
-            Err(e) => {
-                warn!("{} pledge {} failed: {}", signer.name, i + 1, e);
-                // Continue with next pledge instead of failing entirely
-                // This handles the case where some pledges might already exist
-            }
-        }
-    }
-    if pledges.is_empty() {
-        Err(eyre::eyre!(
-            "Failed to post any pledges for {}",
-            signer.name
-        ))
-    } else {
-        Ok(pledges)
-    }
-}
-
-/// Stake and pledge a signer with multiple pledges
-pub(crate) async fn stake_and_pledge_signer(
-    client: &RemoteNodeClient,
-    signer: &TestSigner,
-    pledge_count: usize,
-) -> Result<()> {
-    // First stake
-    post_stake_commitment(client, signer).await?;
-
-    // Then post multiple pledges
-    post_multiple_pledges(client, signer, pledge_count).await?;
+    client
+        .api_client
+        .post_transaction(socket_addr, tx.header.clone())
+        .await?;
 
     Ok(())
 }

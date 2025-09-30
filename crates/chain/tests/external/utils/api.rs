@@ -177,20 +177,6 @@ pub(crate) async fn get_partition_assignments(
     get_json(client, &endpoint, "Failed to get partition assignments").await
 }
 
-pub(crate) async fn get_submit_assignments(
-    client: &RemoteNodeClient,
-    node_id: &str,
-) -> Result<PartitionAssignmentsResponse> {
-    get_partition_assignments(client, node_id, Some(DataLedger::Submit)).await
-}
-
-pub(crate) async fn get_publish_assignments(
-    client: &RemoteNodeClient,
-    node_id: &str,
-) -> Result<PartitionAssignmentsResponse> {
-    get_partition_assignments(client, node_id, Some(DataLedger::Publish)).await
-}
-
 pub(crate) async fn get_all_assignments(
     client: &RemoteNodeClient,
     node_id: &str,
@@ -200,78 +186,6 @@ pub(crate) async fn get_all_assignments(
 
 pub(crate) async fn get_current_epoch(client: &RemoteNodeClient) -> Result<EpochInfoResponse> {
     get_json(client, "epoch/current", "Failed to get current epoch").await
-}
-
-pub(crate) async fn verify_all_partitions_assigned(
-    client: &RemoteNodeClient,
-    node_id: &str,
-) -> Result<bool> {
-    let response = get_all_assignments(client, node_id).await?;
-
-    match response.assignment_status {
-        AssignmentStatus::FullyAssigned => Ok(true),
-        AssignmentStatus::PartiallyAssigned { assigned, total } => {
-            tracing::info!("Partial assignment: {}/{} assigned", assigned, total);
-            Ok(false)
-        }
-        AssignmentStatus::Unassigned => Ok(false),
-    }
-}
-
-pub(crate) async fn verify_partition_hash_quality(
-    client: &RemoteNodeClient,
-    node_id: &str,
-) -> Result<bool> {
-    let response = get_all_assignments(client, node_id).await?;
-    let analysis = &response.hash_analysis;
-
-    if analysis.zero_hashes > 0 {
-        tracing::warn!(
-            "Found {} zero hashes in partition assignments",
-            analysis.zero_hashes
-        );
-        return Ok(false);
-    }
-
-    if !analysis.duplicate_hashes.is_empty() {
-        tracing::warn!("Found duplicate hashes: {:?}", analysis.duplicate_hashes);
-        return Ok(false);
-    }
-
-    if analysis.total_hashes != analysis.unique_hashes {
-        tracing::warn!(
-            "Hash count mismatch: {} total, {} unique",
-            analysis.total_hashes,
-            analysis.unique_hashes
-        );
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-pub(crate) async fn wait_for_epoch_transition(
-    client: &RemoteNodeClient,
-    start_epoch: u64,
-    timeout_secs: u64,
-) -> Result<u64> {
-    use tokio::time::{sleep, Duration};
-
-    let start_time = std::time::Instant::now();
-    let timeout_duration = Duration::from_secs(timeout_secs);
-
-    loop {
-        if start_time.elapsed() > timeout_duration {
-            return Err(eyre::eyre!("Timeout waiting for epoch transition"));
-        }
-
-        let current_epoch_info = get_current_epoch(client).await?;
-        if current_epoch_info.current_epoch > start_epoch {
-            return Ok(current_epoch_info.current_epoch);
-        }
-
-        sleep(Duration::from_secs(2)).await;
-    }
 }
 
 // Slot replica verification functions using existing APIs
@@ -341,9 +255,8 @@ pub(crate) async fn aggregate_slot_replicas(
 
         let slot_replicas: Vec<SlotReplica> = replicas
             .into_iter()
-            .map(|(node_addr, hash)| SlotReplica {
+            .map(|(node_addr, _hash)| SlotReplica {
                 node_address: node_addr,
-                partition_hash: hash,
             })
             .collect();
 
@@ -352,7 +265,6 @@ pub(crate) async fn aggregate_slot_replicas(
             ledger,
             replica_count,
             replicas: slot_replicas,
-            is_fully_replicated,
         });
     }
 
@@ -529,7 +441,7 @@ pub(crate) async fn validate_partition_assignments(
     Ok(())
 }
 
-pub async fn get_chunk_counts(
+pub(crate) async fn get_chunk_counts(
     client: &RemoteNodeClient,
     ledger: &str,
     slot_index: usize,
