@@ -58,6 +58,7 @@ reth.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+irys-reth.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true
