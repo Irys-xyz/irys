@@ -25,7 +25,7 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
 
-use crate::routes::anchor;
+use crate::routes::{anchor, index::STARTED_AT};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -112,7 +112,7 @@ pub fn routes() -> impl HttpServiceFactory {
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
     info!(?port, "Starting API server");
-
+    std::sync::LazyLock::force(&STARTED_AT);
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
         App::new()
