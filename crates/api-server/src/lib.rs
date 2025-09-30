@@ -21,6 +21,7 @@ use routes::{
 use std::{
     net::{SocketAddr, TcpListener},
     sync::Arc,
+    time::Instant,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info};
@@ -41,6 +42,7 @@ pub struct ApiState {
     pub block_index: BlockIndexReadGuard,
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub started_at: Instant,
 }
 
 impl ApiState {
@@ -112,7 +114,6 @@ pub fn routes() -> impl HttpServiceFactory {
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
     info!(?port, "Starting API server");
-
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
         App::new()
