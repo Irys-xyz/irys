@@ -1,5 +1,6 @@
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
+mod blobs_rejected;
 
 use std::sync::Arc;
 

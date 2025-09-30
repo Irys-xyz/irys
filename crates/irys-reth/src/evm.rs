@@ -641,7 +641,6 @@ where
         };
 
         // we've determined that this is/should be a shadow tx
-
         let shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..])
             .map_err(|e| Self::create_internal_error(format!("failed to decode shadow tx: {e}")))?;
 
@@ -722,11 +721,6 @@ where
                 if state_acc.status != account.status {
                     warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
                 }
-                // assert_eq!(
-                //     state_acc.status, account.status,
-                //     "Invalid account status flags: from commit {:?}, from prev: {:?}",
-                //     &state_acc.status, &account.status
-                // );
 
                 execution_result
             }

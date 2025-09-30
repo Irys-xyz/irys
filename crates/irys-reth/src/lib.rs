@@ -519,7 +519,7 @@ mod tests {
     async fn eip4844_txs_are_rejected_by_mempool() -> eyre::Result<()> {
         // setup
         let ctx = TestContext::new().await?;
-        let ((node, _shadow_tx_rx), ctx) = ctx.get_single_node()?;
+        let ((node, _shadow_tx_rx), _ctx) = ctx.get_single_node()?;
         let local_signer = PrivateKeySigner::random();
         let envelope: Bytes = TransactionTestContext::tx_with_blobs_bytes(1, local_signer)
             .await
