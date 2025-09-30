@@ -1,12 +1,17 @@
 use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use eyre::OptionExt as _;
 use irys_actors::BlockProdStrategy;
-use irys_actors::{BlockProducerInner, ProductionStrategy};
+use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
 use irys_types::{IrysBlockHeader, NodeConfig};
 use reth::core::primitives::SealedBlock;
-use reth_ethereum_primitives::Block;
+use reth::primitives::Block;
+use alloy_eips::eip7685::{Requests, RequestsOrHash};
+use reth::rpc::types::engine::ExecutionPayload;
+use reth::api::Block as _;
+use reth::rpc::api::EngineApiClient as _;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
@@ -34,8 +39,8 @@ async fn send_block_to_block_tree(
 
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(
-    genesis_node: &IrysNodeTest,
-) -> eyre::Result<(Arc<IrysBlockHeader>, SealedBlock<Block>)> {
+    genesis_node: &IrysNodeTest<IrysNodeCtx>,
+) -> eyre::Result<(Arc<IrysBlockHeader>, reth::payload::EthBuiltPayload)> {
     let block_prod_strategy = ProductionStrategy {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
@@ -58,6 +63,41 @@ where
     block.seal_slow()
 }
 
+// Injects a sealed block into the local reth engine via engine API so that
+// ExecutionPayloadCache can retrieve it by hash during validation.
+async fn inject_payload_into_reth(
+    node_ctx: &IrysNodeCtx,
+    sealed: SealedBlock<Block>,
+    parent_beacon_block_root: irys_types::H256,
+) -> eyre::Result<()> {
+    let exec_data = <
+        <irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as
+            reth::api::PayloadTypes
+    >::block_to_payload(sealed);
+
+    let payload = exec_data.payload;
+    let sidecar = exec_data.sidecar;
+    let ExecutionPayload::V3(payload_v3) = payload else {
+        eyre::bail!("expected v3 payload");
+    };
+    let versioned_hashes = sidecar
+        .versioned_hashes()
+        .ok_or_eyre("version hashes must be present")?
+        .clone();
+
+    let engine_api_client = node_ctx.reth_node_adapter.inner.engine_http_client();
+    let _ = engine_api_client
+        .new_payload_v4(
+            payload_v3,
+            versioned_hashes,
+            parent_beacon_block_root.into(),
+            RequestsOrHash::Requests(Requests::new(vec![])),
+        )
+        .await?;
+
+    Ok(())
+}
+
 #[test_log::test(actix_web::test)]
 async fn evm_payload_with_requests_hash_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
@@ -74,17 +114,14 @@ async fn evm_payload_with_requests_hash_is_rejected() -> eyre::Result<()> {
     let (mut irys_block, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set requests_hash in the EVM header
-    let mutated = mutate_header(&eth_payload, |blk| {
+    let mutated = mutate_header(eth_payload.block(), |blk| {
         // set any non-empty hash
         blk.header.requests_hash = Some(reth::revm::primitives::B256::with_last_byte(0x11));
     });
 
-    // Update execution payload cache with mutated sealed block
-    genesis_node
-        .node_ctx
-        .execution_payload_provider
-        .add_payload_to_cache(mutated.clone())
-        .await;
+    // Register mutated payload in local reth so validation can fetch it
+    inject_payload_into_reth(&genesis_node.node_ctx, mutated.clone(), irys_block.previous_block_hash)
+        .await?;
 
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
@@ -118,17 +155,14 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     let (mut irys_block, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set blob_gas_used in the EVM header to non-zero
-    let mutated = mutate_header(&eth_payload, |blk| {
+    let mutated = mutate_header(eth_payload.block(), |blk| {
         blk.header.blob_gas_used = Some(1);
         blk.header.excess_blob_gas = blk.header.excess_blob_gas.or(Some(0));
     });
 
-    // Update cache and irys header
-    genesis_node
-        .node_ctx
-        .execution_payload_provider
-        .add_payload_to_cache(mutated.clone())
-        .await;
+    // Register mutated payload in local reth so validation can fetch it
+    inject_payload_into_reth(&genesis_node.node_ctx, mutated.clone(), irys_block.previous_block_hash)
+        .await?;
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
@@ -160,17 +194,14 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     let (mut irys_block, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set excess_blob_gas in the EVM header to non-zero
-    let mutated = mutate_header(&eth_payload, |blk| {
+    let mutated = mutate_header(eth_payload.block(), |blk| {
         blk.header.excess_blob_gas = Some(1);
         blk.header.blob_gas_used = blk.header.blob_gas_used.or(Some(0));
     });
 
-    // Update cache and irys header
-    genesis_node
-        .node_ctx
-        .execution_payload_provider
-        .add_payload_to_cache(mutated.clone())
-        .await;
+    // Register mutated payload in local reth so validation can fetch it
+    inject_payload_into_reth(&genesis_node.node_ctx, mutated.clone(), irys_block.previous_block_hash)
+        .await?;
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
@@ -185,4 +216,3 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     genesis_node.stop().await;
     Ok(())
 }
-

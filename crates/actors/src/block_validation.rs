@@ -996,6 +996,16 @@ pub async fn shadow_transactions_are_valid(
 
     let evm_block: Block = payload_v3.try_into_block()?;
 
+    // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
+    if evm_block.header.requests_hash.is_some() {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            "Rejecting block: EIP-7685 requests_hash present which is disabled",
+        );
+        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
+    }
+
     // 2. Extract shadow transactions from the beginning of the block
     let mut expect_shadow_txs = true;
     let actual_shadow_txs = evm_block
