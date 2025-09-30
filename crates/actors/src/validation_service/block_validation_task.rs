@@ -288,11 +288,12 @@ impl BlockValidationTask {
         }
         .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block.block_hash, block_height = %self.block.height));
 
-        let epoch_snapshot = self
+        let parent_epoch_snapshot = self
             .block_tree_guard
             .read()
-            .get_epoch_snapshot(&block.block_hash)
-            .expect("block should have an epoch snapshot in the block_tree");
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .expect("parent block should have an epoch snapshot in the block_tree");
+        tracing::info!("Using parent epoch snapshot for PoA validation");
 
         // POA validation
         let poa_task = {
@@ -308,7 +309,7 @@ impl BlockValidationTask {
                 poa_is_valid(
                     &poa,
                     &block_index_guard,
-                    &epoch_snapshot,
+                    &parent_epoch_snapshot,
                     &consensus_config,
                     &miner_address,
                 )
