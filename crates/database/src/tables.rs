@@ -153,18 +153,7 @@ table IngressProofs {
     type SubKey = Address;
 }
 
-/// Maps a global (perm) chunk offset to the last block height it was used by a transaction
-/// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks
-table ProgrammableDataLRU {
-    type Key = GlobalChunkOffset;
-    type Value = u64;
-}
 
-/// Maps a global offset to a cached chunk
-table ProgrammableDataCache {
-    type Key = GlobalChunkOffset;
-    type Value = CachedChunk;
-}
 
 /// Tracks the peer list of known peers as well as their reputation score.
 /// While the node maintains connections to a subset of these peers - the
