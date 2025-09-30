@@ -428,9 +428,10 @@ impl BlockTree {
             .insert(hash);
 
         debug!(
-            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}",
-            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash
+            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}",
+            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash()
         );
+
         if block.cumulative_diff > self.max_cumulative_difficulty.0 {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
