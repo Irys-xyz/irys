@@ -5039,6 +5039,7 @@ dependencies = [
  "alloy-rpc-types",
  "assert_matches",
  "atomic-write-file",
+ "base58",
  "derive_more",
  "eyre",
  "irys-config",
