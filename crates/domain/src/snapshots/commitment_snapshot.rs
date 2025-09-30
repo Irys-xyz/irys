@@ -1,6 +1,9 @@
 use irys_primitives::CommitmentType;
 use irys_types::{Address, CommitmentTransaction};
-use std::{collections::BTreeMap, hash::{Hash as _, Hasher as _}};
+use std::{
+    collections::BTreeMap,
+    hash::{Hash as _, Hasher as _},
+};
 use tracing::debug;
 
 use super::EpochSnapshot;
