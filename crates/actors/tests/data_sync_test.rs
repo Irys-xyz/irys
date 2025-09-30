@@ -492,9 +492,13 @@ impl TestSetup {
         // Create service senders to finish initializing the PeerList
         let (service_senders, service_receivers) = ServiceSenders::new();
 
-        let peer_list =
-            PeerList::from_peers(peers_data, service_senders.peer_network.clone(), &config)
-                .expect("Failed to create peer list from peers");
+        let peer_list = PeerList::from_peers(
+            peers_data,
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("Failed to create peer list from peers");
 
         // Create data chunks for this partition to store
         let mut data = Vec::with_capacity((chunk_size * num_chunks) as usize);

@@ -13,7 +13,7 @@ use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
@@ -36,8 +36,6 @@ pub struct DataSyncServiceInner {
     pub chunk_fetcher_factory: ChunkFetcherFactory,
     pub service_senders: ServiceSenders,
     pub config: Config,
-    last_peer_list_check: Instant,
-    peer_list_check_interval: Duration,
 }
 
 pub enum DataSyncServiceMessage {
@@ -83,8 +81,6 @@ impl DataSyncServiceInner {
             chunk_orchestrators: Default::default(),
             service_senders,
             config,
-            last_peer_list_check: Instant::now(),
-            peer_list_check_interval: Duration::from_secs(1),
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -94,8 +90,7 @@ impl DataSyncServiceInner {
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
-                self.sync_peer_partition_assignments();
-                self.update_orchestrator_peers();
+                self.synchronize_peers_and_orchestrators();
             }
             DataSyncServiceMessage::ChunkCompleted {
                 storage_module_id,
@@ -132,15 +127,6 @@ impl DataSyncServiceInner {
     }
 
     fn optimize_peer_concurrency(&mut self) {
-        // Check for any new peers
-        // TODO: this is a temporary solution until the PeerListService can message
-        // the DataSyncService to let it know of peer changes. Until then we poll/synchronize with
-        // the PeerList on a fixed interval
-        if self.last_peer_list_check.elapsed() > self.peer_list_check_interval {
-            self.synchronize_peers_and_orchestrators();
-            self.last_peer_list_check = Instant::now();
-        }
-
         // Get a write lock on the peer bandwidth managers list
         let Ok(mut peers) = self.active_peer_bandwidth_managers.write() else {
             return;
@@ -581,6 +567,9 @@ impl DataSyncService {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.tick().await; // Skip first immediate tick
 
+        // Subscribe to peer lifecycle events for event-driven synchronization
+        let mut peer_events_rx = self.inner.peer_list.subscribe_to_peer_events();
+
         loop {
             tokio::select! {
                 biased;
@@ -604,6 +593,36 @@ impl DataSyncService {
                     if let Err(e) = self.inner.tick() {
                         tracing::error!("Error during tick: {}", e);
                         break;
+                    }
+                }
+
+                evt = peer_events_rx.recv() => {
+                    match evt {
+                        Ok(irys_domain::PeerEvent::BecameActive { .. }) => {
+                            // New active peer available; resync orchestrators/managers
+                            self.inner.synchronize_peers_and_orchestrators();
+                        }
+                        Ok(irys_domain::PeerEvent::BecameInactive { mining_addr, .. }) => {
+                            // Peer no longer active; resync
+                            debug!("Peer became inactive: {}", mining_addr);
+                            self.inner.synchronize_peers_and_orchestrators();
+                        }
+                        Ok(irys_domain::PeerEvent::PeerUpdated { .. }) => {
+                            // Metadata changed; just refresh orchestrator peer sets
+                            self.inner.update_orchestrator_peers();
+                        }
+                        Ok(irys_domain::PeerEvent::PeerRemoved { mining_addr, .. }) => {
+                            // Treat same as disconnect
+                            debug!("Peer removed: {}", mining_addr);
+                            self.inner.handle_peer_disconnection(mining_addr);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Missed events; do a conservative resync
+                            self.inner.synchronize_peers_and_orchestrators();
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            warn!("peer events channel closed in DataSyncService; resubscribing");
+                        }
                     }
                 }
             }
