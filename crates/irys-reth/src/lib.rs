@@ -16,7 +16,6 @@ use std::{sync::Arc, time::SystemTime};
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{TxKind, U256};
-use borsh::BorshSerialize as _;
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -78,19 +77,14 @@ pub fn compose_shadow_tx(
     shadow_tx: &ShadowTransaction,
     max_priority_fee_per_gas: u128,
 ) -> TxEip1559 {
-    // allocating additional 512 bytes for the shadow tx borsh buffer, misc optimisation
-    let mut shadow_tx_buf = Vec::with_capacity(IRYS_SHADOW_EXEC.len() + 512);
-    shadow_tx_buf.extend_from_slice(IRYS_SHADOW_EXEC);
-    shadow_tx
-        .serialize(&mut shadow_tx_buf)
-        .expect("borsh serialization should not fail");
+    let shadow_tx_buf = crate::shadow_tx::encode_prefixed_input(shadow_tx);
     TxEip1559 {
         access_list: AccessList::default(),
         chain_id,
         // TODO: now that we control the EVM (muhahaha), we can _probably_ bypass these gas validations
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
-        input: shadow_tx_buf.into(),
+        input: shadow_tx_buf,
         // large enough to not be rejected by the payload builder
         max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
         // Use the provided priority fee
@@ -352,16 +346,21 @@ where
     #[expect(clippy::result_large_err, reason = "to comply with reth api")]
     fn prefilter_tx(&self, tx: Tx) -> Result<Tx, TransactionValidationOutcome<Tx>> {
         let input = tx.input();
-        if input.starts_with(IRYS_SHADOW_EXEC) {
-            tracing::trace!(
-                "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
-            );
-            return Err(TransactionValidationOutcome::Invalid(
-                tx,
-                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::SignerAccountHasBytecode,
-                ),
-            ));
+        let to = tx.to();
+
+        match crate::shadow_tx::detect_and_decode_from_parts(to, input) {
+            Ok(Some(_)) | Err(_) => {
+                tracing::trace!(
+                    "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
+                );
+                return Err(TransactionValidationOutcome::Invalid(
+                    tx,
+                    reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                        InvalidTransactionError::SignerAccountHasBytecode,
+                    ),
+                ));
+            }
+            Ok(None) => {}
         }
 
         // once we support blobs, we can start accepting eip4844 txs
