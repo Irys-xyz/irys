@@ -15,6 +15,7 @@ services:
       - RUST_LOG=debug
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
+      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
     cap_add:
       - NET_ADMIN
 
@@ -34,12 +35,14 @@ services:
       - "19081:8080"
     environment:
       - RUST_LOG=debug
+      - MIN_HEIGHT=${MIN_HEIGHT:-40}
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
-      - ./scripts/start_peer_with_genesis.sh:/app/start_peer_with_genesis.sh:ro
+      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./scripts/start_peer_with_auto_restart.sh:/app/start_peer_with_auto_restart.sh:ro
     cap_add:
       - NET_ADMIN
-    entrypoint: ["bash", "/app/start_peer_with_genesis.sh"]
+    entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
 
   test-irys-3:
     build:
@@ -49,7 +52,7 @@ services:
     container_name: test-irys-3
     restart: unless-stopped
     depends_on:
-      - test-irys-2
+      - test-irys-1
     networks:
       test_network:
         ipv4_address: 172.21.0.4
@@ -57,12 +60,14 @@ services:
       - "19082:8080"
     environment:
       - RUST_LOG=debug
+      - MIN_HEIGHT=${MIN_HEIGHT:-50}
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
-      - ./scripts/start_peer_with_genesis.sh:/app/start_peer_with_genesis.sh:ro
+      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./scripts/start_peer_with_auto_restart.sh:/app/start_peer_with_auto_restart.sh:ro
     cap_add:
       - NET_ADMIN
-    entrypoint: ["bash", "/app/start_peer_with_genesis.sh"]
+    entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
 
 networks:
   test_network:

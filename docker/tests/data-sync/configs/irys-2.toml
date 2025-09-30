@@ -6,6 +6,13 @@ reward_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
 stake_pledge_drives = true
 genesis_peer_discovery_timeout_millis = 10000
 
+# Whitelist all three node operators for staking
+initial_stake_and_pledge_whitelist = [
+    "0x10605A299777D44BE5373D120d5479f07860325d",  # irys-1
+    "0x951AA3768fE8d51DbC348520b0825C0c1f197277",  # irys-2
+    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"   # irys-3
+]
+
 # irys-1
 [[trusted_peers]]
 gossip = "172.21.0.2:9009"
@@ -21,6 +28,7 @@ api = "172.21.0.4:8080"
 
 [trusted_peers.execution]
 peering_tcp_addr = "172.21.0.4:9010"
+
 
 [gossip]
 public_ip = "172.21.0.3"
@@ -74,12 +82,12 @@ max_invalid_items = 10000
 max_valid_chunks = 10000
 
 [vdf]
-parallel_verification_thread_limit = 4
+parallel_verification_thread_limit = 8
 
 [consensus.Custom]
 expected_genesis_hash = ""
 chain_id = 1270
-token_price_safe_range = 1.0
+token_price_safe_range = 0.1
 annual_cost_per_gb = 0.01
 decay_rate = 0.01
 chunk_size = 32
@@ -100,8 +108,8 @@ minimum_term_fee_usd = 0.01
 
 [consensus.Custom.genesis]
 timestamp_millis = 0
-miner_address = "0x6f8450cfdb7c9aeddab081a5cf43755201f69582"
-reward_address = "0x6f8450cfdb7c9aeddab081a5cf43755201f69582"
+miner_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
+reward_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
 genesis_price = 1.0
@@ -135,10 +143,22 @@ balance = "0x152cf4e72a974f1c0000"
 [consensus.Custom.reth.genesis.alloc.0x852BB3678fE8d51DbC348520b0825C0c1f197288]
 balance = "0x152cf4e72a974f1c0000"
 
+# Hardhat test account 0
+[consensus.Custom.reth.genesis.alloc.0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266]
+balance = "0x152cf4e72a974f1c0000"
+
+# Hardhat test account 1
+[consensus.Custom.reth.genesis.alloc.0x70997970C51812dc3A010C7d01b50e0d17dc79C8]
+balance = "0x152cf4e72a974f1c0000"
+
+# Hardhat test account 2
+[consensus.Custom.reth.genesis.alloc.0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC]
+balance = "0x152cf4e72a974f1c0000"
+
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
-anchor_expiry_depth = 10
+anchor_expiry_depth = 100
 commitment_fee = 100
 
 [consensus.Custom.difficulty_adjustment]
@@ -148,19 +168,20 @@ max_difficulty_adjustment_factor = "4"
 min_difficulty_adjustment_factor = "0.25"
 
 [consensus.Custom.vdf]
-reset_frequency = 600
+reset_frequency = 2000
 num_checkpoints_in_vdf_step = 25
-max_allowed_vdf_fork_steps = 60000
-sha_1s_difficulty = 1800000
+max_allowed_vdf_fork_steps = 120000
+sha_1s_difficulty = 100000
 
 [consensus.Custom.block_reward_config]
 inflation_cap = 100000000.0
 half_life_secs = 126144000
 
 [consensus.Custom.epoch]
-capacity_scalar = 100
+capacity_scalar = 200
 num_blocks_in_epoch = 4
-submit_ledger_epoch_length = 1000
+submit_ledger_epoch_length = 200
+num_capacity_partitions = 30
 
 [consensus.Custom.ema]
 price_adjustment_interval = 10

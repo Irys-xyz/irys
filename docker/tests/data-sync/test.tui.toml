@@ -1,14 +1,15 @@
-refresh_interval_secs = 30
+refresh_interval_secs = 15
 connection_timeout_secs = 10
 
 [[nodes]]
-alias = "Test Irys 1"
+alias = "Test Genesis"
 url = "http://localhost:19080"
 
 [[nodes]]
-alias = "Test Irys 2"
+alias = "Test Peer 2"
 url = "http://localhost:19081"
 
 [[nodes]]
-alias = "Test Irys 3"
+alias = "Test Peer 3"
 url = "http://localhost:19082"
+
