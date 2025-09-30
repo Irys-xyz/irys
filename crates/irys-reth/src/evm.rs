@@ -1,15 +1,14 @@
 // Standard library imports
 use core::convert::Infallible;
 
-// External crate imports - Alloy
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
+use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
 
-// External crate imports - Reth
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::result::ExecutionResult;
@@ -463,6 +462,23 @@ where
     }
 
     fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
+        // Reject blob-carrying transactions (EIP-4844) at execution time.
+        // We keep Cancun active but explicitly disable blobs/sidecars.
+        if !tx.blob_hashes.is_empty()
+            || tx.max_fee_per_blob_gas != 0
+            || tx.tx_type == EIP4844_TX_TYPE_ID
+        {
+            tracing::debug!(
+                blob_hashes_len = tx.blob_hashes.len(),
+                max_fee_per_blob_gas = tx.max_fee_per_blob_gas,
+                tx_type = tx.tx_type,
+                "Rejecting blob-carrying transaction: EIP-4844 not supported"
+            );
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::Eip4844NotSupported,
+            ));
+        }
+
         // run this tx through our processing first, if it's not a shadow tx we return here and pass it on
         let tx = match self.process_shadow_tx(tx)? {
             Either::Left(res) => return Ok(res),

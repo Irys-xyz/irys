@@ -341,6 +341,42 @@ pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
 }
 
+impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
+where
+    Tx: EthPoolTransaction,
+{
+    /// Irys-specific prefilter to reject transactions we never accept in the mempool.
+    ///
+    /// Returns `Ok(tx)` if the tx should continue to normal eth validation,
+    /// or `Err(outcome)` if the tx is invalid for Irys-specific reasons.
+    fn prefilter_tx(&self, tx: Tx) -> Result<Tx, TransactionValidationOutcome<Tx>> {
+        let input = tx.input();
+        if input.starts_with(IRYS_SHADOW_EXEC) {
+            tracing::trace!(
+                "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
+            );
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::SignerAccountHasBytecode,
+                ),
+            ));
+        }
+
+        // once we support blobs, we can start accepting eip4844 txs
+        if tx.is_eip4844() {
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::Eip4844Disabled,
+                ),
+            ));
+        }
+
+        Ok(tx)
+    }
+}
+
 impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
 where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
@@ -353,28 +389,26 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        let input = transaction.input();
-        if !input.starts_with(IRYS_SHADOW_EXEC) {
-            tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
-            return self.eth_tx_validator.validate_one(origin, transaction);
-        }
+        let transaction = match self.prefilter_tx(transaction) {
+            Ok(tx) => tx,
+            Err(outcome) => return outcome,
+        };
 
-        tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
-        // Even though we reject shadow txs from the pool, attempt to decode to verify structure
-        let _ = ShadowTransaction::decode(&mut &input[..]);
-        TransactionValidationOutcome::Invalid(
-            transaction,
-            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                InvalidTransactionError::SignerAccountHasBytecode,
-            ),
-        )
+        tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
+        self.eth_tx_validator.validate_one(origin, transaction)
     }
 
     async fn validate_transactions(
         &self,
         transactions: Vec<(TransactionOrigin, Self::Transaction)>,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.eth_tx_validator.validate_all(transactions)
+        transactions
+            .into_iter()
+            .map(|(origin, tx)| match self.prefilter_tx(tx) {
+                Ok(tx) => self.eth_tx_validator.validate_one(origin, tx),
+                Err(outcome) => outcome,
+            })
+            .collect()
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
