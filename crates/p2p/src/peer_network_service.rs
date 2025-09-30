@@ -23,7 +23,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::time::{interval, sleep, MissedTickBehavior};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -944,9 +944,9 @@ where
 
     let (shutdown_tx, shutdown_rx) = signal();
     let service = PeerNetworkService::new(shutdown_rx, service_receiver, inner);
-
+    let span = Span::current();
     let handle = runtime_handle.spawn(async move {
-        if let Err(err) = service.start().await {
+        if let Err(err) = service.start().instrument(span).await {
             error!("Peer network service terminated: {:?}", err);
         }
     });

@@ -31,7 +31,7 @@ use tokio::{
     },
     time::timeout,
 };
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -155,7 +155,7 @@ impl BlockDiscoveryService {
         info!("Spawning block discovery service");
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-
+        let span = Span::current();
         let handle = runtime_handle.spawn(
             async move {
                 let service = Self {
@@ -165,10 +165,11 @@ impl BlockDiscoveryService {
                 };
                 service
                     .start()
+                    .instrument(span)
                     .await
                     .expect("Block discovery service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+            
         );
 
         TokioServiceHandle {

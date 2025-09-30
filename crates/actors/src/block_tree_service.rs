@@ -29,7 +29,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -126,7 +126,7 @@ impl BlockTreeService {
         let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
         let storage_submodules_config = storage_submodules_config.clone();
-
+        let span = Span::current();
         let handle = runtime_handle.spawn(
             async move {
                 let cache = match BlockTree::restore_from_db(
@@ -159,10 +159,11 @@ impl BlockTreeService {
                 };
                 block_tree_service
                     .start()
+                    .instrument(span)
                     .await
                     .expect("BlockTree encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+            
         );
 
         TokioServiceHandle {

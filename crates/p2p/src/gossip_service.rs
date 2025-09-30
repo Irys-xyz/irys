@@ -1,11 +1,3 @@
-// This rule is added here because otherwise clippy starts to throw warnings about using %
-//  at random macro uses in this file for whatever reason. The second one is because
-//  I have absolutely no idea how to name this module to satisfy this lint
-#![allow(
-    clippy::integer_division_remainder_used,
-    clippy::module_name_repetitions,
-    reason = "I don't know how to name it"
-)]
 use crate::block_pool::BlockPool;
 use crate::block_status_provider::BlockStatusProvider;
 use crate::gossip_data_handler::GossipDataHandler;
@@ -31,7 +23,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::sync::mpsc::{channel, error::SendError, Receiver, Sender};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, info, warn, Span};
+use tracing::{debug, info, warn, Instrument as _, Span};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -308,6 +300,7 @@ fn spawn_broadcast_task(
     task_executor: &TaskExecutor,
     peer_list: PeerList,
 ) -> ServiceHandleWithShutdownSignal {
+    let span = Span::current();
     ServiceHandleWithShutdownSignal::spawn(
         "gossip broadcast",
         move |mut shutdown_rx| async move {
@@ -320,8 +313,9 @@ fn spawn_broadcast_task(
                                 // For each incoming message, spawn a detached task so broadcasts don't block each other
                                 let service = std::sync::Arc::clone(&service);
                                 let peer_list = peer_list.clone();
+                                let span = span.clone();
                                 tokio::spawn(async move {
-                                    if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
+                                    if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).instrument(span).await {
                                         warn!("Failed to broadcast data: {}", error);
                                     }
                                 });
@@ -347,6 +341,7 @@ fn spawn_watcher_task(
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
     task_executor: &TaskExecutor,
 ) -> ServiceHandleWithShutdownSignal {
+    let span = Span::current();
     ServiceHandleWithShutdownSignal::spawn(
         "gossip main",
         move |mut task_shutdown_signal| async move {
@@ -391,7 +386,7 @@ fn spawn_watcher_task(
                             warn!("Error: {}", error);
                         }
                     };
-                });
+                }.instrument(span));
 
             match server.await {
                 Ok(()) => {

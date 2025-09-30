@@ -54,7 +54,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _, Span};
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
@@ -158,6 +158,7 @@ impl BlockProducerService {
         );
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let span = Span::current();
         let handle = runtime_handle.spawn(
             async move {
                 let service = Self {
@@ -168,10 +169,10 @@ impl BlockProducerService {
                 };
                 service
                     .start()
+                    .instrument(span)
                     .await
                     .expect("Block producer service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
         );
 
         TokioServiceHandle {

@@ -6,9 +6,7 @@ use irys_types::{
 };
 use reth_db::Database as _;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::Arc,
-    time::SystemTime,
+    collections::{BTreeMap, HashMap, HashSet}, sync::Arc, time::SystemTime
 };
 use tracing::debug;
 
@@ -262,6 +260,7 @@ impl BlockTree {
 
         let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
 
+        debug!("latest epoch snapshot hash: {}, latest commitment snapshot hash: {}", &arc_epoch_snapshot.get_hash(), &arc_commitment_snapshot.get_hash());
         // Get the latest block from index for EMA snapshot
         let latest_block_hash = {
             let block_index = block_index_guard.read();
@@ -428,8 +427,8 @@ impl BlockTree {
             .insert(hash);
 
         debug!(
-            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}",
-            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash()
+            "adding block {} {} max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {} miner: {}",
+            &block.block_hash, &block.height, self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &block.miner_address
         );
 
         if block.cumulative_diff > self.max_cumulative_difficulty.0 {

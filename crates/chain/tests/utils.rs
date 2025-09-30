@@ -291,7 +291,7 @@ pub struct IrysNodeTest<T = ()> {
     pub node_ctx: T,
     pub cfg: NodeConfig,
     pub temp_dir: TempDir,
-    pub name: Option<String>,
+    pub name: String,
 }
 
 impl IrysNodeTest<()> {
@@ -320,12 +320,12 @@ impl IrysNodeTest<()> {
             cfg: config,
             temp_dir,
             node_ctx: (),
-            name: None,
+            name: "GENESIS".to_owned(),
         }
     }
 
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
-        let span = self.get_span();
+        let span = error_span!("NODE", name = %self.name);
         let _enter = span.enter();
 
         let node = IrysNode::new(self.cfg).unwrap();
@@ -338,15 +338,10 @@ impl IrysNodeTest<()> {
         }
     }
 
-    fn get_span(&self) -> tracing::Span {
-        match &self.name {
-            Some(name) => error_span!("NODE", name = %name),
-            None => error_span!("NODE", name = "genesis"),
-        }
-    }
+
 
     pub fn with_name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_string());
+        self.name = name.to_string();
         self
     }
 
@@ -359,9 +354,7 @@ impl IrysNodeTest<()> {
         log_name: &str,
         seconds_to_wait: usize,
     ) -> IrysNodeTest<IrysNodeCtx> {
-        let span = error_span!("NODE", name = %log_name);
-        let _enter = span.enter();
-        let node = self.start().await;
+        let node = self.start_with_name(log_name).await;
         node.wait_for_packing(seconds_to_wait).await;
         node
     }

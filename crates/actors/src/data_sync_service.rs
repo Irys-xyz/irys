@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
-use tracing::{debug, warn, Instrument as _};
+use tracing::{debug, warn, Instrument as _, Span};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -531,7 +531,7 @@ impl DataSyncService {
         let config = config.clone();
         let service_senders = service_senders.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-
+        let span = Span::current();
         let handle = runtime_handle.spawn(
             async move {
                 let data_sync_service = Self {
@@ -548,10 +548,11 @@ impl DataSyncService {
                 };
                 data_sync_service
                     .start()
+                    .instrument(span)
                     .await
                     .expect("DataSync Service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+           
         );
 
         TokioServiceHandle {

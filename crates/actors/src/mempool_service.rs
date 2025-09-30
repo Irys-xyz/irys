@@ -59,7 +59,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock};
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span};
 
 #[derive(Debug)]
 pub struct Inner {
@@ -1444,7 +1444,7 @@ impl MempoolService {
             .node_config
             .initial_stake_and_pledge_whitelist
             .clone();
-
+        let span = Span::current(); // we don't just `instrument` the async block below so that the span doesn't include spawn_service:start
         let handle = runtime_handle.spawn(
             async move {
                 let mempool_state = Arc::new(RwLock::new(mempool_state));
@@ -1476,10 +1476,11 @@ impl MempoolService {
                 };
                 mempool_service
                     .start()
+                    .instrument(span)
                     .await
                     .expect("Mempool service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+
         );
 
         Ok(TokioServiceHandle {

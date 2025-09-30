@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
 };
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use super::EpochSnapshot;
 
@@ -42,12 +42,12 @@ impl CommitmentSnapshot {
     }
 
     /// Checks and returns the status of a commitment transaction
+    #[instrument(skip_all, fields(tx_id = %commitment_tx.id, signer = %commitment_tx.signer))]
     pub fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
         is_staked_in_current_epoch: bool,
     ) -> CommitmentSnapshotStatus {
-        debug!("GetCommitmentStatus message received");
 
         let commitment_type = &commitment_tx.commitment_type;
         let txid = commitment_tx.id;
@@ -126,6 +126,7 @@ impl CommitmentSnapshot {
     }
 
     /// Adds a new commitment transaction to the snapshot and validates its acceptance
+    #[instrument(skip_all, fields(tx_id = %commitment_tx.id, signer = %commitment_tx.signer))]
     pub fn add_commitment(
         &mut self,
         commitment_tx: &CommitmentTransaction,
@@ -142,8 +143,8 @@ impl CommitmentSnapshot {
         let tx_type = &commitment_tx.commitment_type;
 
         debug!(
-            "add_commitment() called for tx {}, address {}",
-            commitment_tx.id, &signer
+            "called for tx {}, address {} (pledges in epoch: {}, staked in epoch? {})",
+            commitment_tx.id, &signer, &pledges_in_epoch, &is_staked_in_current_epoch
         );
 
         // Early return for unsupported commitment types
@@ -155,7 +156,7 @@ impl CommitmentSnapshot {
         }
 
         // Handle commitment by type
-        match tx_type {
+        let status = match tx_type {
             CommitmentType::Stake => {
                 // Check existing commitments in epoch service
                 if is_staked_in_current_epoch {
@@ -230,7 +231,9 @@ impl CommitmentSnapshot {
                 // but we handle it for completeness
                 CommitmentSnapshotStatus::Unsupported
             }
-        }
+        };
+        debug!("AddCommitment status is {:?}", &status);
+        status
     }
 
     /// Collects all commitment transactions from the snapshot for epoch processing

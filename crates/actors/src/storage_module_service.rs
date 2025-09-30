@@ -535,6 +535,7 @@ impl StorageModuleService {
 
         let actor_addresses = actor_addresses.clone();
         let config = config.clone();
+        let span = Span::current();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -552,10 +553,11 @@ impl StorageModuleService {
                 };
                 pending_storage_module_service
                     .start()
+                    .instrument(span)
                     .await
                     .expect("StorageModule Service encountered an irrecoverable error")
             }
-            .instrument(tracing::Span::current()),
+           
         );
 
         TokioServiceHandle {
