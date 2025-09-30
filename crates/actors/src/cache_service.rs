@@ -1,9 +1,7 @@
 use irys_database::{
     db::IrysDatabaseExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
-    tables::{
-        CachedChunks, CachedDataRoots, IngressProofs, ProgrammableDataCache, ProgrammableDataLRU,
-    },
+    tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
@@ -183,30 +181,29 @@ impl ChunkCacheService {
     }
 
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
-        debug!("Pruning cache for height {}", &migration_height);
         let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
-        self.prune_pd_cache(prune_height)?;
-        let (
-            (chunk_cache_count, chunk_cache_size),
-            (pd_cache_count, pd_cache_size),
-            ingress_proof_count,
-        ) = self.db.view_eyre(|tx| {
-            Ok((
-                get_cache_size::<CachedChunks, _>(tx, self.config.consensus.chunk_size)?,
-                get_cache_size::<ProgrammableDataCache, _>(tx, self.config.consensus.chunk_size)?,
-                tx.entries::<IngressProofs>()?,
-            ))
-        })?;
+        debug!(
+            "Pruning cache for height {} ({})",
+            &migration_height, &prune_height
+        );
+
+        let ((chunk_cache_count, chunk_cache_size), ingress_proof_count) =
+            self.db.view_eyre(|tx| {
+                Ok((
+                    get_cache_size::<CachedChunks, _>(tx, self.config.consensus.chunk_size)?,
+                    tx.entries::<IngressProofs>()?,
+                ))
+            })?;
         info!(
             ?migration_height,
-            "Chunk cache: {} chunks ({:.3} GB), PD: {} chunks ({:.3} GB) {} ingress proofs",
+            "Chunk cache: {} chunks ({:.3} GB),  {} ingress proofs",
             chunk_cache_count,
             (chunk_cache_size / GIGABYTE as u64),
-            pd_cache_count,
-            (pd_cache_size / GIGABYTE as u64),
             ingress_proof_count
         );
+        // TODO: add code to prune chunks BEFORE their absolute expiry epoch based on the number of chunks
+        // (and add a config value to the cache config for this ^)
         Ok(())
     }
 
@@ -266,29 +263,6 @@ impl ChunkCacheService {
             }
         }
         debug!(?chunks_pruned, "Pruned chunks");
-        write_tx.commit()?;
-
-        Ok(())
-    }
-
-    fn prune_pd_cache(&self, prune_height: u64) -> eyre::Result<()> {
-        debug!("processing OnBlockMigrated PD {} message!", &prune_height);
-
-        let write_tx = self.db.tx_mut()?;
-        let mut cursor = write_tx.cursor_write::<ProgrammableDataLRU>()?;
-        let mut walker = cursor.walk(None)?;
-        while let Some((global_offset, expiry_height)) = walker.next().transpose()? {
-            if expiry_height < prune_height {
-                debug!(
-                    ?prune_height,
-                    ?expiry_height,
-                    ?global_offset,
-                    "expiring PD chunk",
-                );
-                write_tx.delete::<ProgrammableDataLRU>(global_offset, None)?;
-                write_tx.delete::<ProgrammableDataCache>(global_offset, None)?;
-            }
-        }
         write_tx.commit()?;
 
         Ok(())
