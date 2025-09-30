@@ -467,6 +467,7 @@ mod tests {
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
     use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
+    use alloy_primitives::Bytes;
     use alloy_primitives::Signature;
     use alloy_primitives::{Address, B256};
     use alloy_rpc_types_engine::ForkchoiceState;
@@ -476,7 +477,7 @@ mod tests {
         providers::{AccountReader as _, BlockHashReader as _, BlockNumReader as _},
         rpc::server_types::eth::EthApiError,
     };
-    use reth_e2e_test_utils::wallet::Wallet;
+    use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
 
     use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::sync::Mutex;
@@ -507,6 +508,33 @@ mod tests {
 
         let tx_res = node.rpc.inject_tx(tx).await;
         assert!(matches!(tx_res, Err(EthApiError::PoolError(_))));
+        Ok(())
+    }
+
+    /// Ensures the mempool rejects EIP-4844 (blob) transactions outright.
+    ///
+    /// We keep Cancun active but disable blobs. Any EIP-4844 envelope should be rejected
+    /// via the mempool validator before deeper validation occurs.
+    #[test_log::test(tokio::test)]
+    async fn eip4844_txs_are_rejected_by_mempool() -> eyre::Result<()> {
+        // setup
+        let ctx = TestContext::new().await?;
+        let ((node, _shadow_tx_rx), ctx) = ctx.get_single_node()?;
+        let local_signer = PrivateKeySigner::random();
+        let envelope: Bytes = TransactionTestContext::tx_with_blobs_bytes(1, local_signer)
+            .await
+            .expect("constructing a valid EIP-4844 tx should succeed");
+
+        // inject the tx via RPC
+        let res = node.rpc.inject_tx(envelope).await;
+        dbg!(&res);
+
+        // mempool rejects EIP-4844
+        assert!(
+            matches!(res, Err(EthApiError::PoolError(_))),
+            "expected pool error for EIP-4844"
+        );
+
         Ok(())
     }
 

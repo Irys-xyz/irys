@@ -1260,3 +1260,88 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, B256, U256};
+    use reth_evm::EvmEnv;
+    use revm::context::result::{EVMError, InvalidTransaction};
+    use revm::context::{BlockEnv, CfgEnv, TxEnv};
+    use revm::database_interface::EmptyDB;
+
+    /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
+    #[test]
+    fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
+        // Build minimal EVM env with Cancun spec enabled
+        let factory = IrysEvmFactory::new();
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let block_env = BlockEnv::default();
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Create a TxEnv that carries EIP-4844 blob fields
+        let mut tx = TxEnv::default();
+        tx.caller = Address::random();
+        tx.kind = TxKind::Call(Address::random());
+        tx.nonce = 0;
+        tx.gas_limit = 21_000;
+        tx.gas_price = 0;
+        tx.value = U256::ZERO;
+        tx.chain_id = Some(1);
+        tx.blob_hashes = vec![B256::ZERO];
+        tx.max_fee_per_blob_gas = 1;
+
+        let res = evm.transact_raw(tx);
+        assert!(
+            matches!(
+                res,
+                Err(EVMError::Transaction(
+                    InvalidTransaction::Eip4844NotSupported
+                ))
+            ),
+            "expected EIP-4844 not supported, got: {:?}",
+            res
+        );
+    }
+
+    /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
+    #[test]
+    fn evm_processes_normal_tx_success() {
+        let factory = IrysEvmFactory::new();
+
+        // Cancun spec, chain id 1, zero basefee and ample gas limit
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let mut block_env = BlockEnv::default();
+        block_env.gas_limit = 30_000_000;
+        block_env.basefee = 0;
+
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Simple call with zero value and zero gas price
+        let tx = TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 21_000,
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_price: 0,
+            chain_id: Some(1),
+            gas_priority_fee: None,
+            access_list: Default::default(),
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            tx_type: 0,
+            authorization_list: Default::default(),
+        };
+
+        let res = evm.transact_raw(tx);
+        assert!(res.is_ok(), "expected Ok, got: {:?}", res);
+        let result = res.unwrap().result;
+        assert!(result.is_success(), "expected success, got: {:?}", result);
+    }
+}
