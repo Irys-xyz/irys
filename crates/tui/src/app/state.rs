@@ -694,12 +694,12 @@ mod tests {
     fn test_decrease_refresh_interval() {
         let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
-        // Default is 30
+        // Default is 10
         assert_eq!(app_state.refresh_interval_secs, 10);
 
         // Decrease by 1
         app_state.decrease_refresh_interval();
-        assert_eq!(app_state.refresh_interval_secs, 29);
+        assert_eq!(app_state.refresh_interval_secs, 9);
 
         // Test near minimum (1)
         app_state.refresh_interval_secs = 2;
