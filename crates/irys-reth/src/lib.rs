@@ -1287,6 +1287,190 @@ mod tests {
         Ok(())
     }
 
+    /// Tests state rollback functionality on safe block reorgs.
+    ///
+    /// This test verifies that when a forkchoice update rolls back to an earlier safe block,
+    /// the state is correctly reverted and subsequent blocks can be built on the rolled-back state.
+    ///
+    /// Test scenario:
+    /// 1. Build 4 blocks with block rewards (balance +4)
+    /// 2. Verify state after 4 blocks: balance = initial + 4
+    /// 3. Roll back to block 1 via forkchoice update (safe/finalized = block 1)
+    /// 4. Build a new fork block (block 2) on top of the rolled-back state
+    /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
+    #[test_log::test(tokio::test)]
+    async fn rollback_state_on_confirmed_blocks() -> eyre::Result<()> {
+        // Setup custom parent tracker for forkchoice updates
+        let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
+
+        // Create context with custom attributes that can track parent block
+        let payload_attributes = {
+            let parent_tracker = parent_tracker.clone();
+            move |timestamp: u64, beneficiary: Address| {
+                let parent = *parent_tracker.lock().unwrap();
+                let mut attrs = eth_payload_attributes_with_parent(timestamp, parent);
+                attrs.suggested_fee_recipient = beneficiary;
+                attrs
+            }
+        };
+
+        let ctx = TestContext::new_with_custom_attributes(payload_attributes).await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Initial setup and baseline measurements
+        let initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+        let mut parent_blockhash = ctx.genesis_blockhash;
+        let mut block_hashes = vec![parent_blockhash];
+
+        // Phase 1: Build 4 blocks with shadow transactions
+        tracing::info!("Phase 1: Building 4 blocks with block rewards");
+        for block_number in 1..=4 {
+            // Create block reward transaction
+            let block_reward_tx = block_reward();
+            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a, 0) // Block rewards must have 0 priority fee
+                .await?;
+
+            // Mine the block
+            let payload =
+                mine_block_and_validate(&mut node, &shadow_tx_store, vec![block_reward_tx], &[])
+                    .await?;
+            parent_blockhash = payload.block().hash();
+            block_hashes.push(parent_blockhash);
+
+            tracing::info!("Built block {}: {}", block_number, parent_blockhash);
+        }
+
+        // Phase 2: Verify state after 4 blocks
+        tracing::info!("Phase 2: Verifying state after building 4 blocks");
+        let best_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
+        assert_eq!(best_block, 4, "Should be at block 4");
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
+        assert_balance_change(
+            &node,
+            ctx.block_producer_a.address(),
+            initial_balance,
+            U256::from(4), // 4 block rewards only
+            true,
+            "Balance should reflect 4 block rewards",
+        );
+        assert_nonce(
+            &node,
+            ctx.block_producer_a.address(),
+            0,
+            "Nonce should be 0",
+        );
+
+        // Phase 3: Roll back to block 1 (safe/finalized)
+        tracing::info!("Phase 3: Rolling back to block 1 via forkchoice update");
+        let rollback_target = block_hashes[1]; // Block 1
+        node.inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: rollback_target,
+                    safe_block_hash: block_hashes[0],
+                    finalized_block_hash: block_hashes[0],
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        // Allow time for rollback message to propagate. Reth does not immediately rewind the
+        // canonical head when supplied an older forkchoice head; the actual tip moves once a new
+        // payload becomes canonical. We only assert on the final forkchoice state after building
+        // the replacement block below.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Phase 4: Build new fork block on rolled-back state
+        tracing::info!("Phase 4: Building new fork block on rolled-back state");
+        let fork_block_number = 2; // Building block 2 on top of block 1
+                                   // Update parent tracker for payload attributes
+        *parent_tracker.lock().unwrap() = rollback_target;
+        let fork_reward_tx = block_reward();
+        let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
+        let fork_payload = prepare_block(&mut node, &shadow_tx_store, vec![fork_reward_tx]).await?;
+        let fork_block_hash = fork_payload.block().hash();
+
+        tracing::info!(
+            "Built fork block {}: {}",
+            fork_block_number,
+            fork_block_hash
+        );
+
+        // Phase 5: Finalize the new fork
+        tracing::info!("Phase 5: Finalizing the new fork");
+        node.inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: fork_block_hash,
+                    safe_block_hash: fork_block_hash,
+                    finalized_block_hash: fork_block_hash,
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        // Allow time for finalization to process
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Phase 6: Verify final state after rollback and fork
+        tracing::info!("Phase 6: Verifying final state after rollback and fork");
+        let final_best_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
+        let final_best_hash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(final_best_block)
+            .unwrap()
+            .unwrap();
+
+        // Assertions for final state
+        assert_eq!(
+            fork_block_hash, final_best_hash,
+            "Fork block should be the canonical head"
+        );
+        assert_eq!(
+            final_best_block, fork_block_number,
+            "Should be at fork block number"
+        );
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
+        assert_balance_change(
+            &node,
+            ctx.block_producer_a.address(),
+            initial_balance,
+            U256::from(2), // 2 block rewards only
+            true,
+            "Balance should reflect rollback to block 1 + new fork block reward",
+        );
+        assert_nonce(
+            &node,
+            ctx.block_producer_a.address(),
+            0,
+            "Nonce always be 0",
+        );
+
+        tracing::info!("Rollback test completed successfully");
+        Ok(())
+    }
+
     /// Tests that shadow transactions never enter the transaction pool when rolling back state to a past block.
     ///
     /// Test scenario:

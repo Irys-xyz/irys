@@ -2,11 +2,9 @@ use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
-    db_cache::{data_size_to_chunk_count, DataRootLRUEntry},
+    db_cache::data_size_to_chunk_count,
     submodule::get_data_size_by_data_root,
-    tables::{
-        CachedChunks, CachedChunksIndex, CompactCachedIngressProof, DataRootLRU, IngressProofs,
-    },
+    tables::{CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs},
 };
 use irys_types::{
     chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
@@ -319,58 +317,6 @@ impl Inner {
             .read_tx()
             .map_err(|_| ChunkIngressError::DatabaseError)?;
 
-        // Update DataRootLRU so partial data_roots are prunable
-        // Use latest canonical height; preserve existing ingress_proof flag if present
-        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-        let latest_height = match canon_chain.0.last() {
-            Some(h) => h.height,
-            None => {
-                error!("Service uninitialized: missing canonical chain head while updating DataRootLRU");
-                return Err(ChunkIngressError::ServiceUninitialized);
-            }
-        };
-        // Conditionally write only if an insert is needed or last_height increases
-        self.irys_db
-            .update(|write_tx| {
-                match write_tx.get::<DataRootLRU>(chunk.data_root)? {
-                    Some(existing) => {
-                        // Only update if the height advances (avoid redundant writes)
-                        if existing.last_height < latest_height {
-                            write_tx.put::<DataRootLRU>(
-                                chunk.data_root,
-                                DataRootLRUEntry {
-                                    last_height: latest_height,
-                                    ingress_proof: existing.ingress_proof,
-                                },
-                            )
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    None => write_tx.put::<DataRootLRU>(
-                        chunk.data_root,
-                        DataRootLRUEntry {
-                            last_height: latest_height,
-                            ingress_proof: false,
-                        },
-                    ),
-                }
-            })
-            .map_err(|e| {
-                error!(
-                    "Error updating DataRootLRU for {} - {}",
-                    &chunk.data_root, &e
-                );
-                ChunkIngressError::DatabaseError
-            })?
-            .map_err(|e| {
-                error!(
-                    "Error updating DataRootLRU for {} - {}",
-                    &chunk.data_root, &e
-                );
-                ChunkIngressError::DatabaseError
-            })?;
-
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
             .map_err(|_| ChunkIngressError::DatabaseError)?;
@@ -401,16 +347,8 @@ impl Inner {
             // we *should* have all the chunks
             // dispatch a ingress proof task
 
-            let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
-
-            let latest = canon_chain
-                .0
-                .last()
-                .ok_or(ChunkIngressError::ServiceUninitialized)?;
-
             let db = self.irys_db.clone();
             let signer = self.config.irys_signer();
-            let latest_height = latest.height;
             let chain_id = self.config.consensus.chain_id;
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
 
@@ -424,28 +362,6 @@ impl Inner {
                     chain_id,
                 )
                 // TODO: handle results instead of unwrapping
-                .unwrap();
-                // Conditionally set ingress_proof=true and/or advance height to avoid redundant writes
-                db.update(|wtx| {
-                    let needs_update = match wtx.get::<DataRootLRU>(root_hash)? {
-                        Some(existing) => {
-                            (existing.last_height < latest_height) || !existing.ingress_proof
-                        }
-                        None => true,
-                    };
-                    if needs_update {
-                        wtx.put::<DataRootLRU>(
-                            root_hash,
-                            DataRootLRUEntry {
-                                last_height: latest_height,
-                                ingress_proof: true,
-                            },
-                        )
-                    } else {
-                        Ok(())
-                    }
-                })
-                .unwrap()
                 .unwrap();
 
                 // Gossip the ingress proof

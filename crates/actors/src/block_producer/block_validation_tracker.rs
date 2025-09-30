@@ -34,7 +34,7 @@ use irys_types::{BlockHash, U256};
 use std::time::Duration;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 /// Tracks the state of block validation during parent block selection
 pub struct BlockValidationTracker {
@@ -84,6 +84,7 @@ impl BlockValidationTracker {
 
     /// Waits for a block to be fully validated, monitoring validation progress\
     /// Returns the final block hash to use (either the target or fallback)
+    #[instrument(skip_all)]
     pub async fn wait_for_validation(&mut self) -> eyre::Result<BlockHash> {
         let start_time = Instant::now();
 

@@ -32,6 +32,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         pending_blocks: blocks as u64,
         is_syncing: state.sync_state.is_syncing(),
         current_sync_height: state.sync_state.sync_target_height(),
+        uptime_secs: state.started_at.elapsed().as_secs(),
     };
 
     HttpResponse::Ok()

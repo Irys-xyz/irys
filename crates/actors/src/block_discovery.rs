@@ -4,7 +4,7 @@ use crate::{
     services::ServiceSenders,
     MempoolServiceMessage,
 };
-use actix::prelude::*;
+
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
@@ -31,28 +31,7 @@ use tokio::{
     },
     time::timeout,
 };
-use tracing::{debug, error, info, warn, Instrument as _, Span};
-
-/// `BlockDiscoveryActor` listens for discovered blocks & validates them.
-#[derive(Debug)]
-pub struct BlockDiscoveryActor {
-    /// Read only view of the block index
-    pub block_index_guard: BlockIndexReadGuard,
-    /// Read only view of the block_tree
-    pub block_tree_guard: BlockTreeReadGuard,
-    /// Reference to the global config
-    pub config: Config,
-    /// The block reward curve
-    pub reward_curve: Arc<HalvingCurve>,
-    /// Database provider for accessing transaction headers and related data.
-    pub db: DatabaseProvider,
-    /// Store last VDF Steps
-    pub vdf_steps_guard: VdfStateReadonly,
-    /// Service Senders
-    pub service_senders: ServiceSenders,
-    /// Tracing span
-    pub span: Span,
-}
+use tracing::{debug, error, info, warn, Instrument as _};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -137,23 +116,6 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
 
         rx.await.map_err(BlockDiscoveryInternalError::RecvError)?
     }
-}
-/// When a block is discovered, either produced locally or received from
-/// a network peer, this message is broadcast.
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "Result<(), BlockDiscoveryError>")]
-pub struct BlockDiscoveredMessage(pub Arc<IrysBlockHeader>, pub bool);
-
-/// Sent when a discovered block is pre-validated
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "Result<(), PreValidationError>")]
-pub struct BlockPreValidatedMessage(
-    pub Arc<IrysBlockHeader>,
-    pub Arc<Vec<DataTransactionHeader>>,
-);
-
-impl Actor for BlockDiscoveryActor {
-    type Context = Context<Self>;
 }
 
 /// `BlockDiscoveryService` listens for discovered blocks & validates them.

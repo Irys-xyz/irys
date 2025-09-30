@@ -273,7 +273,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     let block_tree_guard = &restarted_node.node_ctx.block_tree_guard;
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
 
-    // Make sure genesis has 3 commitments (1 stake, 2 pledge)
+    // Make sure genesis has 3 pledge commitments
     assert_eq!(
         epoch_snapshot
             .commitment_state
@@ -284,7 +284,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         3
     );
 
-    // Make sure signer1 has 2 commitments (1 stake, 1 pledge)
+    // Make sure signer1 has 2 pledge commitments
     assert_eq!(
         epoch_snapshot
             .commitment_state
@@ -295,7 +295,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         2
     );
 
-    // Make sure signer2 has 1 commitments (1 stake, 0 pledge)
+    // Make sure signer2 has 1 pledge commitment
     assert_eq!(
         epoch_snapshot
             .commitment_state

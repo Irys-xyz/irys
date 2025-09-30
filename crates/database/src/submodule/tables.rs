@@ -48,7 +48,7 @@ tables! {
         type Value = RelativeStartOffsets;
     }
 
-    /// Maps a data root to it's data size (used for validation)
+    /// Maps a data root to its data size (used for validation)
     table DataSizeByDataRoot {
         type Key = DataRoot;
         type Value = u64;
@@ -75,7 +75,7 @@ pub struct ChunkPathHashes {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
-/// chunk offsets
+/// relative start offsets
 /// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
 pub struct RelativeStartOffsets(pub Vec<RelativeChunkOffset>);
 

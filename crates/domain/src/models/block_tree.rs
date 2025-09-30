@@ -17,7 +17,7 @@ use crate::{
     CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockTreeEntry {
     pub block_hash: BlockHash,
     pub height: u64,
@@ -51,6 +51,7 @@ pub struct BlockTree {
 
 #[derive(Debug)]
 pub struct BlockMetadata {
+    // todo: wrap into Arc to avoid expensive clones
     pub block: IrysBlockHeader,
     chain_state: ChainState,
     timestamp: SystemTime,
@@ -384,6 +385,10 @@ impl BlockTree {
                 e
             )
         })?;
+
+        // TODO: if we restart when we have a very large amount of blocks,
+        // then actually we would be storing almost all of the block index in memory -
+        // this is because pruning is only called at the very end
 
         // Prune the cache after restoration to ensure correct depth
         // Subtract 1 to ensure we keep exactly `depth` blocks.

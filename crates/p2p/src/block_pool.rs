@@ -2,21 +2,23 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use actix::Addr;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
-use irys_actors::reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor};
+use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
-use irys_actors::MempoolFacade;
+use irys_actors::{MempoolFacade, TxIngressError};
 use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
+
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
+
+use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
     BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
-    PeerNetworkError,
+    IrysTransactionResponse, PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -24,7 +26,7 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
@@ -55,6 +57,8 @@ pub enum BlockPoolError {
     PreviousBlockNotFound(BlockHash),
     #[error("Block {0:?} is a part of a pruned fork")]
     ForkedBlock(BlockHash),
+    #[error("Transaction validation for the block {0:?} failed: {1:?}")]
+    TransactionValidationFailed(BlockHash, TxIngressError),
 }
 
 impl From<PeerNetworkError> for BlockPoolError {
@@ -113,6 +117,8 @@ struct BlockCacheInner {
     pub(crate) orphaned_blocks_by_parent: LruCache<BlockHash, HashSet<BlockHash>>,
     pub(crate) blocks: LruCache<BlockHash, CachedBlock>,
     pub(crate) requested_blocks: HashSet<BlockHash>,
+    /// Per-block fetched transactions cache. Groups transactions by the block they belong to.
+    pub(crate) txs_by_block: LruCache<BlockHash, Vec<IrysTransactionResponse>>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +190,14 @@ impl BlockCacheGuard {
             .await
             .change_block_processing_status(block_hash, is_processing);
     }
+
+    async fn add_tx_for_block(&self, block_hash: BlockHash, tx: IrysTransactionResponse) {
+        self.inner.write().await.add_tx_for_block(block_hash, tx);
+    }
+
+    async fn take_txs_for_block(&self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
+        self.inner.write().await.take_txs_for_block(block_hash)
+    }
 }
 
 impl BlockCacheInner {
@@ -194,6 +208,7 @@ impl BlockCacheInner {
             ),
             blocks: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
             requested_blocks: HashSet::new(),
+            txs_by_block: LruCache::new(NonZeroUsize::new(BLOCK_POOL_CACHE_SIZE).unwrap()),
         }
     }
 
@@ -244,11 +259,25 @@ impl BlockCacheInner {
             if set_is_empty {
                 self.orphaned_blocks_by_parent.pop(&parent_hash);
             }
+            // Remove any transactions cached for this block
+            let _ = self.txs_by_block.pop(block_hash);
         }
     }
 
     fn get_block_header_cloned(&mut self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.blocks.get(block_hash).cloned()
+    }
+
+    fn add_tx_for_block(&mut self, block_hash: BlockHash, tx: IrysTransactionResponse) {
+        if let Some(vec) = self.txs_by_block.get_mut(&block_hash) {
+            vec.push(tx);
+        } else {
+            self.txs_by_block.put(block_hash, vec![tx]);
+        }
+    }
+
+    fn take_txs_for_block(&mut self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
+        self.txs_by_block.pop(block_hash).unwrap_or_default()
     }
 }
 
@@ -257,6 +286,15 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
+    #[tracing::instrument(skip_all, err)]
+    fn fcu_markers(&self) -> eyre::Result<ForkChoiceMarkers> {
+        let migration_depth = self.config.consensus.block_migration_depth as usize;
+        let prune_depth = self.config.consensus.block_tree_depth as usize;
+        let tree = self.block_status_provider.block_tree_read_guard().read();
+        let index = self.block_status_provider.block_index_read_guard().read();
+        ForkChoiceMarkers::from_block_tree(&tree, &index, &self.db, migration_depth, prune_depth)
+    }
+
     pub(crate) fn new(
         db: DatabaseProvider,
         block_discovery: B,
@@ -285,7 +323,7 @@ where
     async fn validate_and_submit_reth_payload<A: ApiClient>(
         &self,
         block_header: &IrysBlockHeader,
-        reth_service: Option<Addr<RethServiceActor>>,
+        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
         // This function repairs missing execution payloads for already-validated blocks.
@@ -361,29 +399,42 @@ where
         );
 
         if let Some(reth_service) = reth_service {
+            let fcu_markers = self.fcu_markers().map_err(|_err| {
+                BlockPoolError::OtherInternal("FCU marker computation failed".to_string())
+            })?;
+            let head_hash = fcu_markers.head.block_hash;
+            let confirmed_hash = fcu_markers.migration_block.block_hash;
+            let finalized_hash = fcu_markers.prune_block.block_hash;
             debug!(
-                "Sending ForkChoiceUpdateMessage to Reth service for block {:?}",
-                block_header.block_hash
+                head = %head_hash,
+                confirmed = %confirmed_hash,
+                finalized = %finalized_hash,
+                "Sending ForkChoiceUpdateMessage to Reth service"
             );
+            let (tx, rx) = oneshot::channel();
+
             reth_service
-                .send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(block_header.block_hash),
-                    confirmed_hash: None,
-                    finalized_hash: None,
+                .send(RethServiceMessage::ForkChoice {
+                    update: ForkChoiceUpdateMessage {
+                        head_hash,
+                        confirmed_hash,
+                        finalized_hash,
+                    },
+                    response: tx,
                 })
-                .await
                 .map_err(|err| {
                     BlockPoolError::OtherInternal(format!(
                         "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
                         err
                     ))
-                })?
-                .map_err(|err| {
-                    BlockPoolError::ForkChoiceFailed(format!(
-                        "Failed to update fork choice in Reth service: {:?}",
-                        err
-                    ))
                 })?;
+
+            rx.await.map_err(|err| {
+                BlockPoolError::ForkChoiceFailed(format!(
+                    "Reth service dropped FCU acknowledgment: {:?}",
+                    err
+                ))
+            })?;
         }
 
         // Remove the payload from the cache after it has been processed to prevent excessive memory usage
@@ -398,7 +449,7 @@ where
     #[instrument(err, skip_all)]
     pub async fn repair_missing_payloads_if_any<A: ApiClient>(
         &self,
-        reth_service: Option<Addr<RethServiceActor>>,
+        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
         if reth_service.is_none() {
@@ -592,7 +643,10 @@ where
             )
             .await
             {
-                error!("Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, err);
+                error!(
+                    "Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool",
+                    block_header.block_hash, err
+                );
                 self.blocks_cache
                     .remove_block(&block_header.block_hash)
                     .await;
@@ -611,12 +665,82 @@ where
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
+        // Send cached transactions (if any) to the mempool before handling the block
+        let cached_txs = self
+            .blocks_cache
+            .take_txs_for_block(&block_header.block_hash)
+            .await;
+        if !cached_txs.is_empty() {
+            debug!(
+                "Block pool: Sending {} cached txs for block {:?} to mempool",
+                cached_txs.len(),
+                current_block_hash
+            );
+        } else {
+            debug!(
+                "Block pool: No cached txs for block {:?} to send to mempool",
+                current_block_hash
+            );
+        }
+
+        for tx in cached_txs {
+            match tx {
+                IrysTransactionResponse::Commitment(commitment_tx) => {
+                    let id = commitment_tx.id;
+                    if let Err(err) = self
+                        .mempool
+                        .handle_commitment_transaction_ingress(commitment_tx)
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to send commitment tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
+                                &id, &current_block_hash, err
+                            );
+                            self.blocks_cache
+                                .remove_block(&block_header.block_hash)
+                                .await;
+                            return Err(BlockPoolError::TransactionValidationFailed(
+                                current_block_hash,
+                                err,
+                            ));
+                        }
+                    }
+                }
+                IrysTransactionResponse::Storage(storage_tx) => {
+                    let id = storage_tx.id;
+                    if let Err(err) = self
+                        .mempool
+                        .handle_data_transaction_ingress(storage_tx)
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to send storage tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
+                                &id, current_block_hash, err
+                            );
+                            self.blocks_cache
+                                .remove_block(&block_header.block_hash)
+                                .await;
+                            return Err(BlockPoolError::TransactionValidationFailed(
+                                current_block_hash,
+                                err,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         if let Err(block_discovery_error) = self
             .block_discovery
             .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
             .await
         {
-            error!("Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool", block_header.block_hash, block_discovery_error);
+            error!(
+                "Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool",
+                block_header.block_hash, block_discovery_error
+            );
             self.blocks_cache
                 .remove_block(&block_header.block_hash)
                 .await;
@@ -681,13 +805,16 @@ where
             "Block pool: Forcing handling of execution payload for EVM block hash: {:?}",
             evm_block_hash
         );
-        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
+        let (response_sender, response_receiver) = oneshot::channel();
 
         if !execution_payload_provider
             .is_payload_in_cache(&evm_block_hash)
             .await
         {
-            debug!("BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network", evm_block_hash);
+            debug!(
+                "BlockPool: Execution payload for EVM block hash {:?} is not in cache, requesting from the network",
+                evm_block_hash
+            );
 
             if let Some(gossip_data_handler) = gossip_data_handler {
                 let result = gossip_data_handler
@@ -729,7 +856,10 @@ where
                 GossipError::Internal(InternalGossipError::Unknown(err_text))
             })?
         } else {
-            debug!("BlockPool: Payload for EVM block hash {:?} is already in cache, no need to request", evm_block_hash);
+            debug!(
+                "BlockPool: Payload for EVM block hash {:?} is already in cache, no need to request",
+                evm_block_hash
+            );
             Ok(())
         }
     }
@@ -767,7 +897,10 @@ where
 
                     if let Some(payload) = gossip_payload {
                         if let Err(err) = gossip_broadcast_sender.send(payload) {
-                            error!("Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
+                            error!(
+                                "Block pool: Failed to broadcast execution payload for EVM block hash {:?}: {:?}",
+                                evm_block_hash, err
+                            );
                         } else {
                             debug!(
                                 "Block pool: Broadcasted execution payload for EVM block hash {:?}",
@@ -777,7 +910,10 @@ where
                     }
                 }
                 Err(err) => {
-                    error!("Block pool: Failed to handle execution payload for EVM block hash {:?}: {:?}", evm_block_hash, err);
+                    error!(
+                        "Block pool: Failed to handle execution payload for EVM block hash {:?}: {:?}",
+                        evm_block_hash, err
+                    );
                 }
             }
         });
@@ -825,7 +961,7 @@ where
                 return Err(BlockPoolError::MempoolError(format!(
                     "Mempool error: {:?}",
                     err
-                )))
+                )));
             }
         }
 
@@ -876,6 +1012,17 @@ where
     /// Remove block from cache - for orphan block processing
     pub(crate) async fn remove_block_from_cache(&self, block_hash: &BlockHash) {
         self.blocks_cache.remove_block(block_hash).await;
+        // Remove associated transactions as well
+        self.blocks_cache.take_txs_for_block(block_hash).await;
+    }
+
+    /// Add a transaction fetched for a specific block into the per-block cache
+    pub(crate) async fn add_tx_for_block(
+        &self,
+        block_hash: BlockHash,
+        tx: IrysTransactionResponse,
+    ) {
+        self.blocks_cache.add_tx_for_block(block_hash, tx).await;
     }
 }
 
@@ -897,10 +1044,9 @@ fn check_block_status(
         }
         BlockStatus::Finalized => {
             debug!(
-                    "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
-                    block_height,
-                    block_hash,
-                );
+                "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
+                block_height, block_hash,
+            );
             Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
         }
         BlockStatus::PartOfAPrunedFork => {

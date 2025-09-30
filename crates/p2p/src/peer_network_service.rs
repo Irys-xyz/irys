@@ -27,55 +27,7 @@ use tracing::{debug, error, info, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
-/*
-Global singletons for handshake flow control and safety
 
-Why globals (process-wide):
-- Multiple actor instances/tasks may trigger handshakes concurrently. To avoid
-  per-actor throttling gaps, we enforce limits and backoff state process-wide.
-
-Why OnceLock + Mutex:
-- OnceLock provides thread-safe, lazy initialization without paying the cost
-  of static constructors on startup, and it prevents races on first-use.
-- Interior state is wrapped in a Mutex for low-contention, short critical
-  sections. The hot path (permit acquire) is handled by a Semaphore.
-
-Configuration and lifetime:
-- Some of these singletons use values derived from NodeConfig and are
-  initialized the first time the service starts in this process. Subsequent
-  instances reuse the same values (first-wins).
-*/
-
-static HANDSHAKE_SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::OnceLock::new();
-
-fn handshake_semaphore_with_max(max: usize) -> std::sync::Arc<tokio::sync::Semaphore> {
-    HANDSHAKE_SEMAPHORE
-        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(max)))
-        .clone()
-}
-
-static HANDSHAKE_FAILURES: std::sync::OnceLock<std::sync::Mutex<HashMap<SocketAddr, u32>>> =
-    std::sync::OnceLock::new();
-
-fn handshake_failures() -> &'static std::sync::Mutex<HashMap<SocketAddr, u32>> {
-    HANDSHAKE_FAILURES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-static BLOCKLIST_UNTIL: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>>,
-> = std::sync::OnceLock::new();
-
-fn blocklist_until() -> &'static std::sync::Mutex<HashMap<SocketAddr, std::time::Instant>> {
-    BLOCKLIST_UNTIL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-static PEERS_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-
-fn peers_limit() -> usize {
-    *PEERS_LIMIT
-        .get_or_init(|| irys_types::config::P2PHandshakeConfig::default().max_peers_per_response)
-}
 fn send_message_and_log_error(sender: &PeerNetworkSender, message: PeerNetworkServiceMessage) {
     if let Err(error) = sender.send(message) {
         error!(
@@ -117,6 +69,12 @@ where
     peer_address: PeerAddress,
     reth_peer_sender: RethPeerSender,
     config: Config,
+
+    // Per-node handshake/backoff state
+    handshake_failures: HashMap<SocketAddr, u32>,
+    blocklist_until: HashMap<SocketAddr, std::time::Instant>,
+    peers_limit: usize,
+    handshake_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 struct HandshakeTask<A>
@@ -130,7 +88,8 @@ where
     peer_list: PeerList,
     api_client: A,
     sender: PeerNetworkSender,
-    max_concurrent_handshakes: usize,
+    semaphore: Arc<tokio::sync::Semaphore>,
+    peers_limit: usize,
 }
 #[derive(Debug, Clone)]
 pub enum PeerListServiceError {
@@ -191,9 +150,12 @@ where
         peer_list: PeerList,
         sender: PeerNetworkSender,
     ) -> Self {
-        PEERS_LIMIT.get_or_init(|| config.node_config.p2p_handshake.max_peers_per_response);
-
         let peer_address = build_peer_address(&config);
+        let peers_limit = config.node_config.p2p_handshake.max_peers_per_response;
+        let handshake_semaphore = Arc::new(tokio::sync::Semaphore::new(
+            config.node_config.p2p_handshake.max_concurrent_handshakes,
+        ));
+
         let state = PeerNetworkServiceState {
             db,
             currently_running_announcements: HashSet::new(),
@@ -210,6 +172,10 @@ where
             peer_address,
             reth_peer_sender,
             config,
+            handshake_failures: HashMap::new(),
+            blocklist_until: HashMap::new(),
+            peers_limit,
+            handshake_semaphore,
         };
 
         Self {
@@ -413,7 +379,7 @@ where
 
         let version_request = self.inner.create_version_request().await;
         let is_trusted_peer = self.inner.peer_list().is_trusted_peer(&peer_api_addr);
-        let (api_client, peer_filter_mode, peer_list, sender, reth_peer_sender) = {
+        let (api_client, peer_filter_mode, peer_list, sender, reth_peer_sender, peers_limit) = {
             let state = self.inner.state.lock().await;
             (
                 state.irys_api_client.clone(),
@@ -421,6 +387,7 @@ where
                 self.inner.peer_list(),
                 self.inner.sender(),
                 state.reth_peer_sender.clone(),
+                state.peers_limit,
             )
         };
 
@@ -432,6 +399,7 @@ where
             is_trusted_peer,
             peer_filter_mode,
             peer_list,
+            peers_limit,
         ));
 
         tokio::spawn(async move {
@@ -479,12 +447,7 @@ where
                 return;
             }
 
-            if let Some(until) = blocklist_until()
-                .lock()
-                .expect("blocklist_until mutex poisoned")
-                .get(&api_address)
-                .copied()
-            {
+            if let Some(until) = state.blocklist_until.get(&api_address).copied() {
                 if std::time::Instant::now() < until {
                     debug!(
                         "Peer {:?} is blacklisted until {:?}, skipping announce",
@@ -517,11 +480,8 @@ where
                 peer_list: self.inner.peer_list(),
                 api_client: state.irys_api_client.clone(),
                 sender: self.inner.sender(),
-                max_concurrent_handshakes: state
-                    .config
-                    .node_config
-                    .p2p_handshake
-                    .max_concurrent_handshakes,
+                semaphore: state.handshake_semaphore.clone(),
+                peers_limit: state.peers_limit,
             };
 
             Some(task)
@@ -533,7 +493,7 @@ where
     }
 
     fn spawn_handshake_task(&self, task: HandshakeTask<A>) {
-        let semaphore = handshake_semaphore_with_max(task.max_concurrent_handshakes);
+        let semaphore = task.semaphore.clone();
         tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
             Self::announce_yourself_to_address_task(
@@ -544,6 +504,7 @@ where
                 task.is_trusted_peer,
                 task.peer_filter_mode,
                 task.peer_list,
+                task.peers_limit,
             )
             .await;
         });
@@ -558,10 +519,10 @@ where
                     .remove(&msg.peer_api_address);
 
                 let attempts = {
-                    let mut guard = handshake_failures()
-                        .lock()
-                        .expect("handshake_failures mutex poisoned");
-                    let entry = guard.entry(msg.peer_api_address).or_insert(0);
+                    let entry = state
+                        .handshake_failures
+                        .entry(msg.peer_api_address)
+                        .or_insert(0);
                     *entry += 1;
                     *entry
                 };
@@ -571,14 +532,8 @@ where
                         + std::time::Duration::from_secs(
                             state.config.node_config.p2p_handshake.blocklist_ttl_secs,
                         );
-                    blocklist_until()
-                        .lock()
-                        .expect("blocklist_until mutex poisoned")
-                        .insert(msg.peer_api_address, until);
-                    handshake_failures()
-                        .lock()
-                        .expect("handshake_failures mutex poisoned")
-                        .remove(&msg.peer_api_address);
+                    state.blocklist_until.insert(msg.peer_api_address, until);
+                    state.handshake_failures.remove(&msg.peer_api_address);
                     debug!(
                         "Peer {:?} blacklisted until {:?} after {} failures",
                         msg.peer_api_address, until, attempts
@@ -608,14 +563,8 @@ where
                 state
                     .currently_running_announcements
                     .remove(&msg.peer_api_address);
-                handshake_failures()
-                    .lock()
-                    .expect("handshake_failures mutex poisoned")
-                    .remove(&msg.peer_api_address);
-                blocklist_until()
-                    .lock()
-                    .expect("blocklist_until mutex poisoned")
-                    .remove(&msg.peer_api_address);
+                state.handshake_failures.remove(&msg.peer_api_address);
+                state.blocklist_until.remove(&msg.peer_api_address);
                 (None, msg.peer_api_address)
             }
         };
@@ -835,6 +784,7 @@ where
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
         peer_list: PeerList,
+        peers_limit: usize,
     ) {
         match Self::announce_yourself_to_address(
             api_client,
@@ -844,6 +794,7 @@ where
             is_trusted_peer,
             peer_filter_mode,
             peer_list,
+            peers_limit,
         )
         .await
         {
@@ -867,6 +818,7 @@ where
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
         peer_list: PeerList,
+        peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
         let peer_response_result = api_client
             .post_version(api_address, version_request)
@@ -922,7 +874,7 @@ where
                 }
 
                 accepted_peers.peers.shuffle(&mut rand::thread_rng());
-                let limit = peers_limit();
+                let limit = peers_limit;
                 if accepted_peers.peers.len() > limit {
                     accepted_peers.peers.truncate(limit);
                 }
@@ -1058,14 +1010,6 @@ mod tests {
         DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&path.to_path_buf()).expect("open test database"),
         ))
-    }
-
-    fn reset_global_state() {
-        handshake_failures()
-            .lock()
-            .expect("handshake mutex")
-            .clear();
-        blocklist_until().lock().expect("blocklist mutex").clear();
     }
 
     #[derive(Clone)]
@@ -1347,7 +1291,6 @@ mod tests {
 
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let config: Config = NodeConfig::testing().into();
         let harness = TestHarness::new(temp_dir.path(), config);
@@ -1363,15 +1306,18 @@ mod tests {
                 })
                 .await;
         }
-        assert!(blocklist_until()
+        let blocklisted = harness
+            .inner
+            .state
             .lock()
-            .expect("blocklist")
-            .contains_key(&target));
+            .await
+            .blocklist_until
+            .contains_key(&target);
+        assert!(blocklisted);
     }
 
     #[test]
     async fn should_prevent_infinite_handshake_loop() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
@@ -1430,7 +1376,6 @@ mod tests {
 
     #[test]
     async fn test_reth_sender_receives_reth_peer_info() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let config: Config = NodeConfig::testing().into();
         let harness = TestHarness::new(temp_dir.path(), config);
@@ -1607,7 +1552,6 @@ mod tests {
 
     #[test]
     async fn test_staked_unstaked_peer_flush_behavior() {
-        reset_global_state();
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];

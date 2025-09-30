@@ -18,7 +18,9 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.number_of_ingress_proofs_total = 3;
+            // Set the total number of proofs required to promote above the number of nodes (3)
+            // to validate the clamping to 3 proofs to promote.
+            consensus.number_of_ingress_proofs_total = 5;
             consensus.number_of_ingress_proofs_from_assignees = 2;
             consensus.num_partitions_per_slot = 3;
             consensus.epoch.num_blocks_in_epoch = 3;

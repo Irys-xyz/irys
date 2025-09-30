@@ -345,6 +345,7 @@ pub struct NodeInfo {
     pub pending_blocks: u64,
     pub is_syncing: bool,
     pub current_sync_height: usize,
+    pub uptime_secs: u64,
 }
 
 #[cfg(test)]
@@ -387,6 +388,7 @@ mod tests {
             pending_blocks: large_value,
             is_syncing: false,
             current_sync_height: 0,
+            uptime_secs: 0,
         };
 
         let json = serde_json::to_string(&node_info).unwrap();
@@ -434,15 +436,14 @@ mod tests {
     }
 
     #[test]
-    fn test_backwards_compatibility() {
+    fn test_backwards_compatibility() -> eyre::Result<()> {
         // Test that we can still deserialize old numeric format for small values
-        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":0}"#;
+        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":0, "uptimeSecs": 0}"#;
 
-        let result: Result<NodeInfo, _> = serde_json::from_str(old_json);
-        assert!(result.is_ok());
+        let node_info: NodeInfo = serde_json::from_str(old_json)?;
 
-        let node_info = result.unwrap();
         assert_eq!(node_info.chain_id, 12345);
         assert_eq!(node_info.height, 67890);
+        Ok(())
     }
 }

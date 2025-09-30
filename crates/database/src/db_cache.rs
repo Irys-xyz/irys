@@ -19,7 +19,6 @@ pub struct PartitionHashes(pub Vec<PartitionHash>);
 pub struct DataRootLRUEntry {
     /// The last block height this data_root was used
     pub last_height: u64,
-    pub ingress_proof: bool, // TODO: use bitflags
 }
 
 // """constrained""" by PD: maximum addressable partitions: u200, with a u32 chunk offset
@@ -86,6 +85,11 @@ pub struct CachedDataRoot {
 
     /// Block hashes for blocks containing transactions with this `data_root`
     pub block_set: Vec<H256>,
+
+    /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used for pruning while unconfirmed.
+    /// If None, pruning falls back to block inclusion history.
+    #[serde(default)]
+    pub expiry_height: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]

@@ -622,6 +622,12 @@ impl Inner {
         );
 
         let mut migrated_block = (*event.block).clone();
+        // todo: investigate the `poa chunk` - after uncommenting the `eyre::ensure` below, all the tests pass.
+        // Yet the code is architected in a way where we could migrate a block without a PoA chunk being present.
+        // eyre::ensure!(
+        //     migrated_block.poa.chunk.is_some(),
+        //     "poa chunk must be present"
+        // );
         let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
 
         // stage 1: move commitment transactions from tree to index
