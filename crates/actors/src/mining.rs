@@ -54,7 +54,6 @@ impl PartitionMiningActor {
         Self {
             config: config.clone(),
             service_senders,
-
             ranges: Ranges::new(
                 num_recall_ranges_in_partition(&config.consensus)
                     .try_into()
@@ -408,7 +407,6 @@ mod tests {
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
     };
-
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
     use irys_storage::ie;
@@ -421,7 +419,6 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, LedgerChunkOffset, NodeConfig,
     };
     use irys_vdf::state::test_helpers::mocked_vdf_service;
-
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
@@ -666,8 +663,6 @@ mod tests {
         sleep(Duration::from_secs(1)).await;
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
-
-        // removed obsolete PackingActor mock after migration to Tokio packing handle
 
         let mut partition_mining_actor = PartitionMiningActor::new(
             &config,
