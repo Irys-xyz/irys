@@ -1,4 +1,4 @@
-use actix::{actors::mocker::Mocker, Arbiter};
+use actix::Arbiter;
 use actix::{Actor as _, SystemService as _};
 
 use irys_actors::broadcast_mining_service::{
@@ -26,7 +26,7 @@ use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
+use std::{sync::atomic::AtomicU64, time::Duration};
 use tokio::time::sleep;
 use tracing::{debug, error};
 

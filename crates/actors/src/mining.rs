@@ -414,7 +414,7 @@ mod tests {
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
     };
-    use actix::actors::mocker::Mocker;
+
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
     use irys_storage::ie;
@@ -427,7 +427,7 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, LedgerChunkOffset, NodeConfig,
     };
     use irys_vdf::state::test_helpers::mocked_vdf_service;
-    use std::any::Any;
+
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
