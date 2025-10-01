@@ -2,7 +2,7 @@ use irys_database::{
     tables::{CompactCachedIngressProof, IngressProofs},
     walk_all,
 };
-use irys_types::{ingress::CachedIngressProof, GossipBroadcastMessage, IngressProof};
+use irys_types::{ingress::CachedIngressProof, GossipBroadcastMessage, IngressProof, TxSource};
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
 use tracing::debug;
 
@@ -12,6 +12,7 @@ impl Inner {
     pub fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
+        _source: TxSource,
     ) -> Result<(), IngressProofError> {
         // Validate the proofs signature and basic details
         let address = ingress_proof

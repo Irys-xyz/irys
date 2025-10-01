@@ -1514,6 +1514,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::IngestDataTx(
                     tx.header.clone(),
+                    irys_types::TxSource::Api,
                     oneshot_tx,
                 ));
         if let Err(e) = response {
@@ -1813,7 +1814,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTx(tx_header, tx))
+                .send(MempoolServiceMessage::IngestDataTx(
+                    tx_header,
+                    irys_types::TxSource::Api,
+                    tx,
+                ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
@@ -1842,7 +1847,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTx(commitment_tx, tx))
+                .send(MempoolServiceMessage::IngestCommitmentTx(
+                    commitment_tx,
+                    irys_types::TxSource::Api,
+                    tx,
+                ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
                 tracing::error!("Error sending message IngestCommitmentTx to mempool: {e:?}");
@@ -2140,11 +2149,15 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestDataTx(data_tx, oneshot_tx));
+        let result =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTx(
+                    data_tx,
+                    irys_types::TxSource::Api,
+                    oneshot_tx,
+                ));
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2167,6 +2180,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::IngestCommitmentTx(
                     commitment_tx,
+                    irys_types::TxSource::Api,
                     oneshot_tx,
                 ));
         if let Err(e) = result {

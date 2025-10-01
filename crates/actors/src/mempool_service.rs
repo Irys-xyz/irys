@@ -90,7 +90,11 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
     IngestChunkFireAndForget(UnpackedChunk),
-    IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
+    IngestIngressProof(
+        IngressProof,
+        irys_types::TxSource,
+        oneshot::Sender<Result<(), IngressProofError>>,
+    ),
     /// Ingress Pre-validated Block
     IngestBlocks {
         prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
@@ -108,6 +112,7 @@ pub enum MempoolServiceMessage {
     /// - Caches the transaction for unstaked signers to be reprocessed later
     IngestCommitmentTx(
         CommitmentTransaction,
+        irys_types::TxSource,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Confirm data tx exists in mempool or database
@@ -115,6 +120,7 @@ pub enum MempoolServiceMessage {
     /// validate and process an incoming DataTransactionHeader
     IngestDataTx(
         DataTransactionHeader,
+        irys_types::TxSource,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
@@ -166,9 +172,9 @@ impl Inner {
                         .handle_ingress_blocks_message(prevalidated_blocks)
                         .await;
                 }
-                MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
+                MempoolServiceMessage::IngestCommitmentTx(commitment_tx, source, response) => {
                     let response_message = self
-                        .handle_ingress_commitment_tx_message(commitment_tx)
+                        .handle_ingress_commitment_tx_message(commitment_tx, source)
                         .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -228,8 +234,8 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::IngestDataTx(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message(tx).await;
+                MempoolServiceMessage::IngestDataTx(tx, source, response) => {
+                    let response_value = self.handle_data_tx_ingress_message(tx, source).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -249,8 +255,8 @@ impl Inner {
                         .send(Arc::clone(&self.mempool_state))
                         .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
                 }
-                MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
+                MempoolServiceMessage::IngestIngressProof(ingress_proof, source, response) => {
+                    let response_value = self.handle_ingest_ingress_proof(ingress_proof, source);
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1129,7 +1135,7 @@ impl Inner {
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
             let _ = self
-                .handle_ingress_commitment_tx_message(commitment_tx)
+                .handle_ingress_commitment_tx_message(commitment_tx, irys_types::TxSource::Gossip)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Commitment tx ingress error during mempool restore from disk")
@@ -1138,7 +1144,7 @@ impl Inner {
 
         for (_txid, storage_tx) in recovered.storage_txs {
             let _ = self
-                .handle_data_tx_ingress_message(storage_tx)
+                .handle_data_tx_ingress_message(storage_tx, irys_types::TxSource::Gossip)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")

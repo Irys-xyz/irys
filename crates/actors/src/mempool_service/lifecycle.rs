@@ -158,7 +158,10 @@ impl Inner {
             )
         };
         for (id, tx) in valid_submit_ledger_tx {
-            match self.handle_data_tx_ingress_message(tx).await {
+            match self
+                .handle_data_tx_ingress_message(tx, irys_types::TxSource::Api)
+                .await
+            {
                 Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
                 Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
             }
@@ -166,7 +169,10 @@ impl Inner {
         for (_address, txs) in valid_commitment_tx {
             for tx in txs {
                 let id = tx.id;
-                match self.handle_ingress_commitment_tx_message(tx).await {
+                match self
+                    .handle_ingress_commitment_tx_message(tx, irys_types::TxSource::Api)
+                    .await
+                {
                     Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
                     Err(err) => debug!(
                         "failed to resubmit commitment tx {} to mempool: {:?}",
@@ -400,7 +406,10 @@ impl Inner {
         // resubmit each commitment tx
         for (id, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
             let _ = self
-                .handle_ingress_commitment_tx_message(orphaned_full_commitment_tx)
+                .handle_ingress_commitment_tx_message(
+                    orphaned_full_commitment_tx,
+                    irys_types::TxSource::Api,
+                )
                 .await
                 .inspect_err(|e| {
                     error!(
@@ -523,7 +532,7 @@ impl Inner {
                 // TODO: handle errors better
                 // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
                 let _ = self
-                    .handle_data_tx_ingress_message(tx)
+                    .handle_data_tx_ingress_message(tx, irys_types::TxSource::Api)
                     .await
                     .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e));
             } else {

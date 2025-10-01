@@ -3,6 +3,7 @@ use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+use irys_types::TxSource;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, H256,
@@ -16,6 +17,7 @@ impl Inner {
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
+        _source: TxSource,
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
@@ -172,7 +174,9 @@ impl Inner {
                     // todo switch _ to actually handle the result
                     let _ = self
                         .handle_message(MempoolServiceMessage::IngestCommitmentTx(
-                            pledge_tx, oneshot_tx,
+                            pledge_tx,
+                            TxSource::Gossip,
+                            oneshot_tx,
                         ))
                         .await;
 

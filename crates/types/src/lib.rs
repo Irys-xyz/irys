@@ -23,6 +23,7 @@ pub mod simple_rng;
 pub mod storage;
 pub mod storage_pricing;
 pub mod transaction;
+pub mod tx_source;
 pub mod version;
 
 pub mod block_provider;
@@ -39,6 +40,7 @@ pub use serialization::*;
 pub use signature::*;
 pub use storage::*;
 pub use transaction::*;
+pub use tx_source::*;
 
 pub use alloy_primitives::{Address, Signature};
 pub use app_state::*;

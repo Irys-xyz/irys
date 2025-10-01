@@ -25,6 +25,7 @@ use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
+use irys_types::TxSource;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
@@ -69,6 +70,7 @@ impl MempoolFacade for MempoolStub {
     async fn handle_data_transaction_ingress(
         &self,
         tx_header: DataTransactionHeader,
+        _source: TxSource,
     ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
@@ -99,6 +101,7 @@ impl MempoolFacade for MempoolStub {
     async fn handle_commitment_transaction_ingress(
         &self,
         _tx_header: CommitmentTransaction,
+        _source: TxSource,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
@@ -106,6 +109,7 @@ impl MempoolFacade for MempoolStub {
     async fn handle_ingest_ingress_proof(
         &self,
         _ingress_proof: IngressProof,
+        _source: TxSource,
     ) -> Result<(), IngressProofError> {
         Ok(())
     }

@@ -10,6 +10,7 @@ use irys_api_client::ApiClient;
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
+use irys_types::TxSource;
 
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
@@ -689,7 +690,7 @@ where
                     let id = commitment_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_commitment_transaction_ingress(commitment_tx)
+                        .handle_commitment_transaction_ingress(commitment_tx, TxSource::Gossip)
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
@@ -711,7 +712,7 @@ where
                     let id = storage_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_data_transaction_ingress(storage_tx)
+                        .handle_data_transaction_ingress(storage_tx, TxSource::Gossip)
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {

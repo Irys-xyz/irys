@@ -8,7 +8,7 @@ use irys_types::{
     chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     H256,
 };
-use irys_types::{Address, IngressProof};
+use irys_types::{Address, IngressProof, TxSource};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -19,16 +19,19 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn handle_data_transaction_ingress(
         &self,
         tx_header: DataTransactionHeader,
+        source: TxSource,
     ) -> Result<(), TxIngressError>;
     async fn handle_commitment_transaction_ingress(
         &self,
         tx_header: CommitmentTransaction,
+        source: TxSource,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
     async fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
+        source: TxSource,
     ) -> Result<(), IngressProofError>;
     async fn get_block_header(
         &self,
@@ -84,10 +87,13 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_data_transaction_ingress(
         &self,
         tx_header: DataTransactionHeader,
+        source: TxSource,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngestDataTx(tx_header, oneshot_tx))
+            .send(MempoolServiceMessage::IngestDataTx(
+                tx_header, source, oneshot_tx,
+            ))
             .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxIngressMessage")
@@ -96,11 +102,13 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_commitment_transaction_ingress(
         &self,
         commitment_tx: CommitmentTransaction,
+        source: TxSource,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::IngestCommitmentTx(
                 commitment_tx,
+                source,
                 oneshot_tx,
             ))
             .map_err(|_| {
@@ -115,11 +123,13 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
+        source: TxSource,
     ) -> Result<(), IngressProofError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::IngestIngressProof(
                 ingress_proof,
+                source,
                 oneshot_tx,
             ))
             .map_err(|_| {
