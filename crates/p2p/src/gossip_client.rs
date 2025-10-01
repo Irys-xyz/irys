@@ -1168,13 +1168,13 @@ mod tests {
             peer_list.add_or_update_peer(addr, peer, true);
 
             let operations = vec![
-                (Duration::from_millis(100), Ok(()), 51),
-                (Duration::from_millis(1500), Ok(()), 52),
-                (Duration::from_secs(3), Ok(()), 51),
+                (Duration::from_millis(100), Ok(()), 52),
+                (Duration::from_millis(1500), Ok(()), 53),
+                (Duration::from_secs(3), Ok(()), 52),
                 (
                     Duration::from_millis(500),
                     Err(GossipError::Network("error".to_string())),
-                    48,
+                    49,
                 ),
             ];
 
