@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use eyre::OptionExt as _;
+use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
@@ -136,6 +137,51 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     signer.sign_block_header(&mut header)?;
     irys_block = Arc::new(header);
 
+    send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let signer = genesis_config.signer().clone();
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    let (mut irys_block, eth_payload) = produce_block(&genesis_node).await?;
+
+    // Mutate: set a non-empty withdrawals list in the EVM body
+    let mutated = mutate_header(eth_payload.block(), |blk| {
+        let w = Withdrawal {
+            index: 0,
+            validator_index: 0,
+            address: genesis_node.node_ctx.config.node_config.reward_address,
+            amount: 1,
+        };
+        blk.body.withdrawals = Some(Withdrawals::new(vec![w]));
+    });
+
+    // Register mutated payload in local cache so validation can fetch it
+    inject_payload_into_cache(&genesis_node.node_ctx, mutated.clone()).await;
+
+    // Update irys block header with new evm block hash and resign
+    let mut header = (*irys_block).clone();
+    header.evm_block_hash = mutated.hash();
+    signer.sign_block_header(&mut header)?;
+    irys_block = Arc::new(header);
+
+    // Send block for validation
     send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
