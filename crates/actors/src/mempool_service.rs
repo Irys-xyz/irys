@@ -40,6 +40,7 @@ use irys_types::{
     Address, Base64, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -715,6 +716,34 @@ impl Inner {
                             actual_perm_fee = ?perm_fee,
                             expected_perm_fee = ?expected_perm_fee.amount,
                             "Skipping Publish tx: insufficient perm_fee"
+                        );
+                        continue;
+                    }
+
+                    // Mirror API-only structural checks to filter gossip txs that would fail API validation
+                    if TermFeeCharges::new(tx.term_fee, &self.config.node_config.consensus_config())
+                        .is_err()
+                    {
+                        trace!(
+                            tx_id = ?tx.id,
+                            term_fee = ?tx.term_fee,
+                            "Skipping Publish tx: invalid term fee structure"
+                        );
+                        continue;
+                    }
+
+                    if PublishFeeCharges::new(
+                        perm_fee,
+                        tx.term_fee,
+                        &self.config.node_config.consensus_config(),
+                    )
+                    .is_err()
+                    {
+                        trace!(
+                            tx_id = ?tx.id,
+                            perm_fee = ?perm_fee,
+                            term_fee = ?tx.term_fee,
+                            "Skipping Publish tx: invalid perm fee structure"
                         );
                         continue;
                     }
