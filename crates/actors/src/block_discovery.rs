@@ -465,9 +465,11 @@ impl BlockDiscoveryServiceInner {
                             ));
                         }
                         // Funding (ensure signer balance can cover total cost)
-                        if let Err(e) =
-                            validate_commitment_funding(&self.reth_adapter, commitment_transaction)
-                        {
+                        if let Err(e) = validate_commitment_funding(
+                            &self.reth_adapter,
+                            commitment_transaction,
+                            Some(previous_block_header.evm_block_hash.into()),
+                        ) {
                             return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                 format!(
                                     "Commitment transaction {} at position {} is unfunded or balance fetch failed: {}",

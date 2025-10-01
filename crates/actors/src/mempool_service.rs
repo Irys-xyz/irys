@@ -68,11 +68,12 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 pub fn validate_funding(
     reth_adapter: &IrysRethNodeAdapter,
     commitment_tx: &irys_types::CommitmentTransaction,
+    parent_evm_block_id: Option<BlockId>,
 ) -> Result<(), TxIngressError> {
     // Fetch the current balance of the signer
     let balance: irys_types::U256 = reth_adapter
         .rpc
-        .get_balance(commitment_tx.signer, None)
+        .get_balance(commitment_tx.signer, parent_evm_block_id)
         .map(From::from)
         .map_err(|e| {
             tracing::error!(

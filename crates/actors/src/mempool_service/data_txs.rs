@@ -87,7 +87,13 @@ impl Inner {
         let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
         let expiry_height = anchor_height + anchor_expiry_depth;
 
-        // Validate ledger type and protocol fees (API only)
+        // Validate ledger type for ALL sources (API and Gossip)
+        // We only accept Publish ledger transactions in the mempool.
+        // Submit ledger entries are constructed by block producers when promoting txs.
+        let ledger = DataLedger::try_from(tx.ledger_id)
+            .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
+
+        // Protocol fee structure checks (API only)
         //
         // Rationale:
         // - When a user submits a tx via our API, we validate fee structure against our
@@ -96,11 +102,9 @@ impl Inner {
         //   EMA/pricing context. To avoid false rejections, we limit validation for Gossip
         //   sources to signature + anchor checks only (performed above), and skip fee structure
         //   checks here.
-        if matches!(source, TxSource::Api) {
-            let ledger = DataLedger::try_from(tx.ledger_id)
-                .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
-            match ledger {
-                DataLedger::Publish => {
+        match ledger {
+            DataLedger::Publish => {
+                if matches!(source, TxSource::Api) {
                     // Publish ledger - permanent storage
                     //
                     // IMPORTANT: We do NOT recompute exact fee amounts here because the EMA
@@ -137,10 +141,10 @@ impl Inner {
                         TxIngressError::Other(format!("Invalid perm fee structure: {}", e))
                     })?;
                 }
-                DataLedger::Submit => {
-                    // Submit ledger - a data transaction cannot target the submit ledger directly
-                    return Err(TxIngressError::InvalidLedger(ledger as u32));
-                }
+            }
+            DataLedger::Submit => {
+                // Submit ledger - a data transaction cannot target the submit ledger directly
+                return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
 

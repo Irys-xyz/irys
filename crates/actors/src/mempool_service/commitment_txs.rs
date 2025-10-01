@@ -118,7 +118,7 @@ impl Inner {
             }
 
             // API-only: Validate funding before storing in mempool
-            if let Err(e) = validate_funding(&self.reth_node_adapter, &commitment_tx) {
+            if let Err(e) = validate_funding(&self.reth_node_adapter, &commitment_tx, None) {
                 let mut mempool_state_guard = self.mempool_state.write().await;
                 mempool_state_guard
                     .recent_invalid_tx
