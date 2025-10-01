@@ -1,4 +1,4 @@
-use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
+use actix::{Actor, Context, Handler, Message, MessageResponse};
 use eyre::eyre;
 use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
@@ -534,11 +534,96 @@ impl Handler<GetInternals> for PackingActor {
 }
 
 /// waits for any pending & active packing tasks to complete
+/// A lightweight, Tokio-native handle for enqueueing packing requests and introspecting service state.
+#[derive(Debug, Clone)]
+pub struct PackingHandle {
+    sender: tokio::sync::mpsc::UnboundedSender<PackingRequest>,
+    internals: Internals,
+}
+
+impl PackingHandle {
+    /// Enqueue a packing request on the Tokio service.
+    pub fn send(
+        &self,
+        req: PackingRequest,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<PackingRequest>> {
+        self.sender.send(req)
+    }
+
+    /// Access a clone of the internals snapshot used by wait_for_packing.
+    pub fn internals(&self) -> Internals {
+        self.internals.clone()
+    }
+}
+
+impl PackingActor {
+    /// Spawn a Tokio task that receives PackingRequest messages and pushes them into the internal queues.
+    /// Returns a `PackingHandle` for interacting with the service without Actix.
+    pub fn spawn_tokio_service(&self, runtime_handle: tokio::runtime::Handle) -> PackingHandle {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PackingRequest>();
+
+        // Clone references to the shared internals so both the service and observers see the same state
+        let job_queues = self.pending_jobs.clone();
+
+        // Build an Internals snapshot that shares the same underlying Arcs as the service
+        let internals = Internals {
+            pending_jobs: self.pending_jobs.clone(),
+            semaphore: self.semaphore.clone(),
+            config: self.packing_config.clone(),
+            active_workers: self.active_workers.clone(),
+        };
+
+        // Spawn the receiver loop
+        runtime_handle.spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                // Mirror the Actix handler behavior: push into SM-specific pending queue
+                if let Some(queue) = job_queues.get(&msg.storage_module.id) {
+                    // Ignore poisoned lock errors by propagating panic (consistent with existing code)
+                    queue.as_ref().write().unwrap().push_back(msg);
+                } else {
+                    // Unknown storage module id; drop the message
+                    tracing::warn!(target: "irys::packing", "Received packing request for unknown SM id");
+                }
+            }
+        });
+
+        PackingHandle {
+            sender: tx,
+            internals,
+        }
+    }
+}
+
+/// Trait to unify waiting logic for both Actix `Addr<PackingActor>` and Tokio `PackingHandle`.
+pub trait PackingIntrospect {
+    type Fut: core::future::Future<Output = eyre::Result<Internals>> + Send;
+    fn get_internals(&self) -> Self::Fut;
+}
+
+impl PackingIntrospect for actix::Addr<PackingActor> {
+    type Fut =
+        core::pin::Pin<Box<dyn core::future::Future<Output = eyre::Result<Internals>> + Send>>;
+
+    fn get_internals(&self) -> Self::Fut {
+        let addr = self.clone();
+        Box::pin(async move { Ok(addr.send(GetInternals()).await?) })
+    }
+}
+
+impl PackingIntrospect for PackingHandle {
+    type Fut = std::future::Ready<eyre::Result<Internals>>;
+
+    fn get_internals(&self) -> Self::Fut {
+        std::future::ready(Ok(self.internals.clone()))
+    }
+}
+
+/// waits for any pending & active packing tasks to complete
 pub async fn wait_for_packing(
-    packing_addr: Addr<PackingActor>,
+    packing: impl PackingIntrospect,
     timeout: Option<Duration>,
 ) -> eyre::Result<()> {
-    let internals = packing_addr.send(GetInternals()).await?;
+    let internals = packing.get_internals().await?;
     tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
         let mut i = 0;
         loop {

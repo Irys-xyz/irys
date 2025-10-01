@@ -1206,13 +1206,17 @@ impl IrysNode {
         let initial_hash = last_step_hash.0;
 
         // set up packing actor
-        let (atomic_global_step_number, packing_actor_addr, packing_controller_handles) =
-            Self::init_packing_actor(
-                &config,
-                global_step_number,
-                &storage_modules_guard,
-                runtime_handle.clone(),
-            );
+        let (
+            atomic_global_step_number,
+            packing_actor_addr,
+            packing_controller_handles,
+            packing_handle,
+        ) = Self::init_packing_actor(
+            &config,
+            global_step_number,
+            &storage_modules_guard,
+            runtime_handle.clone(),
+        );
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
@@ -1296,6 +1300,7 @@ impl IrysNode {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
                 packing: packing_actor_addr,
+                packing_handle: Some(packing_handle),
             },
             reward_curve,
             reth_handle: reth_node.clone(),
@@ -1579,17 +1584,20 @@ impl IrysNode {
         Arc<AtomicU64>,
         actix::Addr<PackingActor>,
         Vec<TokioServiceHandle>,
+        irys_actors::packing::PackingHandle,
     ) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let config = Arc::new(config.clone());
         let packing_actor = PackingActor::new(sm_ids, config);
+        let packing_handle = packing_actor.spawn_tokio_service(runtime_handle.clone());
         let packing_controller_handles = packing_actor.spawn_packing_controllers(runtime_handle);
         let packing_actor_addr = packing_actor.start();
         (
             atomic_global_step_number,
             packing_actor_addr,
             packing_controller_handles,
+            packing_handle,
         )
     }
 

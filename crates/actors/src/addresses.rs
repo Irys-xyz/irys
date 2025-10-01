@@ -1,6 +1,9 @@
 use actix::Addr;
 
-use crate::{mining::PartitionMiningActor, packing::PackingActor};
+use crate::{
+    mining::PartitionMiningActor,
+    packing::{PackingActor, PackingHandle},
+};
 
 /// Serves as a kind of app state that can be passed into actix web to allow
 /// the webserver to interact with actors in the node context.
@@ -8,4 +11,5 @@ use crate::{mining::PartitionMiningActor, packing::PackingActor};
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
     pub packing: Addr<PackingActor>,
+    pub packing_handle: Option<PackingHandle>,
 }
