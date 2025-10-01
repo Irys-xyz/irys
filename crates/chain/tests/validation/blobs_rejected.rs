@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use eyre::OptionExt as _;
-use irys_actors::BlockProdStrategy;
+use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
 use irys_types::{IrysBlockHeader, NodeConfig};
+use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
-use alloy_eips::eip7685::{Requests, RequestsOrHash};
-use reth::rpc::types::engine::ExecutionPayload;
-use reth::api::Block as _;
 use reth::rpc::api::EngineApiClient as _;
+use reth::rpc::types::engine::ExecutionPayload;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
@@ -120,8 +120,12 @@ async fn evm_payload_with_requests_hash_is_rejected() -> eyre::Result<()> {
     });
 
     // Register mutated payload in local reth so validation can fetch it
-    inject_payload_into_reth(&genesis_node.node_ctx, mutated.clone(), irys_block.previous_block_hash)
-        .await?;
+    inject_payload_into_reth(
+        &genesis_node.node_ctx,
+        mutated.clone(),
+        irys_block.previous_block_hash,
+    )
+    .await?;
 
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
@@ -161,8 +165,12 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     });
 
     // Register mutated payload in local reth so validation can fetch it
-    inject_payload_into_reth(&genesis_node.node_ctx, mutated.clone(), irys_block.previous_block_hash)
-        .await?;
+    inject_payload_into_reth(
+        &genesis_node.node_ctx,
+        mutated.clone(),
+        irys_block.previous_block_hash,
+    )
+    .await?;
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
@@ -200,8 +208,12 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     });
 
     // Register mutated payload in local reth so validation can fetch it
-    inject_payload_into_reth(&genesis_node.node_ctx, mutated.clone(), irys_block.previous_block_hash)
-        .await?;
+    inject_payload_into_reth(
+        &genesis_node.node_ctx,
+        mutated.clone(),
+        irys_block.previous_block_hash,
+    )
+    .await?;
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();

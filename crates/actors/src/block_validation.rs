@@ -931,7 +931,7 @@ pub async fn shadow_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
-    // Reject any blob gas usage in the payload (Cancun disabled for blobs).
+    // Reject any blob gas usage in the payload
     if payload_v3.blob_gas_used != 0 {
         tracing::debug!(
             block_hash = %block.block_hash,
@@ -983,6 +983,16 @@ pub async fn shadow_transactions_are_valid(
             );
             eyre::bail!("block contains EIP-7685 requests which are disabled");
         }
+    }
+    // Even if requests are not present in the sidecar, a header-level
+    // requests_hash indicates the use of EIP-7685. We reject it as well.
+    if sidecar.requests_hash().is_some() {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            "Rejecting block: EIP-7685 requests_hash present which is disabled",
+        );
+        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
     }
 
     // ensure the execution payload timestamp matches the block timestamp
@@ -1061,17 +1071,15 @@ pub async fn shadow_transactions_are_valid(
                 // That requires: destination matches + input has prefix + decoding succeeds.
                 if Some(*SHADOW_TX_DESTINATION_ADDR) == tx.to() {
                     let input = tx.input();
-                    if input.starts_with(IRYS_SHADOW_EXEC) {
-                        if ShadowTransaction::decode(&mut &input[..]).is_ok() {
-                            tracing::debug!(
-                                block_hash = %block.block_hash,
-                                evm_block_hash = %block.evm_block_hash,
-                                "Rejecting block: shadow tx injected in the middle of the block",
-                            );
-                            return Err(eyre::eyre!(
-                                "shadow tx injected in the middle of the block"
-                            ));
-                        }
+                    if input.starts_with(IRYS_SHADOW_EXEC) && ShadowTransaction::decode(&mut &input[..]).is_ok() {
+                        tracing::debug!(
+                            block_hash = %block.block_hash,
+                            evm_block_hash = %block.evm_block_hash,
+                            "Rejecting block: shadow tx injected in the middle of the block",
+                        );
+                        return Err(eyre::eyre!(
+                            "shadow tx injected in the middle of the block"
+                        ));
                     }
                 }
                 Ok(None)
