@@ -95,6 +95,7 @@ pub fn validate_funding(
             tx_id = %commitment_tx.id,
             balance = %balance,
             required = %required,
+            account = %commitment_tx.signer,
             "Insufficient balance for commitment tx"
         );
         return Err(TxIngressError::Unfunded);
