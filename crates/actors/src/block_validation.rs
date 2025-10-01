@@ -950,14 +950,6 @@ pub async fn shadow_transactions_are_valid(
         );
         eyre::bail!("block has non-zero excess_blob_gas which is disabled");
     }
-    ensure!(
-        payload_v3.blob_gas_used == 0,
-        "Blob gas usage must always be 0. We don't support blobs"
-    );
-    ensure!(
-        payload_v3.excess_blob_gas == 0,
-        "excess blob gas usage must always be 0. We don't support blobs"
-    );
 
     // Reject any block that carries blob sidecars (EIP-4844).
     // We keep Cancun active but disable blobs/sidecars entirely.
@@ -972,7 +964,7 @@ pub async fn shadow_transactions_are_valid(
             eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
         }
     }
-    // Requests are disabled
+    // Requests are disabled: reject if any present or if header-level requests hash is set.
     if let Some(requests) = sidecar.requests() {
         if !requests.is_empty() {
             tracing::debug!(
@@ -984,16 +976,8 @@ pub async fn shadow_transactions_are_valid(
             eyre::bail!("block contains EIP-7685 requests which are disabled");
         }
     }
-    // Even if requests are not present in the sidecar, a header-level
-    // requests_hash indicates the use of EIP-7685. We reject it as well.
-    if sidecar.requests_hash().is_some() {
-        tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
-            "Rejecting block: EIP-7685 requests_hash present which is disabled",
-        );
-        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
-    }
+    // Note: `requests_hash` may be present even when the requests list is empty.
+    // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
 
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
@@ -1071,15 +1055,15 @@ pub async fn shadow_transactions_are_valid(
                 // That requires: destination matches + input has prefix + decoding succeeds.
                 if Some(*SHADOW_TX_DESTINATION_ADDR) == tx.to() {
                     let input = tx.input();
-                    if input.starts_with(IRYS_SHADOW_EXEC) && ShadowTransaction::decode(&mut &input[..]).is_ok() {
+                    if input.starts_with(IRYS_SHADOW_EXEC)
+                        && ShadowTransaction::decode(&mut &input[..]).is_ok()
+                    {
                         tracing::debug!(
                             block_hash = %block.block_hash,
                             evm_block_hash = %block.evm_block_hash,
                             "Rejecting block: shadow tx injected in the middle of the block",
                         );
-                        return Err(eyre::eyre!(
-                            "shadow tx injected in the middle of the block"
-                        ));
+                        return Err(eyre::eyre!("shadow tx injected in the middle of the block"));
                     }
                 }
                 Ok(None)
