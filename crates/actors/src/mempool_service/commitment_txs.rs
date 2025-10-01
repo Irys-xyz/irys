@@ -22,6 +22,17 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
+        // Validate tx signature
+        // we MUST do this before using the ID
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
+            tracing::error!(
+                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                &commitment_tx,
+                e
+            );
+            return Err(TxIngressError::InvalidSignature);
+        }
+
         // Check stake/pledge whitelist early - reject if address is not whitelisted
         let whitelist = &self.stake_and_pledge_whitelist;
         if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
@@ -68,17 +79,6 @@ impl Inner {
             .is_some()
         {
             return Err(TxIngressError::Skipped);
-        }
-
-        // Validate tx signature
-        // we MUST do this before using the ID
-        if let Err(e) = self.validate_signature(&commitment_tx).await {
-            tracing::error!(
-                "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                &commitment_tx,
-                e
-            );
-            return Err(TxIngressError::InvalidSignature);
         }
 
         let _anchor_height = self.validate_anchor(&commitment_tx).await?;
