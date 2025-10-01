@@ -33,7 +33,6 @@ pub enum ScoreDecreaseReason {
 #[derive(Clone, Debug, Copy)]
 pub enum ScoreIncreaseReason {
     Online,
-    ValidData,
     DataRequest,
     TimelyResponse,
 }
@@ -625,16 +624,13 @@ impl PeerListDataInner {
             let was_active = peer.reputation_score.is_active() && peer.is_online;
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase_by(1);
-                }
-                ScoreIncreaseReason::ValidData => {
-                    peer.reputation_score.increase_by(3);
+                    peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase_by(1);
+                    peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase_by(2);
+                    peer.reputation_score.increase();
                 }
             }
             let now_active = peer.reputation_score.is_active() && peer.is_online;
@@ -651,16 +647,13 @@ impl PeerListDataInner {
             let was_active = peer.reputation_score.is_active() && peer.is_online;
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase_by(1);
-                }
-                ScoreIncreaseReason::ValidData => {
-                    peer.reputation_score.increase_by(3);
+                    peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase_by(1);
+                    peer.reputation_score.increase();
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase_by(2);
+                    peer.reputation_score.increase();
                 }
             }
 
@@ -1122,10 +1115,9 @@ mod tests {
         }
 
         #[rstest]
-        #[case(ScoreIncreaseReason::ValidData, 53)]
         #[case(ScoreIncreaseReason::Online, 51)]
         #[case(ScoreIncreaseReason::DataRequest, 51)]
-        #[case(ScoreIncreaseReason::TimelyResponse, 52)]
+        #[case(ScoreIncreaseReason::TimelyResponse, 51)]
         fn test_increase_peer_score(
             #[case] reason: ScoreIncreaseReason,
             #[case] expected_score: u16,
@@ -1170,10 +1162,6 @@ mod tests {
 
             let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
             assert_eq!(initial_score, 50);
-
-            peer_list.increase_peer_score(&addr, ScoreIncreaseReason::ValidData);
-            let after_increase_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
-            assert_eq!(after_increase_score, 53);
 
             peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
 
