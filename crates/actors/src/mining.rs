@@ -43,7 +43,6 @@ impl PartitionMiningActor {
     pub fn new(
         config: &Config,
         service_senders: ServiceSenders,
-
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStateReadonly,
