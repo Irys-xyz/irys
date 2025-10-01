@@ -1,5 +1,5 @@
 use alloy_eips::BlockId;
-use alloy_primitives::U256;
+use alloy_primitives::{BlockHash, U256};
 
 use irys_types::Address;
 use reth_chainspec::EthereumHardforks;
@@ -37,6 +37,9 @@ where
     fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256>;
 
     fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
+
+    fn get_balance_irys_all_blocks(&self, address: Address, block_hash: BlockHash) -> irys_types::U256;
+
 }
 
 impl<Node, EthApi> IrysRethRpcTestContextExt<Node, EthApi> for RpcTestContext<Node, EthApi>
@@ -66,4 +69,20 @@ where
             })
             .unwrap_or(irys_types::U256::zero())
     }
+    
+    /// Modified version of the`get_balance` impl that checks all blocks,
+    /// and which will return an Irys U256 with a default value of `0` if getting the balance fails.
+    fn get_balance_irys_all_blocks(&self, address: Address, block_hash: BlockHash) -> irys_types::U256 {
+        use reth_provider::StateProviderFactory as _;
+        let provider = self.inner.provider();
+        provider
+            .state_by_block_hash(block_hash)
+            .ok()
+            .and_then(|s| s.account_balance(&address).ok().flatten())
+            .unwrap_or(U256::ZERO)
+            .into()
+
+    }
+
+
 }
