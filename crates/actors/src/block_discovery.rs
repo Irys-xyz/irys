@@ -447,6 +447,19 @@ impl BlockDiscoveryServiceInner {
             {
                 Ok(tx) => {
                     commitments = tx;
+                    // Validate fees for all commitment transactions at block prevalidation time.
+                    // This duplicates API-side checks and ensures gossiped commitments are also
+                    // fee-validated when included in a block.
+                    for (idx, commitment_transaction) in commitments.iter().enumerate() {
+                        if let Err(e) = commitment_transaction.validate_fee(&self.config.consensus) {
+                            return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                format!(
+                                    "Commitment transaction {} at position {} has an invalid fee: {}",
+                                    commitment_transaction.id, idx, e
+                                ),
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Failed to collect commitment transactions: {:?}", e);
