@@ -349,6 +349,7 @@ where
     ///
     /// Returns `Ok(tx)` if the tx should continue to normal eth validation,
     /// or `Err(outcome)` if the tx is invalid for Irys-specific reasons.
+    #[expect(clippy::result_large_err, reason = "to comply with reth api")]
     fn prefilter_tx(&self, tx: Tx) -> Result<Tx, TransactionValidationOutcome<Tx>> {
         let input = tx.input();
         if input.starts_with(IRYS_SHADOW_EXEC) {
