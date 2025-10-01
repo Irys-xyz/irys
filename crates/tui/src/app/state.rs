@@ -679,12 +679,12 @@ mod tests {
     fn test_increase_refresh_interval() {
         let mut app_state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
 
-        // Default is 30
+        // Default is 10
         assert_eq!(app_state.refresh_interval_secs, 10);
 
         // Increase by 1
         app_state.increase_refresh_interval();
-        assert_eq!(app_state.refresh_interval_secs, 31);
+        assert_eq!(app_state.refresh_interval_secs, 11);
 
         // Test near maximum (60)
         app_state.refresh_interval_secs = 59;
