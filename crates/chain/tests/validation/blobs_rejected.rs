@@ -211,7 +211,7 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     // Mutate: append an EIP-4844 transaction that carries blob_versioned_hashes (non-empty)
     let mutated = mutate_header(eth_payload.block(), |blk| {
         let tx_eip4844 = TxEip4844 {
-            chain_id: genesis_node.node_ctx.config.consensus.chain_id as u64,
+            chain_id: genesis_node.node_ctx.config.consensus.chain_id,
             nonce: 0,
             max_fee_per_gas: 1_000_000_000_u128,
             max_priority_fee_per_gas: 0,
