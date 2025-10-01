@@ -1295,7 +1295,7 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                packing_handle: Some(packing_handle),
+                packing_handle,
             },
             reward_curve,
             reth_handle: reth_node.clone(),
@@ -1559,12 +1559,11 @@ impl IrysNode {
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
-                if let Some(handle) = service_senders.packing_handle() {
-                    let _ = handle.send(PackingRequest {
-                        storage_module: sm.clone(),
-                        chunk_range: PartitionChunkRange(interval),
-                    });
-                }
+                let handle = service_senders.packing_handle();
+                let _ = handle.send(PackingRequest {
+                    storage_module: sm.clone(),
+                    chunk_range: PartitionChunkRange(interval),
+                });
             }
         }
         (part_actors, arbiters)

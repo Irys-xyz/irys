@@ -348,17 +348,11 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
             if msg.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(?partition_hash, ?interval, "Expiring partition hash");
-                    if let Some(handle) = self.service_senders.packing_handle() {
-                        let _ = handle.send(PackingRequest {
-                            storage_module: self.storage_module.clone(),
-                            chunk_range: PartitionChunkRange(interval),
-                        });
-                    } else {
-                        warn!(
-                            "Packing handle not set; dropping packing request for partition {:?}",
-                            partition_hash
-                        );
-                    }
+                    let handle = self.service_senders.packing_handle();
+                    let _ = handle.send(PackingRequest {
+                        storage_module: self.storage_module.clone(),
+                        chunk_range: PartitionChunkRange(interval),
+                    });
                 } else {
                     error!(
                         ?partition_hash,

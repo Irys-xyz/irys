@@ -222,13 +222,10 @@ impl StorageModuleServiceInner {
             // Reset packing params and indexes on the storage module
             if let Ok(interval) = packing_sm.reset() {
                 // Message packing service to fill up fresh entropy chunks on the drive
-                if let Some(handle) = &self.actor_addresses.packing_handle {
-                    // Use Tokio-native packing handle
-                    let _ = handle.send(PackingRequest {
-                        storage_module: packing_sm.clone(),
-                        chunk_range: PartitionChunkRange(interval),
-                    });
-                }
+                let _ = self.actor_addresses.packing_handle.send(PackingRequest {
+                    storage_module: packing_sm.clone(),
+                    chunk_range: PartitionChunkRange(interval),
+                });
             }
         }
 

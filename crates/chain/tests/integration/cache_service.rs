@@ -50,11 +50,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(config).start().await;
 
     wait_for_packing(
-        node.node_ctx
-            .actor_addresses
-            .packing_handle
-            .clone()
-            .unwrap(),
+        node.node_ctx.actor_addresses.packing_handle.clone(),
         Some(Duration::from_secs(10)),
     )
     .await?;

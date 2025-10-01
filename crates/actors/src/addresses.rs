@@ -7,5 +7,5 @@ use crate::{mining::PartitionMiningActor, packing::PackingHandle};
 #[derive(Debug, Clone)]
 pub struct ActorAddresses {
     pub partitions: Vec<Addr<PartitionMiningActor>>,
-    pub packing_handle: Option<PackingHandle>,
+    pub packing_handle: PackingHandle,
 }

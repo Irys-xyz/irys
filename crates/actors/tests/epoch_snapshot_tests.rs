@@ -437,19 +437,6 @@ async fn partition_expiration_and_repacking_test() {
     let arc_rwlock = Arc::new(rwlock);
     let closure_arc = arc_rwlock.clone();
 
-    // Create ServiceSenders for testing
-    let (service_senders, mut receivers) = ServiceSenders::new();
-
-    // Spawn a task to handle block producer commands
-    tokio::spawn(async move {
-        while let Some(cmd) = receivers.block_producer.recv().await {
-            if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
-                // Return Ok(None) for the test
-                let _ = response.send(Ok(None));
-            }
-        }
-    });
-
     // Wire a Tokio packing handle that captures requests into closure_arc
     let (tx_packing, mut rx_packing) =
         tokio::sync::mpsc::unbounded_channel::<irys_actors::packing::PackingRequest>();
@@ -473,7 +460,19 @@ async fn partition_expiration_and_repacking_test() {
         config: irys_actors::packing::PackingConfig::new(&std::sync::Arc::new(config.clone())),
     };
     let packing_handle = irys_actors::packing::PackingHandle::from_parts(tx_packing, internals);
-    service_senders.set_packing_handle(packing_handle);
+
+    // Create ServiceSenders for testing (with packing handle)
+    let (service_senders, mut receivers) = ServiceSenders::new_with_packing_handle(packing_handle);
+
+    // Spawn a task to handle block producer commands
+    tokio::spawn(async move {
+        while let Some(cmd) = receivers.block_producer.recv().await {
+            if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
+                // Return Ok(None) for the test
+                let _ = response.send(Ok(None));
+            }
+        }
+    });
 
     let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
