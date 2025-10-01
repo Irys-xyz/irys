@@ -156,21 +156,18 @@ impl BlockDiscoveryService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let span = Span::current();
-        let handle = runtime_handle.spawn(
-            async move {
-                let service = Self {
-                    shutdown: shutdown_rx,
-                    msg_rx: rx,
-                    inner,
-                };
-                service
-                    .start()
-                    .instrument(span)
-                    .await
-                    .expect("Block discovery service encountered an irrecoverable error")
-            }
-            
-        );
+        let handle = runtime_handle.spawn(async move {
+            let service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                inner,
+            };
+            service
+                .start()
+                .instrument(span)
+                .await
+                .expect("Block discovery service encountered an irrecoverable error")
+        });
 
         TokioServiceHandle {
             name: "block_discovery_service".to_string(),

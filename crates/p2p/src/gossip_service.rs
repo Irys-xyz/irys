@@ -347,9 +347,11 @@ fn spawn_watcher_task(
         move |mut task_shutdown_signal| async move {
             debug!("Starting gossip service watch thread");
 
-            let tasks_shutdown_handle = TaskManager::current()
-                .executor()
-                .spawn_critical_with_shutdown_signal("server shutdown task", |_| async move {
+            let tasks_shutdown_handle =
+                TaskManager::current()
+                    .executor()
+                    .spawn_critical_with_shutdown_signal("server shutdown task", |_| {
+                        async move {
                     tokio::select! {
                         _ = task_shutdown_signal.recv() => {
                             debug!("Gossip service shutdown signal received");
@@ -386,7 +388,8 @@ fn spawn_watcher_task(
                             warn!("Error: {}", error);
                         }
                     };
-                }.instrument(span));
+                }.instrument(span)
+                    });
 
             match server.await {
                 Ok(()) => {

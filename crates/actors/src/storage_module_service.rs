@@ -537,28 +537,25 @@ impl StorageModuleService {
         let config = config.clone();
         let span = Span::current();
 
-        let handle = runtime_handle.spawn(
-            async move {
-                let pending_storage_module_service = Self {
-                    shutdown: shutdown_rx,
-                    msg_rx: rx,
-                    inner: StorageModuleServiceInner::new(
-                        storage_modules,
-                        block_index,
-                        block_tree,
-                        actor_addresses,
-                        service_senders,
-                        config,
-                    ),
-                };
-                pending_storage_module_service
-                    .start()
-                    .instrument(span)
-                    .await
-                    .expect("StorageModule Service encountered an irrecoverable error")
-            }
-           
-        );
+        let handle = runtime_handle.spawn(async move {
+            let pending_storage_module_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                inner: StorageModuleServiceInner::new(
+                    storage_modules,
+                    block_index,
+                    block_tree,
+                    actor_addresses,
+                    service_senders,
+                    config,
+                ),
+            };
+            pending_storage_module_service
+                .start()
+                .instrument(span)
+                .await
+                .expect("StorageModule Service encountered an irrecoverable error")
+        });
 
         TokioServiceHandle {
             name: "storage_module_service".to_string(),

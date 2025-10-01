@@ -532,28 +532,25 @@ impl DataSyncService {
         let service_senders = service_senders.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let span = Span::current();
-        let handle = runtime_handle.spawn(
-            async move {
-                let data_sync_service = Self {
-                    shutdown: shutdown_rx,
-                    msg_rx: rx,
-                    inner: DataSyncServiceInner::new(
-                        block_tree,
-                        storage_modules,
-                        peer_list,
-                        chunk_fetcher_factory,
-                        service_senders,
-                        config,
-                    ),
-                };
-                data_sync_service
-                    .start()
-                    .instrument(span)
-                    .await
-                    .expect("DataSync Service encountered an irrecoverable error")
-            }
-           
-        );
+        let handle = runtime_handle.spawn(async move {
+            let data_sync_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                inner: DataSyncServiceInner::new(
+                    block_tree,
+                    storage_modules,
+                    peer_list,
+                    chunk_fetcher_factory,
+                    service_senders,
+                    config,
+                ),
+            };
+            data_sync_service
+                .start()
+                .instrument(span)
+                .await
+                .expect("DataSync Service encountered an irrecoverable error")
+        });
 
         TokioServiceHandle {
             name: "data_sync_service".to_string(),

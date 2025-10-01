@@ -1445,43 +1445,38 @@ impl MempoolService {
             .initial_stake_and_pledge_whitelist
             .clone();
         let span = Span::current(); // we don't just `instrument` the async block below so that the span doesn't include spawn_service:start
-        let handle = runtime_handle.spawn(
-            async move {
-                let mempool_state = Arc::new(RwLock::new(mempool_state));
-                let pledge_provider = MempoolPledgeProvider::new(
-                    mempool_state.clone(),
-                    block_tree_read_guard.clone(),
-                );
+        let handle = runtime_handle.spawn(async move {
+            let mempool_state = Arc::new(RwLock::new(mempool_state));
+            let pledge_provider =
+                MempoolPledgeProvider::new(mempool_state.clone(), block_tree_read_guard.clone());
 
-                let mut stake_and_pledge_whitelist = HashSet::new();
-                stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
+            let mut stake_and_pledge_whitelist = HashSet::new();
+            stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
-                let mempool_service = Self {
-                    shutdown: shutdown_rx,
-                    msg_rx: rx,
-                    reorg_rx,
-                    block_migrated_rx,
-                    inner: Inner {
-                        block_tree_read_guard,
-                        config,
-                        exec: TaskExecutor::current(),
-                        irys_db,
-                        mempool_state,
-                        reth_node_adapter,
-                        service_senders,
-                        storage_modules_guard,
-                        pledge_provider,
-                        stake_and_pledge_whitelist,
-                    },
-                };
-                mempool_service
-                    .start()
-                    .instrument(span)
-                    .await
-                    .expect("Mempool service encountered an irrecoverable error")
-            }
-
-        );
+            let mempool_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                reorg_rx,
+                block_migrated_rx,
+                inner: Inner {
+                    block_tree_read_guard,
+                    config,
+                    exec: TaskExecutor::current(),
+                    irys_db,
+                    mempool_state,
+                    reth_node_adapter,
+                    service_senders,
+                    storage_modules_guard,
+                    pledge_provider,
+                    stake_and_pledge_whitelist,
+                },
+            };
+            mempool_service
+                .start()
+                .instrument(span)
+                .await
+                .expect("Mempool service encountered an irrecoverable error")
+        });
 
         Ok(TokioServiceHandle {
             name: "mempool_service".to_string(),

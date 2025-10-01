@@ -48,7 +48,6 @@ impl CommitmentSnapshot {
         commitment_tx: &CommitmentTransaction,
         is_staked_in_current_epoch: bool,
     ) -> CommitmentSnapshotStatus {
-
         let commitment_type = &commitment_tx.commitment_type;
         let txid = commitment_tx.id;
         let signer = &commitment_tx.signer;

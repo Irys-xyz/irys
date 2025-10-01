@@ -159,21 +159,19 @@ impl BlockProducerService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let span = Span::current();
-        let handle = runtime_handle.spawn(
-            async move {
-                let service = Self {
-                    shutdown: shutdown_rx,
-                    cmd_rx: rx,
-                    inner,
-                    blocks_remaining_for_test,
-                };
-                service
-                    .start()
-                    .instrument(span)
-                    .await
-                    .expect("Block producer service encountered an irrecoverable error")
-            }
-        );
+        let handle = runtime_handle.spawn(async move {
+            let service = Self {
+                shutdown: shutdown_rx,
+                cmd_rx: rx,
+                inner,
+                blocks_remaining_for_test,
+            };
+            service
+                .start()
+                .instrument(span)
+                .await
+                .expect("Block producer service encountered an irrecoverable error")
+        });
 
         TokioServiceHandle {
             name: "block_producer_service".to_string(),

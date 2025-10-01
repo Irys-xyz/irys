@@ -6,7 +6,9 @@ use irys_types::{
 };
 use reth_db::Database as _;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet}, sync::Arc, time::SystemTime
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+    time::SystemTime,
 };
 use tracing::debug;
 
@@ -260,7 +262,11 @@ impl BlockTree {
 
         let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
 
-        debug!("latest epoch snapshot hash: {}, latest commitment snapshot hash: {}", &arc_epoch_snapshot.get_hash(), &arc_commitment_snapshot.get_hash());
+        debug!(
+            "latest epoch snapshot hash: {}, latest commitment snapshot hash: {}",
+            &arc_epoch_snapshot.get_hash(),
+            &arc_commitment_snapshot.get_hash()
+        );
         // Get the latest block from index for EMA snapshot
         let latest_block_hash = {
             let block_index = block_index_guard.read();

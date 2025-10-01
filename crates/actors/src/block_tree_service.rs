@@ -127,44 +127,41 @@ impl BlockTreeService {
         let config = config.clone();
         let storage_submodules_config = storage_submodules_config.clone();
         let span = Span::current();
-        let handle = runtime_handle.spawn(
-            async move {
-                let cache = match BlockTree::restore_from_db(
-                    bi_guard.clone(),
-                    epoch_replay_data,
-                    db.clone(),
-                    &storage_submodules_config,
-                    config.clone(),
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // Choosing to panic and stop the node, if we cannot restore BlockTree, we cannot continue
-                        panic!("Failed to restore BlockTree from DB: {}", e);
-                    }
-                };
+        let handle = runtime_handle.spawn(async move {
+            let cache = match BlockTree::restore_from_db(
+                bi_guard.clone(),
+                epoch_replay_data,
+                db.clone(),
+                &storage_submodules_config,
+                config.clone(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Choosing to panic and stop the node, if we cannot restore BlockTree, we cannot continue
+                    panic!("Failed to restore BlockTree from DB: {}", e);
+                }
+            };
 
-                let block_tree_service = Self {
-                    shutdown: shutdown_rx,
-                    msg_rx: rx,
-                    inner: BlockTreeServiceInner {
-                        db,
-                        cache: Arc::new(RwLock::new(cache)),
-                        miner_address,
-                        block_index_guard: bi_guard,
-                        config,
-                        service_senders,
-                        system,
-                        storage_submodules_config: storage_submodules_config.clone(),
-                    },
-                };
-                block_tree_service
-                    .start()
-                    .instrument(span)
-                    .await
-                    .expect("BlockTree encountered an irrecoverable error")
-            }
-            
-        );
+            let block_tree_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                inner: BlockTreeServiceInner {
+                    db,
+                    cache: Arc::new(RwLock::new(cache)),
+                    miner_address,
+                    block_index_guard: bi_guard,
+                    config,
+                    service_senders,
+                    system,
+                    storage_submodules_config: storage_submodules_config.clone(),
+                },
+            };
+            block_tree_service
+                .start()
+                .instrument(span)
+                .await
+                .expect("BlockTree encountered an irrecoverable error")
+        });
 
         TokioServiceHandle {
             name: "block_tree_service".to_string(),

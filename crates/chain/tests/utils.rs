@@ -338,8 +338,6 @@ impl IrysNodeTest<()> {
         }
     }
 
-
-
     pub fn with_name(mut self, name: &str) -> Self {
         self.name = name.to_string();
         self
