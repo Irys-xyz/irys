@@ -43,7 +43,11 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
     wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
+        node.node_ctx
+            .actor_addresses
+            .packing_handle
+            .clone()
+            .unwrap(),
         Some(Duration::from_secs(10)),
     )
     .await?;
@@ -267,7 +271,12 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
     wait_for_packing(
-        genesis_node.node_ctx.actor_addresses.packing.clone(),
+        genesis_node
+            .node_ctx
+            .actor_addresses
+            .packing_handle
+            .clone()
+            .unwrap(),
         Some(Duration::from_secs(10)),
     )
     .await?;

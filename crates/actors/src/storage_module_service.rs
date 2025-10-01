@@ -223,14 +223,8 @@ impl StorageModuleServiceInner {
             if let Ok(interval) = packing_sm.reset() {
                 // Message packing service to fill up fresh entropy chunks on the drive
                 if let Some(handle) = &self.actor_addresses.packing_handle {
-                    // Use Tokio-native packing handle when available
+                    // Use Tokio-native packing handle
                     let _ = handle.send(PackingRequest {
-                        storage_module: packing_sm.clone(),
-                        chunk_range: PartitionChunkRange(interval),
-                    });
-                } else {
-                    // Fallback to Actix actor
-                    self.actor_addresses.packing.do_send(PackingRequest {
                         storage_module: packing_sm.clone(),
                         chunk_range: PartitionChunkRange(interval),
                     });

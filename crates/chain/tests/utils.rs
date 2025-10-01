@@ -553,7 +553,11 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
         wait_for_packing(
-            self.node_ctx.actor_addresses.packing.clone(),
+            self.node_ctx
+                .actor_addresses
+                .packing_handle
+                .clone()
+                .unwrap(),
             Some(Duration::from_secs(seconds_to_wait as u64)),
         )
         .await

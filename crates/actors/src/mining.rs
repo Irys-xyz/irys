@@ -413,7 +413,6 @@ mod tests {
         block_producer::BlockProducerCommand,
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
-        packing::PackingActor,
     };
     use actix::actors::mocker::Mocker;
     use irys_database::{open_or_create_db, tables::IrysTables};
@@ -481,10 +480,6 @@ mod tests {
                 }
             }
         });
-
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
-            Box::new(Some(())) as Box<dyn Any>
-        }));
 
         // Set up the storage geometry for this test
         let infos = [StorageModuleInfo {
@@ -678,9 +673,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
-            Box::new(Some(())) as Box<dyn Any>
-        }));
+        // removed obsolete PackingActor mock after migration to Tokio packing handle
 
         let mut partition_mining_actor = PartitionMiningActor::new(
             &config,

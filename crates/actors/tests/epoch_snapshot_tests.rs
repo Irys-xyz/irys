@@ -5,9 +5,7 @@ use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
 use irys_actors::{
-    block_producer::BlockProducerCommand,
-    mining::PartitionMiningActor,
-    packing::{PackingActor, PackingRequest},
+    block_producer::BlockProducerCommand, mining::PartitionMiningActor, packing::PackingRequest,
     services::ServiceSenders,
 };
 use irys_config::StorageSubmodulesConfig;

@@ -51,7 +51,11 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let app = node.start_public_api().await;
 
     wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
+        node.node_ctx
+            .actor_addresses
+            .packing_handle
+            .clone()
+            .unwrap(),
         Some(Duration::from_secs(10)),
     )
     .await?;

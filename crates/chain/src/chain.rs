@@ -21,7 +21,7 @@ use irys_actors::{
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining::{MiningControl, PartitionMiningActor},
-    packing::{PackingActor, PackingRequest},
+    packing::{PackingHandle, PackingRequest, PackingService},
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -1206,17 +1206,13 @@ impl IrysNode {
         let initial_hash = last_step_hash.0;
 
         // set up packing actor
-        let (
-            atomic_global_step_number,
-            packing_actor_addr,
-            packing_controller_handles,
-            packing_handle,
-        ) = Self::init_packing_actor(
-            &config,
-            global_step_number,
-            &storage_modules_guard,
-            runtime_handle.clone(),
-        );
+        let (atomic_global_step_number, packing_controller_handles, packing_handle) =
+            Self::init_packing_service(
+                &config,
+                global_step_number,
+                &storage_modules_guard,
+                runtime_handle.clone(),
+            );
         service_senders.set_packing_handle(packing_handle.clone());
 
         // set up storage modules
@@ -1226,7 +1222,6 @@ impl IrysNode {
             &vdf_state_readonly,
             &service_senders,
             &atomic_global_step_number,
-            &packing_actor_addr,
             latest_block.diff,
         );
 
@@ -1300,7 +1295,6 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                packing: packing_actor_addr,
                 packing_handle: Some(packing_handle),
             },
             reward_curve,
@@ -1533,7 +1527,6 @@ impl IrysNode {
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
         atomic_global_step_number: &Arc<AtomicU64>,
-        packing_actor_addr: &actix::Addr<PackingActor>,
         initial_difficulty: U256,
     ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
@@ -1577,27 +1570,24 @@ impl IrysNode {
         (part_actors, arbiters)
     }
 
-    fn init_packing_actor(
+    fn init_packing_service(
         config: &Config,
         global_step_number: u64,
         storage_modules_guard: &StorageModulesReadGuard,
         runtime_handle: tokio::runtime::Handle,
     ) -> (
         Arc<AtomicU64>,
-        actix::Addr<PackingActor>,
         Vec<TokioServiceHandle>,
         irys_actors::packing::PackingHandle,
     ) {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
         let config = Arc::new(config.clone());
-        let packing_actor = PackingActor::new(sm_ids, config);
-        let packing_handle = packing_actor.spawn_tokio_service(runtime_handle.clone());
-        let packing_controller_handles = packing_actor.spawn_packing_controllers(runtime_handle);
-        let packing_actor_addr = packing_actor.start();
+        let packing_service = PackingService::new(sm_ids, config);
+        let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
+        let packing_controller_handles = packing_service.spawn_packing_controllers(runtime_handle);
         (
             atomic_global_step_number,
-            packing_actor_addr,
             packing_controller_handles,
             packing_handle,
         )

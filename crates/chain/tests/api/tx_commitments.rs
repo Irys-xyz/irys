@@ -406,7 +406,11 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Initialize packing and mining
     wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
+        node.node_ctx
+            .actor_addresses
+            .packing_handle
+            .clone()
+            .unwrap(),
         Some(Duration::from_secs(10)),
     )
     .await?;
