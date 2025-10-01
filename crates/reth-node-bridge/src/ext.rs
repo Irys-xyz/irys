@@ -5,7 +5,7 @@ use irys_types::Address;
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
 use reth_node_api::{BlockTy, FullNodeComponents, NodeTypes};
-use reth_provider::BlockReader;
+use reth_provider::{BlockReader, StateProviderBox};
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, TraceExt};
 use tracing::warn;
 
@@ -38,7 +38,7 @@ where
 
     fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
 
-    fn get_balance_irys_all_blocks(&self, address: Address, block_hash: BlockHash) -> eyre::Result<irys_types::U256> ;
+    fn get_balance_irys_all_blocks(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<irys_types::U256> ;
 
 }
 
@@ -71,12 +71,24 @@ where
     }
 
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.
-    fn get_balance_irys_all_blocks(&self, address: Address, block_hash: BlockHash) -> eyre::Result<irys_types::U256> {
+    fn get_balance_irys_all_blocks(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<irys_types::U256> {
         use reth_provider::StateProviderFactory as _;
         use eyre::OptionExt as _;
         let provider = self.inner.provider();
-        Ok(provider
-            .state_by_block_hash(block_hash)?
+        let state_provider: StateProviderBox = {
+
+            let block_id = block_id.unwrap_or(BlockId::Number(alloy_eips::BlockNumberOrTag::Latest));
+            match block_id {
+                BlockId::Hash(rpc_block_hash) => provider
+                        .state_by_block_hash(rpc_block_hash.block_hash)?,
+                BlockId::Number(block_number_or_tag) => match block_number_or_tag {
+                    alloy_eips::BlockNumberOrTag::Latest => provider.latest()?,
+
+                    _ => unimplemented!()
+                },
+            }
+        } ;
+        Ok(state_provider
             .account_balance(&address)?
             .ok_or_eyre("Unable to get account balance from state")?
             .into())
