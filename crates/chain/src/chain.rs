@@ -1336,7 +1336,6 @@ impl IrysNode {
             storage_modules.clone(),
             block_index_guard.clone(),
             block_tree_guard.clone(),
-            &irys_node_ctx.actor_addresses,
             service_senders.clone(),
             &config,
             runtime_handle.clone(),

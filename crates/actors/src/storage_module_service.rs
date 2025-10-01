@@ -14,7 +14,7 @@
 /// consistency throughout the system.
 use crate::{
     chunk_migration_service::ChunkMigrationServiceMessage, packing::PackingRequest,
-    services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
+    services::ServiceSenders, DataSyncServiceMessage,
 };
 use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
@@ -58,7 +58,6 @@ pub struct StorageModuleServiceInner {
     storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
     block_index: BlockIndexReadGuard,
     block_tree: BlockTreeReadGuard,
-    actor_addresses: ActorAddresses,
     submodules_config: StorageSubmodulesConfig,
     service_senders: ServiceSenders,
     config: Config,
@@ -70,7 +69,6 @@ impl StorageModuleServiceInner {
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
-        actor_addresses: ActorAddresses,
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
@@ -84,7 +82,6 @@ impl StorageModuleServiceInner {
             storage_modules,
             block_index,
             block_tree,
-            actor_addresses,
             submodules_config,
             service_senders,
             config,
@@ -525,7 +522,6 @@ impl StorageModuleService {
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
-        actor_addresses: &ActorAddresses,
         service_senders: ServiceSenders,
         config: &Config,
         runtime_handle: tokio::runtime::Handle,
@@ -534,7 +530,6 @@ impl StorageModuleService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let actor_addresses = actor_addresses.clone();
         let config = config.clone();
 
         let handle = runtime_handle.spawn(
@@ -546,7 +541,6 @@ impl StorageModuleService {
                         storage_modules,
                         block_index,
                         block_tree,
-                        actor_addresses,
                         service_senders,
                         config,
                     ),
