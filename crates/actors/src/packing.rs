@@ -554,6 +554,15 @@ impl PackingHandle {
     pub fn internals(&self) -> Internals {
         self.internals.clone()
     }
+
+    /// Construct a PackingHandle from its parts.
+    /// Useful for tests or custom wiring where the receiver loop is managed externally.
+    pub fn from_parts(
+        sender: tokio::sync::mpsc::UnboundedSender<PackingRequest>,
+        internals: Internals,
+    ) -> Self {
+        Self { sender, internals }
+    }
 }
 
 impl PackingActor {

@@ -27,7 +27,6 @@ use tracing::{debug, error, info, warn, Span};
 pub struct PartitionMiningActor {
     config: Config,
     service_senders: ServiceSenders,
-    packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
@@ -44,7 +43,7 @@ impl PartitionMiningActor {
     pub fn new(
         config: &Config,
         service_senders: ServiceSenders,
-        packing_actor: Recipient<PackingRequest>,
+
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStateReadonly,
@@ -55,7 +54,7 @@ impl PartitionMiningActor {
         Self {
             config: config.clone(),
             service_senders,
-            packing_actor,
+
             ranges: Ranges::new(
                 num_recall_ranges_in_partition(&config.consensus)
                     .try_into()
@@ -349,10 +348,17 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
             if msg.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(?partition_hash, ?interval, "Expiring partition hash");
-                    self.packing_actor.do_send(PackingRequest {
-                        storage_module: self.storage_module.clone(),
-                        chunk_range: PartitionChunkRange(interval),
-                    });
+                    if let Some(handle) = self.service_senders.packing_handle() {
+                        let _ = handle.send(PackingRequest {
+                            storage_module: self.storage_module.clone(),
+                            chunk_range: PartitionChunkRange(interval),
+                        });
+                    } else {
+                        warn!(
+                            "Packing handle not set; dropping packing request for partition {:?}",
+                            partition_hash
+                        );
+                    }
                 } else {
                     error!(
                         ?partition_hash,
@@ -543,7 +549,6 @@ mod tests {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders,
-            packing.start().recipient(),
             storage_module,
             true,
             vdf_steps_guard.clone(),
@@ -680,7 +685,6 @@ mod tests {
         let mut partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders,
-            packing.start().recipient(),
             storage_module,
             false,
             vdf_steps_guard.clone(),

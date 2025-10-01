@@ -452,22 +452,33 @@ async fn partition_expiration_and_repacking_test() {
         }
     });
 
-    let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
-        let packing_req = *msg.downcast::<PackingRequest>().unwrap();
-        debug!("Packing request arrived ...");
-
-        {
-            let mut lck = closure_arc.write().unwrap();
-            lck.replace(packing_req);
+    // Wire a Tokio packing handle that captures requests into closure_arc
+    let (tx_packing, mut rx_packing) =
+        tokio::sync::mpsc::unbounded_channel::<irys_actors::packing::PackingRequest>();
+    // spawn a small receiver to capture the request in the shared RwLock
+    tokio::spawn({
+        let closure_arc = closure_arc.clone();
+        async move {
+            while let Some(packing_req) = rx_packing.recv().await {
+                debug!("Packing request arrived ...");
+                let mut lck = closure_arc.write().unwrap();
+                lck.replace(packing_req);
+                debug!("Packing request result pushed ...");
+            }
         }
-
-        debug!("Packing request result pushed ...");
-        Box::new(Some(())) as Box<dyn Any>
-    }));
+    });
+    // minimal Internals for handle construction
+    let internals = irys_actors::packing::Internals {
+        pending_jobs: std::collections::HashMap::new(),
+        semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        active_workers: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        config: irys_actors::packing::PackingConfig::new(&std::sync::Arc::new(config.clone())),
+    };
+    let packing_handle = irys_actors::packing::PackingHandle::from_parts(tx_packing, internals);
+    service_senders.set_packing_handle(packing_handle);
 
     let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
-    let packing_addr = packing.start();
     let mut part_actors = Vec::new();
 
     let atomic_global_step_number = Arc::new(AtomicU64::new(0));
@@ -476,7 +487,6 @@ async fn partition_expiration_and_repacking_test() {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders.clone(),
-            packing_addr.clone().recipient(),
             sm.clone(),
             true, // do not start mining automatically
             vdf_steps_guard.clone(),

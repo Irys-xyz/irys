@@ -1217,6 +1217,7 @@ impl IrysNode {
             &storage_modules_guard,
             runtime_handle.clone(),
         );
+        service_senders.set_packing_handle(packing_handle.clone());
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
@@ -1541,7 +1542,6 @@ impl IrysNode {
             let partition_mining_actor = PartitionMiningActor::new(
                 config,
                 service_senders.clone(),
-                packing_actor_addr.clone().recipient(),
                 sm.clone(),
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
@@ -1566,10 +1566,12 @@ impl IrysNode {
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
-                packing_actor_addr.do_send(PackingRequest {
-                    storage_module: sm.clone(),
-                    chunk_range: PartitionChunkRange(interval),
-                });
+                if let Some(handle) = service_senders.packing_handle() {
+                    let _ = handle.send(PackingRequest {
+                        storage_module: sm.clone(),
+                        chunk_range: PartitionChunkRange(interval),
+                    });
+                }
             }
         }
         (part_actors, arbiters)
