@@ -90,11 +90,7 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
     IngestChunkFireAndForget(UnpackedChunk),
-    IngestIngressProof(
-        IngressProof,
-        irys_types::TxSource,
-        oneshot::Sender<Result<(), IngressProofError>>,
-    ),
+    IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Ingress Pre-validated Block
     IngestBlocks {
         prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
@@ -255,7 +251,7 @@ impl Inner {
                         .send(Arc::clone(&self.mempool_state))
                         .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
                 }
-                MempoolServiceMessage::IngestIngressProof(ingress_proof, source, response) => {
+                MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
                     let response_value = self.handle_ingest_ingress_proof(ingress_proof);
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);

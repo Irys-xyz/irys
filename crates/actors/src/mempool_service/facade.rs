@@ -31,7 +31,6 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
-        source: TxSource,
     ) -> Result<(), IngressProofError>;
     async fn get_block_header(
         &self,
@@ -123,13 +122,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
-        source: TxSource,
     ) -> Result<(), IngressProofError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::IngestIngressProof(
                 ingress_proof,
-                source,
                 oneshot_tx,
             ))
             .map_err(|_| {

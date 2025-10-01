@@ -222,7 +222,7 @@ where
 
         match self
             .mempool
-            .handle_ingest_ingress_proof(proof, TxSource::Gossip)
+            .handle_ingest_ingress_proof(proof)
             .await
             .map_err(GossipError::from)
         {

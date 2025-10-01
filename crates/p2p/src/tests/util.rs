@@ -109,7 +109,6 @@ impl MempoolFacade for MempoolStub {
     async fn handle_ingest_ingress_proof(
         &self,
         _ingress_proof: IngressProof,
-        _source: TxSource,
     ) -> Result<(), IngressProofError> {
         Ok(())
     }

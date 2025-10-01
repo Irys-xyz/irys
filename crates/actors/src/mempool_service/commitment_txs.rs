@@ -3,11 +3,11 @@ use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+use irys_types::TxSource;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, H256,
 };
-use irys_types::TxSource;
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
@@ -82,10 +82,10 @@ impl Inner {
 
         let _anchor_height = self.validate_anchor(&commitment_tx).await?;
 
-    // Validate economic constraints only for API-submitted transactions
-    // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
-    // while still being able to process them when building blocks.
-    if matches!(source, TxSource::Api) {
+        // Validate economic constraints only for API-submitted transactions
+        // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
+        // while still being able to process them when building blocks.
+        if matches!(source, TxSource::Api) {
             // API-only: Validate fee
             if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
                 let mut mempool_state_guard = self.mempool_state.write().await;
