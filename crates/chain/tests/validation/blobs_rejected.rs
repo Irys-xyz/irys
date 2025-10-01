@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use eyre::OptionExt as _;
+use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
+use alloy_primitives::Signature as AlloySignature;
+use alloy_primitives::{Bytes, B256, U256};
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
@@ -170,6 +173,60 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
             amount: 1,
         };
         blk.body.withdrawals = Some(Withdrawals::new(vec![w]));
+    });
+
+    // Register mutated payload in local cache so validation can fetch it
+    inject_payload_into_cache(&genesis_node.node_ctx, mutated.clone()).await;
+
+    // Update irys block header with new evm block hash and resign
+    let mut header = (*irys_block).clone();
+    header.evm_block_hash = mutated.hash();
+    signer.sign_block_header(&mut header)?;
+    irys_block = Arc::new(header);
+
+    // Send block for validation
+    send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let signer = genesis_config.signer().clone();
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    let (mut irys_block, eth_payload) = produce_block(&genesis_node).await?;
+
+    // Mutate: append an EIP-4844 transaction that carries blob_versioned_hashes (non-empty)
+    let mutated = mutate_header(eth_payload.block(), |blk| {
+        let tx_eip4844 = TxEip4844 {
+            chain_id: genesis_node.node_ctx.config.consensus.chain_id as u64,
+            nonce: 0,
+            max_fee_per_gas: 1_000_000_000u128,
+            max_priority_fee_per_gas: 0,
+            gas_limit: 100_000,
+            to: genesis_node.node_ctx.config.node_config.reward_address,
+            value: U256::ZERO,
+            input: Bytes::new(),
+            access_list: Default::default(),
+            blob_versioned_hashes: vec![B256::with_last_byte(0xAB)],
+            max_fee_per_blob_gas: 1,
+        };
+        let sig = AlloySignature::test_signature().with_parity(true);
+        let env = EthereumTxEnvelope::<TxEip4844>::Eip4844(tx_eip4844.into_signed(sig));
+        blk.body.transactions.push(env);
     });
 
     // Register mutated payload in local cache so validation can fetch it
