@@ -459,9 +459,9 @@ mod tests {
         coinbase = "0x0000000000000000000000000000000000000000"
 
         [reth.genesis.config]
-        chainId = 1
+        chainId = 1270
         daoForkSupport = false
-        terminalTotalDifficultyPassed = false
+        terminalTotalDifficultyPassed = true
 
         [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
         balance = "0x152cf4e72a974f1c0000"

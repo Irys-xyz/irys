@@ -1,0 +1,1 @@
+ <!-- # How nodes transition between sync modes and mining mode -->

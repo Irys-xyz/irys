@@ -29,7 +29,7 @@ use irys_actors::{
 use irys_actors::{ActorAddresses, BlockValidationTracker, DataSyncService, StorageModuleService};
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
-use irys_config::chain::chainspec::{build_reth_chainspec, build_unsigned_irys_genesis_block};
+use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
@@ -46,6 +46,7 @@ use irys_p2p::{
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
 use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+use irys_reth_node_bridge::irys_reth::chainspec::irys_chain_spec;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
@@ -72,7 +73,7 @@ use reth::{
 };
 use reth_db::Database as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     net::TcpListener,
     sync::{Arc, RwLock},
@@ -117,6 +118,7 @@ pub struct IrysNodeCtx {
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub sync_service_facade: SyncChainServiceFacade,
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
+    pub started_at: Instant,
 }
 
 impl IrysNodeCtx {
@@ -133,6 +135,7 @@ impl IrysNodeCtx {
             block_index: self.block_index_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
+            started_at: self.started_at,
         }
     }
 
@@ -227,7 +230,7 @@ impl Clone for StopGuard {
 
 async fn start_reth_node(
     task_executor: TaskExecutor,
-    chainspec: ChainSpec,
+    chainspec: Arc<ChainSpec>,
     config: Config,
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
@@ -235,7 +238,7 @@ async fn start_reth_node(
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
-        Arc::new(chainspec.clone()),
+        chainspec.clone(),
         task_executor.clone(),
         config.node_config.clone(),
         latest_block,
@@ -573,7 +576,10 @@ impl IrysNode {
         let mut block_index = BlockIndex::new(&config.node_config)
             .await
             .expect("initializing a new block index should be doable");
-        let reth_chainspec = build_reth_chainspec(config)?;
+        let reth_chainspec = irys_chain_spec(
+            config.consensus.reth.chain,
+            config.consensus.reth.genesis.clone(),
+        )?;
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments) = self
@@ -835,7 +841,7 @@ impl IrysNode {
         reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<()>,
         irys_provider: IrysRethProvider,
-        reth_chainspec: ChainSpec,
+        reth_chainspec: Arc<ChainSpec>,
         latest_block_height: u64,
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,
@@ -1054,6 +1060,7 @@ impl IrysNode {
             service_senders.reth_service.clone(),
             receivers.peer_network,
             service_senders.peer_network.clone(),
+            service_senders.peer_events.clone(),
             runtime_handle.clone(),
         );
 
@@ -1315,6 +1322,7 @@ impl IrysNode {
             mempool_pledge_provider: mempool_pledge_provider.clone(),
             sync_service_facade,
             is_vdf_mining_enabled,
+            started_at: Instant::now(),
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1416,6 +1424,7 @@ impl IrysNode {
                     .expect("Missing reth rpc url!"),
                 sync_state,
                 mempool_pledge_provider,
+                started_at: irys_node_ctx.started_at,
             },
             http_listener,
         );
@@ -1750,6 +1759,7 @@ fn init_peer_list_service(
     reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
+    peer_events: tokio::sync::broadcast::Sender<irys_domain::PeerEvent>,
     runtime_handle: Handle,
 ) -> (TokioServiceHandle, PeerList) {
     let reth_peer_sender = {
@@ -1789,6 +1799,7 @@ fn init_peer_list_service(
         reth_peer_sender,
         service_receiver,
         service_sender,
+        peer_events,
         runtime_handle,
     )
 }

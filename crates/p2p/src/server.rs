@@ -561,7 +561,13 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
         let (tx, _rx) = mpsc::unbounded_channel();
         let peer_network_sender = PeerNetworkSender::new(tx);
-        let peer_list = PeerList::new(&config, &db, peer_network_sender).expect("peer list");
+        let peer_list = PeerList::new(
+            &config,
+            &db,
+            peer_network_sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
 
         let miner = Address::new([1_u8; 20]);
         peer_list.add_or_update_peer(miner, PeerListItem::default(), true);

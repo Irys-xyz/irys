@@ -1,6 +1,9 @@
 use irys_primitives::CommitmentType;
 use irys_types::{Address, CommitmentTransaction};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    hash::{Hash as _, Hasher as _},
+};
 use tracing::debug;
 
 use super::EpochSnapshot;
@@ -14,12 +17,12 @@ pub enum CommitmentSnapshotStatus {
     InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Hash)]
 pub struct CommitmentSnapshot {
     pub commitments: BTreeMap<Address, MinerCommitments>,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Hash)]
 pub struct MinerCommitments {
     pub stake: Option<CommitmentTransaction>,
     pub pledges: Vec<CommitmentTransaction>,
@@ -209,9 +212,10 @@ impl CommitmentSnapshot {
                     as u64;
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
-                        "Invalid pledge count for {}: expected {}, but miner has {} pledges",
+                        "Invalid pledge count for {}: expected {}, but miner {} has {} pledges",
                         commitment_tx.id,
                         pledge_count_before_executing,
+                        &signer,
                         current_pledge_count
                     );
                     return CommitmentSnapshotStatus::InvalidPledgeCount;
@@ -257,6 +261,16 @@ impl CommitmentSnapshot {
             }
         }
         false
+    }
+
+    // NON CANONICAL HASH
+    // SHOULD BE USED FOR DEBUGGING ONLY
+    pub fn get_hash(&self) -> String {
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.hash(&mut hasher);
+        let res = hasher.finish();
+        use base58::ToBase58 as _;
+        res.to_le_bytes().to_base58()
     }
 }
 
