@@ -1,11 +1,8 @@
 use alloy_primitives::B256;
 use irys_types::{
-    partition::PartitionHash, Config, DataTransactionLedger, GenesisConfig, H256List,
-    IrysBlockHeader, IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
+    partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List, IrysBlockHeader,
+    IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
 };
-use reth_chainspec::{ChainSpec, ChainSpecBuilder};
-
-use super::chain::IRYS_TESTNET;
 
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
@@ -74,13 +71,4 @@ pub fn build_unsigned_irys_genesis_block(
         ema_irys_price: config.genesis_price,
         treasury: U256::zero(), // Treasury will be set when genesis commitments are added
     }
-}
-
-pub fn build_reth_chainspec(config: &Config) -> eyre::Result<ChainSpec> {
-    let cs = ChainSpecBuilder::mainnet()
-        .chain(config.consensus.reth.chain)
-        .genesis(config.consensus.reth.genesis.clone())
-        .with_forks(IRYS_TESTNET.hardforks.clone())
-        .build();
-    Ok(cs)
 }

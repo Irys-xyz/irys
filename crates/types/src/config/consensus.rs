@@ -13,6 +13,8 @@ use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
 use eyre::Result;
+use irys_reth::chainspec::IrysHardforksInConfig;
+use reth::rpc::types::serde_helpers::OtherFields;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -410,117 +412,34 @@ impl ConsensusConfig {
         Amount::token(cost_per_chunk_per_epoch)
     }
 
-    // this is a config used for testing
     pub fn testing() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 1;
-        const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
         const CHUNK_SIZE: u64 = 32;
-        // block reward params
-        const HALF_LIFE_YEARS: u128 = 4;
-        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
-        const INFLATION_CAP: u128 = 100_000_000;
+        const SHA1_DIFFICULTY: u64 = 70_000;
+        const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
+        const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
+
+        let base = Self::testnet();
+
+        let difficulty_adjustment = DifficultyAdjustmentConfig {
+            block_time: DEFAULT_BLOCK_TIME,
+            difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)
+                * 14,
+            ..base.difficulty_adjustment
+        };
+
+        let vdf = VdfConsensusConfig {
+            sha_1s_difficulty: SHA1_DIFFICULTY,
+            ..base.vdf
+        };
 
         Self {
-            chain_id: 1270,
-            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
-            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
-            safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs_total: 1,
-            number_of_ingress_proofs_from_assignees: 0,
-            genesis: GenesisConfig {
-                timestamp_millis: 0,
-                miner_address: Address::ZERO,
-                reward_address: Address::ZERO,
-                last_epoch_hash: H256::zero(),
-                vdf_seed: H256::zero(),
-                vdf_next_seed: None,
-                genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
-            },
-            expected_genesis_hash: None,
-            token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
-            mempool: MempoolConsensusConfig {
-                max_data_txs_per_block: 100,
-                max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 20,
-                commitment_fee: 100,
-            },
-            vdf: VdfConsensusConfig {
-                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
-                // With 12s target block time, this resets approximately every 10 minutes
-                reset_frequency: 50 * 12,
-                num_checkpoints_in_vdf_step: 25,
-                max_allowed_vdf_fork_steps: 60_000,
-                sha_1s_difficulty: 70_000,
-            },
             chunk_size: CHUNK_SIZE,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
-            block_migration_depth: 6,
-            block_tree_depth: 50,
-            epoch: EpochConfig {
-                capacity_scalar: 100,
-                num_blocks_in_epoch: 100,
-                submit_ledger_epoch_length: 5,
-                num_capacity_partitions: None,
-            },
-            entropy_packing_iterations: 1000,
-            difficulty_adjustment: DifficultyAdjustmentConfig {
-                block_time: DEFAULT_BLOCK_TIME,
-                difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000)
-                    .div_ceil(DEFAULT_BLOCK_TIME)
-                    * 14,
-                max_difficulty_adjustment_factor: dec!(4),
-                min_difficulty_adjustment_factor: dec!(0.25),
-            },
-            ema: EmaConfig {
-                price_adjustment_interval: 10,
-            },
-            reth: RethChainSpec {
-                chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
-                genesis: Genesis {
-                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                    alloc: {
-                        let mut map = BTreeMap::new();
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map
-                    },
-                    ..Default::default()
-                },
-            },
-            block_reward_config: BlockRewardConfig {
-                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
-                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
-            },
-            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
-            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
-            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
-            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
-                .expect("valid percentage"),
-            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
-            enable_full_ingress_proof_validation: false,
-            max_future_timestamp_drift_millis: 15_000,
+            num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
+            num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
+            difficulty_adjustment,
+            vdf,
+            ..base
         }
     }
 
@@ -597,6 +516,37 @@ impl ConsensusConfig {
                 chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
                 genesis: Genesis {
                     gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                    config: alloy_genesis::ChainConfig {
+                        chain_id: IRYS_TESTNET_CHAIN_ID,
+                        homestead_block: None,
+                        dao_fork_block: None,
+                        dao_fork_support: false,
+                        eip150_block: None,
+                        eip155_block: None,
+                        eip158_block: None,
+                        byzantium_block: None,
+                        constantinople_block: None,
+                        petersburg_block: None,
+                        istanbul_block: None,
+                        muir_glacier_block: None,
+                        berlin_block: None,
+                        london_block: None,
+                        arrow_glacier_block: None,
+                        gray_glacier_block: None,
+                        merge_netsplit_block: None,
+                        shanghai_time: None,
+                        cancun_time: None,
+                        prague_time: None,
+                        osaka_time: None,
+                        terminal_total_difficulty: None,
+                        terminal_total_difficulty_passed: true,
+                        ethash: None,
+                        clique: None,
+                        parlia: None,
+                        extra_fields: OtherFields::new(IrysHardforksInConfig {}.into()),
+                        deposit_contract_address: None,
+                        blob_schedule: BTreeMap::new(),
+                    },
                     alloc: {
                         let mut map = BTreeMap::new();
                         map.insert(
