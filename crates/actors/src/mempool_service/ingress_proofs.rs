@@ -12,7 +12,6 @@ impl Inner {
     pub fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
-        _source: TxSource,
     ) -> Result<(), IngressProofError> {
         // Validate the proofs signature and basic details
         let address = ingress_proof

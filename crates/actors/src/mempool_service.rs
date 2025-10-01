@@ -256,7 +256,7 @@ impl Inner {
                         .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
                 }
                 MempoolServiceMessage::IngestIngressProof(ingress_proof, source, response) => {
-                    let response_value = self.handle_ingest_ingress_proof(ingress_proof, source);
+                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };

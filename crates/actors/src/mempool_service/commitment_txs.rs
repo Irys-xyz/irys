@@ -3,11 +3,11 @@ use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
-use irys_types::TxSource;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, H256,
 };
+use irys_types::TxSource;
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
@@ -17,7 +17,7 @@ impl Inner {
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
         commitment_tx: CommitmentTransaction,
-        _source: TxSource,
+        source: TxSource,
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
@@ -82,50 +82,55 @@ impl Inner {
 
         let _anchor_height = self.validate_anchor(&commitment_tx).await?;
 
-        // Validate fee
-        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
-            drop(mempool_state_guard);
-            tracing::warn!(
-                "Commitment tx {} failed fee validation: {}",
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::CommitmentValidationError(e));
-        }
+    // Validate economic constraints only for API-submitted transactions
+    // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
+    // while still being able to process them when building blocks.
+    if matches!(source, TxSource::Api) {
+            // API-only: Validate fee
+            if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
+                let mut mempool_state_guard = self.mempool_state.write().await;
+                mempool_state_guard
+                    .recent_invalid_tx
+                    .put(commitment_tx.id, ());
+                drop(mempool_state_guard);
+                tracing::warn!(
+                    "Commitment tx {} failed fee validation: {}",
+                    commitment_tx.id,
+                    e
+                );
+                return Err(TxIngressError::CommitmentValidationError(e));
+            }
 
-        // Validate value based on commitment type
-        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
-            drop(mempool_state_guard);
-            tracing::warn!(
-                "Commitment tx {} failed value validation: {}",
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::CommitmentValidationError(e));
-        }
+            // API-only: Validate value based on commitment type
+            if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
+                let mut mempool_state_guard = self.mempool_state.write().await;
+                mempool_state_guard
+                    .recent_invalid_tx
+                    .put(commitment_tx.id, ());
+                drop(mempool_state_guard);
+                tracing::warn!(
+                    "Commitment tx {} failed value validation: {}",
+                    commitment_tx.id,
+                    e
+                );
+                return Err(TxIngressError::CommitmentValidationError(e));
+            }
 
-        // Validate funding before storing in mempool
-        if let Err(e) = self.validate_funding(&commitment_tx) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
+            // API-only: Validate funding before storing in mempool
+            if let Err(e) = self.validate_funding(&commitment_tx) {
+                let mut mempool_state_guard = self.mempool_state.write().await;
+                mempool_state_guard
+                    .recent_invalid_tx
+                    .put(commitment_tx.id, ());
 
-            tracing::info!(
-                "Rejected unfunded commitment tx {} from signer {}",
-                commitment_tx.id,
-                commitment_tx.signer
-            );
+                tracing::info!(
+                    "Rejected unfunded commitment tx {} from signer {}",
+                    commitment_tx.id,
+                    commitment_tx.signer
+                );
 
-            return Err(e);
+                return Err(e);
+            }
         }
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain

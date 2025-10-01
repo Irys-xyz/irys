@@ -5,11 +5,11 @@ use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
-use irys_types::TxSource;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
 };
+use irys_types::TxSource;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
@@ -52,7 +52,7 @@ impl Inner {
     pub async fn handle_data_tx_ingress_message(
         &mut self,
         mut tx: DataTransactionHeader,
-        _source: TxSource,
+        source: TxSource,
     ) -> Result<(), TxIngressError> {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
 
@@ -87,52 +87,61 @@ impl Inner {
         let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
         let expiry_height = anchor_height + anchor_expiry_depth;
 
-        // Validate ledger type and protocol fees
-        let ledger = DataLedger::try_from(tx.ledger_id)
-            .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
-        match ledger {
-            DataLedger::Publish => {
-                // Publish ledger - permanent storage
-                //
-                // IMPORTANT: We do NOT calculate or validate exact fee amounts here.
-                // The EMA (Exponential Moving Average) used for pricing can change between:
-                // 1. When the transaction was created by the client
-                // 2. When it arrives at this node for ingestion
-                //
-                // Additionally, different forks may have different EMA values, causing
-                // the same transaction to have different expected fees on different chains.
-                //
-                // Instead, we only validate that the fee structure can be properly
-                // reconstructed and distributed according to protocol rules.
+        // Validate ledger type and protocol fees (API only)
+        //
+        // Rationale:
+        // - When a user submits a tx via our API, we validate fee structure against our
+        //   canonical view so the user gets immediate feedback if it's malformed/underfunded.
+        // - When we receive a gossiped tx, it may belong to a different fork with a different
+        //   EMA/pricing context. To avoid false rejections, we limit validation for Gossip
+        //   sources to signature + anchor checks only (performed above), and skip fee structure
+        //   checks here.
+        if matches!(source, TxSource::Api) {
+            let ledger = DataLedger::try_from(tx.ledger_id)
+                .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
+            match ledger {
+                DataLedger::Publish => {
+                    // Publish ledger - permanent storage
+                    //
+                    // IMPORTANT: We do NOT recompute exact fee amounts here because the EMA
+                    // (Exponential Moving Average) can change between creation and ingestion,
+                    // and can differ across forks. Instead, we verify the fee structure is
+                    // internally consistent (charge objects can be constructed) so it can be
+                    // distributed properly by protocol rules if included.
+                    let actual_perm_fee = tx.perm_fee.ok_or(TxIngressError::Other(
+                        "Perm fee must be present".to_string(),
+                    ))?;
 
-                let actual_perm_fee = tx.perm_fee.ok_or(TxIngressError::Other(
-                    "Perm fee must be present".to_string(),
-                ))?;
+                    let actual_term_fee = tx.term_fee;
 
-                let actual_term_fee = tx.term_fee;
+                    // Validate that fee distribution objects can be created successfully
+                    // This ensures the fee structure is internally consistent and can be
+                    // properly distributed to block producers, ingress proof providers, etc.
 
-                // Validate that fee distribution objects can be created successfully
-                // This ensures the fee structure is internally consistent and can be
-                // properly distributed to block producers, ingress proof providers, etc.
-
-                // Validate term fee distribution structure
-                TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
+                    // Validate term fee distribution structure
+                    TermFeeCharges::new(
+                        actual_term_fee,
+                        &self.config.node_config.consensus_config(),
+                    )
                     .map_err(|e| {
                         TxIngressError::Other(format!("Invalid term fee structure: {}", e))
                     })?;
 
-                // Validate publish fee distribution structure
-                PublishFeeCharges::new(
-                    actual_perm_fee,
-                    actual_term_fee,
-                    &self.config.node_config.consensus_config(),
-                )
-                .map_err(|e| TxIngressError::Other(format!("Invalid perm fee structure: {}", e)))?;
+                    // Validate publish fee distribution structure
+                    PublishFeeCharges::new(
+                        actual_perm_fee,
+                        actual_term_fee,
+                        &self.config.node_config.consensus_config(),
+                    )
+                    .map_err(|e| {
+                        TxIngressError::Other(format!("Invalid perm fee structure: {}", e))
+                    })?;
+                }
+                DataLedger::Submit => {
+                    // Submit ledger - a data transaction cannot target the submit ledger directly
+                    return Err(TxIngressError::InvalidLedger(ledger as u32));
+                }
             }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
-                return Err(TxIngressError::InvalidLedger(ledger as u32));
-            } // TODO: support other term ledgers here
         }
 
         // we don't check account balance here - we check it when we build & validate blocks
