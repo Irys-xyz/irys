@@ -5,6 +5,7 @@ use crate::{
     MempoolServiceMessage,
 };
 
+use crate::mempool_service::validate_funding as validate_commitment_funding;
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
@@ -14,6 +15,7 @@ use irys_database::{
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
 };
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
@@ -135,6 +137,8 @@ pub struct BlockDiscoveryServiceInner {
     pub vdf_steps_guard: VdfStateReadonly,
     /// Service Senders
     pub service_senders: ServiceSenders,
+    /// Reth adapter used for balance and execution-layer queries
+    pub reth_adapter: IrysRethNodeAdapter,
 }
 
 #[derive(Debug)]
@@ -456,6 +460,28 @@ impl BlockDiscoveryServiceInner {
                             return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                 format!(
                                     "Commitment transaction {} at position {} has an invalid fee: {}",
+                                    commitment_transaction.id, idx, e
+                                ),
+                            ));
+                        }
+                        // Funding (ensure signer balance can cover total cost)
+                        if let Err(e) =
+                            validate_commitment_funding(&self.reth_adapter, commitment_transaction)
+                        {
+                            return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                format!(
+                                    "Commitment transaction {} at position {} is unfunded or balance fetch failed: {}",
+                                    commitment_transaction.id, idx, e
+                                ),
+                            ));
+                        }
+                        // Value (consensus rule for commitment types)
+                        if let Err(e) =
+                            commitment_transaction.validate_value(&self.config.consensus)
+                        {
+                            return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                format!(
+                                    "Commitment transaction {} at position {} has invalid value: {}",
                                     commitment_transaction.id, idx, e
                                 ),
                             ));

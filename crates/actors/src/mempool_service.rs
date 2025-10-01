@@ -61,6 +61,54 @@ use tokio::sync::broadcast;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
+/// Public helper to validate that a commitment transaction is sufficiently funded.
+/// Checks the current balance of the signer via the provided reth adapter and ensures it
+/// covers the total cost (value + fee) of the transaction.
+#[inline]
+pub fn validate_funding(
+    reth_adapter: &IrysRethNodeAdapter,
+    commitment_tx: &irys_types::CommitmentTransaction,
+) -> Result<(), TxIngressError> {
+    // Fetch the current balance of the signer
+    let balance: irys_types::U256 = reth_adapter
+        .rpc
+        .get_balance(commitment_tx.signer, None)
+        .map(From::from)
+        .map_err(|e| {
+            tracing::error!(
+                tx_id = %commitment_tx.id,
+                signer = %commitment_tx.signer,
+                error = %e,
+                "Failed to fetch balance for commitment tx"
+            );
+            TxIngressError::BalanceFetchError {
+                address: commitment_tx.signer.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+    let required = commitment_tx.total_cost();
+
+    if balance < required {
+        tracing::warn!(
+            tx_id = %commitment_tx.id,
+            balance = %balance,
+            required = %required,
+            "Insufficient balance for commitment tx"
+        );
+        return Err(TxIngressError::Unfunded);
+    }
+
+    tracing::debug!(
+        tx_id = %commitment_tx.id,
+        balance = %balance,
+        required = %required,
+        "Funding validated for commitment tx"
+    );
+
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
