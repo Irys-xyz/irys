@@ -32,7 +32,8 @@ impl EventHandlers {
                 InputResult::AddNode(url) => {
                     if NodeManager::is_valid_url(&url) {
                         if let Ok(node_url) = NodeUrl::new(&url) {
-                            NodeManager::add_node(node_url, state, api_client, database_writer).await?;
+                            NodeManager::add_node(node_url, state, api_client, database_writer)
+                                .await?;
                         }
                     }
                 }
@@ -57,8 +58,15 @@ impl EventHandlers {
         }
 
         if input_handler.mode == InputMode::Normal {
-            Self::handle_normal_mode_keys(key, state, api_client, input_handler, menu, database_writer)
-                .await
+            Self::handle_normal_mode_keys(
+                key,
+                state,
+                api_client,
+                input_handler,
+                menu,
+                database_writer,
+            )
+            .await
         } else {
             Ok(false)
         }
@@ -128,8 +136,12 @@ impl EventHandlers {
     ) {
         // Spawn refresh in background with short timeout to avoid blocking UI
         let mut refresh_cancel_token = tokio_util::sync::CancellationToken::new();
-        let refresh_future =
-            RefreshManager::refresh_data(state, api_client, &mut refresh_cancel_token, database_writer);
+        let refresh_future = RefreshManager::refresh_data(
+            state,
+            api_client,
+            &mut refresh_cancel_token,
+            database_writer,
+        );
 
         // Run with short timeout to avoid blocking UI
         let _ = tokio::time::timeout(tokio::time::Duration::from_millis(50), refresh_future).await;
@@ -177,7 +189,11 @@ impl EventHandlers {
 
     fn handle_edit_alias(state: &AppState, input_handler: &mut InputHandler) {
         let url_to_edit = if matches!(state.current_menu, MenuSelection::Nodes) {
-            let node_urls: Vec<String> = state.nodes.keys().map(std::string::ToString::to_string).collect();
+            let node_urls: Vec<String> = state
+                .nodes
+                .keys()
+                .map(std::string::ToString::to_string)
+                .collect();
             if state.focused_node_index < node_urls.len() {
                 Some(node_urls[state.focused_node_index].clone())
             } else {
@@ -200,7 +216,11 @@ impl EventHandlers {
 
     fn handle_delete_node(state: &AppState, input_handler: &mut InputHandler) {
         let url_to_delete = if matches!(state.current_menu, MenuSelection::Nodes) {
-            let node_urls: Vec<String> = state.nodes.keys().map(std::string::ToString::to_string).collect();
+            let node_urls: Vec<String> = state
+                .nodes
+                .keys()
+                .map(std::string::ToString::to_string)
+                .collect();
             if state.focused_node_index < node_urls.len() {
                 Some(node_urls[state.focused_node_index].clone())
             } else {
@@ -274,10 +294,13 @@ impl EventHandlers {
                     let _ = RefreshManager::refresh_observability_data(state, api_client).await;
                 }
                 MenuSelection::Mempool => {
-                    let _ = RefreshManager::refresh_mempool_data(state, api_client, database_writer).await;
+                    let _ =
+                        RefreshManager::refresh_mempool_data(state, api_client, database_writer)
+                            .await;
                 }
                 MenuSelection::Mining => {
-                    let _ = RefreshManager::refresh_mining_data(state, api_client, database_writer).await;
+                    let _ = RefreshManager::refresh_mining_data(state, api_client, database_writer)
+                        .await;
                 }
                 _ => {}
             }

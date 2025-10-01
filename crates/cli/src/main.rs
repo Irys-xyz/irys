@@ -212,7 +212,9 @@ async fn main() -> eyre::Result<()> {
 
             // Create and run the TUI app with optional recording
             let app_result = if record {
-                let mut app = irys_tui::app::App::new(node_urls, config)?.start_recording().await?;
+                let mut app = irys_tui::app::App::new(node_urls, config)?
+                    .start_recording()
+                    .await?;
                 app.run(&mut terminal).await
             } else {
                 let mut app = irys_tui::app::App::new(node_urls, config)?;

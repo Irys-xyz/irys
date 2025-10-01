@@ -28,15 +28,16 @@ impl NodeManager {
 
         let start_time = Instant::now();
         if let Some(node_state) = state.nodes.get_mut(&url) {
-            match api_client
-                .get_node_info_url(&url, &cancel_token)
-                .await
-            {
+            match api_client.get_node_info_url(&url, &cancel_token).await {
                 Ok(info) => {
                     if state.is_recording {
                         if let Some(ref db_writer) = database_writer {
                             let raw_json = serde_json::to_string(&info).unwrap_or_default();
-                            if let Err(e) = db_writer.record_node_info(url.as_str().to_string(), info.clone(), raw_json) {
+                            if let Err(e) = db_writer.record_node_info(
+                                url.as_str().to_string(),
+                                info.clone(),
+                                raw_json,
+                            ) {
                                 tracing::error!("Failed to record node info to database: {}", e);
                             }
                         }
@@ -59,10 +60,7 @@ impl NodeManager {
                     }
                 }
 
-                if let Ok(peer_response) = api_client
-                    .get_peer_list_url(&url, &cancel_token)
-                    .await
-                {
+                if let Ok(peer_response) = api_client.get_peer_list_url(&url, &cancel_token).await {
                     node_state.peers = peer_response;
                     node_state.metrics.peer_count = node_state.peers.len();
                 }

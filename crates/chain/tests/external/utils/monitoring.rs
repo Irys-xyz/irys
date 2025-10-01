@@ -387,7 +387,10 @@ pub(crate) async fn wait_for_node_ready(client: &RemoteNodeClient, node_name: &s
         if retries > NODE_READY_MAX_RETRIES {
             return Err(eyre::eyre!("{} failed to become ready", node_name));
         }
-        warn!("{} not ready, retry {}/{}", node_name, retries, NODE_READY_MAX_RETRIES);
+        warn!(
+            "{} not ready, retry {}/{}",
+            node_name, retries, NODE_READY_MAX_RETRIES
+        );
         sleep(Duration::from_secs(HEIGHT_CHECK_INTERVAL_SECS)).await;
     }
 

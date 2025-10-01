@@ -75,7 +75,9 @@ impl DatabaseWriter {
                         status,
                         raw_json,
                     } => {
-                        if let Err(e) = db.record_mempool_status(&node_url, &status, &raw_json).await
+                        if let Err(e) = db
+                            .record_mempool_status(&node_url, &status, &raw_json)
+                            .await
                         {
                             tracing::error!("Failed to record mempool status: {}", e);
                         }
@@ -176,7 +178,12 @@ impl DatabaseWriter {
         }
     }
 
-    pub fn record_node_info(&self, node_url: String, info: NodeInfo, raw_json: String) -> Result<()> {
+    pub fn record_node_info(
+        &self,
+        node_url: String,
+        info: NodeInfo,
+        raw_json: String,
+    ) -> Result<()> {
         self.command_tx
             .send(DbCommand::RecordNodeInfo {
                 node_url,

@@ -27,9 +27,7 @@ use crate::external::utils::{
     signer::{load_test_signers_from_env, TestSigner},
     transactions::*,
     types::AssignmentStatus,
-    utils::{
-        create_consensus_config_from_response, get_env_duration, parse_node_urls,
-    },
+    utils::{create_consensus_config_from_response, get_env_duration, parse_node_urls},
 };
 
 // Test configuration constants
@@ -695,8 +693,10 @@ async fn sync_partition_data_remote_test() -> Result<()> {
             continue;
         }
 
-        let node_addresses_strings: Vec<String> =
-            node_addresses.iter().map(std::string::ToString::to_string).collect();
+        let node_addresses_strings: Vec<String> = node_addresses
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let validation_results = match check_nodes_sync_status_by_assignment(
             &clients,
             &node_addresses_strings,

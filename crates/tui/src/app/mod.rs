@@ -47,8 +47,8 @@ impl App<NotRecording> {
 
         // Validate command-line URLs
         for url in node_urls {
-            let validated_url = NodeUrl::new(&url)
-                .map_err(|e| eyre::eyre!("Invalid node URL '{}': {}", url, e))?;
+            let validated_url =
+                NodeUrl::new(&url).map_err(|e| eyre::eyre!("Invalid node URL '{}': {}", url, e))?;
             all_nodes.push((validated_url, None));
         }
 
@@ -150,13 +150,14 @@ impl App<Recording> {
     }
 
     pub fn database_writer(&self) -> &DatabaseWriter {
-        self.database_writer.as_ref().expect("Recording state always has database_writer")
+        self.database_writer
+            .as_ref()
+            .expect("Recording state always has database_writer")
     }
 }
 
 impl<State> App<State> {
     pub async fn run(&mut self, terminal: &mut Tui) -> Result<()> {
-
         self.state.splash_start_time = Some(std::time::Instant::now());
 
         loop {

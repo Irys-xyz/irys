@@ -1,4 +1,7 @@
-use crate::{app::state::AppState, db::{db::Database, db_queue::DatabaseWriter}};
+use crate::{
+    app::state::AppState,
+    db::{db::Database, db_queue::DatabaseWriter},
+};
 
 pub struct RecordingManager;
 

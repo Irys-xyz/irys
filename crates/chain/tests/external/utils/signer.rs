@@ -32,7 +32,6 @@ impl TestSigner {
             name,
         })
     }
-
 }
 
 /// Load private keys from environment variables

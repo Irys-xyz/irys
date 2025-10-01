@@ -72,7 +72,8 @@ impl NodeState {
             alias.to_string()
         } else {
             // Extract hostname:port from URL for cleaner display
-            self.url.as_str()
+            self.url
+                .as_str()
                 .replace("http://", "")
                 .replace("https://", "")
                 .split('/')
@@ -209,7 +210,9 @@ impl AppState {
     }
 
     pub fn get_selected_node_url(&self) -> Option<String> {
-        self.selected_node.as_ref().map(|url| url.as_str().to_string())
+        self.selected_node
+            .as_ref()
+            .map(|url| url.as_str().to_string())
     }
 
     pub fn set_node_alias(&mut self, url: &NodeUrl, alias: Option<String>) {
@@ -561,7 +564,10 @@ mod tests {
 
         // With selection
         app_state.selected_node = Some(node_url.clone());
-        assert_eq!(app_state.get_selected_node_url(), Some(node_url.as_str().to_string()));
+        assert_eq!(
+            app_state.get_selected_node_url(),
+            Some(node_url.as_str().to_string())
+        );
     }
 
     #[test]

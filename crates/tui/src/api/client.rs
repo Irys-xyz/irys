@@ -285,9 +285,14 @@ impl ApiClient {
         cancel_token: &CancellationToken,
     ) -> Result<ChunkCounts> {
         let ledger_str = ledger.as_str();
-        let data_endpoint = format!("/storage/intervals/{ledger_str}/{slot_index}/{}", ChunkType::Data.as_str());
-        let entropy_endpoint =
-            format!("/storage/intervals/{ledger_str}/{slot_index}/{}", ChunkType::Entropy.as_str());
+        let data_endpoint = format!(
+            "/storage/intervals/{ledger_str}/{slot_index}/{}",
+            ChunkType::Data.as_str()
+        );
+        let entropy_endpoint = format!(
+            "/storage/intervals/{ledger_str}/{slot_index}/{}",
+            ChunkType::Entropy.as_str()
+        );
 
         let data_intervals: StorageIntervalsResponse = self
             .get_with_cancellation(node_url, &data_endpoint, Some(cancel_token))
@@ -348,7 +353,8 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<NodeInfo> {
-        self.get_node_info_cancellable(url.as_str(), cancel_token).await
+        self.get_node_info_cancellable(url.as_str(), cancel_token)
+            .await
     }
 
     pub async fn get_peer_list_url(
@@ -356,7 +362,8 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<PeerListResponse> {
-        self.get_peer_list_cancellable(url.as_str(), cancel_token).await
+        self.get_peer_list_cancellable(url.as_str(), cancel_token)
+            .await
     }
 
     pub async fn get_mempool_status_url(
@@ -364,7 +371,8 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<MempoolStatus> {
-        self.get_mempool_status_cancellable(url.as_str(), cancel_token).await
+        self.get_mempool_status_cancellable(url.as_str(), cancel_token)
+            .await
     }
 
     pub async fn get_mining_info_url(
@@ -372,7 +380,8 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<MiningInfo> {
-        self.get_mining_info_cancellable(url.as_str(), cancel_token).await
+        self.get_mining_info_cancellable(url.as_str(), cancel_token)
+            .await
     }
 
     pub async fn get_block_tree_forks_url(
@@ -380,7 +389,8 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<BlockTreeForksResponse> {
-        self.get_block_tree_forks_cancellable(url.as_str(), cancel_token).await
+        self.get_block_tree_forks_cancellable(url.as_str(), cancel_token)
+            .await
     }
 
     pub async fn get_node_config_url(
@@ -388,7 +398,8 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<NodeConfig> {
-        self.get_node_config_cancellable(url.as_str(), cancel_token).await
+        self.get_node_config_cancellable(url.as_str(), cancel_token)
+            .await
     }
 
     pub async fn get_all_partition_chunk_counts_url(
@@ -396,6 +407,7 @@ impl ApiClient {
         url: &NodeUrl,
         cancel_token: &CancellationToken,
     ) -> Result<PartitionChunkCounts> {
-        self.get_all_partition_chunk_counts_cancellable(url.as_str(), cancel_token).await
+        self.get_all_partition_chunk_counts_cancellable(url.as_str(), cancel_token)
+            .await
     }
 }
