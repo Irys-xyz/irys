@@ -1295,7 +1295,6 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                packing_handle,
             },
             reward_curve,
             reth_handle: reth_node.clone(),
