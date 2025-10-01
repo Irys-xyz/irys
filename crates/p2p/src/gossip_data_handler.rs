@@ -9,7 +9,7 @@ use core::net::SocketAddr;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
-use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_primitives::Address;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
@@ -84,10 +84,7 @@ where
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
                 self.cache
-                    .record_seen(source_miner_address, GossipCacheKey::Chunk(chunk_path_hash))?;
-                self.peer_list
-                    .increase_peer_score(&source_miner_address, ScoreIncreaseReason::ValidData);
-                Ok(())
+                    .record_seen(source_miner_address, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
                 match error {
@@ -187,8 +184,6 @@ where
                 // Only record as seen after successful validation
                 self.cache
                     .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
-                self.peer_list
-                    .increase_peer_score(&source_miner_address, ScoreIncreaseReason::ValidData);
                 Ok(())
             }
             Err(error) => {
@@ -238,8 +233,6 @@ where
                     source_miner_address,
                     GossipCacheKey::IngressProof(proof_hash),
                 )?;
-                self.peer_list
-                    .increase_peer_score(&source_miner_address, ScoreIncreaseReason::ValidData);
                 Ok(())
             }
             Err(error) => {
@@ -302,8 +295,6 @@ where
                 // Only record as seen after successful validation
                 self.cache
                     .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
-                self.peer_list
-                    .increase_peer_score(&source_miner_address, ScoreIncreaseReason::ValidData);
                 Ok(())
             }
             Err(error) => {
@@ -597,8 +588,6 @@ where
             .process_block::<A>(Arc::new(block_header), skip_block_validation)
             .await
             .map_err(GossipError::BlockPool)?;
-        self.peer_list
-            .increase_peer_score(&source_miner_address, ScoreIncreaseReason::ValidData);
         Ok(())
     }
 
@@ -694,8 +683,6 @@ where
             source_miner_address,
             GossipCacheKey::ExecutionPayload(evm_block_hash),
         )?;
-        self.peer_list
-            .increase_peer_score(&source_miner_address, ScoreIncreaseReason::ValidData);
 
         debug!(
             "Node {}: Execution payload for EVM block {:?} have been added to the cache",
