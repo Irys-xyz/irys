@@ -1276,16 +1276,18 @@ mod tests {
         let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
 
         // Create a TxEnv that carries EIP-4844 blob fields
-        let mut tx = TxEnv::default();
-        tx.caller = Address::random();
-        tx.kind = TxKind::Call(Address::random());
-        tx.nonce = 0;
-        tx.gas_limit = 21_000;
-        tx.gas_price = 0;
-        tx.value = U256::ZERO;
-        tx.chain_id = Some(1);
-        tx.blob_hashes = vec![B256::ZERO];
-        tx.max_fee_per_blob_gas = 1;
+        let tx = TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 0,
+            value: U256::ZERO,
+            chain_id: Some(1),
+            blob_hashes: vec![B256::ZERO],
+            max_fee_per_blob_gas: 1,
+            ..TxEnv::default()
+        };
 
         let res = evm.transact_raw(tx);
         assert!(
@@ -1309,9 +1311,11 @@ mod tests {
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
-        let mut block_env = BlockEnv::default();
-        block_env.gas_limit = 30_000_000;
-        block_env.basefee = 0;
+        let block_env = BlockEnv {
+            gas_limit: 30_000_000,
+            basefee: 0,
+            ..Default::default()
+        };
 
         let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
 

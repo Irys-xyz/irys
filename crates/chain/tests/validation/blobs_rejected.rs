@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
-use eyre::OptionExt as _;
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
+use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::Signature as AlloySignature;
 use alloy_primitives::{Bytes, B256, U256};
-use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
@@ -214,7 +213,7 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
         let tx_eip4844 = TxEip4844 {
             chain_id: genesis_node.node_ctx.config.consensus.chain_id as u64,
             nonce: 0,
-            max_fee_per_gas: 1_000_000_000u128,
+            max_fee_per_gas: 1_000_000_000_u128,
             max_priority_fee_per_gas: 0,
             gas_limit: 100_000,
             to: genesis_node.node_ctx.config.node_config.reward_address,
