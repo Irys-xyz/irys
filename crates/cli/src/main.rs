@@ -1,10 +1,10 @@
 use clap::{command, Parser, Subcommand};
 use eyre::{bail, OptionExt as _};
 use irys_chain::utils::load_config;
-use irys_config::chain::chainspec::build_reth_chainspec;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
+use irys_reth_node_bridge::irys_reth::chainspec::irys_chain_spec;
 use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use std::{path::PathBuf, sync::Arc};
@@ -84,8 +84,12 @@ async fn main() -> eyre::Result<()> {
             Ok(())
         }
         Commands::InitState { state_path } => {
-            let chain_spec = build_reth_chainspec(&Config::new(node_config.clone()))?;
-            init_state(node_config, chain_spec.into(), state_path).await
+            let config = Config::new(node_config.clone());
+            let chain_spec = irys_chain_spec(
+                config.consensus.reth.chain,
+                config.consensus.reth.genesis.clone(),
+            )?;
+            init_state(node_config, chain_spec, state_path).await
         }
         Commands::RollbackBlocks { mode } => {
             let db = cli_init_irys_db(DatabaseEnvKind::RW)?;

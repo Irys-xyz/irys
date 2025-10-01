@@ -14,6 +14,7 @@ use crate::{
 };
 use actix::Message;
 use core::ops::Deref;
+use irys_domain::PeerEvent;
 use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
@@ -53,6 +54,10 @@ impl ServiceSenders {
     pub fn subscribe_block_state_updates(&self) -> broadcast::Receiver<BlockStateUpdated> {
         self.0.block_state_events.subscribe()
     }
+
+    pub fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent> {
+        self.0.peer_events.subscribe()
+    }
 }
 
 #[derive(Debug)]
@@ -72,6 +77,7 @@ pub struct ServiceReceivers {
     pub reorg_events: broadcast::Receiver<ReorgEvent>,
     pub block_migrated_events: broadcast::Receiver<BlockMigratedEvent>,
     pub block_state_events: broadcast::Receiver<BlockStateUpdated>,
+    pub peer_events: broadcast::Receiver<PeerEvent>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
     pub block_discovery: UnboundedReceiver<BlockDiscoveryMessage>,
 }
@@ -93,6 +99,7 @@ pub struct ServiceSendersInner {
     pub reorg_events: broadcast::Sender<ReorgEvent>,
     pub block_migrated_events: broadcast::Sender<BlockMigratedEvent>,
     pub block_state_events: broadcast::Sender<BlockStateUpdated>,
+    pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
 }
@@ -126,6 +133,7 @@ impl ServiceSendersInner {
             broadcast::channel::<BlockMigratedEvent>(100);
         let (block_state_sender, block_state_receiver) =
             broadcast::channel::<BlockStateUpdated>(100);
+        let (peer_events_sender, peer_events_receiver) = broadcast::channel::<PeerEvent>(100);
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
@@ -146,6 +154,7 @@ impl ServiceSendersInner {
             reorg_events: reorg_sender,
             block_migrated_events: block_migrated_sender,
             block_state_events: block_state_sender,
+            peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
         };
@@ -165,6 +174,7 @@ impl ServiceSendersInner {
             reorg_events: reorg_receiver,
             block_migrated_events: block_migrated_receiver,
             block_state_events: block_state_receiver,
+            peer_events: peer_events_receiver,
             peer_network: peer_network_receiver,
             block_discovery: block_discovery_receiver,
         };
