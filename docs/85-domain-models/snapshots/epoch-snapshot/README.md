@@ -1,0 +1,1 @@
+<!-- description of the epoch snapshot and its encapsulated components -->

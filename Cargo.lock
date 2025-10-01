@@ -4962,7 +4962,6 @@ dependencies = [
  "color-eyre",
  "eyre",
  "irys-chain",
- "irys-config",
  "irys-database",
  "irys-domain",
  "irys-reth-node-bridge",
@@ -4979,14 +4978,9 @@ dependencies = [
 name = "irys-config"
 version = "0.1.0"
 dependencies = [
- "alloy-core",
- "alloy-eips",
- "alloy-genesis",
  "alloy-primitives",
  "eyre",
  "irys-types",
- "reth-chainspec",
- "reth-primitives-traits",
  "serde",
  "toml",
  "tracing",
@@ -5327,6 +5321,7 @@ dependencies = [
  "futures",
  "hex",
  "irys-primitives",
+ "irys-reth",
  "k256",
  "modular-bitfield",
  "nodit",
