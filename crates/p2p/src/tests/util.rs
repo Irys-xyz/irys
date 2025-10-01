@@ -106,13 +106,6 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_ingest_ingress_proof(
-        &self,
-        _ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError> {
-        Ok(())
-    }
-
     async fn handle_chunk_ingress(
         &self,
         chunk: UnpackedChunk,
@@ -141,6 +134,13 @@ impl MempoolFacade for MempoolStub {
             .iter()
             .any(|message| message.id == tx_id);
         Ok(exists)
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        _ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        Ok(())
     }
 
     async fn get_block_header(
