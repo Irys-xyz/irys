@@ -111,6 +111,28 @@ pub fn validate_funding(
     Ok(())
 }
 
+/// Public helper to validate a commitment transaction's basic invariants used during
+/// block discovery and mempool selection:
+/// - fee must meet minimum requirements
+/// - account must have enough funds at the specified EVM block state (Pass None for new incoming
+///   transactions - this will validate against the current canonical tip)
+/// - value must match the commitment type rules
+#[inline]
+pub fn validate_commitment_transaction(
+    reth_adapter: &IrysRethNodeAdapter,
+    consensus: &irys_types::ConsensusConfig,
+    commitment_tx: &irys_types::CommitmentTransaction,
+    parent_evm_block_id: Option<BlockId>,
+) -> Result<(), TxIngressError> {
+    // Fee
+    commitment_tx.validate_fee(consensus)?;
+    // Funding
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id)?;
+    // Value
+    commitment_tx.validate_value(consensus)?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Inner {
     pub block_tree_read_guard: BlockTreeReadGuard,
@@ -524,8 +546,15 @@ impl Inner {
                 continue;
             }
 
-            // Check funding before simulation
-            if !check_funding(tx) {
+            // Full validation (fee, funding at parent block, value) before simulation
+            if validate_commitment_transaction(
+                &self.reth_node_adapter,
+                &self.config.consensus,
+                tx,
+                parent_evm_block_id,
+            )
+            .is_err()
+            {
                 continue;
             }
 

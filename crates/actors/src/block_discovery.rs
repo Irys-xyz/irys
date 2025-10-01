@@ -5,7 +5,7 @@ use crate::{
     MempoolServiceMessage,
 };
 
-use crate::mempool_service::validate_funding as validate_commitment_funding;
+use crate::mempool_service::validate_commitment_transaction;
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
@@ -194,7 +194,7 @@ impl BlockDiscoveryService {
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block discovery service");
                     break;
-                }
+                },
                 // Handle commands
                 cmd = self.msg_rx.recv() => {
                     match cmd {
@@ -206,7 +206,7 @@ impl BlockDiscoveryService {
                             break;
                         }
                     }
-                }
+                },
             }
         }
 
@@ -455,35 +455,15 @@ impl BlockDiscoveryServiceInner {
                     // This duplicates API-side checks and ensures gossiped commitments are also
                     // fee-validated when included in a block.
                     for (idx, commitment_transaction) in commitments.iter().enumerate() {
-                        if let Err(e) = commitment_transaction.validate_fee(&self.config.consensus)
-                        {
-                            return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                format!(
-                                    "Commitment transaction {} at position {} has an invalid fee: {}",
-                                    commitment_transaction.id, idx, e
-                                ),
-                            ));
-                        }
-                        // Funding (ensure signer balance can cover total cost)
-                        if let Err(e) = validate_commitment_funding(
+                        if let Err(e) = validate_commitment_transaction(
                             &self.reth_adapter,
+                            &self.config.consensus,
                             commitment_transaction,
                             Some(previous_block_header.evm_block_hash.into()),
                         ) {
                             return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                 format!(
-                                    "Commitment transaction {} at position {} is unfunded or balance fetch failed: {}",
-                                    commitment_transaction.id, idx, e
-                                ),
-                            ));
-                        }
-                        // Value (consensus rule for commitment types)
-                        if let Err(e) =
-                            commitment_transaction.validate_value(&self.config.consensus)
-                        {
-                            return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                format!(
-                                    "Commitment transaction {} at position {} has invalid value: {}",
+                                    "Commitment transaction {} at position {} failed validation: {}",
                                     commitment_transaction.id, idx, e
                                 ),
                             ));
