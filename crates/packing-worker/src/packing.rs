@@ -3,7 +3,7 @@ use futures::{
     StreamExt as _,
 };
 use irys_packing::PackingType;
-use tracing::debug;
+use tracing::trace;
 
 #[cfg(feature = "nvidia")]
 use irys_packing::capacity_pack_range_cuda_c;
@@ -42,8 +42,8 @@ impl PackingWorkerState {
                         let _permit = semaphore.acquire_owned().await?;
 
                         if i % 1000 == 0 {
-                            debug!(
-                                target: "irys::packing::update",
+                            trace!(
+                                target: "irys::packing::done",
                                 "CPU Packed chunks {} / {} for partition_hash {:?} mining_address {:?} iterations {}",
                                 i, end_value,  partition_hash, mining_address, entropy_packing_iterations
                             );
@@ -72,7 +72,7 @@ impl PackingWorkerState {
                 .buffered(cpu_packing_concurrency as usize)
                 .inspect(move |_| {
                     // This runs after all tasks complete
-                    tracing::debug!(
+                    trace!(
                         target: "irys::packing::done",
                         "CPU Packed chunks complete for  partition_hash {:?} mining_address {:?} iterations {}",
                         partition_hash, mining_address, entropy_packing_iterations
