@@ -1,20 +1,20 @@
 use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::web::{Data, Json, Path};
-use irys_types::{parse_address, partition::PartitionAssignment, DataLedger, H256};
+use irys_types::{partition::PartitionAssignment, Address, DataLedger, H256};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LedgerSummary {
-    node_id: String,
+    miner_address: String,
     ledger_type: DataLedger,
     assignment_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PartitionAssignmentsResponse {
-    node_id: String,
+    miner_address: String,
     assignments: Vec<PartitionAssignment>,
     epoch_height: u64,
     assignment_status: AssignmentStatus,
@@ -97,7 +97,7 @@ fn determine_assignment_status(
 }
 
 fn count_assignments_by_ledger_type(
-    node_id: &str,
+    miner_address: Address,
     partition_assignments: &[PartitionAssignment],
     ledger_type: DataLedger,
 ) -> Result<usize, ApiError> {
@@ -108,7 +108,7 @@ fn count_assignments_by_ledger_type(
 
     if count == 0 {
         return Err(ApiError::LedgerNotFound {
-            node_id: node_id.to_string(),
+            miner_address,
             ledger_type,
         });
     }
@@ -117,7 +117,7 @@ fn count_assignments_by_ledger_type(
 }
 
 fn filter_assignments_by_ledger_type(
-    node_id: &str,
+    miner_address: Address,
     partition_assignments: Vec<PartitionAssignment>,
     ledger_type: DataLedger,
 ) -> Result<Vec<PartitionAssignment>, ApiError> {
@@ -128,7 +128,7 @@ fn filter_assignments_by_ledger_type(
 
     if filtered.is_empty() {
         return Err(ApiError::LedgerNotFound {
-            node_id: node_id.to_string(),
+            miner_address,
             ledger_type,
         });
     }
@@ -138,65 +138,62 @@ fn filter_assignments_by_ledger_type(
 
 #[expect(clippy::unused_async)]
 async fn get_ledger_summary(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
     ledger_type: DataLedger,
 ) -> Result<Json<LedgerSummary>, ApiError> {
-    let node_address = parse_address(node_id.as_str())?;
-
     let partition_assignments = {
         let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
-        epoch_snapshot.get_partition_assignments(node_address)
+        epoch_snapshot.get_partition_assignments(*miner_address)
     };
 
     let assignment_count =
-        count_assignments_by_ledger_type(&node_id, &partition_assignments, ledger_type)?;
+        count_assignments_by_ledger_type(*miner_address, &partition_assignments, ledger_type)?;
 
     Ok(Json(LedgerSummary {
-        node_id: node_id.to_string(),
+        miner_address: miner_address.to_string(),
         ledger_type,
         assignment_count,
     }))
 }
 
 pub async fn get_submit_summary(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
 ) -> Result<Json<LedgerSummary>, ApiError> {
-    get_ledger_summary(node_id, app_state, DataLedger::Submit).await
+    get_ledger_summary(miner_address, app_state, DataLedger::Submit).await
 }
 
 pub async fn get_publish_summary(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
 ) -> Result<Json<LedgerSummary>, ApiError> {
-    get_ledger_summary(node_id, app_state, DataLedger::Publish).await
+    get_ledger_summary(miner_address, app_state, DataLedger::Publish).await
 }
 
 #[expect(clippy::unused_async)]
 async fn get_partition_assignments(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
     ledger_type: DataLedger,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
-    let node_address = parse_address(node_id.as_str())?;
-
     let (filtered_assignments, epoch_height) = {
         let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
-        let all_assignments = epoch_snapshot.get_partition_assignments(node_address);
-        let filtered = filter_assignments_by_ledger_type(&node_id, all_assignments, ledger_type)?;
+        let all_assignments = epoch_snapshot.get_partition_assignments(*miner_address);
+        let filtered =
+            filter_assignments_by_ledger_type(*miner_address, all_assignments, ledger_type)?;
         (filtered, epoch_snapshot.epoch_height)
     };
 
     let assignment_status = determine_assignment_status(
         &filtered_assignments,
         &get_canonical_epoch_snapshot(&app_state),
-        node_address,
+        *miner_address,
     );
     let hash_analysis = analyze_partition_hashes(&filtered_assignments);
 
     Ok(Json(PartitionAssignmentsResponse {
-        node_id: node_id.to_string(),
+        miner_address: miner_address.to_string(),
         assignments: filtered_assignments,
         epoch_height,
         assignment_status,
@@ -205,40 +202,38 @@ async fn get_partition_assignments(
 }
 
 pub async fn get_submit_assignments(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
-    get_partition_assignments(node_id, app_state, DataLedger::Submit).await
+    get_partition_assignments(miner_address, app_state, DataLedger::Submit).await
 }
 
 pub async fn get_publish_assignments(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
-    get_partition_assignments(node_id, app_state, DataLedger::Publish).await
+    get_partition_assignments(miner_address, app_state, DataLedger::Publish).await
 }
 
 pub async fn get_all_assignments(
-    node_id: Path<String>,
+    miner_address: Path<Address>,
     app_state: Data<ApiState>,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
-    let node_address = parse_address(node_id.as_str())?;
-
     let (partition_assignments, epoch_height) = {
         let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
-        let assignments = epoch_snapshot.get_partition_assignments(node_address);
+        let assignments = epoch_snapshot.get_partition_assignments(*miner_address);
         (assignments, epoch_snapshot.epoch_height)
     };
 
     let assignment_status = determine_assignment_status(
         &partition_assignments,
         &get_canonical_epoch_snapshot(&app_state),
-        node_address,
+        *miner_address,
     );
     let hash_analysis = analyze_partition_hashes(&partition_assignments);
 
     Ok(Json(PartitionAssignmentsResponse {
-        node_id: node_id.to_string(),
+        miner_address: miner_address.to_string(),
         assignments: partition_assignments,
         epoch_height,
         assignment_status,

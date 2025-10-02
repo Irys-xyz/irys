@@ -1,5 +1,5 @@
 use actix_web::{body::BoxBody, HttpResponse, ResponseError};
-use irys_types::{AddressParseError, DataLedger};
+use irys_types::{Address, AddressParseError, DataLedger};
 use serde::Serialize;
 
 use awc::http::StatusCode;
@@ -12,11 +12,11 @@ pub enum ApiError {
     Internal { err: String },
     #[error("Not implemented: {feature}")]
     NotImplemented { feature: String },
-    #[error("Node not found: {node_id}")]
-    NodeNotFound { node_id: String },
-    #[error("No {ledger_type} ledger assignments found for node: {node_id}")]
+    #[error("Miner not found: {miner_address}")]
+    MinerNotFound { miner_address: Address },
+    #[error("No {ledger_type} ledger assignments found for miner: {miner_address}")]
     LedgerNotFound {
-        node_id: String,
+        miner_address: Address,
         ledger_type: DataLedger,
     },
     #[error("Invalid address: {0}")]
@@ -42,7 +42,7 @@ impl ResponseError for ApiError {
             Self::ErrNoId { .. } => StatusCode::NOT_FOUND,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NotImplemented { .. } => StatusCode::FORBIDDEN,
-            Self::NodeNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::MinerNotFound { .. } => StatusCode::NOT_FOUND,
             Self::LedgerNotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidAddress(_) => StatusCode::BAD_REQUEST,
             Self::CanonicalChainError(_) => StatusCode::INTERNAL_SERVER_ERROR,

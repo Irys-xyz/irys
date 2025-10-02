@@ -123,23 +123,23 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/chain/height", web::get().to(chain::get_height))
         // Ledger endpoints
         .route(
-            "/ledger/submit/{node_id}/summary",
+            "/ledger/submit/{miner_address}/summary",
             web::get().to(ledger::get_submit_summary),
         )
         .route(
-            "/ledger/publish/{node_id}/summary",
+            "/ledger/publish/{miner_address}/summary",
             web::get().to(ledger::get_publish_summary),
         )
         .route(
-            "/ledger/submit/{node_id}/assignments",
+            "/ledger/submit/{miner_address}/assignments",
             web::get().to(ledger::get_submit_assignments),
         )
         .route(
-            "/ledger/publish/{node_id}/assignments",
+            "/ledger/publish/{miner_address}/assignments",
             web::get().to(ledger::get_publish_assignments),
         )
         .route(
-            "/ledger/{node_id}/assignments",
+            "/ledger/{miner_address}/assignments",
             web::get().to(ledger::get_all_assignments),
         )
         // Epoch endpoints
