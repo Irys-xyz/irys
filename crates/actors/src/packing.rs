@@ -21,7 +21,6 @@ use tokio::{
         Notify, Semaphore,
     },
     task::yield_now,
-    time::sleep,
 };
 use tracing::{debug, error, span, warn, Level};
 
@@ -627,8 +626,7 @@ pub async fn wait_for_packing(
     tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
         // short warmup and require observing activity before we apply the strong barrier.
         // This avoids a race where we check before any work is observed and return prematurely.
-        let start = std::time::Instant::now();
-        let warmup = Duration::from_millis(500);
+        // Wait briefly for a state-change notification if no activity has been observed, avoiding immediate-return races.
         let mut observed_activity = false;
 
         loop {
@@ -651,13 +649,14 @@ pub async fn wait_for_packing(
 
             if queued_jobs == 0 && active == 0 {
                 if !observed_activity {
-                    // If there was never any observed activity and we've been idle past warmup, return early.
-                    if start.elapsed() >= warmup {
-                        break Some(());
+                    // Wait briefly for a state change; if none, return early (nothing to wait for)
+                    if tokio::time::timeout(Duration::from_millis(100), notify.notified())
+                        .await
+                        .is_ok()
+                    {
+                        continue;
                     }
-                    // Otherwise, give the system a moment to register activity before concluding.
-                    sleep(Duration::from_millis(100)).await;
-                    continue;
+                    break Some(());
                 }
 
                 // Strong barrier: wait for all permits to be available,
