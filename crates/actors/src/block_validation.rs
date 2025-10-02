@@ -44,7 +44,7 @@ use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
 use reth::revm::primitives::FixedBytes;
-use reth::rpc::api::EngineApiClient as _;
+use reth::rpc::api::{EngineApiClient as _, EthApiServer};
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
@@ -54,6 +54,8 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use alloy_eips::BlockNumberOrTag;
+use reth::providers::StateProviderFactory;
 use thiserror::Error;
 use tracing::{debug, error, info, warn, Instrument as _};
 
@@ -1347,31 +1349,26 @@ pub async fn commitment_txs_are_valid(
             })?
     };
 
-    // UNCOMMENT THE LOOP FOR WHATEVER REASON YOU MIGHT WANT TO EXPERIMENT WITH TIMINGS AND WHATNOT
     // loop {
+    //     let eth_api = reth_adapter.inner.eth_api();
+    //     let block = eth_api.block_by_number(BlockNumberOrTag::Latest, false).await;
+    //     if let Ok(block) = block {
+    //         let hash = block.as_ref().map(|b| (b.header.number, b.header.hash));
+    //         info!("Latest reth block: {:?}", hash);
+    //     }
+    //
     //     let provider = reth_adapter.inner.provider();
     //
-    //     let res = provider.state_by_block_hash(latest_canonical_evm_block);
+    //     let res = provider.state_by_block_hash(parent_evm_block_hash);
     //     if let Err(e) = res {
     //         info!("WHOPS. reth provider state_by_block_hash() error: {:?}", e);
     //         tokio::time::sleep(Duration::from_millis(100)).await;
     //         continue;
     //     }
     //
-    //     let prov = res.unwrap();
-    //     // block_hash(0) just to see the result of the call
-    //     let res2 = prov.block_hash(0);
-    //     if let Err(e) = res2 {
-    //         info!("WHOPS 2. reth provider block_hash() error: {:?}", e);
-    //         tokio::time::sleep(Duration::from_millis(100)).await;
-    //         continue;
-    //     }
-    //
-    //     warn!("OOOKAY!");
+    //     warn!("Block is okay");
     //     break;
     // }
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Validate that all commitment transactions have the correct fee, funding at parent state, and value
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -1381,7 +1378,7 @@ pub async fn commitment_txs_are_valid(
             tx,
             // THAT SHOULD BE THE PARENT EVM BLOCK HASH. IT'S SET TO THE CANONICAL TO DEMONSTRATE
             // THAT STUFF IS BROKEN. IF WE PASS NONE HERE EVERYTHING WORKS
-            Some(latest_canonical_evm_block.into()),
+            Some(parent_evm_block_hash.into()),
         )
         .map_err(|e| {
             error!(
