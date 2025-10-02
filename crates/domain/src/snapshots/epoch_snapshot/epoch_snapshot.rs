@@ -4,7 +4,6 @@ use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
-use irys_storage::ie;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},

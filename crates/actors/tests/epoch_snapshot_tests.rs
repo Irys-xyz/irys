@@ -1,6 +1,5 @@
 use actix::Arbiter;
 use actix::{Actor as _, SystemService as _};
-
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
@@ -12,7 +11,6 @@ use irys_database::{
     add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
-use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;

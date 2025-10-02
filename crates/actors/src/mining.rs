@@ -13,7 +13,7 @@ use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr as _;
 use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
-use irys_storage::{ie, ii};
+use irys_storage::ii;
 use irys_types::block_production::Seed;
 use irys_types::{block_production::SolutionContext, H256, U256};
 use irys_types::{
@@ -408,7 +408,6 @@ mod tests {
     };
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
-    use irys_storage::ie;
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         block_production::SolutionContext, chunk::UnpackedChunk, partition::PartitionAssignment,
