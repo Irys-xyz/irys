@@ -101,7 +101,7 @@ impl PackingWorkerState {
 
                         let num_chunks = end - start + 1;
 
-                        debug!(
+                        tracing::debug!(
                             "Packing using CUDA C implementation, start:{} end:{} (len: {})",
                             &start, &end, &num_chunks
                         );
@@ -124,7 +124,7 @@ impl PackingWorkerState {
                                 out
                             })
                             .await?;
-                        debug!(
+                        tracing::debug!(
                             target: "irys::packing::update",
                             ?chunk_range, ?partition_hash, ?mining_address, ?entropy_packing_iterations,
                             "CUDA Packed chunks"
