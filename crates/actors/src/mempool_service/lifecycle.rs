@@ -159,7 +159,7 @@ impl Inner {
         };
         for (id, tx) in valid_submit_ledger_tx {
             match self
-                .handle_data_tx_ingress_message(tx, irys_types::TxSource::Api)
+                .handle_data_tx_ingress_message(tx, irys_types::TxSource::Gossip)
                 .await
             {
                 Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
@@ -170,7 +170,7 @@ impl Inner {
             for tx in txs {
                 let id = tx.id;
                 match self
-                    .handle_ingress_commitment_tx_message(tx, irys_types::TxSource::Api)
+                    .handle_ingress_commitment_tx_message(tx, irys_types::TxSource::Gossip)
                     .await
                 {
                     Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
@@ -408,7 +408,7 @@ impl Inner {
             let _ = self
                 .handle_ingress_commitment_tx_message(
                     orphaned_full_commitment_tx,
-                    irys_types::TxSource::Api,
+                    irys_types::TxSource::Gossip,
                 )
                 .await
                 .inspect_err(|e| {

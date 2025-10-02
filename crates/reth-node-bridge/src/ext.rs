@@ -38,7 +38,7 @@ where
 
     fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
 
-    fn get_balance_irys_all_blocks(
+    fn get_balance_irys_canonical_and_pending(
         &self,
         address: Address,
         block_id: Option<BlockId>,
@@ -74,7 +74,7 @@ where
     }
 
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.
-    fn get_balance_irys_all_blocks(
+    fn get_balance_irys_canonical_and_pending(
         &self,
         address: Address,
         block_id: Option<BlockId>,

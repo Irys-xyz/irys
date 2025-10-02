@@ -74,7 +74,7 @@ pub fn validate_funding(
     // Fetch the current balance of the signer
     let balance: irys_types::U256 = reth_adapter
         .rpc
-        .get_balance_irys_all_blocks(commitment_tx.signer, parent_evm_block_id)
+        .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
         .map_err(|e| {
             tracing::error!(
                 tx_id = %commitment_tx.id,
