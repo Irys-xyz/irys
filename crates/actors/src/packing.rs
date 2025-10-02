@@ -543,8 +543,17 @@ impl PackingService {
                     // Ignore poisoned lock errors by propagating panic (consistent with existing code)
                     queue.as_ref().write().unwrap().push_back(msg);
                 } else {
-                    // Unknown storage module id; drop the message
-                    tracing::warn!(target: "irys::packing", "Received packing request for unknown SM id");
+                    // Unknown storage module id; this indicates a wiring/configuration bug. Drop the message but surface loudly.
+                    tracing::error!(
+                        target: "irys::packing",
+                        sm_id = msg.storage_module.id,
+                        "Received packing request for unknown storage module id; dropping request"
+                    );
+                    debug_assert!(
+                        false,
+                        "Packing request targeted unknown storage module id {}. This indicates a wiring/configuration bug.",
+                        msg.storage_module.id
+                    );
                 }
             }
         });
