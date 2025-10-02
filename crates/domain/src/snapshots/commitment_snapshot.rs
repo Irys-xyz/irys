@@ -485,6 +485,7 @@ mod tests {
             signer,
             CommitmentType::Unpledge {
                 pledge_count_before_executing: 0,
+                partition_hash: [0_u8; 32],
             },
             U256::from(1000),
         );

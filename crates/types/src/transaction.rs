@@ -415,6 +415,7 @@ impl CommitmentTransaction {
         anchor: H256,
         provider: &impl PledgeDataProvider,
         signer_address: Address,
+        partition_hash: H256,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
 
@@ -428,6 +429,7 @@ impl CommitmentTransaction {
         Self {
             commitment_type: CommitmentType::Unpledge {
                 pledge_count_before_executing: count,
+                partition_hash: partition_hash.into(),
             },
             anchor,
             fee: config.mempool.commitment_fee,
@@ -512,6 +514,7 @@ impl CommitmentTransaction {
             }
             CommitmentType::Unpledge {
                 pledge_count_before_executing,
+                ..
             } => {
                 // For unpledge, validate using the embedded pledge count
                 // Calculate expected refund value
@@ -1107,9 +1110,14 @@ mod pledge_decay_parametrized_tests {
             MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
 
         // Create an unpledge transaction
-        let unpledge_tx =
-            CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer_address)
-                .await;
+        let unpledge_tx = CommitmentTransaction::new_unpledge(
+            &config,
+            H256::zero(),
+            &provider,
+            signer_address,
+            H256::zero(),
+        )
+        .await;
 
         // Verify the commitment type is correct
         assert!(matches!(
@@ -1133,6 +1141,28 @@ mod pledge_decay_parametrized_tests {
             actual_amount.round_dp(0),
             expected_unpledge_value.round_dp(0)
         );
+    }
+
+    #[tokio::test]
+    async fn test_new_unpledge_includes_partition_hash() {
+        let config = ConsensusConfig::testing();
+        let signer = Address::default();
+        let provider = MockPledgeProvider::new().with_pledge_count(signer, 2);
+        let ph = H256::from([0xAB_u8; 32]);
+        let tx =
+            CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer, ph).await;
+
+        match tx.commitment_type {
+            CommitmentType::Unpledge {
+                partition_hash,
+                pledge_count_before_executing,
+            } => {
+                assert_eq!(pledge_count_before_executing, 2);
+                let ph_bytes: [u8; 32] = ph.into();
+                assert_eq!(partition_hash, ph_bytes);
+            }
+            _ => panic!("unexpected type"),
+        }
     }
 }
 
