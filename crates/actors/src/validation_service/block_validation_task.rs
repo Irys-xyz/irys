@@ -377,6 +377,7 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.db,
                 &self.block_tree_guard,
+                &self.service_inner.reth_node_adapter,
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await

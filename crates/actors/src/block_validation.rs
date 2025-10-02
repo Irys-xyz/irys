@@ -1,4 +1,5 @@
 use crate::block_tree_service::ValidationResult;
+use crate::mempool_service::validate_commitment_transaction;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
@@ -1312,6 +1313,7 @@ pub async fn commitment_txs_are_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
+    reth_adapter: &IrysRethNodeAdapter,
 ) -> eyre::Result<()> {
     // Extract commitment transaction IDs from the block
     let block_tx_ids = block
@@ -1325,14 +1327,68 @@ pub async fn commitment_txs_are_valid(
     let actual_commitments =
         get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
-    // Validate that all commitment transactions have correct values
+    // Resolve parent block EVM hash for funding checks at the correct state
+    let parent_evm_block_hash = {
+        let read = block_tree_guard.read();
+        read.get_block(&block.previous_block_hash)
+            .map(|h| h.evm_block_hash)
+            .ok_or_else(|| eyre!("Parent block isn't found while validating commitments"))?
+    };
+
+    warn!("PARENT EVM BLOCK HASH: {:?}", parent_evm_block_hash);
+
+    let latest_canonical_evm_block = {
+        let read = block_tree_guard.read();
+        let hash = read.get_latest_canonical_entry().block_hash;
+        read.get_block(&hash)
+            .map(|h| h.evm_block_hash)
+            .ok_or_else(|| {
+                eyre!("Latest canonical block isn't found while validating commitments")
+            })?
+    };
+
+    // UNCOMMENT THE LOOP FOR WHATEVER REASON YOU MIGHT WANT TO EXPERIMENT WITH TIMINGS AND WHATNOT
+    // loop {
+    //     let provider = reth_adapter.inner.provider();
+    //
+    //     let res = provider.state_by_block_hash(latest_canonical_evm_block);
+    //     if let Err(e) = res {
+    //         info!("WHOPS. reth provider state_by_block_hash() error: {:?}", e);
+    //         tokio::time::sleep(Duration::from_millis(100)).await;
+    //         continue;
+    //     }
+    //
+    //     let prov = res.unwrap();
+    //     // block_hash(0) just to see the result of the call
+    //     let res2 = prov.block_hash(0);
+    //     if let Err(e) = res2 {
+    //         info!("WHOPS 2. reth provider block_hash() error: {:?}", e);
+    //         tokio::time::sleep(Duration::from_millis(100)).await;
+    //         continue;
+    //     }
+    //
+    //     warn!("OOOKAY!");
+    //     break;
+    // }
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Validate that all commitment transactions have the correct fee, funding at parent state, and value
     for (idx, tx) in actual_commitments.iter().enumerate() {
-        tx.validate_value(&config.consensus).map_err(|e| {
+        validate_commitment_transaction(
+            reth_adapter,
+            &config.consensus,
+            tx,
+            // THAT SHOULD BE THE PARENT EVM BLOCK HASH. IT'S SET TO THE CANONICAL TO DEMONSTRATE
+            // THAT STUFF IS BROKEN. IF WE PASS NONE HERE EVERYTHING WORKS
+            Some(latest_canonical_evm_block.into()),
+        )
+        .map_err(|e| {
             error!(
-                "Commitment transaction {} at position {} has invalid value: {}",
+                "Commitment transaction {} at position {} failed validation: {}",
                 tx.id, idx, e
             );
-            eyre::eyre!("Invalid commitment transaction value: {}", e)
+            eyre::eyre!("Invalid commitment transaction: {}", e)
         })?;
     }
 

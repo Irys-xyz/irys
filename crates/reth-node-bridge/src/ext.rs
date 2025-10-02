@@ -1,5 +1,5 @@
 use alloy_eips::BlockId;
-use alloy_primitives::{BlockHash, U256};
+use alloy_primitives::U256;
 
 use irys_types::Address;
 use reth_chainspec::EthereumHardforks;
@@ -38,8 +38,11 @@ where
 
     fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
 
-    fn get_balance_irys_all_blocks(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<irys_types::U256> ;
-
+    fn get_balance_irys_all_blocks(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> eyre::Result<irys_types::U256>;
 }
 
 impl<Node, EthApi> IrysRethRpcTestContextExt<Node, EthApi> for RpcTestContext<Node, EthApi>
@@ -71,23 +74,28 @@ where
     }
 
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.
-    fn get_balance_irys_all_blocks(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<irys_types::U256> {
-        use reth_provider::StateProviderFactory as _;
+    fn get_balance_irys_all_blocks(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> eyre::Result<irys_types::U256> {
         use eyre::OptionExt as _;
+        use reth_provider::StateProviderFactory as _;
         let provider = self.inner.provider();
         let state_provider: StateProviderBox = {
-
-            let block_id = block_id.unwrap_or(BlockId::Number(alloy_eips::BlockNumberOrTag::Latest));
+            let block_id =
+                block_id.unwrap_or(BlockId::Number(alloy_eips::BlockNumberOrTag::Latest));
             match block_id {
-                BlockId::Hash(rpc_block_hash) => provider
-                        .state_by_block_hash(rpc_block_hash.block_hash)?,
+                BlockId::Hash(rpc_block_hash) => {
+                    provider.state_by_block_hash(rpc_block_hash.block_hash)?
+                }
                 BlockId::Number(block_number_or_tag) => match block_number_or_tag {
                     alloy_eips::BlockNumberOrTag::Latest => provider.latest()?,
 
-                    _ => unimplemented!()
+                    _ => unimplemented!(),
                 },
             }
-        } ;
+        };
         Ok(state_provider
             .account_balance(&address)?
             .ok_or_eyre("Unable to get account balance from state")?
