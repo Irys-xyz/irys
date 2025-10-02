@@ -1,5 +1,4 @@
 use crate::block_tree_service::ValidationResult;
-use crate::mempool_service::validate_commitment_transaction;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
@@ -1313,7 +1312,6 @@ pub async fn commitment_txs_are_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
-    reth_adapter: &IrysRethNodeAdapter,
 ) -> eyre::Result<()> {
     // Extract commitment transaction IDs from the block
     let block_tx_ids = block
@@ -1327,17 +1325,15 @@ pub async fn commitment_txs_are_valid(
     let actual_commitments =
         get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
-    // Validate that all commitment transactions have the correct fee, funding at parent state, and value
+    // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
-        validate_commitment_transaction(reth_adapter, &config.consensus, tx, None).map_err(
-            |e| {
-                error!(
-                    "Commitment transaction {} at position {} failed validation: {}",
-                    tx.id, idx, e
-                );
-                eyre::eyre!("Invalid commitment transaction: {}", e)
-            },
-        )?;
+        tx.validate_value(&config.consensus).map_err(|e| {
+            error!(
+                "Commitment transaction {} at position {} has invalid value: {}",
+                tx.id, idx, e
+            );
+            eyre::eyre!("Invalid commitment transaction value: {}", e)
+        })?;
     }
 
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
