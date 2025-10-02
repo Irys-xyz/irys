@@ -15,6 +15,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::mpsc::error::{SendError, TrySendError};
 use tokio::{sync::Semaphore, task::yield_now, time::sleep};
 use tracing::{debug, error, span, warn, Level};
 
@@ -498,13 +499,10 @@ impl PackingHandle {
     /// Enqueue a packing request with a short bounded wait if the channel is full.
     /// If the channel remains saturated past a small timeout, log a warning and drop the request.
     /// Returns Err only if the channel is closed.
-    pub fn send(
-        &self,
-        req: PackingRequest,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<PackingRequest>> {
+    pub fn send(&self, req: PackingRequest) -> Result<(), SendError<PackingRequest>> {
         match self.sender.try_send(req) {
             Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(mut req)) => {
+            Err(TrySendError::Full(mut req)) => {
                 let start = std::time::Instant::now();
                 let max_wait = Duration::from_millis(50);
                 loop {
@@ -521,19 +519,17 @@ impl PackingHandle {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     match self.sender.try_send(req) {
                         Ok(()) => return Ok(()),
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(r)) => {
+                        Err(TrySendError::Full(r)) => {
                             req = r;
                             continue;
                         }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(r)) => {
-                            return Err(tokio::sync::mpsc::error::SendError(r));
+                        Err(TrySendError::Closed(r)) => {
+                            return Err(SendError(r));
                         }
                     }
                 }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(req)) => {
-                Err(tokio::sync::mpsc::error::SendError(req))
-            }
+            Err(TrySendError::Closed(req)) => Err(SendError(req)),
         }
     }
 
