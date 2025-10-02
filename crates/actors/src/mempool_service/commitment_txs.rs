@@ -415,14 +415,23 @@ impl Inner {
             )
         };
 
-        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
+        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot);
 
-        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, is_staked);
-
-        // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentSnapshotStatus::Unsupported) {
-            warn!("Commitment is unsupported: {}", commitment_tx.id);
-            return CommitmentSnapshotStatus::Unsupported;
+        // Reject unsupported or invalid commitment types/targets
+        match cache_status {
+            CommitmentSnapshotStatus::Accepted
+            | CommitmentSnapshotStatus::Unknown
+            | CommitmentSnapshotStatus::Unstaked => {}
+            CommitmentSnapshotStatus::Unsupported
+            | CommitmentSnapshotStatus::InvalidPledgeCount
+            | CommitmentSnapshotStatus::PartitionNotOwned
+            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                warn!(
+                    "Commitment rejected: {:?} id={} ",
+                    cache_status, commitment_tx.id
+                );
+                return cache_status;
+            }
         }
 
         // For unstaked addresses, check for pending stake transactions
