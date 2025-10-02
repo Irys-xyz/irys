@@ -118,7 +118,8 @@ pub fn capacity_pack_range_cuda_c(
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
     entropy: &mut Vec<u8>,
-) -> u32 {
+) -> eyre::Result<()> {
+
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
@@ -164,7 +165,11 @@ pub fn capacity_pack_range_cuda_c(
 
         entropy.set_len(entropy.capacity());
     }
-    result
+    use capacity_cuda::entropy_chunk_errors::*;
+    match result {
+        NO_ERROR => Ok(()),
+       _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result))
+    }
 }
 
 #[cfg(feature = "nvidia")]
@@ -176,7 +181,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
     partition_hash: PartitionHash,
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
-) {
+) -> eyre::Result<()> {
     use irys_types::ConsensusConfig;
 
     let num_chunks: u32 = data.len() as u32 / ConsensusConfig::CHUNK_SIZE as u32; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
@@ -189,10 +194,11 @@ pub fn capacity_pack_range_with_data_cuda_c(
         entropy_packing_iterations,
         irys_chain_id,
         &mut entropy,
-    );
+    )?;
 
     // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
     xor_vec_u8_arrays_in_place(data, &entropy);
+    Ok(())
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
@@ -477,7 +483,7 @@ mod tests {
         let mut c_chunk_cuda = Vec::<u8>::with_capacity(2 * testing_config.chunk_size as usize);
         let now = Instant::now();
 
-        let result = capacity_pack_range_cuda_c(
+        capacity_pack_range_cuda_c(
             2,
             mining_address,
             chunk_offset,
@@ -485,13 +491,9 @@ mod tests {
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
             &mut c_chunk_cuda,
-        );
+        ).unwrap();
 
-        println!("CUDA result: {}", result);
 
-        if result != 0 {
-            panic!("CUDA error");
-        }
 
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
@@ -623,7 +625,7 @@ mod tests {
             partition_hash.into(),
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
-        );
+        ).unwrap();
 
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
