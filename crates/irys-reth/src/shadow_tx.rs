@@ -60,8 +60,8 @@ pub enum TransactionPacket {
     StorageFees(BalanceDecrement),
     /// Pledge funds to an account (balance decrement). Used for pledging operations.
     Pledge(BalanceDecrement),
-    /// Unpledge funds from an account (balance increment). Used for unpledging operations.
-    Unpledge(EitherIncrementOrDecrement),
+    /// Unpledge fee debit at inclusion (balance decrement). Refund occurs in epoch via UnpledgeRefund.
+    Unpledge(BalanceDecrement),
     /// Term fee reward to the miners that stored the block
     TermFeeReward(BalanceIncrement),
     /// Ingress proof reward payment to providers who submitted valid proofs (balance increment).
@@ -89,10 +89,7 @@ impl TransactionPacket {
             Self::Stake(dec) => Some(dec.target),
             Self::StorageFees(dec) => Some(dec.target),
             Self::Pledge(dec) => Some(dec.target),
-            Self::Unpledge(either) => match either {
-                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
-                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
-            },
+            Self::Unpledge(dec) => Some(dec.target),
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
@@ -303,7 +300,7 @@ impl BorshDeserialize for TransactionPacket {
             STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
             STORAGE_FEES_ID => Self::StorageFees(BalanceDecrement::deserialize_reader(reader)?),
             PLEDGE_ID => Self::Pledge(BalanceDecrement::deserialize_reader(reader)?),
-            UNPLEDGE_ID => Self::Unpledge(EitherIncrementOrDecrement::deserialize_reader(reader)?),
+            UNPLEDGE_ID => Self::Unpledge(BalanceDecrement::deserialize_reader(reader)?),
             TERM_FEE_REWARD_ID => {
                 Self::TermFeeReward(BalanceIncrement::deserialize_reader(reader)?)
             }
@@ -662,13 +659,11 @@ mod tests {
                     irys_ref: test_ref,
                 },
             )),
-            TransactionPacket::Unpledge(EitherIncrementOrDecrement::BalanceDecrement(
-                BalanceDecrement {
-                    amount: U256::from(500_u64),
-                    target: test_address,
-                    irys_ref: test_ref,
-                },
-            )),
+            TransactionPacket::Unpledge(BalanceDecrement {
+                amount: U256::from(500_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
             TransactionPacket::StorageFees(BalanceDecrement {
                 amount: U256::from(600_u64),
                 target: test_address,

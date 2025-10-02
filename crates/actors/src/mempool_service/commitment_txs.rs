@@ -415,7 +415,8 @@ impl Inner {
             )
         };
 
-        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot);
+        let cache_status =
+            commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot);
 
         // Reject unsupported or invalid commitment types/targets
         match cache_status {

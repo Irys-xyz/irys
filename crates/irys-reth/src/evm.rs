@@ -1017,8 +1017,7 @@ where
 
         match shadow_tx {
             shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
-                shadow_tx::TransactionPacket::Unstake(either_inc_dec)
-                | shadow_tx::TransactionPacket::Unpledge(either_inc_dec) => match either_inc_dec {
+                shadow_tx::TransactionPacket::Unstake(either_inc_dec) => match either_inc_dec {
                     shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(balance_increment) => {
                         let log = Self::create_shadow_log(
                             balance_increment.target,
@@ -1059,6 +1058,23 @@ where
                         ))
                     }
                 },
+                shadow_tx::TransactionPacket::Unpledge(balance_decrement) => {
+                    let log = Self::create_shadow_log(
+                        balance_decrement.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(balance_decrement.amount, 256),
+                            DynSolValue::Address(balance_decrement.target),
+                        ],
+                    );
+                    let target = balance_decrement.target;
+                    let result = self
+                        .handle_balance_decrement(log, tx_hash, balance_decrement)?
+                        .map(|(plain_account, execution_result)| {
+                            (plain_account, execution_result, true)
+                        });
+                    Ok((result, target))
+                }
                 shadow_tx::TransactionPacket::BlockReward(block_reward_increment) => {
                     let log = Self::create_shadow_log(
                         beneficiary,

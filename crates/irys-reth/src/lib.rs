@@ -1778,7 +1778,7 @@ mod tests {
         Ok(())
     }
 
-    /// Test unpledge transaction (balance increment)
+    /// Test unpledge transaction (fee debit at inclusion)
     #[test_log::test(tokio::test)]
     async fn test_unpledge_balance_increment() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
@@ -1793,16 +1793,14 @@ mod tests {
             "Target account should have initial balance"
         );
 
-        // Now create unpledge transaction
-        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
+        // Now create unpledge transaction: inclusion-time fee debit
+        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS (used as fee for test)
         let unpledge_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                BalanceIncrement {
-                    amount: unpledge_amount,
-                    target: target_address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
+            TransactionPacket::Unpledge(BalanceDecrement {
+                amount: unpledge_amount,
+                target: target_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
             alloy_primitives::FixedBytes::ZERO,
         );
         let unpledge_tx =
@@ -1927,16 +1925,14 @@ mod tests {
             .unwrap();
         assert!(account.is_none(), "Test account should not exist");
 
-        // Create unpledge transaction for non-existent account
+        // Create unpledge transaction for non-existent account (fee debit should fail)
         let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 IRYS
         let unpledge_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                BalanceIncrement {
-                    amount: unpledge_amount,
-                    target: nonexistent_address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
+            TransactionPacket::Unpledge(BalanceDecrement {
+                amount: unpledge_amount,
+                target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
             alloy_primitives::FixedBytes::ZERO,
         );
         let unpledge_tx =
@@ -3025,13 +3021,11 @@ pub mod test_utils {
     /// Compose a shadow tx for unpledge.
     pub fn unpledge(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(
-            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                shadow_tx::BalanceIncrement {
-                    amount: U256::ONE,
-                    target: address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
+            TransactionPacket::Unpledge(shadow_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
             alloy_primitives::FixedBytes::ZERO,
         )
     }

@@ -399,15 +399,18 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee,
             }),
-            irys_primitives::CommitmentType::Unpledge { .. } => {
-                create_increment_or_decrement("unpledge").map(|result| ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(
-                        TransactionPacket::Unpledge(result),
-                        (*self.solution_hash).into(),
-                    ),
-                    transaction_fee,
-                })
-            }
+            irys_primitives::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
+                // Inclusion-time behavior: fee-only debit from signer; no treasury movement here
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Unpledge(BalanceDecrement {
+                        amount: fee,
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
+                transaction_fee,
+            }),
             irys_primitives::CommitmentType::Unstake => create_increment_or_decrement("unstake")
                 .map(|result| ShadowMetadata {
                     shadow_tx: ShadowTransaction::new_v1(
@@ -536,9 +539,11 @@ impl<'a> ShadowTxGenerator<'a> {
                         eyre!("Treasury balance overflow when adding commitment value")
                     })?;
             }
-            irys_primitives::CommitmentType::Unstake
-            | irys_primitives::CommitmentType::Unpledge { .. } => {
+            irys_primitives::CommitmentType::Unstake => {
                 self.deduct_from_treasury_for_payout(tx.value)?;
+            }
+            irys_primitives::CommitmentType::Unpledge { .. } => {
+                // No treasury changes at inclusion for unpledge
             }
         }
 
@@ -895,16 +900,14 @@ mod tests {
                 ),
                 transaction_fee: 500,
             },
-            // Unpledge (180000 - 1500 fee = 178500 increment)
+            // Unpledge: fee-only debit at inclusion (1500)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::Unpledge(EitherIncrementOrDecrement::BalanceIncrement(
-                        BalanceIncrement {
-                            amount: U256::from(178500).into(), // 180000 - 1500 fee
-                            target: commitments[3].signer,
-                            irys_ref: commitments[3].id.into(),
-                        },
-                    )),
+                    TransactionPacket::Unpledge(BalanceDecrement {
+                        amount: U256::from(1500).into(),
+                        target: commitments[3].signer,
+                        irys_ref: commitments[3].id.into(),
+                    }),
                     H256::zero().into(),
                 ),
                 transaction_fee: 1500,
