@@ -283,7 +283,7 @@ impl DataSyncServiceTestHarness {
             let request_count = peer_fetcher.request_log.read().unwrap().len();
             total_requests += request_count;
 
-            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}", 
+            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}",
                 peer_name,
                 peer_manager.health_score(),
                 request_count,
