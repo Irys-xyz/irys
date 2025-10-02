@@ -495,12 +495,46 @@ pub struct PackingHandle {
 }
 
 impl PackingHandle {
-    /// Enqueue a packing request on the Tokio service.
+    /// Enqueue a packing request with a short bounded wait if the channel is full.
+    /// If the channel remains saturated past a small timeout, log a warning and drop the request.
+    /// Returns Err only if the channel is closed.
     pub fn send(
         &self,
         req: PackingRequest,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<PackingRequest>> {
-        self.sender.send(req)
+        match self.sender.try_send(req) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(mut req)) => {
+                let start = std::time::Instant::now();
+                let max_wait = Duration::from_millis(50);
+                loop {
+                    if start.elapsed() >= max_wait {
+                        tracing::warn!(
+                            target: "irys::packing",
+                            "Dropping packing request due to saturated channel after {:?}",
+                            max_wait
+                        );
+                        // Drop to preserve responsiveness and bounded memory, mirroring legacy do_send behavior
+                        return Ok(());
+                    }
+                    // Briefly sleep to yield CPU and give receivers a chance to make progress
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    match self.sender.try_send(req) {
+                        Ok(()) => return Ok(()),
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(r)) => {
+                            req = r;
+                            continue;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(r)) => {
+                            return Err(tokio::sync::mpsc::error::SendError(r));
+                        }
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(req)) => {
+                Err(tokio::sync::mpsc::error::SendError(req))
+            }
+        }
     }
 
     /// Access a clone of the internals snapshot used by wait_for_packing.
