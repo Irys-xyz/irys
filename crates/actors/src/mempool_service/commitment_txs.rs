@@ -23,7 +23,7 @@ impl Inner {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
         // Validate tx signature
-        // we MUST do this before using the ID
+        // we MUST do this before using the ID to prevent poisoning, as this validates the ID is correct
         if let Err(e) = self.validate_signature(&commitment_tx).await {
             tracing::error!(
                 "Signature validation for commitment_tx {:?} failed with error: {:?}",
