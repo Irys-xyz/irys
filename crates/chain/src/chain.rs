@@ -81,7 +81,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::mpsc::{self};
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
 use tokio::time::sleep;
@@ -1148,7 +1148,6 @@ impl IrysNode {
             &block_tree_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
-            reth_node_adapter.clone(),
             receivers.block_discovery,
             runtime_handle.clone(),
         );
@@ -1664,7 +1663,6 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
-        reth_node_adapter: IrysRethNodeAdapter,
         block_discovery_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
         runtime_handle: Handle,
     ) -> TokioServiceHandle {
@@ -1676,7 +1674,6 @@ impl IrysNode {
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,
-            reth_adapter: reth_node_adapter,
         };
         BlockDiscoveryService::spawn_service(
             Arc::new(block_discovery_inner),

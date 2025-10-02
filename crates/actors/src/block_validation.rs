@@ -44,7 +44,7 @@ use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
 use reth::revm::primitives::FixedBytes;
-use reth::rpc::api::{EngineApiClient as _, EthApiServer};
+use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
@@ -54,8 +54,6 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use alloy_eips::BlockNumberOrTag;
-use reth::providers::StateProviderFactory;
 use thiserror::Error;
 use tracing::{debug, error, info, warn, Instrument as _};
 
@@ -1329,64 +1327,17 @@ pub async fn commitment_txs_are_valid(
     let actual_commitments =
         get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
 
-    // Resolve parent block EVM hash for funding checks at the correct state
-    let parent_evm_block_hash = {
-        let read = block_tree_guard.read();
-        read.get_block(&block.previous_block_hash)
-            .map(|h| h.evm_block_hash)
-            .ok_or_else(|| eyre!("Parent block isn't found while validating commitments"))?
-    };
-
-    warn!("PARENT EVM BLOCK HASH: {:?}", parent_evm_block_hash);
-
-    let latest_canonical_evm_block = {
-        let read = block_tree_guard.read();
-        let hash = read.get_latest_canonical_entry().block_hash;
-        read.get_block(&hash)
-            .map(|h| h.evm_block_hash)
-            .ok_or_else(|| {
-                eyre!("Latest canonical block isn't found while validating commitments")
-            })?
-    };
-
-    // loop {
-    //     let eth_api = reth_adapter.inner.eth_api();
-    //     let block = eth_api.block_by_number(BlockNumberOrTag::Latest, false).await;
-    //     if let Ok(block) = block {
-    //         let hash = block.as_ref().map(|b| (b.header.number, b.header.hash));
-    //         info!("Latest reth block: {:?}", hash);
-    //     }
-    //
-    //     let provider = reth_adapter.inner.provider();
-    //
-    //     let res = provider.state_by_block_hash(parent_evm_block_hash);
-    //     if let Err(e) = res {
-    //         info!("WHOPS. reth provider state_by_block_hash() error: {:?}", e);
-    //         tokio::time::sleep(Duration::from_millis(100)).await;
-    //         continue;
-    //     }
-    //
-    //     warn!("Block is okay");
-    //     break;
-    // }
-
     // Validate that all commitment transactions have the correct fee, funding at parent state, and value
     for (idx, tx) in actual_commitments.iter().enumerate() {
-        validate_commitment_transaction(
-            reth_adapter,
-            &config.consensus,
-            tx,
-            // THAT SHOULD BE THE PARENT EVM BLOCK HASH. IT'S SET TO THE CANONICAL TO DEMONSTRATE
-            // THAT STUFF IS BROKEN. IF WE PASS NONE HERE EVERYTHING WORKS
-            Some(parent_evm_block_hash.into()),
-        )
-        .map_err(|e| {
-            error!(
-                "Commitment transaction {} at position {} failed validation: {}",
-                tx.id, idx, e
-            );
-            eyre::eyre!("Invalid commitment transaction: {}", e)
-        })?;
+        validate_commitment_transaction(reth_adapter, &config.consensus, tx, None).map_err(
+            |e| {
+                error!(
+                    "Commitment transaction {} at position {} failed validation: {}",
+                    tx.id, idx, e
+                );
+                eyre::eyre!("Invalid commitment transaction: {}", e)
+            },
+        )?;
     }
 
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;

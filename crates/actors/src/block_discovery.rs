@@ -14,7 +14,6 @@ use irys_database::{
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
 };
-use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
@@ -136,8 +135,6 @@ pub struct BlockDiscoveryServiceInner {
     pub vdf_steps_guard: VdfStateReadonly,
     /// Service Senders
     pub service_senders: ServiceSenders,
-    /// Reth adapter used for balance and execution-layer queries
-    pub reth_adapter: IrysRethNodeAdapter,
 }
 
 #[derive(Debug)]
