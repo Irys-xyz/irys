@@ -15,8 +15,14 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::mpsc::error::{SendError, TrySendError};
-use tokio::{sync::Semaphore, task::yield_now, time::sleep};
+use tokio::{
+    sync::{
+        mpsc::error::{SendError, TrySendError},
+        Semaphore,
+    },
+    task::yield_now,
+    time::sleep,
+};
 use tracing::{debug, error, span, warn, Level};
 
 #[cfg(feature = "nvidia")]
