@@ -300,16 +300,19 @@ pub struct CommitmentTransaction {
 }
 
 /// Ordering for CommitmentTransaction prioritizes transactions as follows:
-/// 1. Stake commitments (sorted by fee, highest first)
-/// 2. Pledge commitments (sorted by pledge_count_before_executing ascending, then by fee descending)
-/// 3. Other commitment types (sorted by fee)
+/// 1. Stake commitments (fee desc, then id tie-breaker)
+/// 2. Pledge & Unpledge (count asc, then fee desc, then id tie-breaker)
+/// 3. Unstake (last, fee desc, then id tie-breaker)
 impl Ord for CommitmentTransaction {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // First, compare by commitment type (Stake > Pledge/Unpledge)
+        // First, compare by commitment type (Stake > Pledge > Unpledge > Unstake)
         match (&self.commitment_type, &other.commitment_type) {
             (CommitmentType::Stake, CommitmentType::Stake) => {
-                // Both are stakes, sort by fee (higher first)
-                other.user_fee().cmp(&self.user_fee())
+                // Both are stakes, sort by fee (higher first), then by id for tie-breaks
+                other
+                    .user_fee()
+                    .cmp(&self.user_fee())
+                    .then_with(|| self.id.cmp(&other.id))
             }
             (CommitmentType::Stake, _) => std::cmp::Ordering::Less, // Stake comes first
             (_, CommitmentType::Stake) => std::cmp::Ordering::Greater, // Stake comes first
@@ -322,9 +325,53 @@ impl Ord for CommitmentTransaction {
                 },
             ) => count_a
                 .cmp(count_b)
-                .then_with(|| other.user_fee().cmp(&self.user_fee())),
-            // Handle other cases (Unpledge, Unstake) - sort by fee
-            _ => other.user_fee().cmp(&self.user_fee()),
+                .then_with(|| other.user_fee().cmp(&self.user_fee()))
+                .then_with(|| self.id.cmp(&other.id)),
+            (
+                CommitmentType::Unpledge {
+                    pledge_count_before_executing: count_a,
+                    ..
+                },
+                CommitmentType::Unpledge {
+                    pledge_count_before_executing: count_b,
+                    ..
+                },
+            ) => count_a
+                .cmp(count_b)
+                .then_with(|| other.user_fee().cmp(&self.user_fee()))
+                .then_with(|| self.id.cmp(&other.id)),
+            (
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: count_a,
+                },
+                CommitmentType::Unpledge {
+                    pledge_count_before_executing: count_b,
+                    ..
+                },
+            ) => count_a
+                .cmp(count_b)
+                .then_with(|| other.user_fee().cmp(&self.user_fee()))
+                .then_with(|| self.id.cmp(&other.id)),
+            (
+                CommitmentType::Unpledge {
+                    pledge_count_before_executing: count_a,
+                    ..
+                },
+                CommitmentType::Pledge {
+                    pledge_count_before_executing: count_b,
+                },
+            ) => count_a
+                .cmp(count_b)
+                .then_with(|| other.user_fee().cmp(&self.user_fee()))
+                .then_with(|| self.id.cmp(&other.id)),
+            // Unstake always last
+            (CommitmentType::Unstake, CommitmentType::Unstake) => other
+                .user_fee()
+                .cmp(&self.user_fee())
+                .then_with(|| self.id.cmp(&other.id)),
+            (CommitmentType::Unstake, _) => std::cmp::Ordering::Greater,
+            (_, CommitmentType::Unstake) => std::cmp::Ordering::Less,
+            // No fallback: all current variants are covered explicitly
         }
     }
 }

@@ -422,8 +422,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::shadow_tx::{
-        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
-        TransactionPacket, BLOCK_REWARD_ID, UNSTAKE_ID,
+        BalanceDecrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
+        BLOCK_REWARD_ID, UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{

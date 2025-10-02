@@ -1,5 +1,5 @@
 use irys_primitives::CommitmentType;
-use irys_types::{partition::PartitionHash, Address, CommitmentTransaction, H256};
+use irys_types::{Address, CommitmentTransaction};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
@@ -28,14 +28,12 @@ pub struct CommitmentSnapshot {
 pub struct MinerCommitments {
     pub stake: Option<CommitmentTransaction>,
     pub pledges: Vec<CommitmentTransaction>,
-    pub scheduled_unpledges: Vec<ScheduledUnpledge>,
+    // Preserve block-relative inclusion order for unpledges
+    pub unpledges: Vec<CommitmentTransaction>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScheduledUnpledge {
-    pub partition_hash: PartitionHash,
-    pub tx_id: H256,
-}
+// NOTE: We intentionally store full unpledge transactions instead of a
+// reduced struct so epoch processing can consume them directly.
 
 impl CommitmentSnapshot {
     pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
@@ -174,11 +172,12 @@ impl CommitmentSnapshot {
 
                 // Reject duplicates in this snapshot
                 if let Some(mc) = miner_commitments {
-                    if mc
-                        .scheduled_unpledges
-                        .iter()
-                        .any(|e| e.partition_hash == irys_types::H256::from(*partition_hash))
-                    {
+                    if mc.unpledges.iter().any(|tx| {
+                        matches!(
+                            tx.commitment_type,
+                            CommitmentType::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
+                        )
+                    }) {
                         return CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge;
                     }
                 }
@@ -322,21 +321,17 @@ impl CommitmentSnapshot {
                 }
 
                 // Duplicate check
-                if miner_commitments
-                    .scheduled_unpledges
-                    .iter()
-                    .any(|e| e.partition_hash == irys_types::H256::from(*partition_hash))
-                {
+                if miner_commitments.unpledges.iter().any(|tx| {
+                    matches!(
+                        tx.commitment_type,
+                        CommitmentType::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
+                    )
+                }) {
                     return CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge;
                 }
 
-                // Record scheduled unpledge with ordering metadata
-                miner_commitments
-                    .scheduled_unpledges
-                    .push(ScheduledUnpledge {
-                        partition_hash: irys_types::H256::from(*partition_hash),
-                        tx_id: commitment_tx.id,
-                    });
+                // Record full unpledge tx (ordering preserved by Vec push)
+                miner_commitments.unpledges.push(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
             CommitmentType::Unstake => CommitmentSnapshotStatus::Unsupported,
@@ -355,6 +350,10 @@ impl CommitmentSnapshot {
 
             for pledge in &miner_commitments.pledges {
                 all_commitments.push(pledge.clone());
+            }
+
+            for unpledge in &miner_commitments.unpledges {
+                all_commitments.push(unpledge.clone());
             }
         }
 
@@ -384,18 +383,7 @@ impl CommitmentSnapshot {
     }
 }
 
-impl CommitmentSnapshot {
-    /// Export scheduled unpledges preserving insertion order per signer.
-    pub fn export_scheduled_unpledges(&self) -> Vec<(Address, ScheduledUnpledge)> {
-        let mut out: Vec<(Address, ScheduledUnpledge)> = Vec::new();
-        for (addr, mc) in &self.commitments {
-            for e in &mc.scheduled_unpledges {
-                out.push((*addr, *e));
-            }
-        }
-        out
-    }
-}
+impl CommitmentSnapshot {}
 
 #[cfg(test)]
 mod tests {
