@@ -21,7 +21,7 @@ pub async fn get_chunk_by_ledger_offset(
 ) -> actix_web::Result<HttpResponse> {
     let ledger = match DataLedger::try_from(path.ledger_id) {
         Ok(l) => l,
-        Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {}", e))),
+        Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {e}"))),
     };
 
     match state
@@ -37,7 +37,7 @@ pub async fn get_chunk_by_ledger_offset(
                 "Error retrieving chunk: ledger_id:{} chunk_offset: {} {}",
                 path.ledger_id, path.ledger_offset, e
             );
-            Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
+            Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {e}")))
         }
     }
 }
@@ -55,7 +55,7 @@ pub async fn get_chunk_by_data_root_offset(
 ) -> actix_web::Result<HttpResponse> {
     let ledger = match DataLedger::try_from(path.ledger_id) {
         Ok(l) => l,
-        Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {}", e))),
+        Err(e) => return Ok(HttpResponse::BadRequest().body(format!("Invalid ledger id: {e}"))),
     };
 
     match state
@@ -67,7 +67,7 @@ pub async fn get_chunk_by_data_root_offset(
             .json(chunk)),
         Ok(None) => Ok(HttpResponse::NotFound().body("Chunk not found")),
         Err(e) => {
-            Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {}", e)))
+            Ok(HttpResponse::InternalServerError().body(format!("Error retrieving chunk: {e}")))
         }
     }
 }

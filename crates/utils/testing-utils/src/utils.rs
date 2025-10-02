@@ -74,7 +74,7 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
 
         // print timestamp before the panic message
-        eprintln!("\x1b[1;31m[{}] Panic occurred:\x1b[0m", timestamp);
+        eprintln!("\x1b[1;31m[{timestamp}] Panic occurred:\x1b[0m");
 
         // call the original panic hook
         original_hook(panic_info);

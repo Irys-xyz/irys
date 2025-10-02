@@ -1,0 +1,187 @@
+node_mode = "Peer"
+sync_mode = "Trusted"
+base_directory = "/app/data"
+mining_key = "4882545ed67d1b638207334975ee839e2369d31d8b3b8ef656b94952ca4ae4f3"
+reward_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
+stake_pledge_drives = true
+genesis_peer_discovery_timeout_millis = 10000
+
+# Whitelist all three node operators for staking
+initial_stake_and_pledge_whitelist = [
+    "0x10605A299777D44BE5373D120d5479f07860325d",  # irys-1
+    "0x951AA3768fE8d51DbC348520b0825C0c1f197277",  # irys-2
+    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"   # irys-3
+]
+
+# irys-1
+[[trusted_peers]]
+gossip = "172.21.0.2:9009"
+api = "172.21.0.2:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "172.21.0.2:9010"
+
+# irys-3
+[[trusted_peers]]
+gossip = "172.21.0.4:9009"
+api = "172.21.0.4:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "172.21.0.4:9010"
+
+
+[gossip]
+public_ip = "172.21.0.3"
+public_port = 9009
+bind_ip = "0.0.0.0"
+bind_port = 9009
+
+[http]
+public_ip = "172.21.0.3"
+public_port = 8080
+bind_ip = "0.0.0.0"
+bind_port = 8080
+
+[reth.network]
+use_random_ports = false
+public_ip = "172.21.0.3"
+public_port = 9010
+bind_ip = "0.0.0.0"
+bind_port = 9010
+
+[storage]
+num_writes_before_sync = 1
+
+[data_sync]
+max_storage_throughput_bps = 1047961600
+bandwidth_adjustment_interval = "1s"
+chunk_request_timeout = "15s"
+max_pending_chunk_requests = 100
+
+[packing]
+[packing.local]
+cpu_packing_concurrency = 4
+gpu_packing_batch_size = 1024
+
+[cache]
+cache_clean_lag = 2
+
+[oracle]
+type = "mock"
+initial_price = 1.0
+incremental_change = 0.00000000000001
+smoothing_interval = 15
+
+[mempool]
+max_pending_pledge_items = 100
+max_pledges_per_item = 100
+max_pending_chunk_items = 30
+max_chunks_per_item = 500
+max_valid_items = 10000
+max_invalid_items = 10000
+max_valid_chunks = 10000
+
+[vdf]
+parallel_verification_thread_limit = 8
+
+[consensus.Custom]
+expected_genesis_hash = ""
+chain_id = 1270
+token_price_safe_range = 0.1
+annual_cost_per_gb = 0.01
+decay_rate = 0.01
+chunk_size = 32
+block_migration_depth = 6
+block_tree_depth = 50
+num_chunks_in_partition = 60
+num_chunks_in_recall_range = 10
+num_partitions_per_slot = 3
+entropy_packing_iterations = 1000
+number_of_ingress_proofs_total = 1
+number_of_ingress_proofs_from_assignees = 0
+safe_minimum_number_of_years = 200
+stake_value = 20000.0
+pledge_base_value = 950.0
+pledge_decay = 0.9
+immediate_tx_inclusion_reward_percent = 0.01
+minimum_term_fee_usd = 0.01
+
+[consensus.Custom.genesis]
+timestamp_millis = 0
+miner_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
+reward_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
+last_epoch_hash = "11111111111111111111111111111111"
+vdf_seed = "11111111111111111111111111111111"
+genesis_price = 1.0
+
+[consensus.Custom.reth]
+chain = 1270
+
+[consensus.Custom.reth.genesis]
+nonce = "0x0"
+timestamp = "0x0"
+extraData = "0x"
+gasLimit = "0x1c9c380"
+difficulty = "0x0"
+mixHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+coinbase = "0x0000000000000000000000000000000000000000"
+
+[consensus.Custom.reth.genesis.config]
+chainId = 1
+daoForkSupport = false
+terminalTotalDifficultyPassed = false
+
+# irys-1
+[consensus.Custom.reth.genesis.alloc.0x10605A299777D44BE5373D120d5479f07860325d]
+balance = "0x152cf4e72a974f1c0000"
+
+# irys-2
+[consensus.Custom.reth.genesis.alloc.0x951AA3768fE8d51DbC348520b0825C0c1f197277]
+balance = "0x152cf4e72a974f1c0000"
+
+# irys-3
+[consensus.Custom.reth.genesis.alloc.0x852BB3678fE8d51DbC348520b0825C0c1f197288]
+balance = "0x152cf4e72a974f1c0000"
+
+# Hardhat test account 0
+[consensus.Custom.reth.genesis.alloc.0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266]
+balance = "0x152cf4e72a974f1c0000"
+
+# Hardhat test account 1
+[consensus.Custom.reth.genesis.alloc.0x70997970C51812dc3A010C7d01b50e0d17dc79C8]
+balance = "0x152cf4e72a974f1c0000"
+
+# Hardhat test account 2
+[consensus.Custom.reth.genesis.alloc.0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC]
+balance = "0x152cf4e72a974f1c0000"
+
+[consensus.Custom.mempool]
+max_data_txs_per_block = 100
+max_commitment_txs_per_block = 100
+anchor_expiry_depth = 100
+commitment_fee = 100
+
+[consensus.Custom.difficulty_adjustment]
+block_time = 12
+difficulty_adjustment_interval = 100800000
+max_difficulty_adjustment_factor = "4"
+min_difficulty_adjustment_factor = "0.25"
+
+[consensus.Custom.vdf]
+reset_frequency = 2000
+num_checkpoints_in_vdf_step = 25
+max_allowed_vdf_fork_steps = 120000
+sha_1s_difficulty = 100000
+
+[consensus.Custom.block_reward_config]
+inflation_cap = 100000000.0
+half_life_secs = 126144000
+
+[consensus.Custom.epoch]
+capacity_scalar = 200
+num_blocks_in_epoch = 4
+submit_ledger_epoch_length = 200
+num_capacity_partitions = 30
+
+[consensus.Custom.ema]
+price_adjustment_interval = 10

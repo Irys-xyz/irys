@@ -84,6 +84,8 @@ semver.workspace = true
 thiserror.workspace = true
 itertools.workspace = true
 alloy-rpc-types-trace.workspace = true
+serde = { workspace = true, features = ["derive"] }
+reqwest = { workspace = true, features = ["json"] }
 
 
 [package.metadata.cargo-machete]
