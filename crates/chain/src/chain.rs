@@ -5,30 +5,28 @@ use actix_web::dev::Server;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
 use futures::FutureExt as _;
-use irys_actors::block_discovery::{
-    BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
-};
-use irys_actors::block_tree_service::BlockTreeServiceMessage;
-use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
-use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
-use irys_actors::pledge_provider::MempoolPledgeProvider;
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacadeImpl,
+    block_discovery::{
+        BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
+        BlockDiscoveryServiceInner,
+    },
     block_producer::BlockProducerCommand,
-    block_tree_service::BlockTreeService,
-    broadcast_mining_service::BroadcastMiningService,
+    block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
+    broadcast_mining_service::{BroadcastMiningService, MiningServiceBroadcaster},
     cache_service::ChunkCacheService,
+    chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     packing::{PackingRequest, PackingService},
     partition_mining_service::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
+    pledge_provider::MempoolPledgeProvider,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
+    BlockValidationTracker, DataSyncService, StorageModuleService,
 };
-use irys_actors::{BlockValidationTracker, DataSyncService, StorageModuleService};
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;

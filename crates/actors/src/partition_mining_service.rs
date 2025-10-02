@@ -12,17 +12,18 @@ use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
 use irys_storage::ii;
-use irys_types::block_production::{Seed, SolutionContext};
 use irys_types::{
+    block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
     PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::time::sleep;
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::sleep,
+};
 use tracing::{debug, error, info, warn};
 
 /// Commands that control the partition mining service
