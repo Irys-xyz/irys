@@ -15,9 +15,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, block_tree, chain, commitment, full_config, get_chunk, index, ledger,
-    mempool, mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy,
-    storage, tx,
+    block, block_index, block_tree, commitment, full_config, get_chunk, index, ledger, mempool,
+    mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -119,8 +118,6 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
-        // Chain endpoints
-        .route("/chain/height", web::get().to(chain::get_height))
         // Ledger endpoints
         .route(
             "/ledger/submit/{miner_address}/summary",
