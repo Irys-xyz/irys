@@ -1816,7 +1816,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::IngestDataTx(
                     tx_header,
-                    irys_types::TxSource::Api,
+                    irys_types::TxSource::Gossip,
                     tx,
                 ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
@@ -1849,7 +1849,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::IngestCommitmentTx(
                     commitment_tx,
-                    irys_types::TxSource::Api,
+                    irys_types::TxSource::Gossip,
                     tx,
                 ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
