@@ -439,7 +439,7 @@ async fn partition_expiration_and_repacking_test() {
 
     // Wire a Tokio packing handle that captures requests into closure_arc
     let (tx_packing, mut rx_packing) =
-        tokio::sync::mpsc::unbounded_channel::<irys_actors::packing::PackingRequest>();
+        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(1);
     // spawn a small receiver to capture the request in the shared RwLock
     tokio::spawn({
         let closure_arc = closure_arc.clone();

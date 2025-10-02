@@ -490,7 +490,7 @@ pub struct Internals {
 /// A lightweight, Tokio-native handle for enqueueing packing requests and introspecting service state.
 #[derive(Debug, Clone)]
 pub struct PackingHandle {
-    sender: tokio::sync::mpsc::UnboundedSender<PackingRequest>,
+    sender: tokio::sync::mpsc::Sender<PackingRequest>,
     internals: Internals,
 }
 
@@ -511,7 +511,7 @@ impl PackingHandle {
     /// Construct a PackingHandle from its parts.
     /// Useful for tests or custom wiring where the receiver loop is managed externally.
     pub fn from_parts(
-        sender: tokio::sync::mpsc::UnboundedSender<PackingRequest>,
+        sender: tokio::sync::mpsc::Sender<PackingRequest>,
         internals: Internals,
     ) -> Self {
         Self { sender, internals }
@@ -522,7 +522,7 @@ impl PackingService {
     /// Spawn a Tokio task that receives PackingRequest messages and pushes them into the internal queues.
     /// Returns a `PackingHandle` for interacting with the service.
     pub fn spawn_tokio_service(&self, runtime_handle: tokio::runtime::Handle) -> PackingHandle {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PackingRequest>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PackingRequest>(5_000);
 
         // Clone references to the shared internals so both the service and observers see the same state
         let job_queues = self.pending_jobs.clone();
@@ -707,7 +707,7 @@ mod tests {
         let packing = PackingService::new(sm_ids, Arc::new(config.clone()));
 
         // Spawn packing controllers with runtime handle
-        // In this test context, get the Tokio runtime handle this way
+        // In this test context, get the Tokio runtime handle
         let runtime_handle =
             tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime");
         let _packing_handles = packing.spawn_packing_controllers(runtime_handle);
