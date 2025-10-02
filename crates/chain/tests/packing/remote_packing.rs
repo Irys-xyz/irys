@@ -99,7 +99,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     let packing = irys_actors::packing::PackingService::new(sm_ids, Arc::new(config.clone()));
 
     // Spawn packing controllers with runtime handle
-    // In actix test context, we need to get the tokio runtime this way
+    // Get the current Tokio runtime handle for this test context
     let runtime_handle =
         tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime");
     let _packing_handles = packing.spawn_packing_controllers(runtime_handle.clone());

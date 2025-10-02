@@ -1205,7 +1205,7 @@ impl IrysNode {
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
 
-        // set up packing actor
+        // set up packing service
         let (atomic_global_step_number, packing_controller_handles, packing_handle) =
             Self::init_packing_service(
                 &config,

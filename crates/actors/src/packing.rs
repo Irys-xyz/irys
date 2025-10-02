@@ -33,7 +33,7 @@ pub type PackingJobsBySM = HashMap<usize, AtomicPackingJobQueue>;
 pub type PackingSemaphore = Arc<Semaphore>;
 
 #[derive(Debug, Clone)]
-/// Packing actor state
+/// Packing service state
 pub struct PackingService {
     /// list of all the pending packing jobs
     pending_jobs: PackingJobsBySM,
@@ -48,7 +48,7 @@ pub struct PackingService {
 }
 
 #[derive(Debug, Clone)]
-/// configuration for the packing actor
+/// configuration for the packing service
 pub struct PackingConfig {
     pub poll_duration: Duration,
     /// Max. number of packing threads for CPU packing
@@ -79,7 +79,7 @@ impl PackingConfig {
 const LOG_PER_CHUNKS: u32 = 1000;
 
 impl PackingService {
-    /// creates a new packing actor
+    /// creates a new packing service
     pub fn new(storage_module_ids: Vec<usize>, config: Arc<Config>) -> Self {
         let packing_config = PackingConfig::new(&config);
         let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
@@ -520,7 +520,7 @@ impl PackingHandle {
 
 impl PackingService {
     /// Spawn a Tokio task that receives PackingRequest messages and pushes them into the internal queues.
-    /// Returns a `PackingHandle` for interacting with the service without Actix.
+    /// Returns a `PackingHandle` for interacting with the service.
     pub fn spawn_tokio_service(&self, runtime_handle: tokio::runtime::Handle) -> PackingHandle {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PackingRequest>();
 
@@ -538,7 +538,7 @@ impl PackingService {
         // Spawn the receiver loop
         runtime_handle.spawn(async move {
             while let Some(msg) = rx.recv().await {
-                // Mirror the Actix handler behavior: push into SM-specific pending queue
+                // Enqueue into the SM-specific pending queue
                 if let Some(queue) = job_queues.get(&msg.storage_module.id) {
                     // Ignore poisoned lock errors by propagating panic (consistent with existing code)
                     queue.as_ref().write().unwrap().push_back(msg);
@@ -702,12 +702,12 @@ mod tests {
                 packing_end
             )),
         };
-        // Create an instance of the packing actor
+        // Create an instance of the packing service
         let sm_ids = vec![storage_module.id];
         let packing = PackingService::new(sm_ids, Arc::new(config.clone()));
 
         // Spawn packing controllers with runtime handle
-        // In actix test context, we need to get the tokio runtime this way
+        // In this test context, get the Tokio runtime handle this way
         let runtime_handle =
             tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime");
         let _packing_handles = packing.spawn_packing_controllers(runtime_handle);
