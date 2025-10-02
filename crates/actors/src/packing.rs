@@ -509,38 +509,14 @@ pub struct PackingHandle {
 }
 
 impl PackingHandle {
-    /// Enqueue a packing request with a short bounded wait if the channel is full.
-    /// If the channel remains saturated past a small timeout, log a warning and drop the request.
+    /// Enqueue a packing request. If the bounded channel is full, drop immediately with a warning.
     /// Returns Err only if the channel is closed.
     pub fn send(&self, req: PackingRequest) -> Result<(), SendError<PackingRequest>> {
         match self.sender.try_send(req) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(mut req)) => {
-                let start = std::time::Instant::now();
-                let max_wait = Duration::from_millis(50);
-                loop {
-                    if start.elapsed() >= max_wait {
-                        tracing::warn!(
-                            target: "irys::packing",
-                            "Dropping packing request due to saturated channel after {:?}",
-                            max_wait
-                        );
-                        // Drop to preserve responsiveness and bounded memory, mirroring legacy do_send behavior
-                        return Ok(());
-                    }
-                    // Briefly sleep to yield CPU and give receivers a chance to make progress
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    match self.sender.try_send(req) {
-                        Ok(()) => return Ok(()),
-                        Err(TrySendError::Full(r)) => {
-                            req = r;
-                            continue;
-                        }
-                        Err(TrySendError::Closed(r)) => {
-                            return Err(SendError(r));
-                        }
-                    }
-                }
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(target: "irys::packing", "Dropping packing request due to saturated channel");
+                Ok(())
             }
             Err(TrySendError::Closed(req)) => Err(SendError(req)),
         }
