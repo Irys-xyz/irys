@@ -18,7 +18,7 @@ use std::{
 use tokio::{
     sync::{
         mpsc::error::{SendError, TrySendError},
-        Semaphore,
+        Notify, Semaphore,
     },
     task::yield_now,
     time::sleep,
@@ -48,6 +48,8 @@ pub struct PackingService {
     semaphore: PackingSemaphore,
     /// Atomic counter of the number of active workers - used primarily to determine when packing has finished
     active_workers: Arc<AtomicUsize>,
+    /// Notifier for activity/idle transitions
+    notify: Arc<Notify>,
     /// packing process configuration
     packing_config: PackingConfig,
     /// Top level config
@@ -100,6 +102,7 @@ impl PackingService {
             packing_config,
             config,
             active_workers: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -113,6 +116,8 @@ impl PackingService {
             if was_active {
                 // basic atomic counter so we can keep track of the number of active workers
                 self.active_workers.fetch_sub(1, Ordering::Relaxed);
+                // signal potential idle transition
+                self.notify.notify_waiters();
                 was_active = false
             }
             // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
@@ -133,6 +138,8 @@ impl PackingService {
             };
 
             self.active_workers.fetch_add(1, Ordering::Relaxed);
+            // signal activity observed
+            self.notify.notify_waiters();
             was_active = true;
 
             // TODO: should we be validating if the requested range is valid?
@@ -499,6 +506,7 @@ pub struct Internals {
 pub struct PackingHandle {
     sender: tokio::sync::mpsc::Sender<PackingRequest>,
     internals: Internals,
+    notify: Arc<Notify>,
 }
 
 impl PackingHandle {
@@ -550,7 +558,11 @@ impl PackingHandle {
         sender: tokio::sync::mpsc::Sender<PackingRequest>,
         internals: Internals,
     ) -> Self {
-        Self { sender, internals }
+        Self {
+            sender,
+            internals,
+            notify: Arc::new(Notify::new()),
+        }
     }
 }
 
@@ -572,12 +584,15 @@ impl PackingService {
         };
 
         // Spawn the receiver loop
+        let notify = self.notify.clone();
         runtime_handle.spawn(async move {
             while let Some(msg) = rx.recv().await {
                 // Enqueue into the SM-specific pending queue
                 if let Some(queue) = job_queues.get(&msg.storage_module.id) {
                     // Ignore poisoned lock errors by propagating panic (consistent with existing code)
                     queue.as_ref().write().unwrap().push_back(msg);
+                    // signal new activity for waiters
+                    notify.notify_waiters();
                 } else {
                     // Unknown storage module id; this indicates a wiring/configuration bug. Drop the message but surface loudly.
                     tracing::error!(
@@ -597,6 +612,7 @@ impl PackingService {
         PackingHandle {
             sender: tx,
             internals,
+            notify: self.notify.clone(),
         }
     }
 }
@@ -607,16 +623,16 @@ pub async fn wait_for_packing(
     timeout: Option<Duration>,
 ) -> eyre::Result<()> {
     let internals = handle.internals();
+    let notify = handle.notify.clone();
     tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
-        // To avoid a race where we check before any work is observed, require seeing activity once.
-        let mut observed_activity = false;
-        // Require a few consecutive idle observations before declaring completion.
-        let mut idle_streak: u8 = 0;
-        let mut i = 0;
+        // short warmup and require observing activity before we apply the strong barrier.
+        // This avoids a race where we check before any work is observed and return prematurely.
         let start = std::time::Instant::now();
         let warmup = Duration::from_millis(500);
+        let mut observed_activity = false;
 
         loop {
+            // Counts all jobs in all job queues
             let queued_jobs = internals
                 .pending_jobs
                 .values()
@@ -627,37 +643,33 @@ pub async fn wait_for_packing(
             let active = internals.active_workers.load(Ordering::Relaxed);
 
             // Record that we've seen the system do something
-            if !observed_activity && (queued_jobs > 0 || active > 0 || available_permits < target_permits) {
+            if !observed_activity
+                && (queued_jobs > 0 || active > 0 || available_permits < target_permits)
+            {
                 observed_activity = true;
-                debug!("Observed packing activity (queued: {queued_jobs}, active: {active}, permits: {}/{}).", target_permits - available_permits, target_permits);
             }
 
-            // Consider system idle if no queued jobs, all permits available, and no active workers.
-            let is_idle = queued_jobs == 0 && available_permits == target_permits && active == 0;
-
-            if is_idle {
-                // If there was never any observed activity and we've been idle past warmup, return early.
-                if !observed_activity && start.elapsed() >= warmup {
-                    break Some(());
-                }
-                if observed_activity {
-                    idle_streak = idle_streak.saturating_add(1);
-                    if idle_streak >= 3 {
+            if queued_jobs == 0 && active == 0 {
+                if !observed_activity {
+                    // If there was never any observed activity and we've been idle past warmup, return early.
+                    if start.elapsed() >= warmup {
                         break Some(());
                     }
+                    // Otherwise, give the system a moment to register activity before concluding.
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
+
+                // Strong barrier: wait for all permits to be available,
+                // ensuring no local CPU workers are still running.
+                let needed: u32 = internals.config.concurrency.into();
+                let _permit = internals.semaphore.acquire_many(needed).await.unwrap();
+                drop(_permit);
+                break Some(());
             } else {
-                idle_streak = 0;
+                // Wait for a state change rather than polling
+                notify.notified().await
             }
-
-            if active > 0 {
-                i += 1;
-                if i % 10 == 0 {
-                    debug!("{} active packing workers, waiting... (queued: {queued_jobs})", active);
-                }
-            }
-
-            sleep(Duration::from_millis(100)).await
         }
     })
     .await?
