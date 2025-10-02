@@ -53,7 +53,7 @@ macro_rules! partition_chunk_offset_ii {
 #[macro_export]
 macro_rules! partition_chunk_offset_ie {
     ($start:expr, $end:expr) => {
-        ie(
+        $crate::storage::ie(
             PartitionChunkOffset::from($start),
             PartitionChunkOffset::from($end),
         )
@@ -331,7 +331,7 @@ macro_rules! ledger_chunk_offset_ii {
 #[macro_export]
 macro_rules! ledger_chunk_offset_ie {
     ($start:expr, $end:expr) => {
-        ie(
+        $crate::storage::ie(
             LedgerChunkOffset::from($start),
             LedgerChunkOffset::from($end),
         )
