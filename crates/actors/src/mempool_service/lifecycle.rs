@@ -532,7 +532,7 @@ impl Inner {
                 // TODO: handle errors better
                 // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
                 let _ = self
-                    .handle_data_tx_ingress_message(tx, irys_types::TxSource::Api)
+                    .handle_data_tx_ingress_message(tx, irys_types::TxSource::Gossip)
                     .await
                     .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e));
             } else {
