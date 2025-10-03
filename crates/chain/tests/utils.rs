@@ -1508,14 +1508,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         let tx = account.sign_transaction(tx).map_err(AddTxError::CreateTx)?;
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let response = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestDataTxFromApi(
-                tx.header.clone(),
-                oneshot_tx,
-            ));
+        let response =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTxFromApi(
+                    tx.header.clone(),
+                    oneshot_tx,
+                ));
         if let Err(e) = response {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -1810,14 +1810,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .or_else(|_| self.get_tx_header(tx_id))?;
 
             let (tx, rx) = tokio::sync::oneshot::channel();
-            peer
-                .node_ctx
+            peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromGossip(
-                    tx_header,
-                    tx,
-                ))
+                .send(MempoolServiceMessage::IngestDataTxFromGossip(tx_header, tx))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
@@ -1843,8 +1839,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             tracing::error!(?commitment_tx.id);
 
             let (tx, rx) = tokio::sync::oneshot::channel();
-            peer
-                .node_ctx
+            peer.node_ctx
                 .service_senders
                 .mempool
                 .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
@@ -1853,7 +1848,9 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
-                tracing::error!("Error sending message IngestCommitmentTxFromGossip to mempool: {e:?}");
+                tracing::error!(
+                    "Error sending message IngestCommitmentTxFromGossip to mempool: {e:?}"
+                );
             }
         }
 
@@ -2148,14 +2145,13 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestDataTxFromApi(
-                data_tx,
-                oneshot_tx,
-            ));
+        let result =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTxFromApi(
+                    data_tx, oneshot_tx,
+                ));
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2172,14 +2168,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestCommitmentTxFromApi(
-                commitment_tx,
-                oneshot_tx,
-            ));
+        let result = self.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx),
+        );
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }

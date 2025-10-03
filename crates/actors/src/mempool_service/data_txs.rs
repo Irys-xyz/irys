@@ -65,12 +65,13 @@ impl Inner {
             }
         }
 
-    // Validate the transaction signature
-    // check the result and error handle
-    self.validate_signature(&tx).await?;
+        // Validate the transaction signature
+        // check the result and error handle
+        self.validate_signature(&tx).await?;
 
         // Validate anchor and compute pre-confirmation expiry horizon
-        let expiry_height = self.compute_expiry_height(&tx).await?;
+        let anchor_height = self.validate_anchor(&tx).await?;
+        let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
 
         // Validate ledger type for ALL sources (API and Gossip)
         // We only accept Publish ledger transactions in the mempool.
@@ -133,7 +134,8 @@ impl Inner {
         self.validate_signature(&tx).await?;
 
         // Validate anchor and compute pre-confirmation expiry horizon
-        let expiry_height = self.compute_expiry_height(&tx).await?;
+        let anchor_height = self.validate_anchor(&tx).await?;
+        let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
 
         // Validate ledger type for ALL sources (API and Gossip)
         // We only accept Publish ledger transactions in the mempool.
@@ -202,11 +204,10 @@ impl Inner {
         Ok(known_in_db)
     }
 
-    /// Resolves the anchor and returns the pre-confirmation expiry height.
-    async fn compute_expiry_height(&self, tx: &DataTransactionHeader) -> Result<u64, TxIngressError> {
-        let anchor_height = self.validate_anchor(tx).await?;
+    /// Computes the pre-confirmation expiry height given a resolved anchor height.
+    fn compute_expiry_height_from_anchor(&self, anchor_height: u64) -> u64 {
         let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
-        Ok(anchor_height + anchor_expiry_depth)
+        anchor_height + anchor_expiry_depth
     }
 
     /// Parses the ledger id from the tx and maps errors to TxIngressError.
@@ -247,7 +248,10 @@ impl Inner {
     }
 
     /// Processes any pending chunks that arrived before their parent transaction.
-    async fn process_pending_chunks_for_root(&mut self, data_root: H256) -> Result<(), TxIngressError> {
+    async fn process_pending_chunks_for_root(
+        &mut self,
+        data_root: H256,
+    ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
         let option_chunks_map = guard.pending_chunks.pop(&data_root);
         drop(guard);
@@ -286,10 +290,13 @@ impl Inner {
     }
 
     /// API-only validation of fee distribution structures for Publish ledger.
-    fn validate_fee_structure_api_only(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
-        let actual_perm_fee = tx
-            .perm_fee
-            .ok_or(TxIngressError::Other("Perm fee must be present".to_string()))?;
+    fn validate_fee_structure_api_only(
+        &self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        let actual_perm_fee = tx.perm_fee.ok_or(TxIngressError::Other(
+            "Perm fee must be present".to_string(),
+        ))?;
 
         let actual_term_fee = tx.term_fee;
 

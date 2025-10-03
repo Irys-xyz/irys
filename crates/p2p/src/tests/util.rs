@@ -100,8 +100,7 @@ impl MempoolFacade for MempoolStub {
         &self,
         tx_header: DataTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
-        self.handle_data_transaction_ingress_api(tx_header)
-            .await
+        self.handle_data_transaction_ingress_api(tx_header).await
     }
 
     async fn handle_commitment_transaction_ingress_api(
