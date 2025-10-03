@@ -126,20 +126,29 @@ __device__ void compute_entropy_chunk_cuda(const unsigned char *chunk_id, size_t
 //     }
 // }
 
-__global__ void compute_entropy_chunks_cuda_kernel(unsigned char *chunk_id, unsigned long int chunk_offset_start, long int chunks_count, unsigned char *chunks, unsigned int packing_sha_1_5_s) {
-    // Get the index of the current thread
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;  // Total number of threads in the grid
-    
-    // Grid-stride loop - each thread processes multiple chunks if needed
+__global__ void compute_entropy_chunks_cuda_kernel(
+    unsigned char *chunk_id, 
+    unsigned long int chunk_offset_start, 
+    long int chunks_count, 
+    unsigned char *chunks, 
+    unsigned int packing_sha_1_5_s) 
+{
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = (size_t)gridDim.x * blockDim.x;
+    // grid-stride loop - each thread processes multiple chunks (if needed)
     // this prevents packing corruption issues if the number of chunks exceeds the number of threads allocated (block num * threads per block)
-    for (int chunk_idx = idx; chunk_idx < chunks_count; chunk_idx += stride) {
-        unsigned char *output = chunks + chunk_idx * DATA_CHUNK_SIZE;
+    // TODO: maybe print a warning log, as this is suboptimal
+    for (size_t chunk_idx = idx; chunk_idx < (size_t)chunks_count; chunk_idx += stride) {
+        unsigned char *output = chunks + (chunk_idx * (size_t)DATA_CHUNK_SIZE);
+        
         __align__(8) unsigned char chunk_id_thread[CHUNK_ID_LEN];
         
-        // Copy the base chunk_id and modify the offset
+        // memcpy base chunk_id
         memcpy(chunk_id_thread, chunk_id, CHUNK_ID_LEN - sizeof(uint64_t));
-        *((uint32_t*)&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)]) = chunk_offset_start + chunk_idx;
+        
+        // use memcpy the 64-bit value (avoids alignment issues)
+        uint64_t full_offset = (uint64_t)(chunk_offset_start + chunk_idx);
+        memcpy(&chunk_id_thread[CHUNK_ID_LEN - sizeof(uint64_t)], &full_offset, sizeof(uint64_t));
         
         compute_entropy_chunk_cuda(chunk_id_thread, CHUNK_ID_LEN, output, packing_sha_1_5_s);
     }
