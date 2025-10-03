@@ -18,8 +18,8 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
+    irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader,
+    IrysTransactionCommon as _, NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -1066,7 +1066,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             &self,
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            mut mempool: irys_actors::block_producer::MempoolTxsBundle,
+            mempool: irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
@@ -1226,7 +1226,10 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
                 system_ledgers: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),

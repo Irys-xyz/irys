@@ -1134,14 +1134,15 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     };
 
     // Compute commitment refund events for epoch blocks from parent's commitment snapshot
-    let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> = if is_epoch_block {
-        crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
-            &parent_commitment_snapshot,
-            &config.consensus,
-        )?
-    } else {
-        Vec::new()
-    };
+    let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
+        if is_epoch_block {
+            crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &config.consensus,
+            )?
+        } else {
+            Vec::new()
+        };
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,

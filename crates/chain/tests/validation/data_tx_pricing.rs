@@ -8,7 +8,7 @@ use irys_chain::IrysNodeCtx;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    H256List, IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
+    H256List, IrysBlockHeader, NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 
@@ -57,7 +57,10 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 system_ledgers: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),

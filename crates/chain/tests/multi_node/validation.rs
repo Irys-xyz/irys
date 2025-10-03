@@ -3,12 +3,10 @@ use std::sync::Arc;
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta, reth_ethereum_primitives,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    NodeConfig, H256, U256,
+    storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256,
 };
 use reth::payload::EthBuiltPayload;
 
@@ -193,7 +191,14 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    irys_actors::block_producer::MempoolTxsBundle { system_ledgers: vec![], commitment_txs_to_bill: vec![], submit_txs, publish_txs: mempool.publish_txs, aggregated_miner_fees: expired_ledger_fees.clone(), commitment_refund_events: vec![] },
+                    irys_actors::block_producer::MempoolTxsBundle {
+                        system_ledgers: vec![],
+                        commitment_txs_to_bill: vec![],
+                        submit_txs,
+                        publish_txs: mempool.publish_txs,
+                        aggregated_miner_fees: expired_ledger_fees.clone(),
+                        commitment_refund_events: vec![],
+                    },
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
@@ -285,7 +290,14 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    irys_actors::block_producer::MempoolTxsBundle { system_ledgers: vec![], commitment_txs_to_bill: vec![], submit_txs, publish_txs: mempool.publish_txs, aggregated_miner_fees: expired_ledger_fees.clone(), commitment_refund_events: vec![] },
+                    irys_actors::block_producer::MempoolTxsBundle {
+                        system_ledgers: vec![],
+                        commitment_txs_to_bill: vec![],
+                        submit_txs,
+                        publish_txs: mempool.publish_txs,
+                        aggregated_miner_fees: expired_ledger_fees.clone(),
+                        commitment_refund_events: vec![],
+                    },
                     reward_amount,
                     timestamp_ms,
                     solution_hash,

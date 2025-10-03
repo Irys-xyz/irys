@@ -1208,7 +1208,7 @@ pub trait BlockProdStrategy {
         )
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn build_non_epoch_bundle(&self, mempool_txs: MempoolTxs) -> MempoolTxsBundle {
         let mut txids = H256List::new();
         for ctx in mempool_txs.commitment_tx.iter() {

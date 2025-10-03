@@ -69,7 +69,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                 }],
                 commitment_txs_to_bill: vec![self.invalid_stake.clone()],
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
@@ -164,7 +167,10 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                 }],
                 commitment_txs_to_bill: vec![self.invalid_pledge.clone()],
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
@@ -259,7 +265,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                 }],
                 commitment_txs_to_bill: self.commitments.clone(),
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
@@ -366,7 +375,10 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                 }],
                 commitment_txs_to_bill: vec![self.wrong_commitment.clone()],
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
@@ -587,7 +599,10 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                 system_ledgers: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![self.data_tx.clone()], proofs: Some(proofs) },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![self.data_tx.clone()],
+                    proofs: Some(proofs),
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
@@ -768,7 +783,10 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                 }],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),

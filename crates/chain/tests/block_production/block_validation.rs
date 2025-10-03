@@ -19,7 +19,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     use irys_domain::EmaSnapshot;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
-        CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
+        DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
     };
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;

@@ -7,6 +7,7 @@ pub mod block_validation;
 pub mod broadcast_mining_service;
 pub mod cache_service;
 pub mod chunk_migration_service;
+pub mod commitment_refunds;
 pub mod data_sync_service;
 pub mod mempool_service;
 pub mod mining;
@@ -14,7 +15,6 @@ pub mod packing;
 pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
-pub mod commitment_refunds;
 pub mod storage_module_service;
 pub mod validation_service;
 

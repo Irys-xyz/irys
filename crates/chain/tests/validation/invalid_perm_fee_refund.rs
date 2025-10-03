@@ -9,8 +9,8 @@ use irys_actors::{
 };
 use irys_primitives::Address;
 use irys_types::{
-    CommitmentTransaction, DataLedger, DataTransactionHeader, H256List, IrysBlockHeader,
-    NodeConfig, SystemTransactionLedger, H256, U256,
+    DataLedger, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
+    SystemTransactionLedger, H256, U256,
 };
 use std::collections::BTreeMap;
 
@@ -47,7 +47,10 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                 system_ledgers: vec![data_ledger],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.data_tx.clone()],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds,
@@ -173,7 +176,10 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                 system_ledgers: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
-                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds, // But we have a refund!
