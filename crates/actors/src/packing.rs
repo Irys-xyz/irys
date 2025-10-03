@@ -35,6 +35,7 @@ pub struct PackingRequest {
 
 pub type AtomicPackingJobQueue = Arc<RwLock<VecDeque<PackingRequest>>>;
 pub type PackingJobsBySM = HashMap<usize, AtomicPackingJobQueue>;
+pub type PackingQueues = Arc<RwLock<PackingJobsBySM>>;
 
 pub type PackingSemaphore = Arc<Semaphore>;
 
@@ -42,8 +43,7 @@ pub type PackingSemaphore = Arc<Semaphore>;
 /// Packing service state
 pub struct PackingService {
     /// list of all the pending packing jobs
-    pending_jobs:
-        Arc<RwLock<std::collections::HashMap<usize, Arc<RwLock<VecDeque<PackingRequest>>>>>>,
+    pending_jobs: PackingQueues,
     /// semaphore to control concurrency -- sm_id => semaphore
     semaphore: PackingSemaphore,
     /// Atomic counter of the number of active workers - used primarily to determine when packing has finished
@@ -93,7 +93,7 @@ impl PackingService {
         let packing_config = PackingConfig::new(&config);
         let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
         // Dynamic registration: start with an empty map of queues; queues are created on first use
-        let pending_jobs = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let pending_jobs: PackingQueues = Arc::new(RwLock::new(HashMap::new()));
         Self {
             pending_jobs,
             semaphore,
@@ -503,8 +503,7 @@ impl PackingService {
 
 #[derive(Debug, Clone)]
 pub struct Internals {
-    pub pending_jobs:
-        Arc<RwLock<std::collections::HashMap<usize, Arc<RwLock<VecDeque<PackingRequest>>>>>>,
+    pub pending_jobs: PackingQueues,
     pub semaphore: PackingSemaphore,
     pub active_workers: Arc<AtomicUsize>,
     pub config: PackingConfig,
