@@ -1,24 +1,26 @@
-use irys_domain::{ChunkType, StorageModule};
+use crate::{
+    block_producer::BlockProducerCommand,
+    broadcast_mining_service::{
+        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
+        BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
+    },
+    packing::PackingRequest,
+    services::ServiceSenders,
+};
+
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-use crate::block_producer::BlockProducerCommand;
-use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
-    BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
-};
-use crate::packing::PackingRequest;
-use crate::services::ServiceSenders;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr as _;
+use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
-use irys_storage::{ie, ii};
-use irys_types::block_production::Seed;
-use irys_types::{block_production::SolutionContext, H256, U256};
+use irys_storage::ii;
 use irys_types::{
+    block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange,
+    PartitionChunkOffset, PartitionChunkRange, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use tracing::{debug, error, info, warn, Span};
@@ -27,7 +29,6 @@ use tracing::{debug, error, info, warn, Span};
 pub struct PartitionMiningActor {
     config: Config,
     service_senders: ServiceSenders,
-    packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
@@ -44,7 +45,6 @@ impl PartitionMiningActor {
     pub fn new(
         config: &Config,
         service_senders: ServiceSenders,
-        packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStateReadonly,
@@ -55,7 +55,6 @@ impl PartitionMiningActor {
         Self {
             config: config.clone(),
             service_senders,
-            packing_actor,
             ranges: Ranges::new(
                 num_recall_ranges_in_partition(&config.consensus)
                     .try_into()
@@ -349,7 +348,8 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
             if msg.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(?partition_hash, ?interval, "Expiring partition hash");
-                    self.packing_actor.do_send(PackingRequest {
+                    let handle = self.service_senders.packing_handle();
+                    let _ = handle.send(PackingRequest {
                         storage_module: self.storage_module.clone(),
                         chunk_range: PartitionChunkRange(interval),
                     });
@@ -407,12 +407,9 @@ mod tests {
         block_producer::BlockProducerCommand,
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
-        packing::PackingActor,
     };
-    use actix::actors::mocker::Mocker;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
-    use irys_storage::ie;
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         block_production::SolutionContext, chunk::UnpackedChunk, partition::PartitionAssignment,
@@ -422,7 +419,6 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, LedgerChunkOffset, NodeConfig,
     };
     use irys_vdf::state::test_helpers::mocked_vdf_service;
-    use std::any::Any;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
@@ -475,10 +471,6 @@ mod tests {
                 }
             }
         });
-
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
-            Box::new(Some(())) as Box<dyn Any>
-        }));
 
         // Set up the storage geometry for this test
         let infos = [StorageModuleInfo {
@@ -543,7 +535,6 @@ mod tests {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders,
-            packing.start().recipient(),
             storage_module,
             true,
             vdf_steps_guard.clone(),
@@ -673,14 +664,9 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
-            Box::new(Some(())) as Box<dyn Any>
-        }));
-
         let mut partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders,
-            packing.start().recipient(),
             storage_module,
             false,
             vdf_steps_guard.clone(),

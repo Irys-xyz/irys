@@ -134,7 +134,7 @@ mod tests {
         partition_chunk_offset_ie, Base64, ConsensusConfig, DataTransactionLedger,
         LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk, H256,
     };
-    use nodit::interval::{ie, ii};
+    use nodit::interval::ii;
     use rand::Rng as _;
 
     #[test]

@@ -8,6 +8,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
+    packing::PackingHandle,
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
@@ -17,7 +18,7 @@ use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{
     broadcast,
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -57,6 +58,29 @@ impl ServiceSenders {
 
     pub fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent> {
         self.0.peer_events.subscribe()
+    }
+
+    pub fn new_with_packing_handle(handle: PackingHandle) -> (Self, ServiceReceivers) {
+        let (senders, receivers) = ServiceSendersInner::init();
+        senders
+            .packing_handle
+            .set(handle)
+            .expect("packing_handle already set");
+        (Self(Arc::new(senders)), receivers)
+    }
+
+    /// Late-initialize the packing handle for cases where ServiceSenders is constructed
+    /// before the packing service exists. Subsequent calls are ignored.
+    pub fn set_packing_handle(&self, handle: PackingHandle) {
+        let _ = self.0.packing_handle.set(handle);
+    }
+
+    pub fn packing_handle(&self) -> PackingHandle {
+        self.0
+            .packing_handle
+            .get()
+            .expect("packing_handle not set")
+            .clone()
     }
 }
 
@@ -102,6 +126,7 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
+    pub packing_handle: OnceLock<PackingHandle>,
 }
 
 impl ServiceSendersInner {
@@ -157,6 +182,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
+            packing_handle: OnceLock::new(),
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
