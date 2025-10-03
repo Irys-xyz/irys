@@ -33,13 +33,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Include the data transaction in submit ledger
             let data_ledger = SystemTransactionLedger {
                 ledger_id: DataLedger::Submit as u32,
@@ -49,19 +43,17 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             // Create an invalid refund - refunding a promoted transaction
             let user_perm_fee_refunds = vec![self.invalid_refund];
 
-            Ok((
-                vec![data_ledger],
-                vec![],
-                vec![self.data_tx.clone()],
-                PublishLedgerWithTxs {
-                    txs: vec![],
-                    proofs: None,
-                },
-                LedgerExpiryBalanceDelta {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![data_ledger],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.data_tx.clone()],
+                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds,
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -174,28 +166,20 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let user_perm_fee_refunds = vec![self.invalid_refund];
 
-            Ok((
-                vec![],
-                vec![],
-                vec![], // No actual transactions!
-                PublishLedgerWithTxs {
-                    txs: vec![],
-                    proofs: None,
-                },
-                LedgerExpiryBalanceDelta {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds, // But we have a refund!
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 

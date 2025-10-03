@@ -14,6 +14,7 @@ pub mod packing;
 pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
+pub mod commitment_refunds;
 pub mod storage_module_service;
 pub mod validation_service;
 

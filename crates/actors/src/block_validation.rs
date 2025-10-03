@@ -16,8 +16,8 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
 };
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
-    ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot,
+    EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -913,6 +913,7 @@ pub async fn shadow_transactions_are_valid(
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
@@ -999,6 +1000,7 @@ pub async fn shadow_transactions_are_valid(
         block,
         db,
         parent_epoch_snapshot,
+        parent_commitment_snapshot,
         block_index,
     )
     .await?;
@@ -1078,6 +1080,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
@@ -1130,6 +1133,16 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
+    // Compute commitment refund events for epoch blocks from parent's commitment snapshot
+    let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> = if is_epoch_block {
+        crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+            &parent_commitment_snapshot,
+            &config.consensus,
+        )?
+    } else {
+        Vec::new()
+    };
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1142,6 +1155,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &mut publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
+        &commitment_refund_events,
     )
     .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 

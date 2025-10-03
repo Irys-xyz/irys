@@ -41,6 +41,9 @@ pub enum CommitmentValidationError {
         expected: U256,
         pledge_count: u64,
     },
+    /// Invalid unpledge because pledge_count_before_executing is zero
+    #[error("Invalid unpledge: pledge_count_before_executing must be > 0")]
+    InvalidUnpledgeCountZero,
     #[error("Signer address is not allowed to stake/pledge")]
     ForbiddenSigner,
 }
@@ -559,16 +562,15 @@ impl CommitmentTransaction {
                     });
                 }
             }
-            CommitmentType::Unpledge {
-                pledge_count_before_executing,
-                ..
-            } => {
-                // For unpledge, validate using the embedded pledge count
-                // Calculate expected refund value
-                let expected_value = Self::calculate_pledge_value_at_count(
-                    config,
-                    pledge_count_before_executing.saturating_sub(1),
-                );
+            CommitmentType::Unpledge { pledge_count_before_executing, .. } => {
+                // Unpledge must reference an existing pledge (count > 0)
+                if *pledge_count_before_executing == 0 {
+                    return Err(CommitmentValidationError::InvalidUnpledgeCountZero);
+                }
+
+                // Calculate expected refund value: value of the most recent pledge (count-1)
+                let expected_value =
+                    Self::calculate_pledge_value_at_count(config, *pledge_count_before_executing - 1);
 
                 if self.value != expected_value {
                     return Err(CommitmentValidationError::InvalidUnpledgeValue {

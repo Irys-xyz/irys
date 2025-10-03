@@ -1,7 +1,7 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    mempool_service::MempoolServiceMessage,
+    mempool_service::{MempoolServiceMessage, MempoolTxs},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -18,7 +18,8 @@ use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
-    BlockIndex, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExponentialMarketAvgCalculation,
+    BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
+    ExponentialMarketAvgCalculation,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -31,10 +32,10 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
-    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
-    H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
-    VDFLimiterInfo, H256, U256,
+    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
+    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
+    TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -141,6 +142,26 @@ pub struct BlockProducerInner {
     pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
+}
+
+/// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
+#[derive(Debug, Clone, Copy)]
+pub struct UnpledgeRefundEvent {
+    pub account: Address,
+    pub amount: U256,
+    pub irys_ref_txid: H256,
+}
+
+/// Named result bundle for mempool-derived inputs to block production.
+#[derive(Debug)]
+pub struct MempoolTxsBundle {
+    pub system_ledgers: Vec<SystemTransactionLedger>,
+    pub commitment_txs_to_bill: Vec<CommitmentTransaction>,
+    pub submit_txs: Vec<DataTransactionHeader>,
+    pub publish_txs: PublishLedgerWithTxs,
+    pub aggregated_miner_fees: LedgerExpiryBalanceDelta,
+    /// Unpledge refund events to emit on epoch blocks; empty on non-epoch blocks
+    pub commitment_refund_events: Vec<UnpledgeRefundEvent>,
 }
 
 impl BlockProducerService {
@@ -416,22 +437,21 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let (
-            system_tx_ledger,
-            commitment_txs_to_bill,
-            submit_txs,
-            mut publish_txs,
-            expired_ledger_fees,
-        ) = self.get_mempool_txs(&prev_block_header).await?;
+        let inputs = self.get_mempool_txs(&prev_block_header).await?;
+        let system_tx_ledger = inputs.system_ledgers.clone();
+        let expired_ledger_fees = inputs.aggregated_miner_fees.clone();
+        let submit_txs = inputs.submit_txs.clone();
+        let publish_txs = inputs.publish_txs.clone();
+        let mempool_bundle = inputs;
 
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
+        let _commitment_refund_events = mempool_bundle.commitment_refund_events.clone();
+
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
-                &commitment_txs_to_bill,
-                &submit_txs,
-                &mut publish_txs,
+                mempool_bundle,
                 block_reward,
                 current_timestamp,
                 solution.solution_hash,
@@ -621,13 +641,11 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
-        commitment_txs_to_bill: &[CommitmentTransaction],
-        submit_txs: &[DataTransactionHeader],
-        publish_txs: &mut PublishLedgerWithTxs,
+        mut mempool: MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
         solution_hash: H256,
-        ledger_expiry_balance_delta: LedgerExpiryBalanceDelta,
+        _ledger_expiry_balance_delta: LedgerExpiryBalanceDelta,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -643,11 +661,12 @@ pub trait BlockProdStrategy {
             prev_block_header,
             &solution_hash,
             &self.inner().config.consensus,
-            commitment_txs_to_bill,
-            submit_txs,
-            publish_txs,
+            &mempool.commitment_txs_to_bill,
+            &mempool.submit_txs,
+            &mut mempool.publish_txs,
             initial_treasury_balance,
-            &ledger_expiry_balance_delta,
+            &mempool.aggregated_miner_fees,
+            &mempool.commitment_refund_events,
         )?;
 
         let mut shadow_txs = Vec::new();
@@ -1069,14 +1088,63 @@ pub trait BlockProdStrategy {
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
-    ) -> eyre::Result<(
-        Vec<SystemTransactionLedger>,
-        Vec<CommitmentTransaction>,
-        Vec<DataTransactionHeader>,
-        PublishLedgerWithTxs,
-        LedgerExpiryBalanceDelta,
-    )> {
-        let config = &self.inner().config;
+    ) -> eyre::Result<MempoolTxsBundle> {
+        // Fetch mempool once
+        let mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
+        let block_height = prev_block_header.height + 1;
+        let is_epoch = self.is_epoch_block(block_height);
+
+        // Non-epoch blocks: bill commitments and return early
+        if !is_epoch {
+            debug!(
+                block_height,
+                commitment_ids = ?mempool_txs
+                    .commitment_tx
+                    .iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>(),
+                "Selected best mempool txs"
+            );
+            return Ok(self.build_non_epoch_bundle(mempool_txs));
+        }
+
+        // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
+        let (parent_epoch_snapshot, parent_commitment_snapshot) =
+            self.fetch_parent_snapshots(prev_block_header)?;
+
+        let aggregated_miner_fees = self
+            .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
+            .await?;
+
+        let system_ledger = self.build_commitment_ledger_epoch(&parent_commitment_snapshot);
+        let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
+
+        let system_ledgers = if !system_ledger.tx_ids.is_empty() {
+            vec![system_ledger]
+        } else {
+            Vec::new()
+        };
+
+        Ok(MempoolTxsBundle {
+            system_ledgers,
+            commitment_txs_to_bill: Vec::new(),
+            submit_txs: mempool_txs.submit_tx,
+            publish_txs: mempool_txs.publish_tx,
+            aggregated_miner_fees,
+            commitment_refund_events,
+        })
+    }
+
+    #[inline]
+    fn is_epoch_block(&self, height: u64) -> bool {
+        height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
+    }
+
+    #[tracing::instrument(skip_all, ret, err)]
+    async fn fetch_best_mempool_txs(
+        &self,
+        prev_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<MempoolTxs> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()
             .service_senders
@@ -1086,89 +1154,69 @@ pub trait BlockProdStrategy {
                 tx,
             ))
             .expect("to send MempoolServiceMessage");
-        let mempool_txs = rx.await.expect("to receive txns")?;
-        let block_height = prev_block_header.height + 1;
-        let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
+        rx.await.expect("to receive txns")
+    }
+
+    #[tracing::instrument(skip_all, ret, err)]
+    fn fetch_parent_snapshots(
+        &self,
+        prev_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<(Arc<EpochSnapshot>, Arc<CommitmentSnapshot>)> {
+        let read = self.inner().block_tree_guard.read();
+        let epoch = read
+            .get_epoch_snapshot(&prev_block_header.block_hash)
+            .ok_or_eyre("parent blocks epoch snapshot must be available")?;
+        let commit = read
+            .get_commitment_snapshot(&prev_block_header.block_hash)
+            .map_err(|e| {
+                eyre!(
+                    "Could not find commitment snapshot for current epoch: {}",
+                    e
+                )
+            })?;
+        Ok((epoch, commit))
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn build_commitment_ledger_epoch(
+        &self,
+        commit_snapshot: &CommitmentSnapshot,
+    ) -> SystemTransactionLedger {
+        let mut txids = H256List::new();
+        let commitments = commit_snapshot.get_epoch_commitments();
+        for tx in commitments.iter() {
+            txids.push(tx.id);
+        }
         debug!(
-            "get_best_mempool_txs for block height: {} returned: {:#?}",
-            block_height,
-            mempool_txs
-                .commitment_tx
-                .iter()
-                .map(|t| t.id)
-                .collect::<Vec<_>>()
+            tx_count = commitments.len(),
+            "Producing epoch rollup for commitment ledger"
         );
-        let commitment_txs_to_bill;
-        let system_transaction_ledger;
-        let aggregated_miner_fees;
-        if is_epoch_block {
-            let (parent_epoch_snapshot, parent_commitment_snapshot_result) = {
-                let read = self.inner().block_tree_guard.read();
-                let epoch = read
-                    .get_epoch_snapshot(&prev_block_header.block_hash)
-                    .ok_or_eyre("parent blocks epoch snapshot must be available")?;
-                let commit = read.get_commitment_snapshot(&prev_block_header.block_hash);
-                (epoch, commit)
-            };
+        SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment.into(),
+            tx_ids: txids,
+        }
+    }
 
-            tracing::debug!("about to calculate fees");
-            // Calculate fees for expired ledgers
-            aggregated_miner_fees = self
-                .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
-                .await?;
+    #[tracing::instrument(skip_all)]
+    fn derive_unpledge_refunds(
+        &self,
+        commit_snapshot: &CommitmentSnapshot,
+    ) -> eyre::Result<Vec<UnpledgeRefundEvent>> {
+        crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+            commit_snapshot,
+            &self.inner().config.consensus,
+        )
+    }
 
-            // todo - if tx is of publish ledger and did not get promoted then we refund the perm fee
-
-            // === EPOCH BLOCK: Rollup all commitments from the current epoch ===
-            // Epoch blocks don't add new commitments - they summarize all commitments
-            // that were validated throughout the epoch into a single rollup entry
-            let entry = parent_commitment_snapshot_result;
-
-            if let Ok(entry) = entry {
-                let mut txids = H256List::new();
-                let commitments = entry.get_epoch_commitments();
-
-                // Collect all commitment transaction IDs from the epoch
-                for tx in commitments.iter() {
-                    txids.push(tx.id);
-                }
-
-                debug!(
-                    "Producing epoch block at height {} with commitments rollup tx {:#?}",
-                    block_height, txids
-                );
-
-                system_transaction_ledger = SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: txids,
-                };
-
-                // IMPORTANT: On epoch blocks we don't bill the user for commitment txs
-                commitment_txs_to_bill = vec![];
-            } else {
-                eyre::bail!("Could not find commitment snapshot for current epoch");
-            }
-        } else {
-            // === REGULAR BLOCK: Process new commitment transactions ===
-            // Regular blocks add fresh commitment transactions from the mempool
-            // and create ledger entries that reference these new commitments
-            let mut txids = H256List::new();
-
-            // Add each new commitment transaction to the ledger
-            mempool_txs.commitment_tx.iter().for_each(|ctx| {
-                txids.push(ctx.id);
-            });
-            debug!(
-                "Producing block at height {} with commitment tx {:#?}",
-                block_height, txids
-            );
-            system_transaction_ledger = SystemTransactionLedger {
-                ledger_id: SystemLedger::Commitment.into(),
-                tx_ids: txids,
-            };
-            // IMPORTANT: Commitment txs get billed on regular blocks
-            commitment_txs_to_bill = mempool_txs.commitment_tx;
-            aggregated_miner_fees = LedgerExpiryBalanceDelta::default();
+    #[allow(dead_code)]
+    fn build_non_epoch_bundle(&self, mempool_txs: MempoolTxs) -> MempoolTxsBundle {
+        let mut txids = H256List::new();
+        for ctx in mempool_txs.commitment_tx.iter() {
+            txids.push(ctx.id);
+        }
+        let system_transaction_ledger = SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment.into(),
+            tx_ids: txids,
         };
         let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
             vec![system_transaction_ledger]
@@ -1176,13 +1224,14 @@ pub trait BlockProdStrategy {
             Vec::new()
         };
 
-        Ok((
+        MempoolTxsBundle {
             system_ledgers,
-            commitment_txs_to_bill,
-            mempool_txs.submit_tx,
-            mempool_txs.publish_tx,
-            aggregated_miner_fees,
-        ))
+            commitment_txs_to_bill: mempool_txs.commitment_tx,
+            submit_txs: mempool_txs.submit_tx,
+            publish_txs: mempool_txs.publish_tx,
+            aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+            commitment_refund_events: Vec::new(),
+        }
     }
 
     async fn get_evm_block(

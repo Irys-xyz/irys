@@ -31,23 +31,18 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
             expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
-
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    submit_txs,
-                    data_txs_with_proofs,
+                    mempool,
                     // NOTE: Point of error - trying to give yourself extra funds in the evm state
                     invalid_reward_amount,
                     timestamp_ms,
@@ -186,24 +181,19 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
             expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
-            let mut submit_txs = submit_txs.to_vec();
+            let mut submit_txs = mempool.publish_txs.txs.clone();
             submit_txs.push(self.extra_tx.clone());
-
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    &submit_txs,
-                    data_txs_with_proofs,
+                    irys_actors::block_producer::MempoolTxsBundle { system_ledgers: vec![], commitment_txs_to_bill: vec![], submit_txs, publish_txs: mempool.publish_txs, aggregated_miner_fees: expired_ledger_fees.clone(), commitment_refund_events: vec![] },
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
@@ -279,28 +269,23 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
             expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
-            let mut submit_txs = submit_txs.to_vec();
+            let mut submit_txs = mempool.publish_txs.txs.clone();
             // NOTE: We reverse the order of txs, this means
             // that during validation the irys block txs will not match the
             // reth block txs
             assert_eq!(submit_txs.len(), 2);
             submit_txs.reverse();
-
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    &submit_txs,
-                    data_txs_with_proofs,
+                    irys_actors::block_producer::MempoolTxsBundle { system_ledgers: vec![], commitment_txs_to_bill: vec![], submit_txs, publish_txs: mempool.publish_txs, aggregated_miner_fees: expired_ledger_fees.clone(), commitment_refund_events: vec![] },
                     reward_amount,
                     timestamp_ms,
                     solution_hash,

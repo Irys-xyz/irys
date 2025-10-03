@@ -1066,27 +1066,29 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             &self,
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mut mempool: irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
             expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
-            let mut submit_txs = submit_txs.to_vec();
+            let mut submit_txs = mempool.publish_txs.txs.clone();
             if submit_txs.len() >= 2 {
                 submit_txs.reverse();
             }
-
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     prev_evm_block,
-                    commitment_txs_to_bill,
-                    &submit_txs,
-                    data_txs_with_proofs,
+                    irys_actors::block_producer::MempoolTxsBundle {
+                        system_ledgers: vec![],
+                        commitment_txs_to_bill: vec![],
+                        submit_txs,
+                        publish_txs: mempool.publish_txs,
+                        aggregated_miner_fees: expired_ledger_fees.clone(),
+                        commitment_refund_events: vec![],
+                    },
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
@@ -1218,28 +1220,19 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<irys_types::SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Force inclusion of malicious tx in Submit ledger, bypassing mempool validation
-            Ok((
-                vec![],
-                vec![],
-                vec![self.malicious_tx.clone()],
-                PublishLedgerWithTxs {
-                    txs: vec![],
-                    proofs: None,
-                },
-                LedgerExpiryBalanceDelta {
-                    // No expired ledger fees
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.malicious_tx.clone()],
+                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -1485,9 +1478,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             _solution_hash: H256,
@@ -1496,14 +1487,11 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             // Deliberately use an incorrect solution hash (all zeros)
             // This should cause the block to be rejected during validation
             let invalid_solution_hash = H256::zero();
-
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     prev_evm_block,
-                    commitment_txs_to_bill,
-                    submit_txs,
-                    data_txs_with_proofs,
+                    mempool,
                     reward_amount,
                     timestamp_ms,
                     invalid_solution_hash,

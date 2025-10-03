@@ -51,27 +51,19 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
-            Ok((
-                vec![],
-                vec![],
-                vec![self.malicious_tx.clone()], // Submit ledger tx
-                PublishLedgerWithTxs {
-                    txs: vec![],
-                    proofs: None,
-                }, // No Publish ledger txs
-                LedgerExpiryBalanceDelta {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.malicious_tx.clone()],
+                publish_txs: PublishLedgerWithTxs { txs: vec![], proofs: None },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
-                }, // No expired ledger fees
-            ))
+                },
+                commitment_refund_events: vec![],
+            })
         }
     }
 
