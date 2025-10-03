@@ -36,7 +36,7 @@ use tracing::{trace, warn};
 // External crate imports - Other
 
 use super::*;
-use crate::shadow_tx::{self, ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
+use crate::shadow_tx::{self, ShadowTransaction};
 
 /// Constants for shadow transaction processing
 mod constants {
@@ -174,7 +174,7 @@ pub struct IrysBlockExecutorFactory {
 
 impl IrysBlockExecutorFactory {
     /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
-    /// [`ReceiptBuilder`].
+    /// [`RethReceiptBuilder`].
     pub const fn new(
         receipt_builder: RethReceiptBuilder,
         spec: Arc<ChainSpec>,
@@ -619,30 +619,28 @@ where
     ) -> Result<Either<ResultAndState, <Self as Evm>::Tx>, <Self as Evm>::Error> {
         // figure out if this is a shadow tx
 
-        // check that the call target is [`SHADOW_TX_DESTINATION_ADDR`]
+        // Attempt unified shadow-tx detection + decoding
         let to_address = match tx.kind {
             TxKind::Create => return Ok(Either::Right(tx)),
             TxKind::Call(address) => address,
         };
         let tx_envelope_input_buf = &tx.data;
 
-        if to_address != *SHADOW_TX_DESTINATION_ADDR {
-            trace!("Not a shadow tx");
-            return Ok(Either::Right(tx));
+        let shadow_tx = match shadow_tx::detect_and_decode_from_parts(
+            Some(to_address),
+            tx_envelope_input_buf,
+        ) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => {
+                trace!("Not a shadow tx");
+                return Ok(Either::Right(tx));
+            }
+            Err(e) => {
+                return Err(Self::create_internal_error(format!(
+                    "failed to decode shadow tx: {e}"
+                )));
+            }
         };
-
-        // check that the tx data/input bytes start with the required prefix [`IRYS_SHADOW_EXEC`]
-        if tx_envelope_input_buf
-            .strip_prefix(IRYS_SHADOW_EXEC)
-            .is_none()
-        {
-            trace!("Not a shadow tx");
-            return Ok(Either::Right(tx));
-        };
-
-        // we've determined that this is/should be a shadow tx
-        let shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..])
-            .map_err(|e| Self::create_internal_error(format!("failed to decode shadow tx: {e}")))?;
 
         tracing::trace!("executing shadow transaction");
 

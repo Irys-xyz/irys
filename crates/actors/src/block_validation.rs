@@ -7,7 +7,6 @@ use crate::{
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
-use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
@@ -21,7 +20,7 @@ use irys_domain::{
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
-use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
+use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
@@ -1000,76 +999,30 @@ pub async fn shadow_transactions_are_valid(
         eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
     }
 
-    // 2. Extract shadow transactions from the beginning of the block
-    let mut expect_shadow_txs = true;
-    let actual_shadow_txs = evm_block
-        .body
-        .transactions
-        .into_iter()
-        .map(|tx| {
-            // Enforce that no EIP-4844 (blob) transactions are present in the block
-            if tx.is_eip4844() {
-                tracing::debug!(
-                    block_hash = %block.block_hash,
-                    evm_block_hash = %block.evm_block_hash,
-                    "Rejecting block: contains EIP-4844 transaction which is disabled",
-                );
-                return Err(eyre::eyre!(
-                    "block contains EIP-4844 transaction which is disabled"
-                ));
-            }
+    // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
+    for tx in evm_block.body.transactions.iter() {
+        if tx.is_eip4844() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                "Rejecting block: contains EIP-4844 transaction which is disabled",
+            );
+            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+        }
+    }
 
-            if expect_shadow_txs {
-                if Some(*SHADOW_TX_DESTINATION_ADDR) != tx.to() {
-                    // after reaching first non-shadow tx, we scan the rest of the
-                    // txs to check if we don't have any stray shadow txs in there
-                    expect_shadow_txs = false;
-                    ensure!(
-                        !tx.input().starts_with(IRYS_SHADOW_EXEC),
-                        "shadow tx injected in the middle of the block",
-                    );
-                    return Ok(None);
-                }
-                let input = tx.input();
-                if input.strip_prefix(IRYS_SHADOW_EXEC).is_none() {
-                    // after reaching first non-shadow tx, we scan the rest of the
-                    // txs to check if we don't have any stray shadow txs in there
-                    expect_shadow_txs = false;
-                    return Ok(None);
-                };
-                let shadow_tx = ShadowTransaction::decode(&mut &input[..])
-                    .map_err(|e| eyre::eyre!("failed to decode shadow tx: {e}"))?;
-                let tx_signer = tx.into_signed().recover_signer()?;
-
-                ensure!(
-                    block.miner_address == tx_signer,
-                    "Shadow tx signer is not the miner"
-                );
-                Ok(Some(shadow_tx))
-            } else {
-                // TODO: The shadow tx decoding is a bit messy,
-                // we have duplicate logic here, duplicate logic in the reth-mempool and in the reth block builder.
-                // Ideally all places should converge a single, simple method.
-                //
-                // After first non-shadow tx, reject only if a fully-formed shadow tx appears later.
-                // That requires: destination matches + input has prefix + decoding succeeds.
-                if Some(*SHADOW_TX_DESTINATION_ADDR) == tx.to() {
-                    let input = tx.input();
-                    if input.starts_with(IRYS_SHADOW_EXEC)
-                        && ShadowTransaction::decode(&mut &input[..]).is_ok()
-                    {
-                        tracing::debug!(
-                            block_hash = %block.block_hash,
-                            evm_block_hash = %block.evm_block_hash,
-                            "Rejecting block: shadow tx injected in the middle of the block",
-                        );
-                        return Err(eyre::eyre!("shadow tx injected in the middle of the block"));
-                    }
-                }
-                Ok(None)
-            }
-        })
-        .filter_map(std::result::Result::transpose);
+    // 3. Extract shadow transactions from the beginning of the block lazily
+    let txs_slice = &evm_block.body.transactions;
+    let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
+        // Verify signer for each yielded shadow tx (must be the miner)
+        let (stx, tx_ref) = res?;
+        let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
+        ensure!(
+            block.miner_address == tx_signer,
+            "Shadow tx signer is not the miner"
+        );
+        Ok(stx)
+    });
 
     // 3. Generate expected shadow transactions
     let expected_txs = generate_expected_shadow_transactions_from_db(
@@ -1087,6 +1040,48 @@ pub async fn shadow_transactions_are_valid(
 
     // 5. Return the execution data for reuse
     Ok(execution_data)
+}
+
+/// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
+///
+/// - Yields shadow transactions at the front of the list.
+/// - If any shadow transaction appears after the first non-shadow, yields a single error and ends.
+fn extract_leading_shadow_txs(
+    txs: &[reth_ethereum_primitives::TransactionSigned],
+) -> impl Iterator<
+    Item = eyre::Result<(
+        ShadowTransaction,
+        &reth_ethereum_primitives::TransactionSigned,
+    )>,
+> + '_ {
+    let mut it = txs.iter();
+    let mut seen_non_shadow = false;
+    let mut reported_error = false;
+    std::iter::from_fn(move || {
+        if reported_error {
+            return None;
+        }
+        for tx in it.by_ref() {
+            match detect_and_decode(tx) {
+                Ok(Some(stx)) => {
+                    if seen_non_shadow {
+                        reported_error = true;
+                        return Some(Err(ShadowTxError::ShadowTxAfterNonShadow.into()));
+                    }
+                    return Some(Ok((stx, tx)));
+                }
+                Ok(None) => {
+                    seen_non_shadow = true;
+                    continue;
+                }
+                Err(e) => {
+                    reported_error = true;
+                    return Some(Err(e.into()));
+                }
+            }
+        }
+        None
+    })
 }
 
 /// Submits the EVM payload to reth for execution layer validation.
