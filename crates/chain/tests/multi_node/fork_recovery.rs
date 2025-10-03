@@ -876,8 +876,15 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///    - tests all canonical blocks move to all peers
 ///    - tests all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - tests new balance changes are applied based on the new canonical branch
+#[rstest::rstest]
+#[case::full_validation(true)]
+#[case::default(false)]
 #[test_log::test(actix_web::test)]
-async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
+async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
+    #[case] enable_full_validation: bool,
+) -> eyre::Result<()> {
+    initialize_tracing();
+
     //
     // Stage 0: SETUP AND STARTUP
     //
@@ -892,6 +899,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = DATA_CHUNK_SIZE as u64;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    genesis_config
+        .consensus
+        .get_mut()
+        .enable_full_ingress_proof_validation = enable_full_validation;
 
     // create test data
     let data = vec![0_u8; DATA_CHUNK_SIZE];
@@ -1273,11 +1284,23 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         node_a.gossip_enable();
         node_b.gossip_enable();
         node_c.gossip_enable();
-        // Gossip all blocks so everyone syncs
-        node_b.gossip_block_to_peers(&b_block2)?;
-        node_b.gossip_block_to_peers(&b_block3)?;
-        node_c.gossip_block_to_peers(&c_block4)?;
-        node_a.gossip_block_to_peers(&a_block2)?;
+        if enable_full_validation {
+            // Use full block transfer so chunks arrive before validation
+            node_b.send_full_block(&node_a, &b_block2).await?;
+            node_b.send_full_block(&node_a, &b_block3).await?;
+            node_c.send_full_block(&node_a, &c_block4).await?;
+            // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
+            // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
+            // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
+            node_a.send_block_to_peer(&node_b, &a_block2).await?;
+            node_a.send_block_to_peer(&node_c, &a_block2).await?;
+        } else {
+            // Gossip all blocks so everyone syncs
+            node_b.gossip_block_to_peers(&b_block2)?;
+            node_b.gossip_block_to_peers(&b_block3)?;
+            node_c.gossip_block_to_peers(&c_block4)?;
+            node_a.gossip_block_to_peers(&a_block2)?;
+        }
     }
     //
     // Stage 9: FINAL STATE CHECKS
