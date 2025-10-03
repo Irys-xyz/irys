@@ -18,7 +18,11 @@ impl Inner {
         &mut self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        debug!("received commitment tx {:?}", &commitment_tx.id);
+        debug!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            "Received commitment tx from Gossip"
+        );
 
         // Validate tx signature
         // we MUST do this before using the ID to prevent poisoning, as this validates the ID is correct
@@ -97,7 +101,11 @@ impl Inner {
         &mut self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        debug!("received commitment tx {:?}", &commitment_tx.id);
+        debug!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            "Received commitment tx from API"
+        );
 
         // Validate tx signature
         // we MUST do this before using the ID to prevent poisoning, as this validates the ID is correct

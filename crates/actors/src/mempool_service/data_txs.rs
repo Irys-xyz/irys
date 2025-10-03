@@ -52,7 +52,11 @@ impl Inner {
         &mut self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
+        debug!(
+            tx_id = ?tx.id,
+            data_root = ?tx.data_root,
+            "Received data tx from Gossip"
+        );
 
         tx.promoted_height = None;
 
@@ -116,7 +120,11 @@ impl Inner {
         &mut self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
+        debug!(
+            tx_id = ?tx.id,
+            data_root = ?tx.data_root,
+            "Received data tx from API"
+        );
 
         tx.promoted_height = None;
 
