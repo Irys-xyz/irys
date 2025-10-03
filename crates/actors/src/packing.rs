@@ -115,6 +115,8 @@ impl PackingService {
                 was_active = false
             }
             // Try to pop from any non-empty queue across all storage modules
+            // Capture the Notified future before re-checking work to avoid missed notifications
+            let notified = self.notify.notified();
             let front = {
                 let map_guard = self
                     .pending_jobs
@@ -139,7 +141,7 @@ impl PackingService {
                 None => {
                     // No work available; wait for a notification or fall back to a short sleep
                     tokio::select! {
-                        _ = self.notify.notified() => {},
+                        _ = notified => {},
                         _ = tokio::time::sleep(self.packing_config.poll_duration) => {},
                     }
                     continue;
