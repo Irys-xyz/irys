@@ -124,12 +124,47 @@ pub fn validate_commitment_transaction(
     commitment_tx: &irys_types::CommitmentTransaction,
     parent_evm_block_id: Option<BlockId>,
 ) -> Result<(), TxIngressError> {
+    debug!(
+        tx_id = ?commitment_tx.id,
+        signer = ?commitment_tx.signer,
+        "Validating commitment transaction"
+    );
     // Fee
-    commitment_tx.validate_fee(consensus)?;
+    commitment_tx
+        .validate_fee(consensus)
+        .map_err(|e| {
+            warn!(
+                tx_id = ?commitment_tx.id,
+                signer = ?commitment_tx.signer,
+                error = ?e,
+                "Commitment tx fee validation failed"
+            );
+            TxIngressError::from(e)
+        })?;
+
     // Funding
-    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id)?;
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
+        warn!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            error = ?e,
+            "Commitment tx funding validation failed"
+        );
+        e
+    })?;
+
     // Value
-    commitment_tx.validate_value(consensus)?;
+    commitment_tx
+        .validate_value(consensus)
+        .map_err(|e| {
+            warn!(
+                tx_id = ?commitment_tx.id,
+                signer = ?commitment_tx.signer,
+                error = ?e,
+                "Commitment tx value validation failed"
+            );
+            TxIngressError::from(e)
+        })?;
     Ok(())
 }
 
