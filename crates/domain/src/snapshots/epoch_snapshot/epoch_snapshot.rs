@@ -746,26 +746,31 @@ impl EpochSnapshot {
 
             let ph: irys_types::H256 = partition_hash.into();
             // 1) Retire targeted capacity partitions (if still owned by signer)
-            if let Some(assignment) = self.partition_assignments.capacity_partitions.get(&ph) {
-                if assignment.miner_address == unpledge.signer {
-                    // Remove from capacity assignments and all_active_partitions
-                    self.partition_assignments.capacity_partitions.remove(&ph);
-                    if let Some(pos) = self.all_active_partitions.iter().position(|h| *h == ph) {
-                        self.all_active_partitions.remove(pos);
-                    }
-                }
-            }
+            // Remove from capacity assignments and all_active_partitions
+            let assignment = self
+                .partition_assignments
+                .capacity_partitions
+                .remove(&ph)
+                .expect("partition must be present at this point");
+            assert_eq!(assignment.miner_address, unpledge.signer);
+            let pos = self
+                .all_active_partitions
+                .iter()
+                .position(|h| *h == ph)
+                .unwrap();
+            self.all_active_partitions.remove(pos);
 
             // 2) Remove pledge entries by targeted partition hash (lookup by hash)
-            if let Some(entries) = self
+            let entries = self
                 .commitment_state
                 .pledge_commitments
                 .get_mut(&unpledge.signer)
-            {
-                if let Some(pos) = entries.iter().position(|e| e.partition_hash == Some(ph)) {
-                    entries.remove(pos);
-                }
-            }
+                .unwrap();
+            let pos = entries
+                .iter()
+                .position(|e| e.partition_hash == Some(ph))
+                .unwrap();
+            entries.remove(pos);
         }
     }
 
