@@ -562,15 +562,20 @@ impl CommitmentTransaction {
                     });
                 }
             }
-            CommitmentType::Unpledge { pledge_count_before_executing, .. } => {
+            CommitmentType::Unpledge {
+                pledge_count_before_executing,
+                ..
+            } => {
                 // Unpledge must reference an existing pledge (count > 0)
                 if *pledge_count_before_executing == 0 {
                     return Err(CommitmentValidationError::InvalidUnpledgeCountZero);
                 }
 
                 // Calculate expected refund value: value of the most recent pledge (count-1)
-                let expected_value =
-                    Self::calculate_pledge_value_at_count(config, *pledge_count_before_executing - 1);
+                let expected_value = Self::calculate_pledge_value_at_count(
+                    config,
+                    *pledge_count_before_executing - 1,
+                );
 
                 if self.value != expected_value {
                     return Err(CommitmentValidationError::InvalidUnpledgeValue {
