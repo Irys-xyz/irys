@@ -95,8 +95,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
         chunk_range: PartitionChunkRange(irys_types::partition_chunk_offset_ie!(0, packing_end)),
     };
     // Create an instance of the packing service
-    let sm_ids = vec![storage_module.id];
-    let packing = irys_actors::packing::PackingService::new(sm_ids, Arc::new(config.clone()));
+    let packing = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
 
     // Spawn packing controllers with runtime handle
     // Get the current Tokio runtime handle for this test context

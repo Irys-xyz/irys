@@ -946,8 +946,7 @@ impl IrysNode {
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
         // initialize packing service early (dynamic registration)
-        let packing_service =
-            irys_actors::packing::PackingService::new(Vec::new(), Arc::new(config.clone()));
+        let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
         let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
 
         // start service senders/receivers with packing handle

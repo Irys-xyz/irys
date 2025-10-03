@@ -89,7 +89,7 @@ const LOG_PER_CHUNKS: u32 = 1000;
 
 impl PackingService {
     /// creates a new packing service
-    pub fn new(storage_module_ids: Vec<usize>, config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
         let packing_config = PackingConfig::new(&config);
         let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
         // Dynamic registration: start with an empty map of queues; queues are created on first use
@@ -732,8 +732,7 @@ mod tests {
             )),
         };
         // Create an instance of the packing service
-        let sm_ids = vec![storage_module.id];
-        let packing = PackingService::new(sm_ids, Arc::new(config.clone()));
+        let packing = PackingService::new(Arc::new(config.clone()));
 
         // Spawn packing controllers with runtime handle
         // In this test context, get the Tokio runtime handle
