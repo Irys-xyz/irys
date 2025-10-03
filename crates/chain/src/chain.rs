@@ -21,7 +21,7 @@ use irys_actors::{
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining::{MiningControl, PartitionMiningActor},
-    packing::{PackingActor, PackingRequest},
+    packing::PackingRequest,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -945,8 +945,12 @@ impl IrysNode {
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
-        // start service senders/receivers
-        let (service_senders, receivers) = ServiceSenders::new();
+        // initialize packing service early (dynamic registration)
+        let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
+        let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
+
+        // start service senders/receivers with packing handle
+        let (service_senders, receivers) = ServiceSenders::new(packing_handle.clone());
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1205,14 +1209,10 @@ impl IrysNode {
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
 
-        // set up packing actor
-        let (atomic_global_step_number, packing_actor_addr, packing_controller_handles) =
-            Self::init_packing_actor(
-                &config,
-                global_step_number,
-                &storage_modules_guard,
-                runtime_handle.clone(),
-            );
+        // spawn packing controllers and set global step number
+        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
+        let packing_controller_handles =
+            packing_service.spawn_packing_controllers(runtime_handle.clone());
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
@@ -1221,7 +1221,6 @@ impl IrysNode {
             &vdf_state_readonly,
             &service_senders,
             &atomic_global_step_number,
-            &packing_actor_addr,
             latest_block.diff,
         );
 
@@ -1295,7 +1294,6 @@ impl IrysNode {
         let irys_node_ctx = IrysNodeCtx {
             actor_addresses: ActorAddresses {
                 partitions: part_actors,
-                packing: packing_actor_addr,
             },
             reward_curve,
             reth_handle: reth_node.clone(),
@@ -1337,7 +1335,6 @@ impl IrysNode {
             storage_modules.clone(),
             block_index_guard.clone(),
             block_tree_guard.clone(),
-            &irys_node_ctx.actor_addresses,
             service_senders.clone(),
             &config,
             runtime_handle.clone(),
@@ -1527,7 +1524,6 @@ impl IrysNode {
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
         atomic_global_step_number: &Arc<AtomicU64>,
-        packing_actor_addr: &actix::Addr<PackingActor>,
         initial_difficulty: U256,
     ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
         let mut part_actors = Vec::new();
@@ -1536,7 +1532,6 @@ impl IrysNode {
             let partition_mining_actor = PartitionMiningActor::new(
                 config,
                 service_senders.clone(),
-                packing_actor_addr.clone().recipient(),
                 sm.clone(),
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
@@ -1561,36 +1556,14 @@ impl IrysNode {
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
-                packing_actor_addr.do_send(PackingRequest {
+                let handle = service_senders.packing_handle();
+                let _ = handle.send(PackingRequest {
                     storage_module: sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
             }
         }
         (part_actors, arbiters)
-    }
-
-    fn init_packing_actor(
-        config: &Config,
-        global_step_number: u64,
-        storage_modules_guard: &StorageModulesReadGuard,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> (
-        Arc<AtomicU64>,
-        actix::Addr<PackingActor>,
-        Vec<TokioServiceHandle>,
-    ) {
-        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
-        let config = Arc::new(config.clone());
-        let packing_actor = PackingActor::new(sm_ids, config);
-        let packing_controller_handles = packing_actor.spawn_packing_controllers(runtime_handle);
-        let packing_actor_addr = packing_actor.start();
-        (
-            atomic_global_step_number,
-            packing_actor_addr,
-            packing_controller_handles,
-        )
     }
 
     fn init_block_producer(
