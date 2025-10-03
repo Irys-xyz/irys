@@ -190,7 +190,7 @@ impl BlockDiscoveryService {
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block discovery service");
                     break;
-                }
+                },
                 // Handle commands
                 cmd = self.msg_rx.recv() => {
                     match cmd {
@@ -202,7 +202,7 @@ impl BlockDiscoveryService {
                             break;
                         }
                     }
-                }
+                },
             }
         }
 
