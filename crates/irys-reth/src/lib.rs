@@ -341,6 +341,43 @@ pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
 }
 
+impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
+where
+    Tx: EthPoolTransaction,
+{
+    /// Irys-specific prefilter to reject transactions we never accept in the mempool.
+    ///
+    /// Returns `Ok(tx)` if the tx should continue to normal eth validation,
+    /// or `Err(outcome)` if the tx is invalid for Irys-specific reasons.
+    #[expect(clippy::result_large_err, reason = "to comply with reth api")]
+    fn prefilter_tx(&self, tx: Tx) -> Result<Tx, TransactionValidationOutcome<Tx>> {
+        let input = tx.input();
+        if input.starts_with(IRYS_SHADOW_EXEC) {
+            tracing::trace!(
+                "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
+            );
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::SignerAccountHasBytecode,
+                ),
+            ));
+        }
+
+        // once we support blobs, we can start accepting eip4844 txs
+        if tx.is_eip4844() {
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::Eip4844Disabled,
+                ),
+            ));
+        }
+
+        Ok(tx)
+    }
+}
+
 impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
 where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
@@ -353,28 +390,26 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        let input = transaction.input();
-        if !input.starts_with(IRYS_SHADOW_EXEC) {
-            tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
-            return self.eth_tx_validator.validate_one(origin, transaction);
-        }
+        let transaction = match self.prefilter_tx(transaction) {
+            Ok(tx) => tx,
+            Err(outcome) => return outcome,
+        };
 
-        tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
-        // Even though we reject shadow txs from the pool, attempt to decode to verify structure
-        let _ = ShadowTransaction::decode(&mut &input[..]);
-        TransactionValidationOutcome::Invalid(
-            transaction,
-            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                InvalidTransactionError::SignerAccountHasBytecode,
-            ),
-        )
+        tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
+        self.eth_tx_validator.validate_one(origin, transaction)
     }
 
     async fn validate_transactions(
         &self,
         transactions: Vec<(TransactionOrigin, Self::Transaction)>,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.eth_tx_validator.validate_all(transactions)
+        transactions
+            .into_iter()
+            .map(|(origin, tx)| match self.prefilter_tx(tx) {
+                Ok(tx) => self.eth_tx_validator.validate_one(origin, tx),
+                Err(outcome) => outcome,
+            })
+            .collect()
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
@@ -433,6 +468,7 @@ mod tests {
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
     use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
+    use alloy_primitives::Bytes;
     use alloy_primitives::Signature;
     use alloy_primitives::{Address, B256};
     use alloy_rpc_types_engine::ForkchoiceState;
@@ -442,7 +478,7 @@ mod tests {
         providers::{AccountReader as _, BlockHashReader as _, BlockNumReader as _},
         rpc::server_types::eth::EthApiError,
     };
-    use reth_e2e_test_utils::wallet::Wallet;
+    use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
 
     use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::sync::Mutex;
@@ -473,6 +509,33 @@ mod tests {
 
         let tx_res = node.rpc.inject_tx(tx).await;
         assert!(matches!(tx_res, Err(EthApiError::PoolError(_))));
+        Ok(())
+    }
+
+    /// Ensures the mempool rejects EIP-4844 (blob) transactions outright.
+    ///
+    /// We keep Cancun active but disable blobs. Any EIP-4844 envelope should be rejected
+    /// via the mempool validator before deeper validation occurs.
+    #[test_log::test(tokio::test)]
+    async fn eip4844_txs_are_rejected_by_mempool() -> eyre::Result<()> {
+        // setup
+        let ctx = TestContext::new().await?;
+        let ((node, _shadow_tx_rx), _ctx) = ctx.get_single_node()?;
+        let local_signer = PrivateKeySigner::random();
+        let envelope: Bytes = TransactionTestContext::tx_with_blobs_bytes(1, local_signer)
+            .await
+            .expect("constructing a valid EIP-4844 tx should succeed");
+
+        // inject the tx via RPC
+        let res = node.rpc.inject_tx(envelope).await;
+        dbg!(&res);
+
+        // mempool rejects EIP-4844
+        assert!(
+            matches!(res, Err(EthApiError::PoolError(_))),
+            "expected pool error for EIP-4844"
+        );
+
         Ok(())
     }
 
