@@ -4,7 +4,6 @@ use crate::mempool_service::{
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
-use irys_types::TxSource;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionId, H256,
@@ -15,10 +14,9 @@ use tracing::{debug, instrument, trace, warn};
 
 impl Inner {
     #[instrument(skip_all)]
-    pub async fn handle_ingress_commitment_tx_message(
+    pub async fn handle_ingress_commitment_tx_message_gossip(
         &mut self,
         commitment_tx: CommitmentTransaction,
-        source: TxSource,
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
@@ -86,52 +84,216 @@ impl Inner {
         // Validate economic constraints only for API-submitted transactions
         // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
         // while still being able to process them when building blocks.
-        if matches!(source, TxSource::Api) {
-            // API-only: Validate fee
-            if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
-                let mut mempool_state_guard = self.mempool_state.write().await;
-                mempool_state_guard
-                    .recent_invalid_tx
-                    .put(commitment_tx.id, ());
-                drop(mempool_state_guard);
-                tracing::warn!(
-                    "Commitment tx {} failed fee validation: {}",
-                    commitment_tx.id,
-                    e
-                );
-                return Err(TxIngressError::CommitmentValidationError(e));
+        // Gossip path: skip fee/value/funding checks
+
+        // Check pending commitments and cached commitments and active commitments of the canonical chain
+        let commitment_status = self.get_commitment_status(&commitment_tx).await;
+        trace!(
+            "commitment tx {} status {:?}",
+            &commitment_tx.id,
+            &commitment_status
+        );
+        if commitment_status == CommitmentSnapshotStatus::Accepted {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            // Add the commitment tx to the valid tx list to be included in the next block
+            trace!(
+                "pushing commitment {} to valid_commitment_tx",
+                &commitment_tx.id
+            );
+            mempool_state_guard
+                .valid_commitment_tx
+                .entry(commitment_tx.signer)
+                .or_default()
+                .push(commitment_tx.clone());
+
+            mempool_state_guard
+                .recent_valid_tx
+                .put(commitment_tx.id, ());
+
+            // Process any pending pledges for this newly staked address
+            // ------------------------------------------------------
+            // When a stake transaction is accepted, we can now process any pledge
+            // transactions from the same address that arrived earlier but were
+            // waiting for the stake. This effectively resolves the dependency
+            // order for address-based validation.
+            let pop = mempool_state_guard
+                .pending_pledges
+                .pop(&commitment_tx.signer);
+            drop(mempool_state_guard);
+            if let Some(pledges_lru) = pop {
+                // Extract all pending pledges as a vector of owned transactions
+                let pledges: Vec<_> = pledges_lru
+                    .into_iter()
+                    .map(|(_, pledge_tx)| pledge_tx)
+                    .collect();
+
+                for pledge_tx in pledges {
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    // todo switch _ to actually handle the result
+                    let _ = self
+                        .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                            pledge_tx,
+                            oneshot_tx,
+                        ))
+                        .await;
+
+                    let _ = oneshot_rx
+                        .await
+                        .expect("to process pending pledge for newly staked address");
+                }
             }
 
-            // API-only: Validate value based on commitment type
-            if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
-                let mut mempool_state_guard = self.mempool_state.write().await;
+            // Gossip transaction
+            self.service_senders
+                .gossip_broadcast
+                .send(GossipBroadcastMessage::from(commitment_tx.clone()))
+                .expect("Failed to send gossip data");
+        } else if commitment_status == CommitmentSnapshotStatus::Unstaked {
+            // For unstaked pledges, we cache them in a 2-level LRU structure:
+            // Level 1: Keyed by signer address (allows tracking multiple addresses)
+            // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
+
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            if let Some(pledges_cache) = mempool_state_guard
+                .pending_pledges
+                .get_mut(&commitment_tx.signer)
+            {
+                // Address already exists in cache - add this pledge transaction to its lru cache
+                pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+            } else {
+                // First pledge from this address - create a new nested lru cache
+                let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
+                let mut new_address_cache =
+                    LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+                // Add the pledge transaction to the new lru cache for the address
+                new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+
+                // Add the address cache to the primary lru cache
                 mempool_state_guard
-                    .recent_invalid_tx
-                    .put(commitment_tx.id, ());
-                drop(mempool_state_guard);
-                tracing::warn!(
-                    "Commitment tx {} failed value validation: {}",
-                    commitment_tx.id,
-                    e
-                );
-                return Err(TxIngressError::CommitmentValidationError(e));
+                    .pending_pledges
+                    .put(commitment_tx.signer, new_address_cache);
             }
+            drop(mempool_state_guard)
+        } else {
+            return Err(TxIngressError::Skipped);
+        }
 
-            // API-only: Validate funding before storing in mempool
-            if let Err(e) = validate_funding(&self.reth_node_adapter, &commitment_tx, None) {
-                let mut mempool_state_guard = self.mempool_state.write().await;
-                mempool_state_guard
-                    .recent_invalid_tx
-                    .put(commitment_tx.id, ());
+        Ok(())
+    }
 
-                tracing::info!(
-                    "Rejected unfunded commitment tx {} from signer {}",
-                    commitment_tx.id,
-                    commitment_tx.signer
-                );
+    #[instrument(skip_all)]
+    pub async fn handle_ingress_commitment_tx_message_api(
+        &mut self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        debug!("received commitment tx {:?}", &commitment_tx.id);
 
-                return Err(e);
-            }
+        // Validate tx signature
+        // we MUST do this before using the ID to prevent poisoning, as this validates the ID is correct
+        if let Err(e) = self.validate_signature(&commitment_tx).await {
+            tracing::error!(
+                "Signature validation for commitment_tx {:?} failed with error: {:?}",
+                &commitment_tx,
+                e
+            );
+            return Err(TxIngressError::InvalidSignature);
+        }
+
+        // Check stake/pledge whitelist early - reject if address is not whitelisted
+        let whitelist = &self.stake_and_pledge_whitelist;
+        if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
+            warn!(
+                "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
+                commitment_tx.id, commitment_tx.signer
+            );
+            return Err(CommitmentValidationError::ForbiddenSigner.into());
+        }
+
+        let mempool_state_guard = self.mempool_state.read().await;
+
+        // Early out if we already know about this transaction (invalid)
+        if mempool_state_guard
+            .recent_invalid_tx
+            .contains(&commitment_tx.id)
+        {
+            return Err(TxIngressError::Skipped);
+        }
+
+        // Early out if we already know about this transaction in mempool (recent valid)
+        if mempool_state_guard
+            .recent_valid_tx
+            .contains(&commitment_tx.id)
+        {
+            return Err(TxIngressError::Skipped);
+        }
+
+        //  Early out if the transaction already exists in valid_commitment_tx
+        if mempool_state_guard
+            .valid_commitment_tx
+            .get(&commitment_tx.signer)
+            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id))
+        {
+            return Err(TxIngressError::Skipped);
+        }
+        drop(mempool_state_guard);
+
+        // Early out if we already know about this transaction in index / database
+        if self
+            .irys_db
+            .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, &commitment_tx.id))
+            .map_err(|_| TxIngressError::DatabaseError)?
+            .is_some()
+        {
+            return Err(TxIngressError::Skipped);
+        }
+
+        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
+
+        // API-only: Validate fee
+        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
+            drop(mempool_state_guard);
+            tracing::warn!(
+                "Commitment tx {} failed fee validation: {}",
+                commitment_tx.id,
+                e
+            );
+            return Err(TxIngressError::CommitmentValidationError(e));
+        }
+
+        // API-only: Validate value based on commitment type
+        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
+            drop(mempool_state_guard);
+            tracing::warn!(
+                "Commitment tx {} failed value validation: {}",
+                commitment_tx.id,
+                e
+            );
+            return Err(TxIngressError::CommitmentValidationError(e));
+        }
+
+        // API-only: Validate funding before storing in mempool
+        if let Err(e) = validate_funding(&self.reth_node_adapter, &commitment_tx, None) {
+            let mut mempool_state_guard = self.mempool_state.write().await;
+            mempool_state_guard
+                .recent_invalid_tx
+                .put(commitment_tx.id, ());
+
+            tracing::info!(
+                "Rejected unfunded commitment tx {} from signer {}",
+                commitment_tx.id,
+                commitment_tx.signer
+            );
+
+            return Err(e);
         }
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
@@ -179,9 +341,8 @@ impl Inner {
                     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                     // todo switch _ to actually handle the result
                     let _ = self
-                        .handle_message(MempoolServiceMessage::IngestCommitmentTx(
+                        .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                             pledge_tx,
-                            TxSource::Gossip,
                             oneshot_tx,
                         ))
                         .await;

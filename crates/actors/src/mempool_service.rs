@@ -169,7 +169,7 @@ pub enum MempoolServiceMessage {
     },
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// Ingress CommitmentTransaction into the mempool
+    /// Ingress CommitmentTransaction into the mempool (from API)
     ///
     /// This function performs a series of checks and validations:
     /// - Skips the transaction if it is already known to be invalid or previously processed
@@ -178,17 +178,25 @@ pub enum MempoolServiceMessage {
     /// - Processes any pending pledge transactions that depended on this commitment
     /// - Gossips the transaction to peers if accepted
     /// - Caches the transaction for unstaked signers to be reprocessed later
-    IngestCommitmentTx(
+    IngestCommitmentTxFromApi(
         CommitmentTransaction,
-        irys_types::TxSource,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// Ingress CommitmentTransaction into the mempool (from Gossip)
+    IngestCommitmentTxFromGossip(
+        CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// validate and process an incoming DataTransactionHeader
-    IngestDataTx(
+    /// validate and process an incoming DataTransactionHeader (from API)
+    IngestDataTxFromApi(
         DataTransactionHeader,
-        irys_types::TxSource,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// validate and process an incoming DataTransactionHeader (from Gossip)
+    IngestDataTxFromGossip(
+        DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
@@ -240,9 +248,17 @@ impl Inner {
                         .handle_ingress_blocks_message(prevalidated_blocks)
                         .await;
                 }
-                MempoolServiceMessage::IngestCommitmentTx(commitment_tx, source, response) => {
+                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                     let response_message = self
-                        .handle_ingress_commitment_tx_message(commitment_tx, source)
+                        .handle_ingress_commitment_tx_message_api(commitment_tx)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+                    let response_message = self
+                        .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                         .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -302,8 +318,14 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::IngestDataTx(tx, source, response) => {
-                    let response_value = self.handle_data_tx_ingress_message(tx, source).await;
+                MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -1238,7 +1260,7 @@ impl Inner {
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
             let _ = self
-                .handle_ingress_commitment_tx_message(commitment_tx, irys_types::TxSource::Gossip)
+                .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Commitment tx ingress error during mempool restore from disk")
@@ -1247,7 +1269,7 @@ impl Inner {
 
         for (_txid, storage_tx) in recovered.storage_txs {
             let _ = self
-                .handle_data_tx_ingress_message(storage_tx, irys_types::TxSource::Gossip)
+                .handle_data_tx_ingress_message_gossip(storage_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")

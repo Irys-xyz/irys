@@ -14,7 +14,7 @@ use irys_primitives::Address;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
-    IrysTransactionResponse, PeerListItem, TxSource, UnpackedChunk, H256,
+    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -175,7 +175,7 @@ where
 
         match self
             .mempool
-            .handle_data_transaction_ingress(tx, TxSource::Gossip)
+            .handle_data_transaction_ingress_gossip(tx)
             .await
             .map_err(GossipError::from)
         {
@@ -286,7 +286,7 @@ where
 
         match self
             .mempool
-            .handle_commitment_transaction_ingress(tx, TxSource::Gossip)
+            .handle_commitment_transaction_ingress_gossip(tx)
             .await
             .map_err(GossipError::from)
         {

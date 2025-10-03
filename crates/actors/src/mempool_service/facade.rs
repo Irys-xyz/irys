@@ -8,7 +8,7 @@ use irys_types::{
     chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
     H256,
 };
-use irys_types::{Address, IngressProof, TxSource};
+use irys_types::{Address, IngressProof};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -16,15 +16,21 @@ use tokio::sync::mpsc::UnboundedSender;
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
-        source: TxSource,
     ) -> Result<(), TxIngressError>;
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
+        &self,
+        tx_header: DataTransactionHeader,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction_ingress_api(
         &self,
         tx_header: CommitmentTransaction,
-        source: TxSource,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction_ingress_gossip(
+        &self,
+        tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
@@ -83,31 +89,61 @@ impl From<&ServiceSenders> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
-        source: TxSource,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngestDataTx(
-                tx_header, source, oneshot_tx,
+            .send(MempoolServiceMessage::IngestDataTxFromApi(
+                tx_header, oneshot_tx,
             ))
             .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxIngressMessage")
     }
 
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
         &self,
-        commitment_tx: CommitmentTransaction,
-        source: TxSource,
+        tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngestCommitmentTx(
+            .send(MempoolServiceMessage::IngestDataTxFromGossip(
+                tx_header, oneshot_tx,
+            ))
+            .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
+
+        oneshot_rx.await.expect("to process TxIngressMessage")
+    }
+
+    async fn handle_commitment_transaction_ingress_api(
+        &self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::IngestCommitmentTxFromApi(
                 commitment_tx,
-                source,
+                oneshot_tx,
+            ))
+            .map_err(|_| {
+                TxIngressError::Other("Error sending CommitmentTxIngressMessage ".to_owned())
+            })?;
+
+        oneshot_rx
+            .await
+            .expect("to process CommitmentTxIngressMessage")
+    }
+
+    async fn handle_commitment_transaction_ingress_gossip(
+        &self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                commitment_tx,
                 oneshot_tx,
             ))
             .map_err(|_| {

@@ -5,7 +5,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_types::{CommitmentTransaction, TxSource};
+use irys_types::CommitmentTransaction;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `CommitmentTransaction` type,
@@ -20,7 +20,7 @@ pub async fn post_commitment_tx(
 
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTx(tx, TxSource::Api, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!(
             "API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage: {:?}",

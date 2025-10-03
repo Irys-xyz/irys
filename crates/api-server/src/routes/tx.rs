@@ -12,7 +12,7 @@ use irys_actors::{
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
-    IrysTransactionResponse, TxSource, H256,
+    IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -30,7 +30,7 @@ pub async fn post_tx(
 
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestDataTx(tx, TxSource::Api, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::IngestDataTxFromApi(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)

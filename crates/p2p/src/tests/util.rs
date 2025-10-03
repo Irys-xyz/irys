@@ -25,7 +25,6 @@ use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
-use irys_types::TxSource;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
@@ -67,10 +66,9 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolFacade for MempoolStub {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
-        _source: TxSource,
     ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
@@ -98,10 +96,24 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
+        &self,
+        tx_header: DataTransactionHeader,
+    ) -> std::result::Result<(), TxIngressError> {
+        self.handle_data_transaction_ingress_api(tx_header)
+            .await
+    }
+
+    async fn handle_commitment_transaction_ingress_api(
         &self,
         _tx_header: CommitmentTransaction,
-        _source: TxSource,
+    ) -> std::result::Result<(), TxIngressError> {
+        Ok(())
+    }
+
+    async fn handle_commitment_transaction_ingress_gossip(
+        &self,
+        _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
