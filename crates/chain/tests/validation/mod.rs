@@ -61,29 +61,24 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: H256List(vec![self.invalid_stake.id]),
                 }],
-                vec![self.invalid_stake.clone()],
-                vec![],
-                PublishLedgerWithTxs {
+                commitment_txs_to_bill: vec![self.invalid_stake.clone()],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDelta {
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -164,29 +159,24 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: H256List(vec![self.invalid_pledge.id]),
                 }],
-                vec![self.invalid_pledge.clone()],
-                vec![],
-                PublishLedgerWithTxs {
+                commitment_txs_to_bill: vec![self.invalid_pledge.clone()],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDelta {
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -267,29 +257,24 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: H256List(vec![self.commitments[0].id, self.commitments[1].id]),
                 }],
-                self.commitments.clone(),
-                vec![],
-                PublishLedgerWithTxs {
+                commitment_txs_to_bill: self.commitments.clone(),
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDelta {
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -382,29 +367,24 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: H256List(vec![self.wrong_commitment.id]),
                 }],
-                vec![self.wrong_commitment.clone()],
-                vec![],
-                PublishLedgerWithTxs {
+                commitment_txs_to_bill: vec![self.wrong_commitment.clone()],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDelta {
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -605,13 +585,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Create publish ledger with duplicate proofs from the same signer for one transaction
             // This tests that each transaction must have unique signers
             let proofs = IngressProofsList(
@@ -621,19 +595,20 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                     .collect(),
             );
 
-            Ok((
-                vec![],
-                vec![],
-                vec![],
-                PublishLedgerWithTxs {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![self.data_tx.clone()],
                     proofs: Some(proofs),
                 },
-                LedgerExpiryBalanceDelta {
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 
@@ -800,29 +775,24 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                system_ledgers: vec![SystemTransactionLedger {
                     ledger_id: SystemLedger::Commitment.into(),
                     tx_ids: H256List(vec![]),
                 }],
-                vec![],
-                vec![],
-                PublishLedgerWithTxs {
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                LedgerExpiryBalanceDelta {
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
-            ))
+                commitment_refund_events: vec![],
+            })
         }
     }
 

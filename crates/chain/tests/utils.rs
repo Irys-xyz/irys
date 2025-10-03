@@ -1138,13 +1138,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .read()
             .canonical_commitment_snapshot();
 
-        let is_staked = self
+        let epoch_snapshot = self
             .node_ctx
             .block_tree_guard
             .read()
-            .canonical_epoch_snapshot()
-            .is_staked(commitment_tx.signer);
-        commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
+            .canonical_epoch_snapshot();
+        commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot)
     }
 
     /// wait for specific block to be available via block tree guard

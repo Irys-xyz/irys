@@ -669,16 +669,20 @@ impl EpochSnapshot {
     /// commitment state representation. It validates that all commitment references
     /// in the ledger have corresponding transaction data.
     ///
-    /// TODO: Support unpledging and unstaking
+    /// TODO: Support unstaking
     pub fn compute_commitment_state(&mut self, commitments: Vec<CommitmentTransaction>) {
         // Categorize commitments by their type for separate processing
         let mut stake_commitments: Vec<CommitmentTransaction> = Vec::new();
         let mut pledge_commitments: Vec<CommitmentTransaction> = Vec::new();
+        let mut unpledge_commitments: Vec<CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments {
             match commitment_tx.commitment_type {
                 irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
                 irys_primitives::CommitmentType::Pledge { .. } => {
                     pledge_commitments.push(commitment_tx)
+                }
+                irys_primitives::CommitmentType::Unpledge { .. } => {
+                    unpledge_commitments.push(commitment_tx)
                 }
                 _ => unimplemented!(),
             }
@@ -731,6 +735,44 @@ impl EpochSnapshot {
                 .or_default()
                 .push(value);
         }
+
+        // Process unpledge commitments at epoch boundary
+        for unpledge in &unpledge_commitments {
+            let irys_primitives::CommitmentType::Unpledge { partition_hash, .. } =
+                unpledge.commitment_type
+            else {
+                panic!("unpledge vec must always contain unpledge commitments")
+            };
+
+            let ph: irys_types::H256 = partition_hash.into();
+            // 1) Retire targeted capacity partitions (if still owned by signer)
+            // Remove from capacity assignments and all_active_partitions
+            let assignment = self
+                .partition_assignments
+                .capacity_partitions
+                .remove(&ph)
+                .expect("partition must be present at this point");
+            assert_eq!(assignment.miner_address, unpledge.signer);
+            let pos = self
+                .all_active_partitions
+                .iter()
+                .position(|h| *h == ph)
+                .unwrap();
+            self.all_active_partitions.remove(pos);
+
+            // 2) Remove pledge entries by targeted partition hash (lookup by hash)
+            let entries = self
+                .commitment_state
+                .pledge_commitments
+                .get_mut(&unpledge.signer)
+                .unwrap();
+            let pos = entries
+                .iter()
+                .position(|e| e.partition_hash == Some(ph))
+                .unwrap();
+            entries.remove(pos);
+        }
+        // Refund events are generated in the block producer.
     }
 
     /// Assigns partition hashes to unassigned pledge commitments

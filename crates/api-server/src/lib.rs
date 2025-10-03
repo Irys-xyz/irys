@@ -15,7 +15,7 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
 use routes::{
-    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
+    block, block_index, commitment, get_chunk, index, miner, network_config, peer_list, post_chunk,
     post_version, price, proxy::proxy, tx,
 };
 use std::{
@@ -106,6 +106,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/tx/{tx_id}/local/data_start_offset",
             web::get().to(tx::get_tx_local_start_offset),
+        )
+        .route(
+            "/miner/{address}/pledge-state",
+            web::get().to(miner::get_miner_pledge_state),
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))

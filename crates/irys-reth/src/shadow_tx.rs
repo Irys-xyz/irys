@@ -60,8 +60,10 @@ pub enum TransactionPacket {
     StorageFees(BalanceDecrement),
     /// Pledge funds to an account (balance decrement). Used for pledging operations.
     Pledge(BalanceDecrement),
-    /// Unpledge funds from an account (balance increment). Used for unpledging operations.
-    Unpledge(EitherIncrementOrDecrement),
+    /// Unpledge fee debit at inclusion (balance decrement). Refund occurs in epoch via UnpledgeRefund.
+    Unpledge(BalanceDecrement),
+    /// Unpledge refund at epoch (balance increment). Emitted with zero priority fee.
+    UnpledgeRefund(BalanceIncrement),
     /// Term fee reward to the miners that stored the block
     TermFeeReward(BalanceIncrement),
     /// Ingress proof reward payment to providers who submitted valid proofs (balance increment).
@@ -89,10 +91,8 @@ impl TransactionPacket {
             Self::Stake(dec) => Some(dec.target),
             Self::StorageFees(dec) => Some(dec.target),
             Self::Pledge(dec) => Some(dec.target),
-            Self::Unpledge(either) => match either {
-                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
-                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
-            },
+            Self::Unpledge(dec) => Some(dec.target),
+            Self::UnpledgeRefund(inc) => Some(inc.target),
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
@@ -116,6 +116,8 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_STORAGE_FEES").0);
     pub static PLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_PLEDGE").0);
     pub static UNPLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE").0);
+    pub static UNPLEDGE_REFUND: LazyLock<[u8; 32]> =
+        LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE_REFUND").0);
     pub static TERM_FEE_REWARD: LazyLock<[u8; 32]> =
         LazyLock::new(|| keccak256("SHADOW_TX_TERM_FEE_REWARD").0);
     pub static INGRESS_PROOF_REWARD: LazyLock<[u8; 32]> =
@@ -189,6 +191,7 @@ impl TransactionPacket {
             Self::StorageFees(_) => (*STORAGE_FEES).into(),
             Self::Pledge(_) => (*PLEDGE).into(),
             Self::Unpledge(_) => (*UNPLEDGE).into(),
+            Self::UnpledgeRefund(_) => (*UNPLEDGE_REFUND).into(),
             Self::TermFeeReward(_) => (*TERM_FEE_REWARD).into(),
             Self::IngressProofReward(_) => (*INGRESS_PROOF_REWARD).into(),
             Self::PermFeeRefund(_) => (*PERM_FEE_REFUND).into(),
@@ -206,6 +209,7 @@ pub const UNPLEDGE_ID: u8 = 0x06;
 pub const TERM_FEE_REWARD_ID: u8 = 0x07;
 pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 pub const PERM_FEE_REFUND_ID: u8 = 0x09;
+pub const UNPLEDGE_REFUND_ID: u8 = 0x0A;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -289,6 +293,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[PERM_FEE_REFUND_ID])?;
                 inner.serialize(writer)
             }
+            Self::UnpledgeRefund(inner) => {
+                writer.write_all(&[UNPLEDGE_REFUND_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -303,7 +311,7 @@ impl BorshDeserialize for TransactionPacket {
             STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
             STORAGE_FEES_ID => Self::StorageFees(BalanceDecrement::deserialize_reader(reader)?),
             PLEDGE_ID => Self::Pledge(BalanceDecrement::deserialize_reader(reader)?),
-            UNPLEDGE_ID => Self::Unpledge(EitherIncrementOrDecrement::deserialize_reader(reader)?),
+            UNPLEDGE_ID => Self::Unpledge(BalanceDecrement::deserialize_reader(reader)?),
             TERM_FEE_REWARD_ID => {
                 Self::TermFeeReward(BalanceIncrement::deserialize_reader(reader)?)
             }
@@ -312,6 +320,9 @@ impl BorshDeserialize for TransactionPacket {
             }
             PERM_FEE_REFUND_ID => {
                 Self::PermFeeRefund(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            UNPLEDGE_REFUND_ID => {
+                Self::UnpledgeRefund(BalanceIncrement::deserialize_reader(reader)?)
             }
             _ => {
                 return Err(borsh::io::Error::new(
@@ -662,13 +673,11 @@ mod tests {
                     irys_ref: test_ref,
                 },
             )),
-            TransactionPacket::Unpledge(EitherIncrementOrDecrement::BalanceDecrement(
-                BalanceDecrement {
-                    amount: U256::from(500_u64),
-                    target: test_address,
-                    irys_ref: test_ref,
-                },
-            )),
+            TransactionPacket::Unpledge(BalanceDecrement {
+                amount: U256::from(500_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
             TransactionPacket::StorageFees(BalanceDecrement {
                 amount: U256::from(600_u64),
                 target: test_address,
@@ -686,6 +695,11 @@ mod tests {
             }),
             TransactionPacket::PermFeeRefund(BalanceIncrement {
                 amount: U256::from(900_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::UnpledgeRefund(BalanceIncrement {
+                amount: U256::from(999_u64),
                 target: test_address,
                 irys_ref: test_ref,
             }),

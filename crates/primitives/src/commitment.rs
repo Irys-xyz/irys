@@ -84,6 +84,7 @@ const COMMITMENT_TYPE_UNSTAKE: u8 = 4;
 // Size constants
 const TYPE_DISCRIMINANT_SIZE: usize = 1;
 const U64_SIZE: usize = 8;
+const PARTITION_HASH_SIZE: usize = 32;
 
 #[derive(
     PartialEq,
@@ -108,6 +109,8 @@ pub enum CommitmentType {
     Unpledge {
         #[serde(rename = "pledgeCountBeforeExecuting")]
         pledge_count_before_executing: u64,
+        #[serde(rename = "partitionHash")]
+        partition_hash: [u8; 32],
     },
     Unstake,
 }
@@ -126,9 +129,11 @@ impl Encodable for CommitmentType {
             }
             Self::Unpledge {
                 pledge_count_before_executing,
+                partition_hash,
             } => {
                 out.put_u8(COMMITMENT_TYPE_UNPLEDGE);
                 pledge_count_before_executing.encode(out);
+                out.put_slice(partition_hash);
             }
             Self::Unstake => {
                 out.put_u8(COMMITMENT_TYPE_UNSTAKE);
@@ -141,10 +146,11 @@ impl Encodable for CommitmentType {
             Self::Stake | Self::Unstake => 1,
             Self::Pledge {
                 pledge_count_before_executing,
-            }
-            | Self::Unpledge {
-                pledge_count_before_executing,
             } => 1 + pledge_count_before_executing.length(),
+            Self::Unpledge {
+                pledge_count_before_executing,
+                ..
+            } => 1 + pledge_count_before_executing.length() + PARTITION_HASH_SIZE,
         }
     }
 }
@@ -168,8 +174,15 @@ impl Decodable for CommitmentType {
             }
             COMMITMENT_TYPE_UNPLEDGE => {
                 let count = u64::decode(buf)?;
+                if buf.len() < PARTITION_HASH_SIZE {
+                    return Err(RlpError::InputTooShort);
+                }
+                let mut ph = [0_u8; 32];
+                ph.copy_from_slice(&buf[..PARTITION_HASH_SIZE]);
+                buf.advance(PARTITION_HASH_SIZE);
                 Ok(Self::Unpledge {
                     pledge_count_before_executing: count,
+                    partition_hash: ph,
                 })
             }
             COMMITMENT_TYPE_UNSTAKE => Ok(Self::Unstake),
@@ -195,10 +208,12 @@ impl reth_codecs::Compact for CommitmentType {
             }
             Self::Unpledge {
                 pledge_count_before_executing,
+                partition_hash,
             } => {
                 buf.put_u8(COMMITMENT_TYPE_UNPLEDGE);
                 buf.put_u64_le(*pledge_count_before_executing);
-                TYPE_DISCRIMINANT_SIZE + U64_SIZE
+                buf.put_slice(partition_hash);
+                TYPE_DISCRIMINANT_SIZE + U64_SIZE + PARTITION_HASH_SIZE
             }
             Self::Unstake => {
                 buf.put_u8(COMMITMENT_TYPE_UNSTAKE);
@@ -255,12 +270,21 @@ impl reth_codecs::Compact for CommitmentType {
                     .try_into()
                     .expect("slice has correct length");
                 let count = u64::from_le_bytes(count_bytes);
-
+                let rem = &buf[required_size..];
+                if rem.len() < PARTITION_HASH_SIZE {
+                    panic!(
+                        "CommitmentType::from_compact: buffer too short for Unpledge partition hash, expected at least {} bytes but got {}",
+                        PARTITION_HASH_SIZE, rem.len()
+                    );
+                }
+                let mut ph = [0_u8; 32];
+                ph.copy_from_slice(&rem[..PARTITION_HASH_SIZE]);
                 (
                     Self::Unpledge {
                         pledge_count_before_executing: count,
+                        partition_hash: ph,
                     },
-                    &buf[required_size..],
+                    &rem[PARTITION_HASH_SIZE..],
                 )
             }
             COMMITMENT_TYPE_UNSTAKE => (Self::Unstake, &buf[TYPE_DISCRIMINANT_SIZE..]),
@@ -303,6 +327,7 @@ mod tests {
     #[case::pledge_one(CommitmentType::Pledge { pledge_count_before_executing: 1 }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::pledge_hundred(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::pledge_max(CommitmentType::Pledge { pledge_count_before_executing: u64::MAX }, 9, COMMITMENT_TYPE_PLEDGE)]
+    #[case::unpledge(CommitmentType::Unpledge { pledge_count_before_executing: 42, partition_hash: [7_u8; 32] }, 1 + 8 + 32, COMMITMENT_TYPE_UNPLEDGE)]
     fn test_commitment_type_compact_roundtrip(
         #[case] original: CommitmentType,
         #[case] expected_len: usize,
@@ -355,10 +380,26 @@ mod tests {
     #[rstest]
     #[case::stake(CommitmentType::Stake, 1)]
     #[case::pledge(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length())]
+    #[case::unpledge(CommitmentType::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32] }, 1 + 5_u64.length() + 32)]
     fn test_commitment_type_rlp_length(
         #[case] commitment_type: CommitmentType,
         #[case] expected_length: usize,
     ) {
         assert_eq!(commitment_type.length(), expected_length);
+    }
+
+    #[test]
+    fn test_unpledge_rlp_roundtrip() {
+        use bytes::BytesMut;
+        let original = CommitmentType::Unpledge {
+            pledge_count_before_executing: 3,
+            partition_hash: [1_u8; 32],
+        };
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+        let mut slice = buf.as_ref();
+        let decoded = CommitmentType::decode(&mut slice).unwrap();
+        assert_eq!(original, decoded);
+        assert!(slice.is_empty());
     }
 }
