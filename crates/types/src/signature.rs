@@ -215,7 +215,7 @@ mod tests {
             promoted_height: None,
             signature: Default::default(),
         };
-        
+
         let transaction = DataTransaction {
             header: original_header,
             ..Default::default()

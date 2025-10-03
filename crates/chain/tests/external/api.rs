@@ -90,8 +90,7 @@ async fn external_api() -> eyre::Result<()> {
 
     let recv_tx = loop {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        node
-            .node_ctx
+        node.node_ctx
             .service_senders
             .mempool
             .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx))?;

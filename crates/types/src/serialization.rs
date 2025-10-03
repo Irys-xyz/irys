@@ -899,18 +899,17 @@ mod tests {
         #[rlp(trailing)]
         struct Test {
             a: U256,
-            b: Option<U256>
-
+            b: Option<U256>,
         }
 
         let data1 = Test {
             a: U256::from(42_u64),
-            b: Some(U256::zero())
+            b: Some(U256::zero()),
         };
 
         let data2 = Test {
             a: U256::from(42_u64),
-            b: None
+            b: None,
         };
 
         let mut buffer1 = vec![];
@@ -924,7 +923,7 @@ mod tests {
         // unequal(!) encodings
         // note: why? seems like if we serialise a Some value it gets an additional trailing `128` on the binary
         // note: if we really needed to have `0`, we could modify the encoding u256 uses to treat 0 as a different value
-        assert_eq!(buffer1, buffer2);
+        assert_ne!(buffer1, buffer2);
         let decoded2 = Test::decode(&mut &buffer2[..]).unwrap();
         // but decodes "correctly"
         assert_eq!(decoded2, data2);
