@@ -42,7 +42,8 @@ pub type PackingSemaphore = Arc<Semaphore>;
 /// Packing service state
 pub struct PackingService {
     /// list of all the pending packing jobs
-    pending_jobs: PackingJobsBySM,
+    pending_jobs:
+        Arc<RwLock<std::collections::HashMap<usize, Arc<RwLock<VecDeque<PackingRequest>>>>>>,
     /// semaphore to control concurrency -- sm_id => semaphore
     semaphore: PackingSemaphore,
     /// Atomic counter of the number of active workers - used primarily to determine when packing has finished
@@ -91,10 +92,8 @@ impl PackingService {
     pub fn new(storage_module_ids: Vec<usize>, config: Arc<Config>) -> Self {
         let packing_config = PackingConfig::new(&config);
         let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
-        let pending_jobs = storage_module_ids
-            .iter()
-            .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
-            .collect();
+        // Dynamic registration: start with an empty map of queues; queues are created on first use
+        let pending_jobs = Arc::new(RwLock::new(std::collections::HashMap::new()));
         Self {
             pending_jobs,
             semaphore,
@@ -105,11 +104,7 @@ impl PackingService {
         }
     }
 
-    async fn process_jobs(
-        self,
-        pending_jobs: AtomicPackingJobQueue,
-        runtime_handle: tokio::runtime::Handle,
-    ) {
+    async fn process_jobs(self, runtime_handle: tokio::runtime::Handle) {
         let mut was_active = false;
         'main: loop {
             if was_active {
@@ -119,19 +114,34 @@ impl PackingService {
                 self.notify.notify_waiters();
                 was_active = false
             }
-            // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
+            // Try to pop from any non-empty queue across all storage modules
             let front = {
-                let mut pending_write_guard = pending_jobs
-                    .write()
-                    .expect("Unable to acquire pending jobs write lock");
-                pending_write_guard.pop_front()
+                let map_guard = self
+                    .pending_jobs
+                    .read()
+                    .expect("Unable to acquire pending jobs map read lock");
+                let mut popped = None;
+                for queue in map_guard.values() {
+                    let mut q = queue
+                        .as_ref()
+                        .write()
+                        .expect("Unable to acquire pending queue write lock");
+                    if let Some(req) = q.pop_front() {
+                        popped = Some(req);
+                        break;
+                    }
+                }
+                popped
             };
 
             let next_range = match front {
                 Some(v) => v,
                 None => {
-                    // debug!("no packing requests in queue, sleeping...");
-                    tokio::time::sleep(self.packing_config.poll_duration).await;
+                    // No work available; wait for a notification or fall back to a short sleep
+                    tokio::select! {
+                        _ = self.notify.notified() => {},
+                        _ = tokio::time::sleep(self.packing_config.poll_duration) => {},
+                    }
                     continue;
                 }
             };
@@ -457,31 +467,31 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
 }
 
 impl PackingService {
-    /// Spawn packing controllers and return TokioServiceHandles for them
+    /// Spawn multiple packing controllers (based on configured concurrency) that scan all queues.
+    /// Returns TokioServiceHandles for each controller.
     pub fn spawn_packing_controllers(
         &self,
         runtime_handle: tokio::runtime::Handle,
     ) -> Vec<irys_types::TokioServiceHandle> {
         let mut handles = Vec::new();
-        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
+        let controller_count = std::cmp::max(1_usize, self.packing_config.concurrency as usize);
 
-        for key in keys {
+        for i in 0..controller_count {
             let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
             let self_clone = self.clone();
-            let pending_jobs = self.pending_jobs.get(&key).unwrap().clone();
-
             let runtime_handle_clone = runtime_handle.clone();
+
             let handle = runtime_handle.spawn(async move {
                 tokio::select! {
-                    _ = Self::process_jobs(self_clone, pending_jobs, runtime_handle_clone) => {},
+                    _ = Self::process_jobs(self_clone, runtime_handle_clone) => {},
                     _ = shutdown_rx => {
-                        tracing::info!("Packing controller for SM {} received shutdown signal", key);
+                        tracing::info!("Packing controller {} received shutdown signal", i);
                     }
                 }
             });
 
             handles.push(irys_types::TokioServiceHandle {
-                name: format!("packing_controller_sm_{}", key),
+                name: format!("packing_controller_{}", i),
                 handle,
                 shutdown_signal: shutdown_tx,
             });
@@ -493,7 +503,8 @@ impl PackingService {
 
 #[derive(Debug, Clone)]
 pub struct Internals {
-    pub pending_jobs: PackingJobsBySM,
+    pub pending_jobs:
+        Arc<RwLock<std::collections::HashMap<usize, Arc<RwLock<VecDeque<PackingRequest>>>>>>,
     pub semaphore: PackingSemaphore,
     pub active_workers: Arc<AtomicUsize>,
     pub config: PackingConfig,
@@ -562,25 +573,20 @@ impl PackingService {
         let notify = self.notify.clone();
         runtime_handle.spawn(async move {
             while let Some(msg) = rx.recv().await {
-                // Enqueue into the SM-specific pending queue
-                if let Some(queue) = job_queues.get(&msg.storage_module.id) {
-                    // Ignore poisoned lock errors by propagating panic (consistent with existing code)
-                    queue.as_ref().write().unwrap().push_back(msg);
-                    // signal new activity for waiters
-                    notify.notify_waiters();
-                } else {
-                    // Unknown storage module id; this indicates a wiring/configuration bug. Drop the message but surface loudly.
-                    tracing::error!(
-                        target: "irys::packing",
-                        sm_id = msg.storage_module.id,
-                        "Received packing request for unknown storage module id; dropping request"
-                    );
-                    debug_assert!(
-                        false,
-                        "Packing request targeted unknown storage module id {}. This indicates a wiring/configuration bug.",
-                        msg.storage_module.id
-                    );
-                }
+                // Enqueue into the SM-specific pending queue; create queue if missing
+                let sm_id = msg.storage_module.id;
+                let queue_arc = {
+                    let mut map = job_queues
+                        .write()
+                        .expect("Unable to acquire pending jobs map write lock");
+                    map.entry(sm_id)
+                        .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
+                        .clone()
+                };
+                // Ignore poisoned lock errors by propagating panic (consistent with existing code)
+                queue_arc.as_ref().write().unwrap().push_back(msg);
+                // signal new activity for waiters
+                notify.notify_waiters();
             }
         });
 
@@ -607,10 +613,11 @@ pub async fn wait_for_packing(
 
         loop {
             // Counts all jobs in all job queues
-            let queued_jobs = internals
-                .pending_jobs
-                .values()
-                .fold(0, |acc, x| acc + x.as_ref().read().unwrap().len());
+            let queued_jobs = {
+                let map = internals.pending_jobs.read().unwrap();
+                map.values()
+                    .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+            };
 
             let available_permits = internals.semaphore.available_permits();
             let target_permits = internals.config.concurrency as usize;

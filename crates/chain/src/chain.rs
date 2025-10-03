@@ -21,7 +21,7 @@ use irys_actors::{
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining::{MiningControl, PartitionMiningActor},
-    packing::{PackingRequest, PackingService},
+    packing::PackingRequest,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -945,8 +945,13 @@ impl IrysNode {
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
-        // start service senders/receivers
-        let (service_senders, receivers) = ServiceSenders::new();
+        // initialize packing service early (dynamic registration)
+        let packing_service =
+            irys_actors::packing::PackingService::new(Vec::new(), Arc::new(config.clone()));
+        let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
+
+        // start service senders/receivers with packing handle
+        let (service_senders, receivers) = ServiceSenders::new(packing_handle.clone());
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1205,15 +1210,10 @@ impl IrysNode {
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
 
-        // set up packing service
-        let (atomic_global_step_number, packing_controller_handles, packing_handle) =
-            Self::init_packing_service(
-                &config,
-                global_step_number,
-                &storage_modules_guard,
-                runtime_handle.clone(),
-            );
-        service_senders.set_packing_handle(packing_handle.clone());
+        // spawn packing controllers and set global step number
+        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
+        let packing_controller_handles =
+            packing_service.spawn_packing_controllers(runtime_handle.clone());
 
         // set up storage modules
         let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
@@ -1565,29 +1565,6 @@ impl IrysNode {
             }
         }
         (part_actors, arbiters)
-    }
-
-    fn init_packing_service(
-        config: &Config,
-        global_step_number: u64,
-        storage_modules_guard: &StorageModulesReadGuard,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> (
-        Arc<AtomicU64>,
-        Vec<TokioServiceHandle>,
-        irys_actors::packing::PackingHandle,
-    ) {
-        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
-        let config = Arc::new(config.clone());
-        let packing_service = PackingService::new(sm_ids, config);
-        let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
-        let packing_controller_handles = packing_service.spawn_packing_controllers(runtime_handle);
-        (
-            atomic_global_step_number,
-            packing_controller_handles,
-            packing_handle,
-        )
     }
 
     fn init_block_producer(

@@ -18,7 +18,7 @@ use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::sync::{
     broadcast,
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -39,8 +39,8 @@ impl Deref for ServiceSenders {
 impl ServiceSenders {
     // Create both the sender and receiver sides
     #[must_use]
-    pub fn new() -> (Self, ServiceReceivers) {
-        let (senders, receivers) = ServiceSendersInner::init();
+    pub fn new(handle: PackingHandle) -> (Self, ServiceReceivers) {
+        let (senders, receivers) = ServiceSendersInner::init(handle);
         (Self(Arc::new(senders)), receivers)
     }
 
@@ -61,26 +61,12 @@ impl ServiceSenders {
     }
 
     pub fn new_with_packing_handle(handle: PackingHandle) -> (Self, ServiceReceivers) {
-        let (senders, receivers) = ServiceSendersInner::init();
-        senders
-            .packing_handle
-            .set(handle)
-            .expect("packing_handle already set");
+        let (senders, receivers) = ServiceSendersInner::init(handle);
         (Self(Arc::new(senders)), receivers)
     }
 
-    /// Late-initialize the packing handle for cases where ServiceSenders is constructed
-    /// before the packing service exists. Subsequent calls are ignored.
-    pub fn set_packing_handle(&self, handle: PackingHandle) {
-        let _ = self.0.packing_handle.set(handle);
-    }
-
     pub fn packing_handle(&self) -> PackingHandle {
-        self.0
-            .packing_handle
-            .get()
-            .expect("packing_handle not set")
-            .clone()
+        self.0.packing_handle.clone()
     }
 }
 
@@ -126,12 +112,12 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
-    pub packing_handle: OnceLock<PackingHandle>,
+    pub packing_handle: PackingHandle,
 }
 
 impl ServiceSendersInner {
     #[must_use]
-    pub fn init() -> (Self, ServiceReceivers) {
+    pub fn init(handle: PackingHandle) -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
@@ -182,7 +168,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
-            packing_handle: OnceLock::new(),
+            packing_handle: handle,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
