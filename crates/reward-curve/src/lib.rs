@@ -68,7 +68,8 @@ fn decay_factor(t_secs: u128, half_life: u128) -> Result<U256> {
     // Compute 2^-q
     let decay_q_fp18 = if q == 0 {
         TOKEN_SCALE
-    } else if q >= 256 {
+    // Since TOKEN_SCALE = 1e18 and 2^60 ≈ 1.15e18, TOKEN_SCALE / 2^q == 0 for q >= 60
+    } else if q >= 60 {
         U256::zero() // result underflows to zero
     } else {
         safe_div(TOKEN_SCALE, U256::one() << q)?
@@ -235,6 +236,22 @@ mod tests {
         let ts = secs(5); // arbitrary
         let reward = curve.reward_between(ts, ts)?;
         assert!(reward.amount.is_zero());
+        Ok(())
+    }
+
+    #[test]
+    fn decay_factor_q_cutoff_behavior() -> Result<()> {
+        // With half_life = 1, q = t/half_life = t
+        // q = 59 -> non-zero; q >= 60 -> zero (since TOKEN_SCALE / 2^q truncates to 0)
+        let non_zero = decay_factor(59, 1)?;
+        assert!(non_zero > U256::zero(), "q=59 should be non-zero");
+
+        let zero_60 = decay_factor(60, 1)?;
+        assert!(zero_60.is_zero(), "q=60 should be zero");
+
+        let zero_100 = decay_factor(100, 1)?;
+        assert!(zero_100.is_zero(), "q=100 should be zero");
+
         Ok(())
     }
 
