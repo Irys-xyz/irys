@@ -1149,7 +1149,7 @@ impl Inner {
     // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
     #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
-        &mut self,
+        &self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
         let tx_id = tx.id();

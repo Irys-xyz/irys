@@ -57,39 +57,25 @@ impl Inner {
         tx.promoted_height = None;
 
         {
-            let mempool_state_read_guard = self.mempool_state.read().await;
-
             // Early out if we already know about this transaction in
             // the mempool or the index
-            if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
-                || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
-                || self
-                    .irys_db
-                    .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
-                    .map_err(|_| TxIngressError::DatabaseError)?
-                    .is_some()
-            {
+            if self.is_known_data_tx(&tx.id).await? {
                 warn!("duplicate tx: {:?}", TxIngressError::Skipped);
                 return Err(TxIngressError::Skipped);
             }
-
-            drop(mempool_state_read_guard);
-        };
+        }
 
     // Validate the transaction signature
     // check the result and error handle
     self.validate_signature(&tx).await?;
 
         // Validate anchor and compute pre-confirmation expiry horizon
-        let anchor_height = self.validate_anchor(&tx).await?;
-        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
-        let expiry_height = anchor_height + anchor_expiry_depth;
+        let expiry_height = self.compute_expiry_height(&tx).await?;
 
         // Validate ledger type for ALL sources (API and Gossip)
         // We only accept Publish ledger transactions in the mempool.
         // Submit ledger entries are constructed by block producers when promoting txs.
-        let ledger = DataLedger::try_from(tx.ledger_id)
-            .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
+        let ledger = self.parse_ledger(&tx)?;
 
         // Protocol fee structure checks (Gossip: skip)
         //
@@ -110,73 +96,17 @@ impl Inner {
 
         // we don't check account balance here - we check it when we build & validate blocks
 
-        let mut mempool_state_write_guard = self.mempool_state.write().await;
-        mempool_state_write_guard
-            .valid_submit_ledger_tx
-            .insert(tx.id, tx.clone());
-        mempool_state_write_guard.recent_valid_tx.put(tx.id, ());
-        drop(mempool_state_write_guard);
+        self.insert_tx_and_mark_valid(&tx).await;
 
         // Cache the data_root in the database and set pre-confirmation expiry
-        match self.irys_db.update_eyre(|db_tx| {
-            // Insert/update CachedDataRoot entry
-            let mut cdr = irys_database::cache_data_root(db_tx, &tx, None)?
-                .ok_or_else(|| eyre!("failed to cache data_root"))?;
-            // Set expiry so pruning can remove never-confirmed roots after their anchor window
-            cdr.expiry_height = Some(expiry_height);
-            db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
-            Ok(())
-        }) {
-            Ok(()) => {
-                info!(
-                    "Successfully cached data_root {:?} for tx {:?}",
-                    tx.data_root, tx.id
-                );
-            }
-            Err(db_error) => {
-                error!(
-                    "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                    tx.data_root, tx.id, db_error
-                );
-            }
-        };
+        self.cache_data_root_with_expiry(&tx, expiry_height);
 
         // Process any chunks that arrived before their parent transaction
         // These were temporarily stored in the pending_chunks cache
-        let mut mempool_state_write_guard = self.mempool_state.write().await;
-        let option_chunks_map = mempool_state_write_guard.pending_chunks.pop(&tx.data_root);
-        drop(mempool_state_write_guard);
-
-        if let Some(chunks_map) = option_chunks_map {
-            // Extract owned chunks from the map to process them
-            let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            for chunk in chunks {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                //todo check the value rather than _
-                let _ = self
-                    .handle_message(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
-                    .await;
-
-                let msg_result = oneshot_rx
-                    .await
-                    .expect("pending chunks should be processed by the mempool");
-
-                if let Err(err) = msg_result {
-                    tracing::error!("oneshot failure: {:?}", err);
-                    return Err(TxIngressError::Other("oneshot failure".to_owned()));
-                }
-            }
-        }
+        self.process_pending_chunks_for_root(tx.data_root).await?;
 
         // Gossip transaction
-        let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());
-        if let Err(error) = self
-            .service_senders
-            .gossip_broadcast
-            .send(gossip_broadcast_message)
-        {
-            tracing::error!("Failed to send gossip data: {:?}", error);
-        }
+        self.broadcast_tx_gossip(&tx);
 
         Ok(())
     }
@@ -190,39 +120,25 @@ impl Inner {
         tx.promoted_height = None;
 
         {
-            let mempool_state_read_guard = self.mempool_state.read().await;
-
             // Early out if we already know about this transaction in
             // the mempool or the index
-            if mempool_state_read_guard.recent_invalid_tx.contains(&tx.id)
-                || mempool_state_read_guard.recent_valid_tx.contains(&tx.id)
-                || self
-                    .irys_db
-                    .view_eyre(|dbtx| tx_header_by_txid(dbtx, &tx.id))
-                    .map_err(|_| TxIngressError::DatabaseError)?
-                    .is_some()
-            {
+            if self.is_known_data_tx(&tx.id).await? {
                 warn!("duplicate tx: {:?}", TxIngressError::Skipped);
                 return Err(TxIngressError::Skipped);
             }
-
-            drop(mempool_state_read_guard);
-        };
+        }
 
         // Validate the transaction signature
         // check the result and error handle
         self.validate_signature(&tx).await?;
 
         // Validate anchor and compute pre-confirmation expiry horizon
-        let anchor_height = self.validate_anchor(&tx).await?;
-        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
-        let expiry_height = anchor_height + anchor_expiry_depth;
+        let expiry_height = self.compute_expiry_height(&tx).await?;
 
         // Validate ledger type for ALL sources (API and Gossip)
         // We only accept Publish ledger transactions in the mempool.
         // Submit ledger entries are constructed by block producers when promoting txs.
-        let ledger = DataLedger::try_from(tx.ledger_id)
-            .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))?;
+        let ledger = self.parse_ledger(&tx)?;
 
         // Protocol fee structure checks (API only)
         //
@@ -242,34 +158,7 @@ impl Inner {
                 // and can differ across forks. Instead, we verify the fee structure is
                 // internally consistent (charge objects can be constructed) so it can be
                 // distributed properly by protocol rules if included.
-                let actual_perm_fee = tx
-                    .perm_fee
-                    .ok_or(TxIngressError::Other("Perm fee must be present".to_string()))?;
-
-                let actual_term_fee = tx.term_fee;
-
-                // Validate that fee distribution objects can be created successfully
-                // This ensures the fee structure is internally consistent and can be
-                // properly distributed to block producers, ingress proof providers, etc.
-
-                // Validate term fee distribution structure
-                TermFeeCharges::new(
-                    actual_term_fee,
-                    &self.config.node_config.consensus_config(),
-                )
-                .map_err(|e| {
-                    TxIngressError::Other(format!("Invalid term fee structure: {}", e))
-                })?;
-
-                // Validate publish fee distribution structure
-                PublishFeeCharges::new(
-                    actual_perm_fee,
-                    actual_term_fee,
-                    &self.config.node_config.consensus_config(),
-                )
-                .map_err(|e| {
-                    TxIngressError::Other(format!("Invalid perm fee structure: {}", e))
-                })?;
+                self.validate_fee_structure_api_only(&tx)?;
             }
             DataLedger::Submit => {
                 // Submit ledger - a data transaction cannot target the submit ledger directly
@@ -279,19 +168,65 @@ impl Inner {
 
         // we don't check account balance here - we check it when we build & validate blocks
 
-        let mut mempool_state_write_guard = self.mempool_state.write().await;
-        mempool_state_write_guard
-            .valid_submit_ledger_tx
-            .insert(tx.id, tx.clone());
-        mempool_state_write_guard.recent_valid_tx.put(tx.id, ());
-        drop(mempool_state_write_guard);
+        self.insert_tx_and_mark_valid(&tx).await;
 
         // Cache the data_root in the database and set pre-confirmation expiry
+        self.cache_data_root_with_expiry(&tx, expiry_height);
+
+        // Process any chunks that arrived before their parent transaction
+        // These were temporarily stored in the pending_chunks cache
+        self.process_pending_chunks_for_root(tx.data_root).await?;
+
+        // Gossip transaction
+        self.broadcast_tx_gossip(&tx);
+
+        Ok(())
+    }
+
+    // --- Small shared helpers (kept private to this module) ---
+
+    /// Checks mempool caches and DB for an already-known data transaction.
+    /// Returns Ok(true) if known, Ok(false) if not known.
+    async fn is_known_data_tx(&self, tx_id: &H256) -> Result<bool, TxIngressError> {
+        let guard = self.mempool_state.read().await;
+        if guard.recent_invalid_tx.contains(tx_id) || guard.recent_valid_tx.contains(tx_id) {
+            return Ok(true);
+        }
+        drop(guard);
+
+        let known_in_db = self
+            .irys_db
+            .view_eyre(|dbtx| tx_header_by_txid(dbtx, tx_id))
+            .map_err(|_| TxIngressError::DatabaseError)?
+            .is_some();
+        Ok(known_in_db)
+    }
+
+    /// Resolves the anchor and returns the pre-confirmation expiry height.
+    async fn compute_expiry_height(&self, tx: &DataTransactionHeader) -> Result<u64, TxIngressError> {
+        let anchor_height = self.validate_anchor(tx).await?;
+        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+        Ok(anchor_height + anchor_expiry_depth)
+    }
+
+    /// Parses the ledger id from the tx and maps errors to TxIngressError.
+    fn parse_ledger(&self, tx: &DataTransactionHeader) -> Result<DataLedger, TxIngressError> {
+        DataLedger::try_from(tx.ledger_id)
+            .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))
+    }
+
+    /// Inserts tx into the mempool and marks it as recently valid.
+    async fn insert_tx_and_mark_valid(&mut self, tx: &DataTransactionHeader) {
+        let mut guard = self.mempool_state.write().await;
+        guard.valid_submit_ledger_tx.insert(tx.id, tx.clone());
+        guard.recent_valid_tx.put(tx.id, ());
+    }
+
+    /// Caches data_root with expiry, logging success/failure.
+    fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
         match self.irys_db.update_eyre(|db_tx| {
-            // Insert/update CachedDataRoot entry
-            let mut cdr = irys_database::cache_data_root(db_tx, &tx, None)?
+            let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
                 .ok_or_else(|| eyre!("failed to cache data_root"))?;
-            // Set expiry so pruning can remove never-confirmed roots after their anchor window
             cdr.expiry_height = Some(expiry_height);
             db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
             Ok(())
@@ -309,19 +244,18 @@ impl Inner {
                 );
             }
         };
+    }
 
-        // Process any chunks that arrived before their parent transaction
-        // These were temporarily stored in the pending_chunks cache
-        let mut mempool_state_write_guard = self.mempool_state.write().await;
-        let option_chunks_map = mempool_state_write_guard.pending_chunks.pop(&tx.data_root);
-        drop(mempool_state_write_guard);
+    /// Processes any pending chunks that arrived before their parent transaction.
+    async fn process_pending_chunks_for_root(&mut self, data_root: H256) -> Result<(), TxIngressError> {
+        let mut guard = self.mempool_state.write().await;
+        let option_chunks_map = guard.pending_chunks.pop(&data_root);
+        drop(guard);
 
         if let Some(chunks_map) = option_chunks_map {
-            // Extract owned chunks from the map to process them
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
             for chunk in chunks {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                //todo check the value rather than _
                 let _ = self
                     .handle_message(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
                     .await;
@@ -336,8 +270,11 @@ impl Inner {
                 }
             }
         }
+        Ok(())
+    }
 
-        // Gossip transaction
+    /// Broadcasts the transaction over gossip, with error logging.
+    fn broadcast_tx_gossip(&self, tx: &DataTransactionHeader) {
         let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());
         if let Err(error) = self
             .service_senders
@@ -346,6 +283,25 @@ impl Inner {
         {
             tracing::error!("Failed to send gossip data: {:?}", error);
         }
+    }
+
+    /// API-only validation of fee distribution structures for Publish ledger.
+    fn validate_fee_structure_api_only(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
+        let actual_perm_fee = tx
+            .perm_fee
+            .ok_or(TxIngressError::Other("Perm fee must be present".to_string()))?;
+
+        let actual_term_fee = tx.term_fee;
+
+        TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
+            .map_err(|e| TxIngressError::Other(format!("Invalid term fee structure: {}", e)))?;
+
+        PublishFeeCharges::new(
+            actual_perm_fee,
+            actual_term_fee,
+            &self.config.node_config.consensus_config(),
+        )
+        .map_err(|e| TxIngressError::Other(format!("Invalid perm fee structure: {}", e)))?;
 
         Ok(())
     }
