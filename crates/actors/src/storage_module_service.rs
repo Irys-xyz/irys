@@ -141,9 +141,9 @@ impl StorageModuleServiceInner {
             // Get the existing StorageModule from our state with the same storage module id
             let existing = {
                 modules_snapshot
-                .iter()
-                .find(|sm| sm.id == sm_info.id)
-                .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
+                    .iter()
+                    .find(|sm| sm.id == sm_info.id)
+                    .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
             };
 
             // Did this storage module from our state get assigned a new partition_hash ?

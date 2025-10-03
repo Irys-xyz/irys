@@ -1,0 +1,1 @@
+<!-- Mining overview - storage-based approach -->

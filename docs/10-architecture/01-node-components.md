@@ -1,0 +1,1 @@
+<!-- core components and their responsibilities -->

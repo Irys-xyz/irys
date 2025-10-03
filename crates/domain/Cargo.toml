@@ -33,6 +33,7 @@ reth.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 rug = "1"
+base58.workspace=true
 
 [dev-dependencies]
 test-log.workspace = true

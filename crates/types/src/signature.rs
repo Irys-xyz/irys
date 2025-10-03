@@ -9,7 +9,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 //==============================================================================
 // IrysSignature
 //------------------------------------------------------------------------------
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary, Hash)]
 /// Wrapper newtype around [`Signature`], with enforced [`Parity::NonEip155`] parity
 pub struct IrysSignature(Signature);
 

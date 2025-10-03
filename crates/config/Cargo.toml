@@ -13,11 +13,6 @@ eyre.workspace = true
 tracing.workspace = true
 serde.workspace = true
 toml.workspace = true
-reth-chainspec.workspace = true
-alloy-core.workspace = true
-alloy-eips.workspace = true
-alloy-genesis.workspace = true
-reth-primitives-traits.workspace = true
 alloy-primitives.workspace = true
 
 [dev-dependencies]

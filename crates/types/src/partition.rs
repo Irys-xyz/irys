@@ -19,6 +19,7 @@ pub type PartitionHash = H256;
     Copy,
     RlpDecodable,
     RlpEncodable,
+    Hash,
 )]
 #[rlp(trailing)]
 pub struct PartitionAssignment {

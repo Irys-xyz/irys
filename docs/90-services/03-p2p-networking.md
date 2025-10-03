@@ -1,0 +1,1 @@
+<!-- # Message types and communication patterns between services -->

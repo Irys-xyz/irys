@@ -7,7 +7,7 @@ use irys_types::{
 use tracing::debug;
 
 /// A state struct that can be wrapped with Arc<`RwLock`<>> to provide parallel read access
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct PartitionAssignments {
     /// Active data partition state mapped by partition hash
     pub data_partitions: BTreeMap<PartitionHash, PartitionAssignment>,

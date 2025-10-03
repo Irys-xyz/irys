@@ -1,0 +1,1 @@
+<!-- Block and transaction validation rules (light vs full) -->

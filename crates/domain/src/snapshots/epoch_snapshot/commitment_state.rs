@@ -2,7 +2,7 @@ use irys_primitives::CommitmentStatus;
 use irys_types::{Address, IrysTransactionId, H256, U256};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Hash)]
 pub struct CommitmentStateEntry {
     pub id: IrysTransactionId,
     pub commitment_status: CommitmentStatus,
@@ -13,7 +13,7 @@ pub struct CommitmentStateEntry {
     pub amount: U256,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Hash)]
 pub struct CommitmentState {
     pub stake_commitments: BTreeMap<Address, CommitmentStateEntry>,
     pub pledge_commitments: BTreeMap<Address, Vec<CommitmentStateEntry>>,

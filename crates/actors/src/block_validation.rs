@@ -944,6 +944,7 @@ pub async fn shadow_transactions_are_valid(
         );
 
     let evm_block: Block = payload_v3.try_into_block()?;
+    // todo(IMPORTANT) validate that we have no blobs, no blob gas usage, and none of the txs have any sidecars with them
 
     // 2. Extract shadow transactions from the beginning of the block
     let mut expect_shadow_txs = true;

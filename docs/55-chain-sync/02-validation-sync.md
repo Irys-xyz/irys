@@ -1,0 +1,1 @@
+ <!-- # Near-head sync with full validation -->
