@@ -174,7 +174,7 @@ pub struct IrysBlockExecutorFactory {
 
 impl IrysBlockExecutorFactory {
     /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
-    /// [`ReceiptBuilder`].
+    /// [`RethReceiptBuilder`].
     pub const fn new(
         receipt_builder: RethReceiptBuilder,
         spec: Arc<ChainSpec>,

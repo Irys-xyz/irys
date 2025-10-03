@@ -351,6 +351,8 @@ where
         match crate::shadow_tx::detect_and_decode_from_parts(to, input) {
             Ok(Some(_)) | Err(_) => {
                 tracing::trace!(
+                    sender = ?tx.sender(),
+                    tx_hash = ?tx.hash(),
                     "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
                 );
                 return Err(TransactionValidationOutcome::Invalid(

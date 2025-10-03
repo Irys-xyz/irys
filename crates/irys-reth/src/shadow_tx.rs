@@ -11,11 +11,7 @@
 
 use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_primitives::keccak256;
-use alloy_primitives::Address;
-use alloy_primitives::Bytes;
-use alloy_primitives::FixedBytes;
-use alloy_primitives::TxKind;
-use alloy_primitives::U256;
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::io::{Read, Write};
 use std::sync::LazyLock;
@@ -577,33 +573,15 @@ pub trait ShadowTxSource {
     fn input(&self) -> &[u8];
 }
 
-impl ShadowTxSource for reth_ethereum_primitives::TransactionSigned {
+impl<T> ShadowTxSource for T
+where
+    T: AlloyTransaction,
+{
     fn to_addr(&self) -> Option<Address> {
         AlloyTransaction::to(self)
     }
     fn input(&self) -> &[u8] {
         AlloyTransaction::input(self)
-    }
-}
-
-impl ShadowTxSource for &reth_ethereum_primitives::TransactionSigned {
-    fn to_addr(&self) -> Option<Address> {
-        AlloyTransaction::to(*self)
-    }
-    fn input(&self) -> &[u8] {
-        AlloyTransaction::input(*self)
-    }
-}
-
-impl ShadowTxSource for reth::revm::context::TxEnv {
-    fn to_addr(&self) -> Option<Address> {
-        match self.kind {
-            TxKind::Call(addr) => Some(addr),
-            TxKind::Create => None,
-        }
-    }
-    fn input(&self) -> &[u8] {
-        &self.data
     }
 }
 

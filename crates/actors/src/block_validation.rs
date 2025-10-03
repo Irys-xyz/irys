@@ -1054,11 +1054,10 @@ fn extract_leading_shadow_txs(
         &reth_ethereum_primitives::TransactionSigned,
     )>,
 > + '_ {
-    use std::iter;
     let mut it = txs.iter();
     let mut seen_non_shadow = false;
     let mut reported_error = false;
-    iter::from_fn(move || {
+    std::iter::from_fn(move || {
         if reported_error {
             return None;
         }
@@ -1077,7 +1076,7 @@ fn extract_leading_shadow_txs(
                 }
                 Err(e) => {
                     reported_error = true;
-                    return Some(Err(eyre::eyre!(e.to_string())));
+                    return Some(Err(e.into()));
                 }
             }
         }
