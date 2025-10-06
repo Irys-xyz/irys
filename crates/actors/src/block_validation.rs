@@ -1859,6 +1859,7 @@ pub async fn data_txs_are_valid(
             }
 
             // Enforce data availability by verifying ingress proofs with the actual chunks
+            // possible future improvements: refresh peer list on failure of all 5, try peers concurrently
             if config.consensus.enable_full_ingress_proof_validation {
                 // Collect all chunks for this transaction from the DB (by tx-relative offset)
                 let expected_chunk_count =
@@ -1872,6 +1873,28 @@ pub async fn data_txs_are_valid(
                     Vec::with_capacity(expected_chunk_count as usize);
 
                 let client = reqwest::Client::new();
+
+                // Fetch active peers once outside the chunk loop (take up to 5)
+                let api_addrs: Vec<_> = {
+                    let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
+                    let _ = service_senders
+                        .data_sync
+                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+
+                    match tokio::time::timeout(std::time::Duration::from_millis(1000), peers_rx)
+                        .await
+                    {
+                        Ok(Ok(active_peers)) => {
+                            let guard = active_peers.read().unwrap();
+                            guard
+                                .iter()
+                                .take(5)
+                                .map(|(_addr, pbm)| pbm.peer_address.api)
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    }
+                };
 
                 for i in 0..expected_chunk_count {
                     let tx_chunk_offset = irys_types::TxChunkOffset::from(
@@ -1888,108 +1911,87 @@ pub async fn data_txs_are_valid(
                         error: e.to_string(),
                     })?;
 
-                    // If missing locally, attempt fetch-on-miss from peers and ingest
+                    // If missing locally, attempt fetch-on-miss from pre-selected peers and ingest
                     if maybe_chunk.is_none() {
-                        // Ask DataSync service for active peers
-                        let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
-                        let _ = service_senders
-                            .data_sync
-                            .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+                        for api_addr in api_addrs.iter() {
+                            // Build data_root/offset fetch URL using peer API address
+                            let url = format!(
+                                "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                api_addr,
+                                publish_ledger.ledger_id,
+                                tx_header.data_root,
+                                u32::try_from(i).expect("Value exceeds u32::MAX")
+                            );
 
-                        // Small timeout budget per peer-list request
-                        if let Ok(Ok(active_peers)) =
-                            tokio::time::timeout(std::time::Duration::from_millis(1000), peers_rx)
-                                .await
-                        {
-                            // Take up to 5 API addresses now to avoid holding the lock across awaits
-                            let api_addrs: Vec<_> = {
-                                let guard = active_peers.read().unwrap();
-                                guard
-                                    .iter()
-                                    .take(5)
-                                    .map(|(_addr, pbm)| pbm.peer_address.api)
-                                    .collect()
+                            // Fetch with short timeout
+                            let resp = tokio::time::timeout(
+                                std::time::Duration::from_millis(1500),
+                                client.get(&url).send(),
+                            )
+                            .await;
+
+                            let Ok(Ok(resp)) = resp else {
+                                continue;
                             };
-                            for api_addr in api_addrs {
-                                // Build data_root/offset fetch URL using peer API address
-                                let url = format!(
-                                    "http://{}/v1/chunk/data_root/{}/{}/{}",
-                                    api_addr,
-                                    publish_ledger.ledger_id,
-                                    tx_header.data_root,
-                                    u32::try_from(i).expect("Value exceeds u32::MAX")
-                                );
+                            if !resp.status().is_success() {
+                                continue;
+                            }
 
-                                // Fetch with short timeout
-                                let resp = tokio::time::timeout(
-                                    std::time::Duration::from_millis(1500),
-                                    client.get(&url).send(),
-                                )
-                                .await;
+                            // Parse ChunkFormat and convert to UnpackedChunk
+                            let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
+                            else {
+                                continue;
+                            };
 
-                                let Ok(Ok(resp)) = resp else {
-                                    continue;
-                                };
-                                if !resp.status().is_success() {
-                                    continue;
-                                }
+                            let unpacked = match chunk_format {
+                                irys_types::ChunkFormat::Unpacked(u) => u,
+                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
+                                    &p,
+                                    config.consensus.entropy_packing_iterations,
+                                    config.consensus.chunk_size as usize,
+                                    config.consensus.chain_id,
+                                ),
+                            };
 
-                                // Parse ChunkFormat and convert to UnpackedChunk
-                                let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
-                                else {
-                                    continue;
-                                };
+                            // Basic sanity checks before ingest
+                            if unpacked.data_root != tx_header.data_root
+                                || *unpacked.tx_offset
+                                    != u32::try_from(i).expect("Value exceeds u32::MAX")
+                            {
+                                continue;
+                            }
 
-                                let unpacked = match chunk_format {
-                                    irys_types::ChunkFormat::Unpacked(u) => u,
-                                    irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
-                                        &p,
-                                        config.consensus.entropy_packing_iterations,
-                                        config.consensus.chunk_size as usize,
-                                        config.consensus.chain_id,
-                                    ),
-                                };
+                            // Ingest via mempool to persist and validate
+                            let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
+                            let _ = service_senders
+                                .mempool
+                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx));
 
-                                // Basic sanity checks before ingest
-                                if unpacked.data_root != tx_header.data_root
-                                    || *unpacked.tx_offset
-                                        != u32::try_from(i).expect("Value exceeds u32::MAX")
-                                {
-                                    continue;
-                                }
+                            // Wait briefly for ingest to complete
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_millis(1500),
+                                ing_rx,
+                            )
+                            .await;
 
-                                // Ingest via mempool to persist and validate
-                                let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
-                                let _ = service_senders.mempool.send(
-                                    crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx),
-                                );
-
-                                // Wait briefly for ingest to complete
-                                let _ = tokio::time::timeout(
-                                    std::time::Duration::from_millis(1500),
-                                    ing_rx,
-                                )
-                                .await;
-
-                                // Re-open a fresh read tx to observe the write
-                                let ro_tx2 =
-                                    db.tx().map_err(|e| PreValidationError::DatabaseError {
-                                        error: e.to_string(),
-                                    })?;
-                                maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
-                                    &ro_tx2,
-                                    tx_header.data_root,
-                                    tx_chunk_offset,
-                                )
-                                .map_err(|e| {
-                                    PreValidationError::DatabaseError {
-                                        error: e.to_string(),
-                                    }
+                            // Re-open a fresh read tx to observe the write
+                            let ro_tx2 =
+                                db.tx().map_err(|e| PreValidationError::DatabaseError {
+                                    error: e.to_string(),
                                 })?;
-
-                                if maybe_chunk.is_some() {
-                                    break;
+                            maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                                &ro_tx2,
+                                tx_header.data_root,
+                                tx_chunk_offset,
+                            )
+                            .map_err(|e| {
+                                PreValidationError::DatabaseError {
+                                    error: e.to_string(),
                                 }
+                            })?;
+
+                            if maybe_chunk.is_some() {
+                                break;
                             }
                         }
                     }
