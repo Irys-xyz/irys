@@ -27,7 +27,7 @@ pub async fn post_commitment_tx(
             err
         );
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {:?}", err)));
+            .body(format!("Failed to deliver transaction: {err:?}")));
     }
 
     let msg_result = oneshot_rx.await;
@@ -36,7 +36,7 @@ pub async fn post_commitment_tx(
     if let Err(err) = msg_result {
         tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {:?}", err)));
+            .body(format!("Failed to deliver transaction: {err:?}")));
     }
 
     // If message delivery succeeded, check for validation errors within the response
@@ -45,48 +45,43 @@ pub async fn post_commitment_tx(
         tracing::warn!("API: {:?}", err);
         return match err {
             TxIngressError::InvalidSignature => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err:?}")))
             }
             TxIngressError::Unfunded => {
-                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED).body(format!("{:?}", err)))
+                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED).body(format!("{err:?}")))
             }
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
                 tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Failed to deliver transaction: {:?}", err)))
+                    .body(format!("Failed to deliver transaction: {err:?}")))
             }
             TxIngressError::InvalidAnchor => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err:?}")))
             }
             TxIngressError::DatabaseError => {
                 tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal database error: {:?}", err)))
+                    .body(format!("Internal database error: {err:?}")))
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal service error: {:?}", err)))
+                    .body(format!("Internal service error: {err:?}")))
             }
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
-                    "Commitment validation error: {:?}",
-                    commitment_validation_error
+                    "Commitment validation error: {commitment_validation_error:?}"
                 )))
             }
             TxIngressError::InvalidLedger(_) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{:?}", err)))
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err:?}")))
             }
             TxIngressError::BalanceFetchError { address, reason } => {
                 tracing::error!("API: Balance fetch error for {}: {}", address, reason);
-                Ok(
-                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
-                        "Unable to verify balance for {}: {}",
-                        address, reason
-                    )),
-                )
+                Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(format!("Unable to verify balance for {address}: {reason}")))
             }
         };
     }

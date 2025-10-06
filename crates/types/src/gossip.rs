@@ -172,12 +172,12 @@ pub enum GossipDataRequest {
 impl Debug for GossipDataRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(hash) => write!(f, "block {:?}", hash),
+            Self::Block(hash) => write!(f, "block {hash:?}"),
             Self::ExecutionPayload(block_hash) => {
-                write!(f, "execution payload for block {:?}", block_hash)
+                write!(f, "execution payload for block {block_hash:?}")
             }
             Self::Chunk(chunk_path_hash) => {
-                write!(f, "chunk {:?}", chunk_path_hash)
+                write!(f, "chunk {chunk_path_hash:?}")
             }
         }
     }
