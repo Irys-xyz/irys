@@ -917,11 +917,10 @@ mod tests {
             .expect("Expected Some result from best_payload")
             .expect_err("Block production should have failed due to non-existent account");
 
-        let error_msg = format!("{:?}", err);
+        let error_msg = format!("{err:?}");
         assert!(
             error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected shadow transaction priority fee failure for non-existent account, got: {}",
-            error_msg
+            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
         );
 
         Ok(())
@@ -987,13 +986,12 @@ mod tests {
             .expect("Expected Some result from best_payload")
             .expect_err("Block production should have failed due to insufficient balance");
 
-        let error_msg = format!("{:?}", err);
+        let error_msg = format!("{err:?}");
         assert!(
             error_msg.contains("insufficient balance")
                 || error_msg.contains("Shadow transaction failed")
                 || error_msg.contains("EVM"),
-            "Expected shadow transaction insufficient balance failure, got: {}",
-            error_msg
+            "Expected shadow transaction insufficient balance failure, got: {error_msg}"
         );
 
         Ok(())
@@ -1631,8 +1629,7 @@ mod tests {
             );
             assert!(
                 pool_txs.is_empty(),
-                "Transaction pool should be empty during rollback, but contains: {:?}",
-                pool_txs
+                "Transaction pool should be empty during rollback, but contains: {pool_txs:?}"
             );
         }
 
@@ -1669,8 +1666,7 @@ mod tests {
 
         assert!(
             final_pool_txs.is_empty(),
-            "Transaction pool should remain empty after attempted shadow tx submission, but contains: {:?}",
-            final_pool_txs
+            "Transaction pool should remain empty after attempted shadow tx submission, but contains: {final_pool_txs:?}"
         );
 
         Ok(())
@@ -1950,8 +1946,7 @@ mod tests {
         for (i, expected_hash) in expected_tx_hashes.iter().enumerate() {
             assert_eq!(
                 block_tx_hashes[i], *expected_hash,
-                "Transaction at position {} should match submitted order",
-                i
+                "Transaction at position {i} should match submitted order"
             );
         }
 
@@ -2039,11 +2034,10 @@ mod tests {
                 "Block production should have failed due to non-existent account for unpledge",
             );
 
-        let error_msg = format!("{:?}", err);
+        let error_msg = format!("{err:?}");
         assert!(
             error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected shadow transaction priority fee failure for non-existent account, got: {}",
-            error_msg
+            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
         );
 
         Ok(())
@@ -2124,11 +2118,10 @@ mod tests {
                 "Block production should have failed due to non-existent account for pledge",
             );
 
-        let error_msg = format!("{:?}", err);
+        let error_msg = format!("{err:?}");
         assert!(
             error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected shadow transaction priority fee failure for non-existent account, got: {}",
-            error_msg
+            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
         );
 
         Ok(())
@@ -2796,9 +2789,7 @@ pub mod test_utils {
         for tx_hash in expected_txs {
             assert!(
                 block_txs.contains(tx_hash),
-                "{}: Transaction {:?} not found in block",
-                message,
-                tx_hash
+                "{message}: Transaction {tx_hash:?} not found in block"
             );
         }
     }
@@ -2820,9 +2811,7 @@ pub mod test_utils {
         for tx_hash in excluded_txs {
             assert!(
                 !block_txs.contains(tx_hash),
-                "{}: Transaction {:?} should not be in block",
-                message,
-                tx_hash
+                "{message}: Transaction {tx_hash:?} should not be in block"
             );
         }
     }
@@ -2855,9 +2844,7 @@ pub mod test_utils {
 
         assert!(
             last_shadow_tx_pos < first_normal_tx_pos,
-            "Shadow transactions should appear before normal transactions. Last shadow: {}, First normal: {}",
-            last_shadow_tx_pos,
-            first_normal_tx_pos
+            "Shadow transactions should appear before normal transactions. Last shadow: {last_shadow_tx_pos}, First normal: {first_normal_tx_pos}"
         );
     }
 
@@ -2880,8 +2867,7 @@ pub mod test_utils {
 
         assert_eq!(
             final_balance, expected_balance,
-            "{}: Expected balance {}, got {}",
-            message, expected_balance, final_balance
+            "{message}: Expected balance {expected_balance}, got {final_balance}"
         );
     }
 
@@ -2895,8 +2881,7 @@ pub mod test_utils {
         let actual_nonce = get_nonce(&node.inner, address);
         assert_eq!(
             actual_nonce, expected_nonce,
-            "{}: Expected nonce {}, got {}",
-            message, expected_nonce, actual_nonce
+            "{message}: Expected nonce {expected_nonce}, got {actual_nonce}"
         );
     }
 
@@ -2948,7 +2933,7 @@ pub mod test_utils {
             STORAGE_FEES_ID => storage_fees(address),
             PLEDGE_ID => pledge(address),
             UNPLEDGE_ID => unpledge(address),
-            _ => panic!("Unknown shadow transaction type: {}", tx_type),
+            _ => panic!("Unknown shadow transaction type: {tx_type}"),
         }
     }
 

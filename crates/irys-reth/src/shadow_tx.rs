@@ -771,7 +771,7 @@ mod tests {
             tx.serialize(&mut buf).unwrap();
 
             let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
-            assert_eq!(decoded, tx, "Packet {:?} failed roundtrip", packet);
+            assert_eq!(decoded, tx, "Packet {packet:?} failed roundtrip");
 
             // Verify solution hash is preserved
             let ShadowTransaction::V1 {

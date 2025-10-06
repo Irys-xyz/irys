@@ -427,7 +427,7 @@ mod tests {
         for i in 1..=2 {
             let count_clone = shutdown_count.clone();
             services.push(create_long_running_service(
-                format!("service_{}", i),
+                format!("service_{i}"),
                 move || {
                     count_clone.fetch_add(1, Ordering::SeqCst);
                 },
@@ -460,7 +460,7 @@ mod tests {
         for i in 1..=2 {
             let count_clone = shutdown_count.clone();
             services.push(create_long_running_service(
-                format!("normal_service_{}", i),
+                format!("normal_service_{i}"),
                 move || {
                     count_clone.fetch_add(1, Ordering::SeqCst);
                 },
@@ -495,7 +495,7 @@ mod tests {
         // Create services that record their shutdown order
         for i in 0..3 {
             let tx_clone = tx.clone();
-            let name = format!("service_{}", i);
+            let name = format!("service_{i}");
             let name_for_closure = name.clone();
 
             services.push(create_long_running_service(name, move || {

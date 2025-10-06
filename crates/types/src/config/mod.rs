@@ -372,15 +372,15 @@ pub mod serde_utils {
         if let Some(secs_str) = s.strip_suffix('s') {
             let secs: u64 = secs_str
                 .parse()
-                .map_err(|_| format!("Invalid duration number: {}", secs_str))?;
+                .map_err(|_| format!("Invalid duration number: {secs_str}"))?;
             Ok(Duration::from_secs(secs))
         } else if let Some(millis_str) = s.strip_suffix("ms") {
             let millis: u64 = millis_str
                 .parse()
-                .map_err(|_| format!("Invalid duration number: {}", millis_str))?;
+                .map_err(|_| format!("Invalid duration number: {millis_str}"))?;
             Ok(Duration::from_millis(millis))
         } else {
-            Err(format!("Duration must end with 's' or 'ms': {}", s))
+            Err(format!("Duration must end with 's' or 'ms': {s}"))
         }
     }
 
@@ -506,7 +506,7 @@ mod tests {
         let expected_config = ConsensusConfig::testing();
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
         // for debugging purposes
-        println!("{}", expected_toml_data);
+        println!("{expected_toml_data}");
 
         // Deserialize the TOML string into a ConsensusConfig
         let config = toml::from_str::<ConsensusConfig>(toml_data)
@@ -624,7 +624,7 @@ mod tests {
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
-        println!("{}", expected_toml_data);
+        println!("{expected_toml_data}");
 
         // Deserialize the TOML string into a NodeConfig
         let config = toml::from_str::<NodeConfig>(toml_data)
@@ -651,7 +651,7 @@ mod tests {
             .join("templates")
             .join("testnet_config.toml");
 
-        println!("path: {:?}", template_path);
+        println!("path: {template_path:?}");
 
         let template_content = std::fs::read_to_string(&template_path)
             .expect("Failed to read testnet_config.toml template");
