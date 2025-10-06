@@ -65,6 +65,9 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
 
+        // preserving promoted_height value on ingress is the safest policy
+        // mutating on ingress would allow for various incorrect behaviours such as skipping already-promoted txs by consulting this flag
+        // this allows proper chain-handling flows to adjust it if needed (e.g., on a reorg event)
         if tx.promoted_height.is_some() {
             warn!(
                 "Ingressed tx {:?} has promoted_height set to {:?}; preserving existing promotion state",
