@@ -165,8 +165,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         .join(
             submodule_path
                 .file_name()
-                .expect("submodule dir name")
-                .to_owned(),
+                .expect("submodule dir name"),
         )
         .join(PACKING_PARAMS_FILE_NAME);
     let mut params = PackingParams::from_toml(&params_path).expect("packing params to load");

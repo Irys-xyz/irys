@@ -182,7 +182,7 @@ impl CommitmentSnapshot {
                     }
                 }
 
-                CommitmentSnapshotStatus::Accepted
+                CommitmentSnapshotStatus::Unknown
             }
             _ => CommitmentSnapshotStatus::Unsupported,
         };

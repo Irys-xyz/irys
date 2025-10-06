@@ -133,7 +133,7 @@ impl Inner {
             &commitment_tx.id,
             &commitment_status
         );
-        if commitment_status == CommitmentSnapshotStatus::Accepted {
+        if commitment_status == CommitmentSnapshotStatus::Unknown {
             let mut mempool_state_guard = self.mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
             trace!(
@@ -215,6 +215,7 @@ impl Inner {
             }
             drop(mempool_state_guard)
         } else {
+            // Duplicate or unsupported/invalid: skip
             return Err(TxIngressError::Skipped);
         }
 
@@ -420,9 +421,6 @@ impl Inner {
 
         // Reject unsupported or invalid commitment types/targets
         match cache_status {
-            CommitmentSnapshotStatus::Accepted
-            | CommitmentSnapshotStatus::Unknown
-            | CommitmentSnapshotStatus::Unstaked => {}
             CommitmentSnapshotStatus::Unsupported
             | CommitmentSnapshotStatus::InvalidPledgeCount
             | CommitmentSnapshotStatus::PartitionNotOwned
@@ -433,6 +431,7 @@ impl Inner {
                 );
                 return cache_status;
             }
+            _ => {}
         }
 
         // For unstaked addresses, check for pending stake transactions
@@ -448,16 +447,17 @@ impl Inner {
                     .iter()
                     .any(|c| c.commitment_type == CommitmentType::Stake)
                 {
-                    return CommitmentSnapshotStatus::Accepted;
+                    // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
+                    return CommitmentSnapshotStatus::Unknown;
                 }
             }
 
             // No pending stakes found
-            warn!("Pledge Commitment is unstaked: {}", commitment_tx.id);
+            warn!("Commitment is unstaked: {}", commitment_tx.id);
             return CommitmentSnapshotStatus::Unstaked;
         }
 
-        // All other cases are valid
-        CommitmentSnapshotStatus::Accepted
+        // Pass-through: keep Unknown for fresh tx; Accepted indicates known duplicate
+        cache_status
     }
 }

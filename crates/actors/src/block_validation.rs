@@ -1408,7 +1408,9 @@ pub async fn commitment_txs_are_valid(
         .filter(|tx| {
             matches!(
                 tx.commitment_type,
-                CommitmentType::Stake | CommitmentType::Pledge { .. }
+                CommitmentType::Stake
+                    | CommitmentType::Pledge { .. }
+                    | CommitmentType::Unpledge { .. }
             )
         })
         .collect();

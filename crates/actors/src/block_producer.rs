@@ -1135,12 +1135,11 @@ pub trait BlockProdStrategy {
         })
     }
 
-    #[inline]
     fn is_epoch_block(&self, height: u64) -> bool {
         height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    #[tracing::instrument(skip_all, ret, err)]
+    #[tracing::instrument(skip_all, err)]
     async fn fetch_best_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1157,7 +1156,7 @@ pub trait BlockProdStrategy {
         rx.await.expect("to receive txns")
     }
 
-    #[tracing::instrument(skip_all, ret, err)]
+    #[tracing::instrument(skip_all, err)]
     fn fetch_parent_snapshots(
         &self,
         prev_block_header: &IrysBlockHeader,

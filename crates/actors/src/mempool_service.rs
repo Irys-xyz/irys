@@ -448,7 +448,9 @@ impl Inner {
                     .filter(|tx| {
                         matches!(
                             tx.commitment_type,
-                            CommitmentType::Stake | CommitmentType::Pledge { .. }
+                            CommitmentType::Stake
+                                | CommitmentType::Pledge { .. }
+                                | CommitmentType::Unpledge { .. }
                         )
                     })
                     .cloned()
