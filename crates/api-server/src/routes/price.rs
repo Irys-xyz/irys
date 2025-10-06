@@ -77,7 +77,16 @@ pub async fn get_price(
                 &state.config.consensus,
                 ema.ema_for_public_pricing(),
             )
-            .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {:?}", e)))?;
+            .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
+
+            // Debug logging for fee calculation
+            tracing::debug!(
+                "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
+                bytes_to_store,
+                term_fee,
+                state.config.consensus.immediate_tx_inclusion_reward_percent.amount,
+                state.config.consensus.number_of_ingress_proofs_total
+            );
 
             // If the cost calculation fails, return 400 with the error text
             let total_perm_cost = calculate_perm_fee_from_config(
@@ -86,7 +95,7 @@ pub async fn get_price(
                 ema.ema_for_public_pricing(),
                 term_fee,
             )
-            .map_err(|e| ErrorBadRequest(format!("{:?}", e)))?;
+            .map_err(|e| ErrorBadRequest(format!("{e:?}")))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: total_perm_cost.amount,
@@ -223,7 +232,7 @@ mod tests {
         let json = serde_json::to_string(&price_info).unwrap();
 
         // Should be string, not number
-        assert!(json.contains(&format!("\"bytes\":\"{}\"", above_safe_limit)));
+        assert!(json.contains(&format!("\"bytes\":\"{above_safe_limit}\"")));
 
         // Test JavaScript parsing would work
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
