@@ -1897,9 +1897,12 @@ pub async fn data_txs_are_valid(
                 };
 
                 for i in 0..expected_chunk_count {
-                    let tx_chunk_offset = irys_types::TxChunkOffset::from(
-                        u32::try_from(i).expect("Value exceeds u32::MAX"),
-                    );
+                    let tx_offset_u32 =
+                        u32::try_from(i).map_err(|_| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!("Tx chunk offset index {} exceeds u32::MAX", i),
+                        })?;
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(tx_offset_u32);
 
                     // Try local cache first
                     let mut maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
@@ -1920,7 +1923,7 @@ pub async fn data_txs_are_valid(
                                 api_addr,
                                 publish_ledger.ledger_id,
                                 tx_header.data_root,
-                                u32::try_from(i).expect("Value exceeds u32::MAX")
+                                tx_offset_u32
                             );
 
                             // Fetch with short timeout
@@ -1955,8 +1958,7 @@ pub async fn data_txs_are_valid(
 
                             // Basic sanity checks before ingest
                             if unpacked.data_root != tx_header.data_root
-                                || *unpacked.tx_offset
-                                    != u32::try_from(i).expect("Value exceeds u32::MAX")
+                                || *unpacked.tx_offset != tx_offset_u32
                             {
                                 continue;
                             }
