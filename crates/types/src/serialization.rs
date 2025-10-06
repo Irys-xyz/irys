@@ -196,19 +196,19 @@ impl Decode for U256 {
     }
 }
 
+// NOTE: RLP has specific standards for encoding numbers
+// so we defer to the correct impl used by alloy's U256
 impl Encodable for U256 {
     #[inline]
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        let mut buffer = [0_u8; 32];
-        self.to_big_endian(&mut buffer);
-        buffer.encode(out);
+        let int: alloy_primitives::U256 = (*self).into();
+        int.encode(out);
     }
 }
 
 impl Decodable for U256 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let res = <[u8; 32]>::decode(buf)?;
-        Ok(Self::from_big_endian(&res))
+        alloy_primitives::U256::decode(buf).map(Into::into)
     }
 }
 
@@ -891,6 +891,42 @@ mod tests {
 
         // Assert
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_option_u256_rlp() {
+        #[derive(Debug, Eq, PartialEq, RlpEncodable, RlpDecodable)]
+        #[rlp(trailing)]
+        struct Test {
+            a: U256,
+            b: Option<U256>,
+        }
+
+        let data1 = Test {
+            a: U256::from(42_u64),
+            b: Some(U256::zero()),
+        };
+
+        let data2 = Test {
+            a: U256::from(42_u64),
+            b: None,
+        };
+
+        let mut buffer1 = vec![];
+        data1.encode(&mut buffer1);
+        let decoded = Test::decode(&mut &buffer1[..]).unwrap();
+        // Some(0) is decoded as None
+        assert_ne!(data1, decoded);
+
+        let mut buffer2 = vec![];
+        data2.encode(&mut buffer2);
+        // unequal(!) encodings
+        // note: why? seems like if we serialise a Some value it gets an additional trailing `128` on the binary
+        // note: if we really needed to have `0`, we could modify the encoding u256 uses to treat 0 as a different value
+        assert_ne!(buffer1, buffer2);
+        let decoded2 = Test::decode(&mut &buffer2[..]).unwrap();
+        // but decodes "correctly"
+        assert_eq!(decoded2, data2);
     }
 
     #[test]

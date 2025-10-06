@@ -182,10 +182,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0xe735ff5a5e0eefdf5c5298f919ff5b94f35804f44c5db842db078dcbc7b5d499544cfbf8ffcb4113dea13433d5a739f354cb4551cf5384c9e9bb290d39d39b891b";
+    const SIG_HEX: &str = "0x09ce0a2661221ff591aca987dcebb5ec141d91df64e14dc6ca47c5e0a8be81660a105294723d0201e4989f58cdd51b164ba7bdfc2355c69c4ce6b3c5b0c7a5221c";
     // BS58 (JSON, hence the escaped quotes) encoded signature
     const SIG_BS58: &str =
-        "\"MQQ4dsjqX4iU5F34h6SSLKE1YVHV9Hk2XBnJCprchLdmG71dq1nZStc12oMc7bHjnFo6emHQ1oDpnkCZQEShGDQwL\"";
+        "\"sBf5Lkht1uvPSbkTc5UcWtcEf58Tw6xpVhBJnDEe4xYns4EV3hVKC5Mn2tY7R8VF9LKm1L5JARSMQhUqSaFzGGCT\"";
 
     // spellchecker:on
 
@@ -204,17 +204,18 @@ mod tests {
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
             data_root: H256::from([3_u8; 32]),
-            data_size: 1024,
+            data_size: 242,
             header_size: 0,
-            term_fee: U256::from(100_u64),
-            perm_fee: Some(U256::from(1_u64)),
+            term_fee: U256::from(99_u64),
+            perm_fee: Some(U256::from(98_u64)),
             ledger_id: 0,
-            bundle_format: Some(0),
+            bundle_format: None,
             chain_id: testing_config.chain_id,
             version: 0,
             promoted_height: None,
             signature: Default::default(),
         };
+
         let transaction = DataTransaction {
             header: original_header,
             ..Default::default()

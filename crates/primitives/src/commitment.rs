@@ -49,32 +49,6 @@ impl TryFrom<u8> for CommitmentStatus {
     }
 }
 
-impl Encodable for CommitmentStatus {
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        match self {
-            Self::Pending => out.put_u8(Self::Pending as u8),
-            Self::Active => out.put_u8(Self::Active as u8),
-            Self::Inactive => out.put_u8(Self::Inactive as u8),
-            Self::Slashed => out.put_u8(Self::Slashed as u8),
-        };
-    }
-    fn length(&self) -> usize {
-        1
-    }
-}
-
-impl Decodable for CommitmentStatus {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let _v = buf.to_vec();
-        let enc_stake_status = u8::decode(&mut &buf[..])?;
-        buf.advance(1);
-        let id = Self::try_from(enc_stake_status)
-            .or(Err(RlpError::Custom("unknown stake status id")))?;
-        let _v2 = buf.to_vec();
-        Ok(id)
-    }
-}
-
 // Type discriminants for CommitmentType encoding
 const COMMITMENT_TYPE_STAKE: u8 = 1;
 const COMMITMENT_TYPE_PLEDGE: u8 = 2;
