@@ -63,6 +63,7 @@ pub enum CommitmentValidationError {
 /// Stores deserialized fields from a JSON formatted Irys transaction header.
 /// will decode from strings or numeric literals for u64 fields, due to JS's max safe int being 2^53-1 instead of 2^64
 /// We include the Irys prefix to differentiate from EVM transactions.
+/// NOTE: be CAREFUL with using serde(default) it should ONLY be for `Option`al fields.
 #[serde(rename_all = "camelCase")]
 pub struct DataTransactionHeader {
     /// A 256-bit hash of the transaction signature.
@@ -262,6 +263,7 @@ pub type TxPathHash = H256;
 )]
 #[rlp(trailing)]
 /// Stores deserialized fields from a JSON formatted commitment transaction.
+/// NOTE: be CAREFUL with using serde(default) it should ONLY be for `Option`al fields.
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentTransaction {
     // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
