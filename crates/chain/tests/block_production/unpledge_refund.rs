@@ -10,95 +10,9 @@ use irys_types::{
     U256,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
-
-use crate::utils::IrysNodeTest;
-use hex::encode as hex_encode;
 use tracing::warn;
 
-async fn setup_env(
-    num_blocks_in_epoch: u64,
-    seconds_to_wait: usize,
-) -> eyre::Result<(
-    IrysNodeTest<irys_chain::IrysNodeCtx>,
-    IrysNodeTest<irys_chain::IrysNodeCtx>,
-    Address,
-    PartitionAssignment,
-    ConsensusConfig,
-)> {
-    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
-    genesis_config.consensus.get_mut().chunk_size = 32;
-
-    let peer_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
-
-    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
-        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
-        .await;
-
-    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
-    let peer_node = genesis_node
-        .testing_peer_with_assignments_and_name(peer_config, "PEER")
-        .await?;
-
-    let peer_addr = peer_signer.address();
-    let assignments: Vec<PartitionAssignment> = genesis_node.get_partition_assignments(peer_addr);
-    let capacity_pa = assignments
-        .iter()
-        .find(|pa| pa.ledger_id.is_none())
-        .copied()
-        .expect("peer should have at least one capacity assignment");
-
-    let consensus = genesis_node.node_ctx.config.node_config.consensus_config();
-
-    Ok((genesis_node, peer_node, peer_addr, capacity_pa, consensus))
-}
-
-fn assert_single_log_for(
-    receipts: &[reth::primitives::Receipt],
-    topic: &[u8; 32],
-    addr: Address,
-    context: &str,
-) -> usize {
-    let mut idx: Option<usize> = None;
-    let logs: Vec<_> = receipts
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            // Debug-print all logs for the receipt
-            for (li, log) in r.logs.iter().enumerate() {
-                let t0 = log.topics()[0];
-                let matches_topic = t0 == *topic;
-                let matches_addr = log.address == addr;
-                warn!(
-                    block_receipt_index = i,
-                    log_index = li,
-                    topic0 = %hex_encode(t0),
-                    desired_topic = %hex_encode(topic),
-                    matches_topic,
-                    log_address = ?log.address,
-                    desired_address = ?addr,
-                    matches_addr,
-                    topics_count = log.topics().len(),
-                    "EVM log debug: {context}"
-                );
-            }
-            let has = r
-                .logs
-                .iter()
-                .any(|log| log.topics()[0] == *topic && log.address == addr);
-            if has {
-                idx = Some(i);
-                Some(&r.logs)
-            } else {
-                None
-            }
-        })
-        .collect();
-    assert_eq!(logs.len(), 1, "{}: expected exactly one log", context);
-    idx.expect("receipt index")
-}
-
-// ========== Test ==========
+use crate::utils::IrysNodeTest;
 
 /// End-to-end: a pledged user unpledges a specific capacity partition.
 /// Inclusion block: fee-only UNPLEDGE; Epoch block: UNPLEDGE_REFUND with value.
@@ -134,12 +48,13 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     genesis_node
         .wait_for_mempool(unpledge_tx.id, seconds_to_wait)
         .await?;
+    // Mine exactly one block to include the unpledge (non-epoch block).
+    // Refund will occur later at the epoch boundary.
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
     let balance_before_inclusion = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
 
-    let (_, epoch_height) = genesis_node.mine_until_next_epoch().await?;
-    let inclusion_block = genesis_node.get_block_by_height(epoch_height).await?;
+    let inclusion_block = genesis_node.mine_block().await?;
 
     // ---------- Assert (inclusion): UNPLEDGE only, fee-only debit ----------
     // First, verify the Irys commitment ledger actually contains the unpledge tx id
@@ -330,4 +245,70 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     genesis_node.stop().await;
     peer_node.stop().await;
     Ok(())
+}
+
+async fn setup_env(
+    num_blocks_in_epoch: u64,
+    seconds_to_wait: usize,
+) -> eyre::Result<(
+    IrysNodeTest<irys_chain::IrysNodeCtx>,
+    IrysNodeTest<irys_chain::IrysNodeCtx>,
+    Address,
+    PartitionAssignment,
+    ConsensusConfig,
+)> {
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
+    let peer_node = genesis_node
+        .testing_peer_with_assignments_and_name(peer_config, "PEER")
+        .await?;
+
+    let peer_addr = peer_signer.address();
+    let assignments: Vec<PartitionAssignment> = genesis_node.get_partition_assignments(peer_addr);
+    let capacity_pa = assignments
+        .iter()
+        .find(|pa| pa.ledger_id.is_none())
+        .copied()
+        .expect("peer should have at least one capacity assignment");
+
+    let consensus = genesis_node.node_ctx.config.node_config.consensus_config();
+
+    Ok((genesis_node, peer_node, peer_addr, capacity_pa, consensus))
+}
+
+fn assert_single_log_for(
+    receipts: &[reth::primitives::Receipt],
+    topic: &[u8; 32],
+    addr: Address,
+    context: &str,
+) -> usize {
+    // Find receipts that contain exactly one matching log for the given topic and address.
+    let mut idx: Option<usize> = None;
+    let hits: Vec<_> = receipts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let has = r
+                .logs
+                .iter()
+                .any(|log| log.topics()[0] == *topic && log.address == addr);
+            if has {
+                idx = Some(i);
+                Some(())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(hits.len(), 1, "{}: expected exactly one log", context);
+    idx.expect("receipt index")
 }

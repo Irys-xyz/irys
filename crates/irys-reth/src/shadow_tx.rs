@@ -109,22 +109,23 @@ impl TransactionPacket {
 pub mod shadow_tx_topics {
     use super::*;
 
-    pub static UNSTAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_UNSTAKE").0);
-    pub static BLOCK_REWARD: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SHADOW_TX_BLOCK_REWARD").0);
-    pub static STAKE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_STAKE").0);
-    pub static STORAGE_FEES: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SHADOW_TX_STORAGE_FEES").0);
-    pub static PLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_PLEDGE").0);
-    pub static UNPLEDGE: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE").0);
-    pub static UNPLEDGE_REFUND: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE_REFUND").0);
-    pub static TERM_FEE_REWARD: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SHADOW_TX_TERM_FEE_REWARD").0);
-    pub static INGRESS_PROOF_REWARD: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD").0);
-    pub static PERM_FEE_REFUND: LazyLock<[u8; 32]> =
-        LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND").0);
+    pub static UNSTAKE: LazyLock<FixedBytes<32>> = LazyLock::new(|| keccak256("SHADOW_TX_UNSTAKE"));
+    pub static BLOCK_REWARD: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_BLOCK_REWARD"));
+    pub static STAKE: LazyLock<FixedBytes<32>> = LazyLock::new(|| keccak256("SHADOW_TX_STAKE"));
+    pub static STORAGE_FEES: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_STORAGE_FEES"));
+    pub static PLEDGE: LazyLock<FixedBytes<32>> = LazyLock::new(|| keccak256("SHADOW_TX_PLEDGE"));
+    pub static UNPLEDGE: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE"));
+    pub static UNPLEDGE_REFUND: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_UNPLEDGE_REFUND"));
+    pub static TERM_FEE_REWARD: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_TERM_FEE_REWARD"));
+    pub static INGRESS_PROOF_REWARD: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD"));
+    pub static PERM_FEE_REFUND: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND"));
 }
 
 impl ShadowTransaction {
@@ -186,16 +187,16 @@ impl TransactionPacket {
     pub fn topic(&self) -> FixedBytes<32> {
         use shadow_tx_topics::*;
         match self {
-            Self::Unstake(_) => (*UNSTAKE).into(),
-            Self::BlockReward(_) => (*BLOCK_REWARD).into(),
-            Self::Stake(_) => (*STAKE).into(),
-            Self::StorageFees(_) => (*STORAGE_FEES).into(),
-            Self::Pledge(_) => (*PLEDGE).into(),
-            Self::Unpledge(_) => (*UNPLEDGE).into(),
-            Self::UnpledgeRefund(_) => (*UNPLEDGE_REFUND).into(),
-            Self::TermFeeReward(_) => (*TERM_FEE_REWARD).into(),
-            Self::IngressProofReward(_) => (*INGRESS_PROOF_REWARD).into(),
-            Self::PermFeeRefund(_) => (*PERM_FEE_REFUND).into(),
+            Self::Unstake(_) => *UNSTAKE,
+            Self::BlockReward(_) => *BLOCK_REWARD,
+            Self::Stake(_) => *STAKE,
+            Self::StorageFees(_) => *STORAGE_FEES,
+            Self::Pledge(_) => *PLEDGE,
+            Self::Unpledge(_) => *UNPLEDGE,
+            Self::UnpledgeRefund(_) => *UNPLEDGE_REFUND,
+            Self::TermFeeReward(_) => *TERM_FEE_REWARD,
+            Self::IngressProofReward(_) => *INGRESS_PROOF_REWARD,
+            Self::PermFeeRefund(_) => *PERM_FEE_REFUND,
         }
     }
 }
