@@ -1058,22 +1058,16 @@ where
                         ))
                     }
                 },
-                shadow_tx::TransactionPacket::Unpledge(balance_decrement) => {
+                shadow_tx::TransactionPacket::Unpledge(unpledge_debit) => {
+                    // Fee-only via priority fee (already processed). Emit a log only.
                     let log = Self::create_shadow_log(
-                        balance_decrement.target,
+                        unpledge_debit.target,
                         vec![topic],
-                        vec![
-                            DynSolValue::Uint(balance_decrement.amount, 256),
-                            DynSolValue::Address(balance_decrement.target),
-                        ],
+                        vec![DynSolValue::Address(unpledge_debit.target)],
                     );
-                    let target = balance_decrement.target;
-                    let result = self
-                        .handle_balance_decrement(log, tx_hash, balance_decrement)?
-                        .map(|(plain_account, execution_result)| {
-                            (plain_account, execution_result, true)
-                        });
-                    Ok((result, target))
+                    let target = unpledge_debit.target;
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Err(execution_result), target))
                 }
                 shadow_tx::TransactionPacket::BlockReward(block_reward_increment) => {
                     let log = Self::create_shadow_log(

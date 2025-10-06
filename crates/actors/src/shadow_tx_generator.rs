@@ -426,10 +426,9 @@ impl<'a> ShadowTxGenerator<'a> {
                 transaction_fee,
             }),
             irys_primitives::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
-                // Inclusion-time behavior: fee-only debit from signer; no treasury movement here
+                // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::Unpledge(BalanceDecrement {
-                        amount: fee,
+                    TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
                         target: tx.signer,
                         irys_ref: tx.id.into(),
                     }),
@@ -975,11 +974,10 @@ mod tests {
                 ),
                 transaction_fee: 500,
             },
-            // Unpledge: fee-only debit at inclusion (1500)
+            // Unpledge: fee-only via priority fee at inclusion (1500)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::Unpledge(BalanceDecrement {
-                        amount: U256::from(1500).into(),
+                    TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
                         target: commitments[3].signer,
                         irys_ref: commitments[3].id.into(),
                     }),

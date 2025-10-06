@@ -60,8 +60,9 @@ pub enum TransactionPacket {
     StorageFees(BalanceDecrement),
     /// Pledge funds to an account (balance decrement). Used for pledging operations.
     Pledge(BalanceDecrement),
-    /// Unpledge fee debit at inclusion (balance decrement). Refund occurs in epoch via UnpledgeRefund.
-    Unpledge(BalanceDecrement),
+    /// Unpledge at inclusion: fee-only via priority fee. No amount in packet.
+    /// Refund occurs in epoch via UnpledgeRefund.
+    Unpledge(UnpledgeDebit),
     /// Unpledge refund at epoch (balance increment). Emitted with zero priority fee.
     UnpledgeRefund(BalanceIncrement),
     /// Term fee reward to the miners that stored the block
@@ -311,7 +312,7 @@ impl BorshDeserialize for TransactionPacket {
             STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
             STORAGE_FEES_ID => Self::StorageFees(BalanceDecrement::deserialize_reader(reader)?),
             PLEDGE_ID => Self::Pledge(BalanceDecrement::deserialize_reader(reader)?),
-            UNPLEDGE_ID => Self::Unpledge(BalanceDecrement::deserialize_reader(reader)?),
+            UNPLEDGE_ID => Self::Unpledge(UnpledgeDebit::deserialize_reader(reader)?),
             TERM_FEE_REWARD_ID => {
                 Self::TermFeeReward(BalanceIncrement::deserialize_reader(reader)?)
             }
@@ -462,6 +463,47 @@ pub struct BalanceIncrement {
     pub target: Address,
     /// Reference to the consensus layer transaction that resulted in this shadow tx.
     pub irys_ref: FixedBytes<32>,
+}
+
+/// Unpledge at inclusion time: fee-only via priority fee, no direct balance change.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct UnpledgeDebit {
+    /// Target account address (fee payer for priority fee).
+    pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this shadow tx.
+    pub irys_ref: FixedBytes<32>,
+}
+
+impl BorshSerialize for UnpledgeDebit {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(self.target.as_slice())?;
+        writer.write_all(self.irys_ref.as_slice())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for UnpledgeDebit {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut addr = [0_u8; 20];
+        reader.read_exact(&mut addr)?;
+        let target = Address::from_slice(&addr);
+        let mut ref_buf = [0_u8; 32];
+        reader.read_exact(&mut ref_buf)?;
+        let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
+        Ok(Self { target, irys_ref })
+    }
 }
 
 impl BorshSerialize for BalanceIncrement {
@@ -673,8 +715,7 @@ mod tests {
                     irys_ref: test_ref,
                 },
             )),
-            TransactionPacket::Unpledge(BalanceDecrement {
-                amount: U256::from(500_u64),
+            TransactionPacket::Unpledge(UnpledgeDebit {
                 target: test_address,
                 irys_ref: test_ref,
             }),
