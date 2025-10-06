@@ -1329,4 +1329,123 @@ mod tests {
             assert_eq!(err_str, "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111");
         }
     }
+
+    mod unpledge_processing {
+        use super::*;
+        use irys_primitives::CommitmentStatus;
+        use irys_types::{transaction::CommitmentType, U256};
+
+        fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {
+            let mut snapshot = EpochSnapshot::default();
+            let miner = snapshot.config.node_config.miner_address();
+
+            // Add the partition to the appropriate assignment map
+            let assignment = PartitionAssignment {
+                partition_hash: ph,
+                miner_address: miner,
+                ledger_id: if is_data { Some(DataLedger::Publish as u32) } else { None },
+                slot_index: if is_data { Some(0) } else { None },
+            };
+
+            if is_data {
+                snapshot
+                    .partition_assignments
+                    .data_partitions
+                    .insert(ph, assignment);
+            } else {
+                snapshot
+                    .partition_assignments
+                    .capacity_partitions
+                    .insert(ph, assignment);
+            }
+
+            // Track as active
+            snapshot.all_active_partitions.push(ph);
+
+            // Seed a pledge entry tied to the partition hash
+            let pledge_entry = CommitmentStateEntry {
+                id: H256::zero(),
+                commitment_status: CommitmentStatus::Active,
+                partition_hash: Some(ph),
+                signer: miner,
+                amount: U256::zero(),
+            };
+            snapshot
+                .commitment_state
+                .pledge_commitments
+                .entry(miner)
+                .or_default()
+                .push(pledge_entry);
+
+            snapshot
+        }
+
+        fn make_unpledge_tx(config: &ConsensusConfig, signer: Address, ph: H256) -> CommitmentTransaction {
+            let mut tx = CommitmentTransaction::new(config);
+            tx.signer = signer;
+            tx.commitment_type = CommitmentType::Unpledge {
+                pledge_count_before_executing: 1,
+                partition_hash: ph.into(),
+            };
+            tx
+        }
+
+        #[test]
+        fn unpledge_removes_capacity_partition_and_pledge() {
+            let ph = H256::random();
+            let mut snapshot = setup_snapshot_with_assignment(ph, false);
+            let signer = snapshot.config.node_config.miner_address();
+            let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
+
+            snapshot.apply_unpledges(&[tx]);
+
+            // Removed from capacity map
+            assert!(
+                !snapshot
+                    .partition_assignments
+                    .capacity_partitions
+                    .contains_key(&ph)
+            );
+
+            // Removed from active set
+            assert!(!snapshot.all_active_partitions.iter().any(|h| *h == ph));
+
+            // Removed pledge entry
+            let entries = snapshot
+                .commitment_state
+                .pledge_commitments
+                .get(&signer)
+                .unwrap();
+            assert!(entries.is_empty());
+        }
+
+        #[test]
+        fn unpledge_removes_data_partition_and_pledge() {
+            let ph = H256::random();
+            let mut snapshot = setup_snapshot_with_assignment(ph, true);
+            let signer = snapshot.config.node_config.miner_address();
+            let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
+
+            snapshot.apply_unpledges(&[tx]);
+
+            // Removed from data map
+            assert!(
+                !snapshot
+                    .partition_assignments
+                    .data_partitions
+                    .contains_key(&ph)
+            );
+
+            // Removed from active set
+            assert!(!snapshot.all_active_partitions.iter().any(|h| *h == ph));
+
+            // Removed pledge entry
+            let entries = snapshot
+                .commitment_state
+                .pledge_commitments
+                .get(&signer)
+                .unwrap();
+            assert!(entries.is_empty());
+        }
+    }
 }
