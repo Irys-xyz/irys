@@ -1898,6 +1898,59 @@ mod tests {
         Ok(())
     }
 
+    /// Test pledge + unpledge_refund balances with zero-priority-fee refund
+    #[test_log::test(tokio::test)]
+    async fn test_pledge_unpledge_refund_balances() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
+        let initial_balance = get_balance(&node.inner, target_address);
+
+        // Create transactions: pledge, pledge, unpledge_refund(1 wei)
+        let pledge_tx1 = pledge(target_address);
+        let pledge_tx1 =
+            sign_shadow_tx(pledge_tx1, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let pledge_tx2 = pledge(target_address);
+        let pledge_tx2 =
+            sign_shadow_tx(pledge_tx2, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let refund_tx = unpledge_refund(target_address, U256::ONE);
+        let refund_tx = sign_shadow_tx(refund_tx, &ctx.block_producer_a, 0).await?; // zero-priority fee on refunds
+
+        let expected_tx_hashes = vec![*pledge_tx1.hash(), *pledge_tx2.hash(), *refund_tx.hash()];
+
+        // Mine block with all transactions
+        let block_payload = mine_block(
+            &mut node,
+            &shadow_tx_store,
+            vec![pledge_tx1, pledge_tx2, refund_tx],
+        )
+        .await?;
+
+        // Verify all transactions are included in block in correct order
+        assert_txs_in_block(
+            &block_payload,
+            &expected_tx_hashes,
+            "Pledge/UnpledgeRefund transactions",
+        );
+
+        // Calculate expected final balance
+        // Operation effect: -1 (pledge) -1 (pledge) +1 (refund) = -1 wei
+        // Priority fees: 2 * DEFAULT_PRIORITY_FEE (refund has zero priority fee)
+        let total_priority_fees = U256::from(DEFAULT_PRIORITY_FEE) * U256::from(2);
+        let net_operation_change = U256::ONE; // net -1 wei
+        let expected_final_balance = initial_balance - net_operation_change - total_priority_fees;
+
+        let final_balance = get_balance(&node.inner, target_address);
+        assert_eq!(
+            final_balance, expected_final_balance,
+            "Final balance should reflect pledge/refund operations plus priority fees"
+        );
+
+        Ok(())
+    }
+
     /// Test unpledge on non-existent account fails block production
     #[test_log::test(tokio::test)]
     async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
@@ -2419,9 +2472,9 @@ mod tests {
         );
 
         // Verify target balance changed correctly
-        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +1 (unpledge) -1 (storage) = -1 wei
+        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +0 (unpledge) -1 (storage) = -2 wei
         // Plus paying all the priority fees: -15 Gwei
-        let net_operations = U256::from(1); // Net decrease of 1 wei from operations
+        let net_operations = U256::from(2); // Net decrease of 2 wei from operations
         let total_decrease = net_operations + total_expected_fee;
         assert_balance_change(
             &node,
@@ -3006,6 +3059,18 @@ pub mod test_utils {
     pub fn unpledge(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(
             TransactionPacket::Unpledge(shadow_tx::UnpledgeDebit {
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unpledge refund (epoch-only; zero priority fee expected).
+    pub fn unpledge_refund(address: Address, amount: U256) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::UnpledgeRefund(shadow_tx::BalanceIncrement {
+                amount,
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
