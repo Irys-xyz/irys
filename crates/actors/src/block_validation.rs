@@ -1871,6 +1871,8 @@ pub async fn data_txs_are_valid(
                 let mut chunks: Vec<irys_types::ChunkBytes> =
                     Vec::with_capacity(expected_chunk_count as usize);
 
+                let client = reqwest::Client::new();
+
                 for i in 0..expected_chunk_count {
                     let tx_chunk_offset = irys_types::TxChunkOffset::from(
                         u32::try_from(i).expect("Value exceeds u32::MAX"),
@@ -1919,7 +1921,6 @@ pub async fn data_txs_are_valid(
                                 );
 
                                 // Fetch with short timeout
-                                let client = reqwest::Client::new();
                                 let resp = tokio::time::timeout(
                                     std::time::Duration::from_millis(1500),
                                     client.get(&url).send(),
