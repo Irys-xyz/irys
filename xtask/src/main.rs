@@ -288,17 +288,17 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let timestamp = chrono::DateTime::from_timestamp(now as i64, 0)
                     .unwrap()
                     .format("%Y-%m-%d-%H-%M-%S");
-                let output_file = format!("target/flaky-test-output-{}.txt", timestamp);
+                let output_file = format!("target/flaky-test-output-{timestamp}.txt");
 
                 // Create output file and write header
                 let mut file = fs::File::create(&output_file)?;
-                writeln!(file, "=== Flaky Test Run - {} ===", timestamp)?;
-                write!(file, "Command: cargo flake --iterations {}", iters)?;
+                writeln!(file, "=== Flaky Test Run - {timestamp} ===")?;
+                write!(file, "Command: cargo flake --iterations {iters}")?;
                 if let Some(thread_count) = threads {
-                    write!(file, " --threads {}", thread_count)?;
+                    write!(file, " --threads {thread_count}")?;
                 }
                 if let Some(failures) = tolerable_failures {
-                    write!(file, " --tolerable-failures {}", failures)?;
+                    write!(file, " --tolerable-failures {failures}")?;
                 }
                 if !args_for_header.is_empty() {
                     write!(file, " -- {}", args_for_header.join(" "))?;
@@ -310,7 +310,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
                 // Use script to preserve TTY behavior for progress bars
                 println!("Running cargo-flake to detect flaky tests");
-                println!("Streaming output to: {}", output_file);
+                println!("Streaming output to: {output_file}");
 
                 // Install cargo-flake first
                 cmd!(
