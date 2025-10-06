@@ -13,6 +13,7 @@ use awc::{body::MessageBody, http::StatusCode};
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
+use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
     block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
@@ -1395,7 +1396,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         publish_txs: usize,
         commitment_txs: usize,
         seconds_to_wait: u32,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<(Vec<DataTransactionHeader>, PublishLedgerWithTxs, Vec<CommitmentTransaction>)> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
@@ -1418,25 +1419,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             prev = (submit_tx.len(), publish_tx.txs.len(), commitment_tx.len());
 
             if prev == expected {
-                break;
+                info!("mempool state valid after {} retries", &retries);
+               return Ok((submit_tx, publish_tx, commitment_tx))
             }
             debug!("got {:?} expected {:?} - txs: {:?}", &prev, expected, &txs);
 
             tokio::time::sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
-
-        if retries == max_retries {
             Err(eyre::eyre!(
                 "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
                 retries,
                 &prev,
                 &expected
             ))
-        } else {
-            info!("mempool state valid after {} retries", &retries);
-            Ok(())
-        }
     }
 
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block

@@ -9,6 +9,7 @@ use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::error;
 
 pub mod fee_distribution;
 
@@ -62,7 +63,7 @@ pub enum CommitmentValidationError {
 /// Stores deserialized fields from a JSON formatted Irys transaction header.
 /// will decode from strings or numeric literals for u64 fields, due to JS's max safe int being 2^53-1 instead of 2^64
 /// We include the Irys prefix to differentiate from EVM transactions.
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct DataTransactionHeader {
     /// A 256-bit hash of the transaction signature.
     #[rlp(skip)]
@@ -78,7 +79,7 @@ pub struct DataTransactionHeader {
     pub anchor: H256,
 
     /// The ecdsa/secp256k1 public key of the transaction signer
-    #[serde(default, with = "address_base58_stringify")]
+    #[serde( with = "address_base58_stringify")]
     pub signer: Address,
 
     /// The merkle root of the transactions data chunks
@@ -261,7 +262,7 @@ pub type TxPathHash = H256;
 )]
 #[rlp(trailing)]
 /// Stores deserialized fields from a JSON formatted commitment transaction.
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase")]
 pub struct CommitmentTransaction {
     // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
     #[rlp(skip)]
@@ -274,7 +275,7 @@ pub struct CommitmentTransaction {
     pub anchor: H256,
 
     /// The ecdsa/secp256k1 public key of the transaction signer
-    #[serde(default, with = "address_base58_stringify")]
+    #[serde(with = "address_base58_stringify")]
     pub signer: Address,
 
     /// The type of commitment Stake/UnStake Pledge/UnPledge
