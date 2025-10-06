@@ -3,6 +3,7 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
+use base58::FromBase58 as _;
 use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
@@ -136,6 +137,14 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
 
 /// Parse and validate a user address from a string
 fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
+    // try Base58 format first
+    if let Ok(decoded) = address_str.from_base58() {
+        if let Ok(arr) = TryInto::<[u8; 20]>::try_into(decoded.as_slice()) {
+            return Ok(Address::from(&arr));
+        }
+    }
+
+    // fall back to hex/EVM address format
     Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
 }
 
