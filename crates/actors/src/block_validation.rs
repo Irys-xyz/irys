@@ -1965,16 +1965,54 @@ pub async fn data_txs_are_valid(
 
                             // Ingest via mempool to persist and validate
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
-                            let _ = service_senders
+                            if service_senders
                                 .mempool
-                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx));
+                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .is_err()
+                            {
+                                return Err(PreValidationError::ValidationServiceUnreachable);
+                            }
 
-                            // Wait briefly for ingest to complete
-                            let _ = tokio::time::timeout(
+                            // Wait briefly for ingest to complete and log outcome
+                            let recv_res = tokio::time::timeout(
                                 std::time::Duration::from_millis(1500),
                                 ing_rx,
                             )
                             .await;
+                            match recv_res {
+                                Err(_elapsed) => {
+                                    tracing::warn!(
+                                        "Timed out waiting for chunk ingest completion for data_root {:?}, tx_offset {}",
+                                        tx_header.data_root,
+                                        tx_offset_u32
+                                    );
+                                }
+                                Ok(Err(recv_err)) => {
+                                    tracing::warn!(
+                                        "IngestChunk oneshot channel error for data_root {:?}, tx_offset {}: {:?}",
+                                        tx_header.data_root,
+                                        tx_offset_u32,
+                                        recv_err
+                                    );
+                                }
+                                Ok(Ok(ingest_res)) => match ingest_res {
+                                    Ok(()) => {
+                                        tracing::debug!(
+                                                "Chunk ingested successfully for data_root {:?}, tx_offset {}",
+                                                tx_header.data_root,
+                                                tx_offset_u32
+                                            );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                                "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
+                                                tx_header.data_root,
+                                                tx_offset_u32,
+                                                e
+                                            );
+                                    }
+                                },
+                            }
 
                             // Re-open a fresh read tx to observe the write
                             let ro_tx2 =
