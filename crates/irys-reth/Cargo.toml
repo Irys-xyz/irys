@@ -54,6 +54,7 @@ tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
 lru.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }

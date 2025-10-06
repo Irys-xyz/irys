@@ -1,15 +1,14 @@
 // Standard library imports
 use core::convert::Infallible;
 
-// External crate imports - Alloy
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
+use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
 
-// External crate imports - Reth
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::result::ExecutionResult;
@@ -37,7 +36,7 @@ use tracing::{trace, warn};
 // External crate imports - Other
 
 use super::*;
-use crate::shadow_tx::{self, ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
+use crate::shadow_tx::{self, ShadowTransaction};
 
 /// Constants for shadow transaction processing
 mod constants {
@@ -175,7 +174,7 @@ pub struct IrysBlockExecutorFactory {
 
 impl IrysBlockExecutorFactory {
     /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
-    /// [`ReceiptBuilder`].
+    /// [`RethReceiptBuilder`].
     pub const fn new(
         receipt_builder: RethReceiptBuilder,
         spec: Arc<ChainSpec>,
@@ -463,6 +462,23 @@ where
     }
 
     fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
+        // Reject blob-carrying transactions (EIP-4844) at execution time.
+        // We keep Cancun active but explicitly disable blobs/sidecars.
+        if !tx.blob_hashes.is_empty()
+            || tx.max_fee_per_blob_gas != 0
+            || tx.tx_type == EIP4844_TX_TYPE_ID
+        {
+            tracing::debug!(
+                blob_hashes_len = tx.blob_hashes.len(),
+                max_fee_per_blob_gas = tx.max_fee_per_blob_gas,
+                tx_type = tx.tx_type,
+                "Rejecting blob-carrying transaction: EIP-4844 not supported"
+            );
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::Eip4844NotSupported,
+            ));
+        }
+
         // run this tx through our processing first, if it's not a shadow tx we return here and pass it on
         let tx = match self.process_shadow_tx(tx)? {
             Either::Left(res) => return Ok(res),
@@ -603,31 +619,28 @@ where
     ) -> Result<Either<ResultAndState, <Self as Evm>::Tx>, <Self as Evm>::Error> {
         // figure out if this is a shadow tx
 
-        // check that the call target is [`SHADOW_TX_DESTINATION_ADDR`]
+        // Attempt unified shadow-tx detection + decoding
         let to_address = match tx.kind {
             TxKind::Create => return Ok(Either::Right(tx)),
             TxKind::Call(address) => address,
         };
         let tx_envelope_input_buf = &tx.data;
 
-        if to_address != *SHADOW_TX_DESTINATION_ADDR {
-            trace!("Not a shadow tx");
-            return Ok(Either::Right(tx));
+        let shadow_tx = match shadow_tx::detect_and_decode_from_parts(
+            Some(to_address),
+            tx_envelope_input_buf,
+        ) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => {
+                trace!("Not a shadow tx");
+                return Ok(Either::Right(tx));
+            }
+            Err(e) => {
+                return Err(Self::create_internal_error(format!(
+                    "failed to decode shadow tx: {e}"
+                )));
+            }
         };
-
-        // check that the tx data/input bytes start with the required prefix [`IRYS_SHADOW_EXEC`]
-        if tx_envelope_input_buf
-            .strip_prefix(IRYS_SHADOW_EXEC)
-            .is_none()
-        {
-            trace!("Not a shadow tx");
-            return Ok(Either::Right(tx));
-        };
-
-        // we've determined that this is/should be a shadow tx
-
-        let shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..])
-            .map_err(|e| Self::create_internal_error(format!("failed to decode shadow tx: {e}")))?;
 
         tracing::trace!("executing shadow transaction");
 
@@ -706,11 +719,6 @@ where
                 if state_acc.status != account.status {
                     warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
                 }
-                // assert_eq!(
-                //     state_acc.status, account.status,
-                //     "Invalid account status flags: from commit {:?}, from prev: {:?}",
-                //     &state_acc.status, &account.status
-                // );
 
                 execution_result
             }
@@ -846,9 +854,7 @@ where
             let account_state = self.load_account(target)?;
             if account_state.is_none() {
                 return Err(Self::create_internal_error(format!(
-                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {}, Fee: {}",
-                    target,
-                    total_fee
+                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {target}, Fee: {total_fee}"
                 )));
             }
 
@@ -929,9 +935,7 @@ where
                 "Target account does not exist, cannot deduct priority fee"
             );
             return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: target account does not exist. Target: {}, Required fee: {}",
-                target,
-                fee
+                "Shadow transaction priority fee failed: target account does not exist. Target: {target}, Required fee: {fee}"
             )));
         };
 
@@ -1242,5 +1246,94 @@ where
             logs: vec![log],
             output: Output::Call(Bytes::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, B256, U256};
+    use reth_evm::EvmEnv;
+    use revm::context::result::{EVMError, InvalidTransaction};
+    use revm::context::{BlockEnv, CfgEnv, TxEnv};
+    use revm::database_interface::EmptyDB;
+
+    /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
+    #[test]
+    fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
+        // Build minimal EVM env with Cancun spec enabled
+        let factory = IrysEvmFactory::new();
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let block_env = BlockEnv::default();
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Create a TxEnv that carries EIP-4844 blob fields
+        let tx = TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 0,
+            value: U256::ZERO,
+            chain_id: Some(1),
+            blob_hashes: vec![B256::ZERO],
+            max_fee_per_blob_gas: 1,
+            ..TxEnv::default()
+        };
+
+        let res = evm.transact_raw(tx);
+        assert!(
+            matches!(
+                res,
+                Err(EVMError::Transaction(
+                    InvalidTransaction::Eip4844NotSupported
+                ))
+            ),
+            "expected EIP-4844 not supported, got: {:?}",
+            res
+        );
+    }
+
+    /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
+    #[test]
+    fn evm_processes_normal_tx_success() {
+        let factory = IrysEvmFactory::new();
+
+        // Cancun spec, chain id 1, zero basefee and ample gas limit
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let block_env = BlockEnv {
+            gas_limit: 30_000_000,
+            basefee: 0,
+            ..Default::default()
+        };
+
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Simple call with zero value and zero gas price
+        let tx = TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 21_000,
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_price: 0,
+            chain_id: Some(1),
+            gas_priority_fee: None,
+            access_list: Default::default(),
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            tx_type: 0,
+            authorization_list: Default::default(),
+        };
+
+        let res = evm.transact_raw(tx);
+        assert!(res.is_ok(), "expected Ok, got: {:?}", res);
+        let result = res.unwrap().result;
+        assert!(result.is_success(), "expected success, got: {:?}", result);
     }
 }

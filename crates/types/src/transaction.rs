@@ -109,6 +109,7 @@ pub struct DataTransactionHeader {
     pub signature: IrysSignature,
 
     #[serde(default, with = "optional_string_u64")]
+    /// WARNING: None == Some(0) for RLP!!
     pub bundle_format: Option<u64>,
 
     /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
