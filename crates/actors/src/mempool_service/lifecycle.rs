@@ -37,13 +37,26 @@ impl Inner {
                     });
 
                 // Get and update DB header if needed
-                let mut db_header = self
-                    .read_tx()
-                    .ok()
-                    .and_then(|read_tx| tx_header_by_txid(&read_tx, txid).unwrap_or(None))
-                    .inspect(|_tx| {
-                        debug!("Got tx {} from DB", txid);
-                    });
+                let mut db_header = match self.read_tx() {
+                    Ok(read_tx) => match tx_header_by_txid(&read_tx, txid) {
+                        Ok(Some(h)) => {
+                            debug!("Got tx {} from DB", txid);
+                            Some(h)
+                        }
+                        Ok(None) => {
+                            debug!("Tx {} not found in DB", txid);
+                            None
+                        }
+                        Err(e) => {
+                            warn!("DB error loading tx {}: {}", txid, e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to open DB read transaction: {}", e);
+                        None
+                    }
+                };
 
                 if let Some(ref mut db_tx) = db_header {
                     if db_tx.promoted_height.is_none() {
@@ -198,7 +211,7 @@ impl Inner {
     /// - Do not call from normal ingress paths; promotion state should be preserved during ingress.
     /// - Intended usage is within reorg handlers (e.g., `handle_confirmed_data_tx_reorg`) to
     ///   revert promotion for txs promoted on orphaned forks.
-    async fn mark_unpromoted_in_mempool(&self, txid: H256) {
+    async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
         // Try fast-path: clear in-place if present in the mempool
         {
             let mut state = self.mempool_state.write().await;
@@ -206,24 +219,45 @@ impl Inner {
                 header.promoted_height = None;
                 state.recent_valid_tx.put(txid, ());
                 tracing::debug!(%txid, "Cleared promoted_height in mempool");
-                return;
+                return Ok(());
             }
         }
 
         // Fallback: try to load from DB and insert back into mempool
-        if let Ok(read_tx) = self.read_tx() {
-            if let Some(mut header) = tx_header_by_txid(&read_tx, &txid).unwrap_or(None) {
-                header.promoted_height = None;
+        match self.read_tx() {
+            Ok(read_tx) => match tx_header_by_txid(&read_tx, &txid) {
+                Ok(Some(mut header)) => {
+                    header.promoted_height = None;
 
-                let mut state = self.mempool_state.write().await;
-                state.valid_submit_ledger_tx.insert(txid, header.clone());
-                state.recent_valid_tx.put(txid, ());
-                tracing::debug!(%txid, "Inserted unpromoted header into mempool from DB");
-                return;
+                    let mut state = self.mempool_state.write().await;
+                    state.valid_submit_ledger_tx.insert(txid, header.clone());
+                    state.recent_valid_tx.put(txid, ());
+                    tracing::debug!(%txid, "Inserted unpromoted header into mempool from DB");
+                    return Ok(());
+                }
+                Ok(None) => {
+                    // Not found in DB; handled by the not-found error below.
+                }
+                Err(e) => {
+                    return Err(eyre::eyre!(
+                        "mark_unpromoted_in_mempool: DB lookup error for {}: {}",
+                        txid,
+                        e
+                    ));
+                }
+            },
+            Err(e) => {
+                return Err(eyre::eyre!(
+                    "mark_unpromoted_in_mempool: failed to open DB read transaction: {}",
+                    e
+                ));
             }
         }
 
-        tracing::warn!(%txid, "Could not clear promoted_height: tx not found in mempool or DB");
+        Err(eyre::eyre!(
+            "mark_unpromoted_in_mempool: tx {} not found in mempool or DB",
+            txid
+        ))
     }
 
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
@@ -590,7 +624,9 @@ impl Inner {
         for tx in orphaned_confirmed_publish_txs {
             debug!("reorging orphaned publish tx: {}", &tx);
             // Clear promotion state for txs that were promoted on an orphaned fork
-            self.mark_unpromoted_in_mempool(tx).await;
+            if let Err(e) = self.mark_unpromoted_in_mempool(tx).await {
+                warn!(%tx, error = %e, "Failed to unpromote tx during reorg");
+            }
         }
 
         // 5. If a transaction was promoted in both forks, make sure the transaction has the ingress proofs from the canonical fork

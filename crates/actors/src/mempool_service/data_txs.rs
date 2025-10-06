@@ -33,11 +33,22 @@ impl Inner {
             }
 
             // if data tx exists in mdbx
-            if let Ok(read_tx) = self.read_tx() {
-                if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
-                    debug!("Got tx {} from DB", &tx);
-                    found_txs.push(Some(tx_header.clone()));
-                    continue;
+            match self.read_tx() {
+                Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
+                    Ok(Some(tx_header)) => {
+                        debug!("Got tx {} from DB", &tx);
+                        found_txs.push(Some(tx_header.clone()));
+                        continue;
+                    }
+                    Ok(None) => {
+                        debug!("Tx {} not found in DB", &tx);
+                    }
+                    Err(e) => {
+                        warn!("DB error reading tx {}: {}", &tx, e);
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to open DB read transaction: {}", e);
                 }
             }
             // not found anywhere
