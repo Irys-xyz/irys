@@ -172,8 +172,11 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
                     .error_handler(|err, req| {
                         warn!("JSON decode error for req {:?} - {:?}", &req.path(), &err);
                         let error_message = format!("JSON decode/parse error: {}", err);
-                        InternalError::from_response(err, HttpResponse::BadRequest().body(error_message))
-                            .into()
+                        InternalError::from_response(
+                            err,
+                            HttpResponse::BadRequest().body(error_message),
+                        )
+                        .into()
                     }),
             )
             // not a permanent redirect, so we can redirect to the highest API version

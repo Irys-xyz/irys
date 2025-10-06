@@ -83,7 +83,7 @@ pub enum CommitmentType {
         pledge_count_before_executing: u64,
     },
     Unpledge {
-        #[serde(rename = "pledgeCountBeforeExecuting",  with = "string_u64")]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "string_u64")]
         pledge_count_before_executing: u64,
     },
     Unstake,
@@ -249,8 +249,6 @@ impl reth_codecs::Compact for CommitmentType {
     }
 }
 
-
-
 // TODO: remove - below is duplicated from types/serialization
 pub mod string_u64 {
     use serde::{Deserializer, Serializer};
@@ -272,7 +270,6 @@ pub mod string_u64 {
     }
 }
 
-
 fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -291,7 +288,6 @@ where
         StringOrNumber::Number(n) => Ok(n),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

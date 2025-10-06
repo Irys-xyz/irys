@@ -1396,7 +1396,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         publish_txs: usize,
         commitment_txs: usize,
         seconds_to_wait: u32,
-    ) -> eyre::Result<(Vec<DataTransactionHeader>, PublishLedgerWithTxs, Vec<CommitmentTransaction>)> {
+    ) -> eyre::Result<(
+        Vec<DataTransactionHeader>,
+        PublishLedgerWithTxs,
+        Vec<CommitmentTransaction>,
+    )> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
@@ -1420,14 +1424,14 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             if prev == expected {
                 info!("mempool state valid after {} retries", &retries);
-               return Ok((submit_tx, publish_tx, commitment_tx))
+                return Ok((submit_tx, publish_tx, commitment_tx));
             }
             debug!("got {:?} expected {:?} - txs: {:?}", &prev, expected, &txs);
 
             tokio::time::sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
-            Err(eyre::eyre!(
+        Err(eyre::eyre!(
                 "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
                 retries,
                 &prev,

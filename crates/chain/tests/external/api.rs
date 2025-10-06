@@ -88,7 +88,9 @@ async fn external_api() -> eyre::Result<()> {
 
     info!("waiting for tx header...");
 
-    let (submit, _publish, _commitment) = node.wait_for_mempool_best_txs_shape(1, 0, 1, 999999).await?;
+    let (submit, _publish, _commitment) = node
+        .wait_for_mempool_best_txs_shape(1, 0, 1, 999999)
+        .await?;
     let recv_tx = submit.first().unwrap();
 
     info!(

@@ -143,10 +143,9 @@ fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
             return Ok(Address::from(&arr));
         }
     }
-    
+
     // fall back to hex/EVM address format
-    Address::from_str(address_str)
-        .map_err(|_| ErrorBadRequest("Invalid address format"))
+    Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
 }
 
 pub async fn get_pledge_price(

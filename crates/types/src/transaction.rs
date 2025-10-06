@@ -80,7 +80,7 @@ pub struct DataTransactionHeader {
     pub anchor: H256,
 
     /// The ecdsa/secp256k1 public key of the transaction signer
-    #[serde( with = "address_base58_stringify")]
+    #[serde(with = "address_base58_stringify")]
     pub signer: Address,
 
     /// The merkle root of the transactions data chunks
