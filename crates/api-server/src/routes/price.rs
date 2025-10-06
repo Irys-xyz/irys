@@ -30,6 +30,7 @@ pub struct CommitmentPriceInfo {
     pub value: U256,
     pub fee: U256,
     pub user_address: Option<Address>,
+    pub pledge_count: Option<u64>,
 }
 
 pub async fn get_price(
@@ -117,6 +118,7 @@ pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResp
         value: stake_value.amount,
         fee: U256::from(commitment_fee),
         user_address: None,
+        pledge_count: None,
     }))
 }
 
@@ -128,6 +130,7 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
         value: stake_value.amount,
         fee: U256::from(commitment_fee),
         user_address: None,
+        pledge_count: None,
     }))
 }
 
@@ -161,6 +164,7 @@ pub async fn get_pledge_price(
         value: pledge_value,
         fee: U256::from(commitment_fee),
         user_address: Some(user_address),
+        pledge_count: Some(pledge_count),
     }))
 }
 
@@ -193,6 +197,7 @@ pub async fn get_unpledge_price(
         value: refund_amount,
         fee: U256::from(commitment_fee),
         user_address: Some(user_address),
+        pledge_count: Some(pledge_count),
     }))
 }
 
