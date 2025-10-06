@@ -2,7 +2,6 @@ use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
