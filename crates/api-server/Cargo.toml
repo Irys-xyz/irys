@@ -23,10 +23,13 @@ actix-cors = "0.7"
 tracing.workspace = true
 semver.workspace = true
 eyre.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
 test-log.workspace = true
+rstest.workspace = true
+actix-web = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true

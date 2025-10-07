@@ -686,7 +686,7 @@ impl fmt::Display for IrysBlockHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
         match serde_json::to_string_pretty(self) {
-            Ok(json) => write!(f, "{}", json), // Write the JSON string to the formatter
+            Ok(json) => write!(f, "{json}"), // Write the JSON string to the formatter
             Err(_) => write!(f, "Failed to serialize IrysBlockHeader"), // Handle serialization errors
         }
     }
@@ -896,6 +896,15 @@ impl TryFrom<&str> for DataLedger {
     fn try_from(value: &str) -> eyre::Result<Self> {
         let x = value.parse()?;
         Self::from_u32(x).ok_or_else(|| eyre::eyre!("Invalid ledger number"))
+    }
+}
+
+impl std::fmt::Display for DataLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Publish => write!(f, "publish"),
+            Self::Submit => write!(f, "submit"),
+        }
     }
 }
 

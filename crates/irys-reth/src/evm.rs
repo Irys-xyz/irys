@@ -854,9 +854,7 @@ where
             let account_state = self.load_account(target)?;
             if account_state.is_none() {
                 return Err(Self::create_internal_error(format!(
-                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {}, Fee: {}",
-                    target,
-                    total_fee
+                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {target}, Fee: {total_fee}"
                 )));
             }
 
@@ -937,9 +935,7 @@ where
                 "Target account does not exist, cannot deduct priority fee"
             );
             return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: target account does not exist. Target: {}, Required fee: {}",
-                target,
-                fee
+                "Shadow transaction priority fee failed: target account does not exist. Target: {target}, Required fee: {fee}"
             )));
         };
 
