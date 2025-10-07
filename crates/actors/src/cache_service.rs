@@ -894,6 +894,7 @@ mod tests {
             let mut roots = Vec::new();
             let mut current_size = 0_u64;
             let mut rng = rand::thread_rng();
+            let mut pending_entries = Vec::new();
 
             while current_size < target_size {
                 let entry_size = chunk_size.min(target_size - current_size);
@@ -902,20 +903,37 @@ mod tests {
                 let random_bytes: [u8; 32] = rng.gen();
                 let root = DataRoot::from(random_bytes);
 
-                service.db.update(|wtx| {
-                    let cached = irys_database::db_cache::CachedDataRoot {
-                        data_size: entry_size,
-                        txid_set: vec![],
-                        block_set: vec![],
-                        expiry_height: None,
-                        cached_at: irys_types::UnixTimestamp::now().unwrap(),
-                    };
-                    wtx.put::<CachedDataRoots>(root, cached)?;
-                    eyre::Ok(())
-                })??;
+                let cached = irys_database::db_cache::CachedDataRoot {
+                    data_size: entry_size,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now().unwrap(),
+                };
 
+                pending_entries.push((root, cached));
                 roots.push(root);
                 current_size += entry_size.div_ceil(chunk_size) * chunk_size;
+
+                // Batch writes every 100 entries for better performance
+                if pending_entries.len() >= 100 {
+                    service.db.update(|wtx| {
+                        for (root, cached) in pending_entries.drain(..) {
+                            wtx.put::<CachedDataRoots>(root, cached)?;
+                        }
+                        eyre::Ok(())
+                    })??;
+                }
+            }
+
+            // Write any remaining entries
+            if !pending_entries.is_empty() {
+                service.db.update(|wtx| {
+                    for (root, cached) in pending_entries {
+                        wtx.put::<CachedDataRoots>(root, cached)?;
+                    }
+                    eyre::Ok(())
+                })??;
             }
 
             Ok(roots)
@@ -938,10 +956,10 @@ mod tests {
         }
 
         #[rstest]
-        #[case(1_000_000, 1_500_000, 900_000, "150% of limit evicts to 90%")]
-        #[case(1_000_000, 1_100_000, 900_000, "110% of limit evicts to 90%")]
-        #[case(1_000_000, 2_000_000, 900_000, "200% of limit evicts to 90%")]
-        #[case(500_000, 750_000, 450_000, "Small cache (500KB) respects 90% rule")]
+        #[case(100_000, 150_000, 90_000, "150% of limit evicts to 90%")]
+        #[case(100_000, 110_000, 90_000, "110% of limit evicts to 90%")]
+        #[case(100_000, 200_000, 90_000, "200% of limit evicts to 90%")]
+        #[case(50_000, 75_000, 45_000, "Small cache (50KB) respects 90% rule")]
         #[tokio::test]
         async fn test_size_based_eviction_hysteresis(
             #[case] max_size: u64,
@@ -980,7 +998,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_size_based_eviction_under_limit() -> eyre::Result<()> {
-            let max_size = 1_000_000;
+            let max_size = 100_000;
             let strategy = irys_types::CacheEvictionStrategy::SizeBased {
                 max_cache_size_bytes: max_size,
             };
@@ -1022,7 +1040,7 @@ mod tests {
         #[tokio::test]
         async fn test_size_based_eviction_fifo_order() -> eyre::Result<()> {
             let strategy = irys_types::CacheEvictionStrategy::SizeBased {
-                max_cache_size_bytes: 500_000,
+                max_cache_size_bytes: 50_000,
             };
             let service = setup_test_service_with_strategy(strategy).await?;
 
@@ -1039,13 +1057,13 @@ mod tests {
             let newest_root = insert_entry_with_timestamp(&service, newest_ts)?;
 
             // Fill cache over limit
-            fill_cache_to_size(&service, 1_000_000)?;
+            fill_cache_to_size(&service, 100_000)?;
 
             let count = get_cache_entry_count(&service)?;
             let size = get_cache_total_size(&service)?;
 
             // Evict to bring under limit
-            service.prune_cache_by_size(count as u64, size, 500_000)?;
+            service.prune_cache_by_size(count as u64, size, 50_000)?;
 
             // Oldest entry should be evicted first
             assert!(
