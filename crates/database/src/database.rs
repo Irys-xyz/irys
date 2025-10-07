@@ -75,7 +75,7 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     };
     let mut block_without_chunk = block.clone();
     block_without_chunk.poa.chunk = None;
-    let versioned = block_without_chunk.clone().try_into_versioned()?;
+    let versioned = block_without_chunk.try_into_versioned()?;
     tx.put::<IrysBlockHeaders>(block.block_hash, versioned.into())?;
     Ok(())
 }
@@ -373,8 +373,10 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let mut tx_header = DataTransactionHeader::default();
-        tx_header.version = 1; // Set valid version for versioning tests
+        let tx_header = DataTransactionHeader {
+            version: 1,
+            ..Default::default()
+        };
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx

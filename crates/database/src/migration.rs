@@ -142,8 +142,10 @@ mod tests {
             write_tx.put::<IrysBlockHeaders>(block_hash, header.try_into_versioned()?.into())?;
 
             // IrysDataTxHeaders (non-dupsort)
-            let mut tx_header = DataTransactionHeader::default();
-            tx_header.version = 1; // Set valid version
+            let tx_header = DataTransactionHeader {
+                version: 1,
+                ..DataTransactionHeader::default()
+            };
             write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.try_into_versioned()?.into())?;
 
             // CachedDataRoots (non-dupsort)

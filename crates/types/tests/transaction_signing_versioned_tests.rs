@@ -1,6 +1,6 @@
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, Signable,
+    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, Signable as _,
     VersionedCommitmentTransaction, VersionedDataTransactionHeader,
 };
 
@@ -10,7 +10,7 @@ fn data_tx_signing_uses_discriminant() {
     let signer = IrysSigner::random_signer(&config);
     let header = DataTransactionHeader::new(&config);
     let preimage = {
-        let v = VersionedDataTransactionHeader::V1(header.clone());
+        let v = VersionedDataTransactionHeader::V1(header);
         let mut buf = Vec::new();
         v.encode_for_signing(&mut buf);
         buf
@@ -23,7 +23,7 @@ fn commitment_tx_signing_uses_discriminant() {
     let config = ConsensusConfig::testing();
     let tx = CommitmentTransaction::new_stake(&config, irys_types::H256::zero());
     let preimage = {
-        let v = VersionedCommitmentTransaction::V1(tx.clone());
+        let v = VersionedCommitmentTransaction::V1(tx);
         let mut buf = Vec::new();
         v.encode_for_signing(&mut buf);
         buf
