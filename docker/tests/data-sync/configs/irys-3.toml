@@ -66,6 +66,10 @@ gpu_packing_batch_size = 1024
 [cache]
 cache_clean_lag = 2
 
+[cache.eviction_strategy]
+type = "size_based"
+max_cache_chunks = 40960  # 10 GB with 256KB chunks
+
 [oracle]
 type = "mock"
 initial_price = 1.0
