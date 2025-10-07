@@ -115,7 +115,7 @@ impl IrysSigner {
         transaction.header.version = 1;
 
         // Create the signature hash and sign it
-        let prehash = transaction.signature_hash();
+        let prehash = transaction.signature_hash()?;
 
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
@@ -135,8 +135,7 @@ impl IrysSigner {
         commitment.version = 1;
 
         // Create the signature hash and sign it
-        let prehash = commitment.signature_hash();
-
+        let prehash = commitment.signature_hash()?;
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
         commitment.signature = IrysSignature::new(signature);
@@ -152,7 +151,7 @@ impl IrysSigner {
         block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
-        let prehash = block_header.signature_hash();
+        let prehash = block_header.signature_hash()?;
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
         block_header.signature = IrysSignature::new(signature);
 
@@ -299,7 +298,10 @@ mod tests {
         }
 
         // Recover the signer as a way to verify the signature
-        let prehash = tx.header.signature_hash();
+        let prehash = tx
+            .header
+            .signature_hash()
+            .expect("unsupported version in test");
         let sig = tx.header.signature.as_bytes();
 
         let signer = recover_signer(&sig[..].try_into().unwrap(), prehash.into()).unwrap();

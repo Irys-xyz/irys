@@ -1,15 +1,18 @@
-use std::ops::{Deref, DerefMut};
 pub use crate::ingress::IngressProof;
+use crate::versioning::{
+    compact_with_discriminant, split_discriminant, HasInnerVersion, Signable, VersionDiscriminant,
+    Versioned, VersioningError,
+};
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use crate::{TxChunkOffset, UnpackedChunk};
-use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion};
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 use thiserror::Error;
 
 pub mod fee_distribution;
@@ -47,16 +50,19 @@ pub enum CommitmentValidationError {
     ForbiddenSigner,
 }
 
-
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 #[repr(u8)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum VersionedDataTransactionHeader {
-    V1(DataTransactionHeader) = 1
+    V1(DataTransactionHeader) = 1,
 }
 
 impl VersionDiscriminant for VersionedDataTransactionHeader {
-    fn discriminant(&self) -> u8 { match self { Self::V1(_) => 1 } }
+    fn discriminant(&self) -> u8 {
+        match self {
+            Self::V1(_) => 1,
+        }
+    }
 }
 
 impl Default for VersionedDataTransactionHeader {
@@ -79,7 +85,7 @@ impl Deref for VersionedDataTransactionHeader {
 
 impl DerefMut for VersionedDataTransactionHeader {
     fn deref_mut(&mut self) -> &mut Self::Target {
-                match self {
+        match self {
             Self::V1(v1) => v1,
         }
     }
@@ -87,13 +93,21 @@ impl DerefMut for VersionedDataTransactionHeader {
 
 // TODO: write tests for this
 impl Compact for VersionedDataTransactionHeader {
-    fn to_compact<B>(&self, buf: &mut B) -> usize where B: bytes::BufMut + AsMut<[u8]> {
-        match self { Self::V1(inner) => compact_with_discriminant(1, inner, buf) }
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        match self {
+            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
+        }
     }
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
         let (disc, rest) = split_discriminant(buf);
         match disc {
-            1 => { let (inner, rest2) = DataTransactionHeader::from_compact(rest, rest.len()); (Self::V1(inner), rest2) }
+            1 => {
+                let (inner, rest2) = DataTransactionHeader::from_compact(rest, rest.len());
+                (Self::V1(inner), rest2)
+            }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
         }
     }
@@ -102,7 +116,13 @@ impl Compact for VersionedDataTransactionHeader {
 impl Signable for VersionedDataTransactionHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
-        match self { Self::V1(inner) => { let mut tmp = Vec::new(); inner.encode_for_signing(&mut tmp); out.put_slice(&tmp); } }
+        match self {
+            Self::V1(inner) => {
+                let mut tmp = Vec::new();
+                inner.encode_for_signing(&mut tmp);
+                out.put_slice(&tmp);
+            }
+        }
     }
 }
 
@@ -114,14 +134,15 @@ impl DataTransactionHeader {
             other => Err(VersioningError::UnsupportedVersion(other)),
         }
     }
-
-    /// Infallible helper that panics if unsupported. Prefer the fallible API in network/db boundaries.
-    pub fn into_versioned(self) -> VersionedDataTransactionHeader {
-        self.try_into_versioned().expect("unsupported DataTransactionHeader version")
+}
+impl Versioned for DataTransactionHeader {
+    const VERSION: u8 = 1;
+}
+impl HasInnerVersion for DataTransactionHeader {
+    fn inner_version(&self) -> u8 {
+        self.version
     }
 }
-impl Versioned for DataTransactionHeader { const VERSION: u8 = 1; }
-impl HasInnerVersion for DataTransactionHeader { fn inner_version(&self) -> u8 { self.version } }
 
 // Commitment Transaction versioned wrapper
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
@@ -131,22 +152,67 @@ pub enum VersionedCommitmentTransaction {
     V1(CommitmentTransaction) = 1,
 }
 
-impl Default for VersionedCommitmentTransaction { fn default() -> Self { Self::V1(CommitmentTransaction::default()) } }
+impl Default for VersionedCommitmentTransaction {
+    fn default() -> Self {
+        Self::V1(CommitmentTransaction::default())
+    }
+}
 
-impl VersionDiscriminant for VersionedCommitmentTransaction { fn discriminant(&self) -> u8 { match self { Self::V1(_) => 1 } } }
+impl VersionDiscriminant for VersionedCommitmentTransaction {
+    fn discriminant(&self) -> u8 {
+        match self {
+            Self::V1(_) => 1,
+        }
+    }
+}
 
-impl Deref for VersionedCommitmentTransaction { type Target = CommitmentTransaction; fn deref(&self) -> &Self::Target { match self { Self::V1(v) => v } } }
-impl DerefMut for VersionedCommitmentTransaction { fn deref_mut(&mut self) -> &mut Self::Target { match self { Self::V1(v) => v } } }
+impl Deref for VersionedCommitmentTransaction {
+    type Target = CommitmentTransaction;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::V1(v) => v,
+        }
+    }
+}
+impl DerefMut for VersionedCommitmentTransaction {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::V1(v) => v,
+        }
+    }
+}
 
 impl Compact for VersionedCommitmentTransaction {
-    fn to_compact<B>(&self, buf: &mut B) -> usize where B: bytes::BufMut + AsMut<[u8]> { match self { Self::V1(inner) => compact_with_discriminant(1, inner, buf) } }
-    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) { let (disc, rest) = split_discriminant(buf); match disc { 1 => { let (inner, rest2) = CommitmentTransaction::from_compact(rest, rest.len()); (Self::V1(inner), rest2) } other => panic!("{:?}", VersioningError::UnsupportedVersion(other)) } }
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        match self {
+            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
+        }
+    }
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        let (disc, rest) = split_discriminant(buf);
+        match disc {
+            1 => {
+                let (inner, rest2) = CommitmentTransaction::from_compact(rest, rest.len());
+                (Self::V1(inner), rest2)
+            }
+            other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
+        }
+    }
 }
 
 impl Signable for VersionedCommitmentTransaction {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
-        match self { Self::V1(inner) => { let mut tmp = Vec::new(); inner.encode_for_signing(&mut tmp); out.put_slice(&tmp); } }
+        match self {
+            Self::V1(inner) => {
+                let mut tmp = Vec::new();
+                inner.encode_for_signing(&mut tmp);
+                out.put_slice(&tmp);
+            }
+        }
     }
 }
 
@@ -157,13 +223,15 @@ impl CommitmentTransaction {
             other => Err(VersioningError::UnsupportedVersion(other)),
         }
     }
-
-    pub fn into_versioned(self) -> VersionedCommitmentTransaction {
-        self.try_into_versioned().expect("unsupported CommitmentTransaction version")
+}
+impl Versioned for CommitmentTransaction {
+    const VERSION: u8 = 1;
+}
+impl HasInnerVersion for CommitmentTransaction {
+    fn inner_version(&self) -> u8 {
+        self.version
     }
 }
-impl Versioned for CommitmentTransaction { const VERSION: u8 = 1; }
-impl HasInnerVersion for CommitmentTransaction { fn inner_version(&self) -> u8 { self.version } }
 
 #[derive(
     Clone,
@@ -279,13 +347,10 @@ impl DataTransactionHeader {
         self.encode(out)
     }
 
-    pub fn signature_hash(&self) -> [u8; 32] {
-        // Fallible path hidden behind expect for existing API; callers that need to handle
-        // unsupported versions explicitly should add a fallible variant.
-        self.clone()
-            .try_into_versioned()
-            .expect("unsupported DataTransactionHeader version")
-            .signature_hash()
+    /// Fallible signature hash that returns an error for unsupported versions.
+    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
+        let versioned = self.clone().try_into_versioned()?;
+        Ok(versioned.signature_hash())
     }
 
     /// Validates the transaction signature by:
@@ -294,10 +359,12 @@ impl DataTransactionHeader {
     pub fn is_signature_valid(&self) -> bool {
         let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
         let id_matches_signature = self.id.0 == id;
-        id_matches_signature
-            && self
-                .signature
-                .validate_signature(self.signature_hash(), self.signer)
+        match self.signature_hash() {
+            Ok(sig_hash) => {
+                id_matches_signature && self.signature.validate_signature(sig_hash, self.signer)
+            }
+            Err(_e) => false,
+        }
     }
 }
 
@@ -316,7 +383,7 @@ pub struct DataTransaction {
 }
 
 impl DataTransaction {
-    pub fn signature_hash(&self) -> [u8; 32] {
+    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
         self.header.signature_hash()
     }
 
@@ -564,11 +631,9 @@ impl CommitmentTransaction {
         self.encode(out)
     }
 
-    pub fn signature_hash(&self) -> [u8; 32] {
-        self.clone()
-            .try_into_versioned()
-            .expect("unsupported CommitmentTransaction version")
-            .signature_hash()
+    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
+        let versioned = self.clone().try_into_versioned()?;
+        Ok(versioned.signature_hash())
     }
 
     /// Returns the value stored in the transaction
@@ -582,10 +647,12 @@ impl CommitmentTransaction {
     pub fn is_signature_valid(&self) -> bool {
         let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
         let id_matches_signature = self.id.0 == id;
-        id_matches_signature
-            && self
-                .signature
-                .validate_signature(self.signature_hash(), self.signer)
+        match self.signature_hash() {
+            Ok(sig_hash) => {
+                id_matches_signature && self.signature.validate_signature(sig_hash, self.signer)
+            }
+            Err(_e) => false,
+        }
     }
 
     /// Validates that the commitment transaction has a sufficient fee
@@ -712,7 +779,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
         self.signer = Address::from_public_key(signer.signer.verifying_key());
 
         // Create the signature hash and sign it
-        let prehash = self.signature_hash();
+        let prehash = self.signature_hash()?;
         let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
         self.signature = IrysSignature::new(signature);
@@ -767,7 +834,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
         self.signer = signer.address();
 
         // Create the signature hash and sign it
-        let prehash = self.signature_hash();
+        let prehash = self.signature_hash()?;
         let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
         self.signature = IrysSignature::new(signature);
@@ -1110,7 +1177,7 @@ mod tests {
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,
-            version: 0,
+            version: 1,
             promoted_height: None,
             signature: Signature::test_signature().into(),
         }
@@ -1121,6 +1188,7 @@ mod tests {
         tx.id = H256::from([255_u8; 32]);
         tx.signer = Address::default();
         tx.signature = Signature::test_signature().into();
+        tx.version = 1; // ensure supported version for signing tests
         tx
     }
 }

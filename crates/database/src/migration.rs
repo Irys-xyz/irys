@@ -136,13 +136,15 @@ mod tests {
             let header = IrysBlockHeader {
                 block_hash,
                 height: 1,
+                version: 1, // Set valid version
                 ..Default::default()
             };
-            write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
+            write_tx.put::<IrysBlockHeaders>(block_hash, header.try_into_versioned()?.into())?;
 
             // IrysDataTxHeaders (non-dupsort)
-            let tx_header = DataTransactionHeader::default();
-            write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.into())?;
+            let mut tx_header = DataTransactionHeader::default();
+            tx_header.version = 1; // Set valid version
+            write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.try_into_versioned()?.into())?;
 
             // CachedDataRoots (non-dupsort)
             let cdr = CachedDataRoot {

@@ -4,6 +4,10 @@
 //! making them easy to reference and maintain.
 use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
+use crate::versioning::{
+    compact_with_discriminant, split_discriminant, HasInnerVersion, Signable, VersionDiscriminant,
+    Versioned, VersioningError,
+};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash,
@@ -12,7 +16,6 @@ use crate::{
     string_u128, u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave,
     DataTransactionHeader, H256List, IngressProofsList, IrysSignature, Proof, H256, U256,
 };
-use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion};
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -160,11 +163,17 @@ pub enum VersionedIrysBlockHeader {
     V1(IrysBlockHeader),
 }
 
-impl Default for VersionedIrysBlockHeader { fn default() -> Self { Self::V1(IrysBlockHeader::default()) } }
+impl Default for VersionedIrysBlockHeader {
+    fn default() -> Self {
+        Self::V1(IrysBlockHeader::default())
+    }
+}
 
 impl VersionDiscriminant for VersionedIrysBlockHeader {
     fn discriminant(&self) -> u8 {
-        match self { Self::V1(_) => 1 }
+        match self {
+            Self::V1(_) => 1,
+        }
     }
 }
 
@@ -210,11 +219,9 @@ impl Compact for VersionedIrysBlockHeader {
 
 impl Signable for VersionedIrysBlockHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        // discriminant first
         out.put_u8(self.discriminant());
         match self {
             Self::V1(inner) => {
-                // Use existing RLP encode minus skipped fields (derive already skips block_hash & signature).
                 let mut tmp = Vec::new();
                 inner.digest_for_signing(&mut tmp);
                 out.put_slice(&tmp);
@@ -224,7 +231,11 @@ impl Signable for VersionedIrysBlockHeader {
 }
 
 impl VersionedIrysBlockHeader {
-    pub fn into_inner(self) -> IrysBlockHeader { match self { Self::V1(h) => h } }
+    pub fn into_inner(self) -> IrysBlockHeader {
+        match self {
+            Self::V1(h) => h,
+        }
+    }
 }
 
 impl IrysBlockHeader {
@@ -235,17 +246,16 @@ impl IrysBlockHeader {
             other => Err(VersioningError::UnsupportedVersion(other)),
         }
     }
-
-    /// Infallible helper (will panic on unsupported version). Use only in code paths
-    /// where the version has already been validated (e.g. post network deserialization).
-    pub fn into_versioned(self) -> VersionedIrysBlockHeader {
-        self.try_into_versioned().expect("unsupported IrysBlockHeader version")
-    }
 }
 
-impl Versioned for IrysBlockHeader { const VERSION: u8 = 1; }
-impl HasInnerVersion for IrysBlockHeader { fn inner_version(&self) -> u8 { self.version } }
-
+impl Versioned for IrysBlockHeader {
+    const VERSION: u8 = 1;
+}
+impl HasInnerVersion for IrysBlockHeader {
+    fn inner_version(&self) -> u8 {
+        self.version
+    }
+}
 
 /// Stores deserialized fields from a JSON formatted Irys block header.
 #[derive(
@@ -264,8 +274,6 @@ impl HasInnerVersion for IrysBlockHeader { fn inner_version(&self) -> u8 { self.
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeader {
-
-
     /// The block identifier.
     /// Excluded from RLP encoding as it's derived from the signature hash.
     #[rlp(skip)]
@@ -376,12 +384,10 @@ impl IrysBlockHeader {
         Encodable::encode(&self, buf);
     }
 
-    /// Create a `keccak256` hash of the [`IrysBlockHeader`]
-    pub fn signature_hash(&self) -> [u8; 32] {
-        // allocate the buffer, guesstimate the required capacity
-        let mut bytes = Vec::with_capacity(size_of::<Self>() * 3);
-        self.digest_for_signing(&mut bytes);
-        keccak256(bytes).0
+    /// Create a keccak256 hash of the header using versioned discriminant-first preimage.
+    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
+        let versioned = self.clone().try_into_versioned()?;
+        Ok(versioned.signature_hash())
     }
 
     /// Validates the block hash signature by:
@@ -390,10 +396,15 @@ impl IrysBlockHeader {
     pub fn is_signature_valid(&self) -> bool {
         let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
         let signature_hash_matches_block_hash = self.block_hash.0 == id;
-        signature_hash_matches_block_hash
-            && self
-                .signature
-                .validate_signature(self.signature_hash(), self.miner_address)
+        match self.signature_hash() {
+            Ok(prehash) => {
+                signature_hash_matches_block_hash
+                    && self
+                        .signature
+                        .validate_signature(prehash, self.miner_address)
+            }
+            Err(_) => false,
+        }
     }
 
     // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
@@ -779,6 +790,7 @@ impl IrysBlockHeader {
             ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             treasury: U256::zero(),
+            version: 1, // Set valid version for versioning support
             ..Default::default()
         }
     }
@@ -1298,7 +1310,9 @@ mod tests {
     }
 
     fn mock_header() -> IrysBlockHeader {
-        IrysBlockHeader::new_mock_header()
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.version = 1;
+        h
     }
 
     #[test]

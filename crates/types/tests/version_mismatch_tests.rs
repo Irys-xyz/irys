@@ -1,20 +1,17 @@
-#![cfg(debug_assertions)]
-use irys_types::{DataTransactionHeader, CommitmentTransaction, ConsensusConfig};
+use irys_types::{CommitmentTransaction, ConsensusConfig, DataTransactionHeader};
 
 #[test]
-#[should_panic]
-fn data_tx_into_versioned_panics_on_version_mismatch() {
+fn data_tx_try_into_versioned_returns_err_on_version_mismatch() {
     let config = ConsensusConfig::testing();
     let mut header = DataTransactionHeader::new(&config);
     header.version = 42; // wrong
-    let _ = header.into_versioned();
+    assert!(header.try_into_versioned().is_err());
 }
 
 #[test]
-#[should_panic]
-fn commitment_tx_into_versioned_panics_on_version_mismatch() {
+fn commitment_tx_try_into_versioned_returns_err_on_version_mismatch() {
     let config = ConsensusConfig::testing();
     let mut tx = CommitmentTransaction::new(&config);
     tx.version = 99; // wrong
-    let _ = tx.into_versioned();
+    assert!(tx.try_into_versioned().is_err());
 }

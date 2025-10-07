@@ -1,4 +1,6 @@
-use irys_types::{versioning::VersioningError, DataTransactionHeader, IrysBlockHeader, CommitmentTransaction};
+use irys_types::{
+    versioning::VersioningError, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+};
 
 #[test]
 fn data_tx_try_into_versioned_supported() {

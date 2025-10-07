@@ -7,8 +7,10 @@ use thiserror::Error;
 /// Error type for versioning / decoding issues.
 #[derive(Debug, Error)]
 pub enum VersioningError {
-    #[error("unsupported version {0}")] UnsupportedVersion(u8),
-    #[error("version mismatch: discriminant {discriminant} != inner {inner}")] VersionMismatch { discriminant: u8, inner: u8 },
+    #[error("unsupported version {0}")]
+    UnsupportedVersion(u8),
+    #[error("version mismatch: discriminant {discriminant} != inner {inner}")]
+    VersionMismatch { discriminant: u8, inner: u8 },
 }
 
 /// Marker for root objects that have a semantic version fixed by an enum discriminant.
