@@ -153,7 +153,7 @@ impl ChunkCacheService {
                     .read()
                     .get_block_bounds(ledger_id, LedgerChunkOffset::from(chunk_offset))
                     .expect("Should be able to get block bounds as max_chunk_offset was checked");
-                prune_height = Some((block_bounds.height - 1).try_into().unwrap());
+                prune_height = Some(block_bounds.height - 1);
             }
         }
 
