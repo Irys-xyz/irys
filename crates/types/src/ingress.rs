@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::irys::IrysSigner;
 
-use crate::{
-    generate_data_root, generate_ingress_leaves, ChunkBytes, DataRoot, IrysSignature, Node, H256,
-};
+use crate::{generate_data_root, generate_ingress_leaves, DataRoot, IrysSignature, Node, H256};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
 
@@ -105,10 +103,10 @@ pub fn generate_ingress_proof_tree<C: AsRef<[u8]>>(
     ))
 }
 
-pub fn generate_ingress_proof(
+pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     signer: &IrysSigner,
     data_root: DataRoot,
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    chunks: impl Iterator<Item = eyre::Result<C>>,
     chain_id: u64,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
@@ -224,7 +222,7 @@ mod tests {
         let proof = generate_ingress_proof(
             &signer,
             data_root,
-            chunks.clone().into_iter().map(Ok),
+            chunks.iter().map(|c| Ok(c.as_slice())),
             chain_id,
         )?;
 
@@ -273,7 +271,7 @@ mod tests {
         let testnet_proof = generate_ingress_proof(
             &signer,
             data_root,
-            chunks.clone().into_iter().map(Ok),
+            chunks.iter().map(|c| Ok(c.as_slice())),
             testnet_chain_id,
         )?;
 
@@ -282,7 +280,7 @@ mod tests {
         let mainnet_proof = generate_ingress_proof(
             &signer,
             data_root,
-            chunks.clone().into_iter().map(Ok),
+            chunks.iter().map(|c| Ok(c.as_slice())),
             mainnet_chain_id,
         )?;
 
