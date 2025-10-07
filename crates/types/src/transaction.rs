@@ -468,13 +468,7 @@ impl CommitmentTransaction {
         partition_hash: H256,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
-
-        // If user has no pledges, they get 0 back
-        let value = if count == 0 {
-            U256::zero()
-        } else {
-            Self::calculate_pledge_value_at_count(config, count - 1)
-        };
+        let value = Self::calculate_pledge_value_at_count(config, count.checked_sub(1).unwrap());
 
         Self {
             commitment_type: CommitmentType::Unpledge {

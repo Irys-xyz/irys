@@ -749,22 +749,25 @@ impl EpochSnapshot {
     /// Note: We also remove the partition hash from `all_active_partitions` to
     /// keep the active set consistent. This mirrors prior behavior.
     pub fn apply_unpledges(&mut self, commitments: &[CommitmentTransaction]) {
-        for unpledge in commitments.iter().filter(|c| matches!(c.commitment_type, irys_primitives::CommitmentType::Unpledge { .. })) {
-            let irys_primitives::CommitmentType::Unpledge { partition_hash, .. } = unpledge.commitment_type else { unreachable!() };
+        for unpledge in commitments.iter().filter(|c| {
+            matches!(
+                c.commitment_type,
+                irys_primitives::CommitmentType::Unpledge { .. }
+            )
+        }) {
+            let irys_primitives::CommitmentType::Unpledge { partition_hash, .. } =
+                unpledge.commitment_type
+            else {
+                unreachable!()
+            };
 
             let ph: irys_types::H256 = partition_hash.into();
 
             // Remove from capacity assignments, if present
-            let cap_removed = self
-                .partition_assignments
-                .capacity_partitions
-                .remove(&ph);
+            let cap_removed = self.partition_assignments.capacity_partitions.remove(&ph);
 
             // Remove from data assignments, if present (minor change requested)
-            let data_removed = self
-                .partition_assignments
-                .data_partitions
-                .remove(&ph);
+            let data_removed = self.partition_assignments.data_partitions.remove(&ph);
 
             if cap_removed.is_none() && data_removed.is_none() {
                 panic!("partition must be present at this point");
@@ -1343,7 +1346,11 @@ mod tests {
             let assignment = PartitionAssignment {
                 partition_hash: ph,
                 miner_address: miner,
-                ledger_id: if is_data { Some(DataLedger::Publish as u32) } else { None },
+                ledger_id: if is_data {
+                    Some(DataLedger::Publish as u32)
+                } else {
+                    None
+                },
                 slot_index: if is_data { Some(0) } else { None },
             };
 
@@ -1380,7 +1387,11 @@ mod tests {
             snapshot
         }
 
-        fn make_unpledge_tx(config: &ConsensusConfig, signer: Address, ph: H256) -> CommitmentTransaction {
+        fn make_unpledge_tx(
+            config: &ConsensusConfig,
+            signer: Address,
+            ph: H256,
+        ) -> CommitmentTransaction {
             let mut tx = CommitmentTransaction::new(config);
             tx.signer = signer;
             tx.commitment_type = CommitmentType::Unpledge {
@@ -1400,12 +1411,10 @@ mod tests {
             snapshot.apply_unpledges(&[tx]);
 
             // Removed from capacity map
-            assert!(
-                !snapshot
-                    .partition_assignments
-                    .capacity_partitions
-                    .contains_key(&ph)
-            );
+            assert!(!snapshot
+                .partition_assignments
+                .capacity_partitions
+                .contains_key(&ph));
 
             // Removed from active set
             assert!(!snapshot.all_active_partitions.iter().any(|h| *h == ph));
@@ -1429,12 +1438,10 @@ mod tests {
             snapshot.apply_unpledges(&[tx]);
 
             // Removed from data map
-            assert!(
-                !snapshot
-                    .partition_assignments
-                    .data_partitions
-                    .contains_key(&ph)
-            );
+            assert!(!snapshot
+                .partition_assignments
+                .data_partitions
+                .contains_key(&ph));
 
             // Removed from active set
             assert!(!snapshot.all_active_partitions.iter().any(|h| *h == ph));

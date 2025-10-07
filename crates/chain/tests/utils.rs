@@ -1313,6 +1313,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
+    #[tracing::instrument(skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -1340,6 +1341,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         if retries == max_retries {
+            tracing::error!("failed to locate tx");
             Err(eyre::eyre!(
                 "Failed to locate tx in mempool after {} retries",
                 retries
