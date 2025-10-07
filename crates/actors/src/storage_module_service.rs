@@ -29,7 +29,7 @@ use irys_types::{
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ops::Range,
     path::Path,
     sync::{Arc, RwLock},
@@ -121,7 +121,7 @@ impl StorageModuleServiceInner {
         }
     }
 
-    #[tracing::instrument(err)]
+    #[tracing::instrument(skip_all, err)]
     async fn handle_partition_assignments_update(
         &mut self,
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
@@ -129,139 +129,106 @@ impl StorageModuleServiceInner {
     ) -> eyre::Result<()> {
         // Read the current storage modules once, outside the loop
         // this is the current state of the storage modules prior of the partition assignments update
-        let modules_snapshot: Vec<Arc<StorageModule>> =
-            { self.storage_modules.read().unwrap().clone() };
+        let modules_by_id: HashMap<usize, Arc<StorageModule>> = {
+            let modules_guard = self.storage_modules.read().unwrap();
+            modules_guard
+                .iter()
+                .map(|module| (module.id, module.clone()))
+                .collect()
+        };
         let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();
         let mut packing_modules: Vec<Arc<StorageModule>> = Vec::new();
 
         debug!("StorageModuleInfos:\n{:#?}", storage_module_infos);
 
-        // Build a quick lookup for incoming module ids
-        let incoming_ids: std::collections::HashSet<usize> =
-            storage_module_infos.iter().map(|s| s.id).collect();
+        let info_by_id: HashMap<usize, &StorageModuleInfo> = storage_module_infos
+            .iter()
+            .map(|info| (info.id, info))
+            .collect();
 
-        // Handle de-assignments for modules omitted from the incoming update.
-        // Note: storage_module_infos may contain ONLY assigned modules. Any local
-        // storage module not present in the update must be treated as unassigned.
-        for existing in modules_snapshot.iter() {
-            if !incoming_ids.contains(&existing.id) {
-                // If we currently have an assignment, clear it (unless a newer local state exists)
-                if existing.partition_assignment().is_some() {
-                    let path = &self.submodules_config.submodule_paths[existing.id];
-                    let params_path = path.join(PACKING_PARAMS_FILE_NAME);
-                    let newer_local = match PackingParams::from_toml(&params_path) {
-                        Ok(params) => params
-                            .last_updated_height
-                            .is_some_and(|h| h > update_height),
-                        Err(_) => false,
-                    };
+        for info in storage_module_infos.iter() {
+            if !modules_by_id.contains_key(&info.id) {
+                panic!(
+                    "StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}",
+                    info.id, info
+                );
+            }
+        }
 
-                    if newer_local {
-                        debug!(
-                            module_id = existing.id,
+        for (module_id, module) in modules_by_id.iter() {
+            match info_by_id.get(module_id) {
+                None => {
+                    self.clear_assignment_if_outdated(module, update_height, "missing_from_update");
+                }
+                Some(sm_info) => {
+                    if sm_info.submodules.is_empty() {
+                        return Err(eyre::eyre!(
+                            "StorageModuleInfo {} missing submodule entries",
+                            sm_info.id
+                        ));
+                    }
+
+                    let path = &self.submodules_config.submodule_paths[sm_info.id];
+
+                    // ARCHITECTURE NOTE: Configuration vs. Implementation Mismatch
+                    if *path != sm_info.submodules[0].1 {
+                        return Err(eyre::eyre!("Submodule paths don't match"));
+                    }
+
+                    if sm_info.partition_assignment.is_none() {
+                        self.clear_assignment_if_outdated(
+                            module,
                             update_height,
-                            "skipping implicit unassign: local packing params are from the future"
+                            "explicitly_unassigned",
                         );
-                    } else {
-                        debug!(
-                            module_id = existing.id,
-                            update_height, "clearing local partition assignment (implicit)"
-                        );
-                        existing.clear_assignment(update_height);
-                        if let Ok(interval) = existing.reset() {
-                            debug!(
-                                ?interval,
-                                module_id = existing.id,
-                                "storage module reset after implicit unassign"
-                            );
-                        } else {
-                            warn!(
-                                module_id = existing.id,
-                                "failed to reset storage module after implicit unassign"
-                            );
-                        }
                     }
                 }
             }
         }
 
         for sm_info in storage_module_infos.iter() {
-            // Get the existing StorageModule from our state with the same storage module id
-            let existing = {
-                modules_snapshot
-                    .iter()
-                    .find(|sm| sm.id == sm_info.id)
-                    .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
+            let Some(info_pa) = sm_info.partition_assignment else {
+                continue;
             };
 
-            // Did this storage module from our state get assigned a new partition_hash ?
-            if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
-                existing.assign_partition(sm_info.partition_assignment.unwrap(), update_height);
+            let existing = modules_by_id
+                .get(&sm_info.id)
+                .expect("StorageModuleInfo must reference an existing storage module id");
 
-                // Record this storage module as needing packing, the protocol will always assign a new partition_hash
-                // to capacity for 1 epoch so we can schedule this formerly unassigned storage module for packing
-                packing_modules.push(existing.clone());
-
-                // Skip any further validations for now
-                continue;
-            }
-
-            // Get the path for this module - this is the only place the storage module id can be used as an index
             let path = &self.submodules_config.submodule_paths[sm_info.id];
 
-            // Validate the path
-            // ARCHITECTURE NOTE: Configuration vs. Implementation Mismatch
-            //
-            // There's a fundamental disconnect between the configuration system and the storage module design:
-            //
-            // 1. Original Design Intent:
-            //    The StorageModule system was designed to support multiple submodules per StorageModule,
-            //    allowing several smaller storage units to be combined into a single 16TB logical partition.
-            //
-            // 2. Current Configuration Limitation:
-            //    The configuration system lacks the capability to express this many-to-one relationship.
-            //
-            // 3. Testnet Simplification:
-            //    For Testnet, we adopt a simplified 1:1 mapping where each StorageModule contains
-            //    exactly one submodule representing a full 16TB partition.
-            //
-            // This limitation should be addressed in future versions to fully realize the original
-            // flexible storage architecture. see [`system_ledger::get_genesis_commitments()`] and
-            // [`EpochServiceActor::map_storage_modules_to_partition_assignments`] for reference
-            if *path != sm_info.submodules[0].1 {
-                return Err(eyre::eyre!("Submodule paths don't match"));
+            match self.validate_packing_params(existing, path, sm_info.id) {
+                Ok(()) => {}
+                Err(err) => panic!("{}", err),
             }
 
-            // Validate the in memory storage module against on-disk packing parameters
-            if let Some(info_pa) = sm_info.partition_assignment {
-                // Validate the existing storage module info as it exists in our local state
-                // vs. the existing packing params on disk to make sure everything is in sync
-                // before updating the partition assignment
-                match self.validate_packing_params(existing, path, sm_info.id) {
-                    Ok(()) => {}
-                    Err(err) => panic!("{}", err),
+            match existing.partition_assignment() {
+                None => {
+                    existing.assign_partition(info_pa, update_height);
+                    packing_modules.push(existing.clone());
                 }
-
-                // Check to see if there's been a change in the ledger assignment for the partition_has
-                // moved from Capacity->LedgerSlot or LedgerSlot->Capacity
-                let existing_pa = existing.partition_assignment().unwrap();
-                if info_pa.ledger_id != existing_pa.ledger_id
-                    || info_pa.slot_index != existing_pa.slot_index
-                {
+                Some(existing_pa) if existing_pa != info_pa => {
                     let ledger_before = existing_pa.ledger_id;
+                    let slot_before = existing_pa.slot_index;
 
-                    // Update the storage modules partition assignment (and packing params toml)
-                    // to match ledger/capacity reassignment
                     existing.assign_partition(info_pa, update_height);
 
-                    if ledger_before.is_some() && info_pa.ledger_id.is_none() {
-                        // This storage module is expiring from LedgerSlot->Capacity
-                        packing_modules.push(existing.clone());
-                    } else if ledger_before.is_none() && info_pa.ledger_id.is_some() {
-                        // This storage module is assigned Capacity->LedgerSlot
-                        assigned_modules.push(existing.clone());
+                    match (ledger_before, info_pa.ledger_id) {
+                        (Some(_), None) => {
+                            packing_modules.push(existing.clone());
+                        }
+                        (None, Some(_)) => {
+                            assigned_modules.push(existing.clone());
+                        }
+                        (Some(before), Some(after))
+                            if before != after || slot_before != info_pa.slot_index =>
+                        {
+                            assigned_modules.push(existing.clone());
+                        }
+                        _ => {}
                     }
                 }
+                _ => {}
             }
         }
 
@@ -421,6 +388,59 @@ impl StorageModuleServiceInner {
         }
 
         Ok(())
+    }
+
+    fn clear_assignment_if_outdated(
+        &self,
+        module: &Arc<StorageModule>,
+        update_height: u64,
+        reason: &'static str,
+    ) {
+        if module.partition_assignment().is_none() {
+            return;
+        }
+
+        let path = &self.submodules_config.submodule_paths[module.id];
+        let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+        let newer_local = match PackingParams::from_toml(&params_path) {
+            Ok(params) => params
+                .last_updated_height
+                .is_some_and(|h| h > update_height),
+            Err(_) => false,
+        };
+
+        if newer_local {
+            debug!(
+                module_id = module.id,
+                update_height,
+                reason,
+                "skipping unassign: local packing params are newer than update"
+            );
+            return;
+        }
+
+        debug!(
+            module_id = module.id,
+            update_height, reason, "clearing local partition assignment"
+        );
+        module.clear_assignment(update_height);
+
+        match module.reset() {
+            Ok(interval) => {
+                debug!(
+                    ?interval,
+                    module_id = module.id,
+                    reason,
+                    "storage module reset after unassign"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    module_id = module.id,
+                    reason, "failed to reset storage module after unassign: {}", e
+                );
+            }
+        }
     }
 
     fn get_max_partition_offset(&self, storage_module: Arc<StorageModule>) -> PartitionChunkOffset {
