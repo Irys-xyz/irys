@@ -288,6 +288,9 @@ pub struct RemotePackingConfig {
     pub timeout: Option<Duration>,
 }
 
+/// Default maximum cache size: 10 GB
+pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
+
 /// Cache eviction strategy - node operators select one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
@@ -303,16 +306,21 @@ pub enum CacheEvictionStrategy {
     /// Size-based eviction: remove oldest cached data (FIFO) when limits exceeded
     /// Runs on every prune_cache() call, evicts oldest entries when over limit
     SizeBased {
-        /// Maximum number of chunks to cache (None = no chunk count limit)
-        max_cache_chunks: Option<u64>,
+        /// Maximum cache size in bytes
+        /// Default: 10737418240 (10 GB)
+        #[serde(default = "default_max_cache_size_bytes")]
+        max_cache_size_bytes: u64,
     },
+}
+
+const fn default_max_cache_size_bytes() -> u64 {
+    DEFAULT_MAX_CACHE_SIZE_BYTES
 }
 
 impl Default for CacheEvictionStrategy {
     fn default() -> Self {
-        // Default to size-based with no limits (backward compatible)
         Self::SizeBased {
-            max_cache_chunks: None,
+            max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
         }
     }
 }

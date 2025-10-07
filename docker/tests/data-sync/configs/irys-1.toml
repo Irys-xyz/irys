@@ -68,7 +68,7 @@ cache_clean_lag = 2
 
 [cache.eviction_strategy]
 type = "size_based"
-max_cache_chunks = 40960  # 10 GB with 256KB chunks
+max_cache_size_bytes = 10737418240  # 10 GB
 
 [oracle]
 type = "mock"

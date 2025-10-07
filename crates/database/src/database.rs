@@ -142,13 +142,17 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     let result = tx.get::<CachedDataRoots>(key)?;
 
     // Create or update the CachedDataRoot
-    let mut cached_data_root = result.unwrap_or_else(|| CachedDataRoot {
-        data_size: tx_header.data_size,
-        txid_set: vec![tx_header.id],
-        block_set: vec![],
-        expiry_height: None,
-        cached_at: UnixTimestamp::now_or_panic(),
-    });
+    let mut cached_data_root = match result {
+        Some(existing) => existing,
+        None => CachedDataRoot {
+            data_size: tx_header.data_size,
+            txid_set: vec![tx_header.id],
+            block_set: vec![],
+            expiry_height: None,
+            cached_at: UnixTimestamp::now()
+                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
+        },
+    };
 
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
