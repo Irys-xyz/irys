@@ -4,7 +4,6 @@ pub mod block_index;
 pub mod commitment;
 pub mod get_chunk;
 pub mod index;
-pub mod miner;
 pub mod network_config;
 pub mod peer_list;
 pub mod post_chunk;

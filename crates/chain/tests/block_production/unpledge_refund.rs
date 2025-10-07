@@ -6,8 +6,8 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    partition::PartitionAssignment, Address, CommitmentTransaction, ConsensusConfig,
-    IrysTransactionCommon, NodeConfig, PledgeDataProvider as _, U256,
+    partition::PartitionAssignment, Address, CommitmentTransaction, ConsensusConfig, NodeConfig,
+    PledgeDataProvider as _, U256,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
 use std::{
@@ -592,7 +592,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let assigned_partitions = {
         let sms = genesis_node.node_ctx.storage_modules_guard.read();
-        sms.iter().map(|sm| sm.clone()).collect::<Vec<_>>()
+        sms.iter().cloned().collect::<Vec<_>>()
     };
     assert_eq!(
         assigned_partitions.len(),
