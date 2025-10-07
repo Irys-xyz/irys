@@ -1881,9 +1881,7 @@ pub async fn data_txs_are_valid(
                         .data_sync
                         .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
 
-                    match tokio::time::timeout(std::time::Duration::from_millis(1000), peers_rx)
-                        .await
-                    {
+                    match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
                         Ok(Ok(active_peers)) => {
                             let guard = active_peers.read().unwrap();
                             guard
@@ -1928,7 +1926,7 @@ pub async fn data_txs_are_valid(
 
                             // Fetch with short timeout
                             let resp = tokio::time::timeout(
-                                std::time::Duration::from_millis(1500),
+                                Duration::from_millis(500),
                                 client.get(&url).send(),
                             )
                             .await;
@@ -1974,11 +1972,9 @@ pub async fn data_txs_are_valid(
                             }
 
                             // Wait briefly for ingest to complete and log outcome
-                            let recv_res = tokio::time::timeout(
-                                std::time::Duration::from_millis(1500),
-                                ing_rx,
-                            )
-                            .await;
+                            let recv_res =
+                                tokio::time::timeout(std::time::Duration::from_millis(500), ing_rx)
+                                    .await;
                             match recv_res {
                                 Err(_elapsed) => {
                                     tracing::warn!(
