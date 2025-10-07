@@ -181,7 +181,7 @@ impl Display for BlockParam {
             Self::Latest => write!(f, "latest"),
             Self::Pending => write!(f, "pending"),
             Self::Finalized => write!(f, "finalized"),
-            Self::BlockHeight(height) => write!(f, "{}", height),
+            Self::BlockHeight(height) => write!(f, "{height}"),
             Self::Hash(hash) => write!(f, "{}", hash.0.to_base58()),
         }
     }

@@ -9,7 +9,7 @@ WORKDIR /workspace
 
 # Install build deps (vendored OpenSSL is enabled but we still need common build tools)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	build-essential pkg-config clang cmake git ca-certificates libgmp-dev && \
+	build-essential pkg-config clang cmake git ca-certificates libgmp-dev m4 file && \
 	rm -rf /var/lib/apt/lists/*
 
 # Copy the full workspace (simpler and more robust than fine-grained caching here)

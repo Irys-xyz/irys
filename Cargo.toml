@@ -23,6 +23,7 @@ members = [
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
   "crates/packing-worker",
+  "crates/tui",
 ]
 resolver = "2"
 
@@ -59,7 +60,7 @@ irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
 irys-packing-worker = { path = "./crates/packing-worker" }
-
+irys-tui = { path = "./crates/tui" }
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix = "0.13.5"
 actix-rt = "2.10.0"
@@ -442,6 +443,8 @@ doc-overindented-list-items = "allow"
 unused-async = "deny"
 large-enum-variant = "allow"
 doc-lazy-continuation = "allow"
+result-large-err = "allow"
+uninlined-format-args = "allow"
 # to enable in the future
 type-complexity = "allow"
 needless-range-loop = "allow"
@@ -510,4 +513,5 @@ default.extend-ignore-re = [
   "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
+default.extend-words = { ratatui = "ratatui" }
 files.extend-exclude = ["ext/*", "fixtures/*"]

@@ -1,6 +1,9 @@
+use std::str::FromStr;
+
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use bytes::Buf as _;
 use reth_codecs::Compact;
+use serde::{Deserialize as _, Deserializer};
 
 #[derive(
     PartialEq,
@@ -76,17 +79,18 @@ pub enum CommitmentType {
     #[default]
     Stake,
     Pledge {
-        #[serde(rename = "pledgeCountBeforeExecuting")]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "string_u64")]
         pledge_count_before_executing: u64,
     },
     Unpledge {
-        #[serde(rename = "pledgeCountBeforeExecuting")]
+        #[serde(rename = "pledgeCountBeforeExecuting", with = "string_u64")]
         pledge_count_before_executing: u64,
     },
     Unstake,
 }
 
 impl Encodable for CommitmentType {
+    // TODO: this is not really spec compliant (afaict)
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         match self {
             Self::Stake => {
@@ -239,10 +243,49 @@ impl reth_codecs::Compact for CommitmentType {
             }
             COMMITMENT_TYPE_UNSTAKE => (Self::Unstake, &buf[TYPE_DISCRIMINANT_SIZE..]),
             _ => panic!(
-                "CommitmentType::from_compact: unknown commitment type discriminant: {}",
-                type_id
+                "CommitmentType::from_compact: unknown commitment type discriminant: {type_id}"
             ),
         }
+    }
+}
+
+// TODO: remove - below is duplicated from types/serialization
+pub mod string_u64 {
+    use serde::{Deserializer, Serializer};
+
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
+fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr + serde::Deserialize<'de>,
+    T::Err: std::fmt::Display,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber<T> {
+        String(String),
+        Number(T),
+    }
+
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::String(s) => T::from_str(&s).map_err(serde::de::Error::custom),
+        StringOrNumber::Number(n) => Ok(n),
     }
 }
 
