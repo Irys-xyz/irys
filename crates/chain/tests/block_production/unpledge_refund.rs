@@ -25,6 +25,28 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let (genesis_node, peer_node, peer_addr, capacity_pa, consensus) =
         setup_env(num_blocks_in_epoch, seconds_to_wait).await?;
 
+    // Helper: current set of assigned SM partition hashes on a node
+    let assigned_sm_hashes = |node: &IrysNodeTest<irys_chain::IrysNodeCtx>| -> Vec<irys_types::H256> {
+        let sms = node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
+            .collect()
+    };
+
+    // ---------- Pre-state: storage modules should be assigned before unpledge ----------
+    let pre_hashes = assigned_sm_hashes(&peer_node);
+    assert!(
+        !pre_hashes.is_empty(),
+        "Peer should have at least one assigned storage module before unpledge"
+    );
+    // Test setup must guarantee the target capacity partition is locally loaded
+    assert!(
+        pre_hashes
+            .iter()
+            .any(|h| *h == capacity_pa.partition_hash),
+        "Test setup invariant violated: target capacity partition must be assigned to a local SM"
+    );
+
     // --- Build and submit Unpledge commitment for that partition
     let anchor = peer_node.get_anchor().await?;
 
@@ -55,6 +77,20 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let balance_before_inclusion = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
 
     let inclusion_block = genesis_node.mine_block().await?;
+
+    // ---------- Assert (inclusion): storage modules not released yet ----------
+    let inclusion_hashes = assigned_sm_hashes(&peer_node);
+    assert_eq!(
+        inclusion_hashes.len(),
+        pre_hashes.len(),
+        "Unpledge inclusion must not change number of assigned storage modules"
+    );
+    assert!(
+        inclusion_hashes
+            .iter()
+            .any(|h| *h == capacity_pa.partition_hash),
+        "Target partition should still be assigned after inclusion (release only at epoch)"
+    );
 
     // ---------- Assert (inclusion): UNPLEDGE only, fee-only debit ----------
     // First, verify the Irys commitment ledger actually contains the unpledge tx id
@@ -152,6 +188,11 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // ---------- Action: mine to the next epoch ----------
     let (_mined, final_height) = genesis_node.mine_until_next_epoch().await?;
+    // Ensure the peer has fully synced the epoch block so SM updates are applied
+    peer_node
+        .wait_until_height(final_height, seconds_to_wait)
+        .await
+        .expect("peer to sync to epoch height");
     let last_block = genesis_node.get_block_by_height(final_height).await?;
 
     // ---------- Assert (epoch): UNPLEDGE_REFUND with value, balances and treasury ----------
@@ -209,9 +250,15 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
             }
         }
     }
+    assert!(matched, "Did not find decoded UnpledgeRefund for signer in epoch block");
+
+    // ---------- Assert (epoch): storage module released for target (if it was assigned) ----------
+    let epoch_hashes = assigned_sm_hashes(&peer_node);
     assert!(
-        matched,
-        "Did not find decoded UnpledgeRefund for signer in epoch block"
+        !epoch_hashes
+            .iter()
+            .any(|h| *h == capacity_pa.partition_hash),
+        "Target partition must be unassigned from storage modules at epoch boundary"
     );
 
     // Treasury should decrease by refund amount at epoch block
@@ -273,12 +320,17 @@ async fn setup_env(
         .await?;
 
     let peer_addr = peer_signer.address();
-    let assignments: Vec<PartitionAssignment> = genesis_node.get_partition_assignments(peer_addr);
-    let capacity_pa = assignments
-        .iter()
-        .find(|pa| pa.ledger_id.is_none())
-        .copied()
-        .expect("peer should have at least one capacity assignment");
+
+    // Prefer a capacity assignment that is actually loaded on a local Storage Module.
+    // This guarantees the subsequent unpledge triggers a real SM unassignment at epoch.
+    let capacity_pa = {
+        let sms = peer_node.node_ctx.storage_modules_guard.read();
+        // Require a locally loaded capacity assignment (ledger_id == None) for determinism
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment())
+            .find(|pa| pa.ledger_id.is_none())
+            .expect("Test requires at least one local capacity SM assignment")
+    };
 
     let consensus = genesis_node.node_ctx.config.node_config.consensus_config();
 

@@ -21,6 +21,7 @@ use irys_config::StorageSubmodulesConfig;
 use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, PackingParams, StorageModule, StorageModuleInfo,
+    PACKING_PARAMS_FILE_NAME,
 };
 use irys_types::{
     BlockHash, Config, DataLedger, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
@@ -145,6 +146,50 @@ impl StorageModuleServiceInner {
                     .find(|sm| sm.id == sm_info.id)
                     .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
             };
+
+            // Handle explicit unassignment (partition removal): Some -> None
+            if existing.partition_assignment().is_some() && sm_info.partition_assignment.is_none() {
+                // Guard: avoid clobbering a newer local assignment
+                let path = &self.submodules_config.submodule_paths[sm_info.id];
+                let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+                let newer_local = match PackingParams::from_toml(&params_path) {
+                    Ok(params) => params
+                        .last_updated_height
+                        .is_some_and(|h| h > update_height),
+                    Err(_) => false,
+                };
+
+                if newer_local {
+                    debug!(
+                        module_id = sm_info.id,
+                        update_height,
+                        "skipping unassign: local packing params are from the future"
+                    );
+                    continue;
+                }
+
+                debug!(
+                    module_id = sm_info.id,
+                    update_height, "clearing local partition assignment"
+                );
+                existing.clear_assignment(update_height);
+                // Reset intervals and on-disk state so miner/indexers stop immediately
+                if let Ok(interval) = existing.reset() {
+                    debug!(
+                        ?interval,
+                        module_id = sm_info.id,
+                        "storage module reset after unassign"
+                    );
+                } else {
+                    warn!(
+                        module_id = sm_info.id,
+                        "failed to reset storage module after unassign"
+                    );
+                }
+
+                // Unassignment handled; skip further validations for this module
+                continue;
+            }
 
             // Did this storage module from our state get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
