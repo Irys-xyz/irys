@@ -5,7 +5,7 @@ pub use crate::{
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use crate::{TxChunkOffset, UnpackedChunk};
-use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion, assert_version};
+use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion};
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
@@ -106,7 +106,20 @@ impl Signable for VersionedDataTransactionHeader {
     }
 }
 
-impl DataTransactionHeader { pub fn into_versioned(self) -> VersionedDataTransactionHeader { assert_version(&self); VersionedDataTransactionHeader::V1(self) } }
+impl DataTransactionHeader {
+    /// Fallible conversion that inspects the inner version field.
+    pub fn try_into_versioned(self) -> Result<VersionedDataTransactionHeader, VersioningError> {
+        match self.version {
+            1 => Ok(VersionedDataTransactionHeader::V1(self)),
+            other => Err(VersioningError::UnsupportedVersion(other)),
+        }
+    }
+
+    /// Infallible helper that panics if unsupported. Prefer the fallible API in network/db boundaries.
+    pub fn into_versioned(self) -> VersionedDataTransactionHeader {
+        self.try_into_versioned().expect("unsupported DataTransactionHeader version")
+    }
+}
 impl Versioned for DataTransactionHeader { const VERSION: u8 = 1; }
 impl HasInnerVersion for DataTransactionHeader { fn inner_version(&self) -> u8 { self.version } }
 
@@ -137,7 +150,18 @@ impl Signable for VersionedCommitmentTransaction {
     }
 }
 
-impl CommitmentTransaction { pub fn into_versioned(self) -> VersionedCommitmentTransaction { assert_version(&self); VersionedCommitmentTransaction::V1(self) } }
+impl CommitmentTransaction {
+    pub fn try_into_versioned(self) -> Result<VersionedCommitmentTransaction, VersioningError> {
+        match self.version {
+            1 => Ok(VersionedCommitmentTransaction::V1(self)),
+            other => Err(VersioningError::UnsupportedVersion(other)),
+        }
+    }
+
+    pub fn into_versioned(self) -> VersionedCommitmentTransaction {
+        self.try_into_versioned().expect("unsupported CommitmentTransaction version")
+    }
+}
 impl Versioned for CommitmentTransaction { const VERSION: u8 = 1; }
 impl HasInnerVersion for CommitmentTransaction { fn inner_version(&self) -> u8 { self.version } }
 
@@ -256,9 +280,12 @@ impl DataTransactionHeader {
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
-        assert_version(self);
-        // Use versioned discriminant-first preimage
-        VersionedDataTransactionHeader::V1(self.clone()).signature_hash()
+        // Fallible path hidden behind expect for existing API; callers that need to handle
+        // unsupported versions explicitly should add a fallible variant.
+        self.clone()
+            .try_into_versioned()
+            .expect("unsupported DataTransactionHeader version")
+            .signature_hash()
     }
 
     /// Validates the transaction signature by:
@@ -538,8 +565,10 @@ impl CommitmentTransaction {
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
-        assert_version(self);
-        VersionedCommitmentTransaction::V1(self.clone()).signature_hash()
+        self.clone()
+            .try_into_versioned()
+            .expect("unsupported CommitmentTransaction version")
+            .signature_hash()
     }
 
     /// Returns the value stored in the transaction

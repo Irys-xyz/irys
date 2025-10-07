@@ -12,7 +12,7 @@ use crate::{
     string_u128, u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave,
     DataTransactionHeader, H256List, IngressProofsList, IrysSignature, Proof, H256, U256,
 };
-use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion, assert_version};
+use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion};
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -228,9 +228,18 @@ impl VersionedIrysBlockHeader {
 }
 
 impl IrysBlockHeader {
+    /// Fallible conversion that dispatches on the embedded `version` field.
+    pub fn try_into_versioned(self) -> Result<VersionedIrysBlockHeader, VersioningError> {
+        match self.version {
+            1 => Ok(VersionedIrysBlockHeader::V1(self)),
+            other => Err(VersioningError::UnsupportedVersion(other)),
+        }
+    }
+
+    /// Infallible helper (will panic on unsupported version). Use only in code paths
+    /// where the version has already been validated (e.g. post network deserialization).
     pub fn into_versioned(self) -> VersionedIrysBlockHeader {
-        assert_version(&self);
-        VersionedIrysBlockHeader::V1(self)
+        self.try_into_versioned().expect("unsupported IrysBlockHeader version")
     }
 }
 
