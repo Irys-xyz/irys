@@ -26,12 +26,13 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
         setup_env(num_blocks_in_epoch, seconds_to_wait).await?;
 
     // Helper: current set of assigned SM partition hashes on a node
-    let assigned_sm_hashes = |node: &IrysNodeTest<irys_chain::IrysNodeCtx>| -> Vec<irys_types::H256> {
-        let sms = node.node_ctx.storage_modules_guard.read();
-        sms.iter()
-            .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
-            .collect()
-    };
+    let assigned_sm_hashes =
+        |node: &IrysNodeTest<irys_chain::IrysNodeCtx>| -> Vec<irys_types::H256> {
+            let sms = node.node_ctx.storage_modules_guard.read();
+            sms.iter()
+                .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
+                .collect()
+        };
 
     // ---------- Pre-state: storage modules should be assigned before unpledge ----------
     let pre_hashes = assigned_sm_hashes(&peer_node);
@@ -41,9 +42,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     );
     // Test setup must guarantee the target capacity partition is locally loaded
     assert!(
-        pre_hashes
-            .iter()
-            .any(|h| *h == capacity_pa.partition_hash),
+        pre_hashes.iter().any(|h| *h == capacity_pa.partition_hash),
         "Test setup invariant violated: target capacity partition must be assigned to a local SM"
     );
 
@@ -250,10 +249,14 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
             }
         }
     }
-    assert!(matched, "Did not find decoded UnpledgeRefund for signer in epoch block");
+    assert!(
+        matched,
+        "Did not find decoded UnpledgeRefund for signer in epoch block"
+    );
 
     // ---------- Assert (epoch): storage module released for target (if it was assigned) ----------
     let epoch_hashes = assigned_sm_hashes(&peer_node);
+    tracing::error!(hash = ?capacity_pa.partition_hash, "hash unassigned");
     assert!(
         !epoch_hashes
             .iter()

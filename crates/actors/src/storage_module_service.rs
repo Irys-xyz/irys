@@ -36,7 +36,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
-use tracing::{debug, error, warn, Instrument as _, Span};
+use tracing::{debug, error, warn, Instrument as _};
 
 // Messages that the StorageModuleService service supports
 #[derive(Debug)]
@@ -121,14 +121,12 @@ impl StorageModuleServiceInner {
         }
     }
 
+    #[tracing::instrument(err)]
     async fn handle_partition_assignments_update(
         &mut self,
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
         update_height: u64,
     ) -> eyre::Result<()> {
-        let span = Span::current();
-        let _span = span.enter();
-
         // Read the current storage modules once, outside the loop
         // this is the current state of the storage modules prior of the partition assignments update
         let modules_snapshot: Vec<Arc<StorageModule>> =
@@ -138,6 +136,55 @@ impl StorageModuleServiceInner {
 
         debug!("StorageModuleInfos:\n{:#?}", storage_module_infos);
 
+        // Build a quick lookup for incoming module ids
+        let incoming_ids: std::collections::HashSet<usize> =
+            storage_module_infos.iter().map(|s| s.id).collect();
+
+        // Handle de-assignments for modules omitted from the incoming update.
+        // Note: storage_module_infos may contain ONLY assigned modules. Any local
+        // storage module not present in the update must be treated as unassigned.
+        for existing in modules_snapshot.iter() {
+            if !incoming_ids.contains(&existing.id) {
+                // If we currently have an assignment, clear it (unless a newer local state exists)
+                if existing.partition_assignment().is_some() {
+                    let path = &self.submodules_config.submodule_paths[existing.id];
+                    let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+                    let newer_local = match PackingParams::from_toml(&params_path) {
+                        Ok(params) => params
+                            .last_updated_height
+                            .is_some_and(|h| h > update_height),
+                        Err(_) => false,
+                    };
+
+                    if newer_local {
+                        debug!(
+                            module_id = existing.id,
+                            update_height,
+                            "skipping implicit unassign: local packing params are from the future"
+                        );
+                    } else {
+                        debug!(
+                            module_id = existing.id,
+                            update_height, "clearing local partition assignment (implicit)"
+                        );
+                        existing.clear_assignment(update_height);
+                        if let Ok(interval) = existing.reset() {
+                            debug!(
+                                ?interval,
+                                module_id = existing.id,
+                                "storage module reset after implicit unassign"
+                            );
+                        } else {
+                            warn!(
+                                module_id = existing.id,
+                                "failed to reset storage module after implicit unassign"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         for sm_info in storage_module_infos.iter() {
             // Get the existing StorageModule from our state with the same storage module id
             let existing = {
@@ -146,50 +193,6 @@ impl StorageModuleServiceInner {
                     .find(|sm| sm.id == sm_info.id)
                     .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
             };
-
-            // Handle explicit unassignment (partition removal): Some -> None
-            if existing.partition_assignment().is_some() && sm_info.partition_assignment.is_none() {
-                // Guard: avoid clobbering a newer local assignment
-                let path = &self.submodules_config.submodule_paths[sm_info.id];
-                let params_path = path.join(PACKING_PARAMS_FILE_NAME);
-                let newer_local = match PackingParams::from_toml(&params_path) {
-                    Ok(params) => params
-                        .last_updated_height
-                        .is_some_and(|h| h > update_height),
-                    Err(_) => false,
-                };
-
-                if newer_local {
-                    debug!(
-                        module_id = sm_info.id,
-                        update_height,
-                        "skipping unassign: local packing params are from the future"
-                    );
-                    continue;
-                }
-
-                debug!(
-                    module_id = sm_info.id,
-                    update_height, "clearing local partition assignment"
-                );
-                existing.clear_assignment(update_height);
-                // Reset intervals and on-disk state so miner/indexers stop immediately
-                if let Ok(interval) = existing.reset() {
-                    debug!(
-                        ?interval,
-                        module_id = sm_info.id,
-                        "storage module reset after unassign"
-                    );
-                } else {
-                    warn!(
-                        module_id = sm_info.id,
-                        "failed to reset storage module after unassign"
-                    );
-                }
-
-                // Unassignment handled; skip further validations for this module
-                continue;
-            }
 
             // Did this storage module from our state get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
