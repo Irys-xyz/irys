@@ -24,6 +24,7 @@ pub mod storage;
 pub mod storage_pricing;
 pub mod transaction;
 pub mod version;
+pub mod versioning;
 
 pub mod block_provider;
 pub mod h256;
@@ -51,5 +52,6 @@ pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use simple_rng::*;
 pub use version::*;
+pub use versioning::*;
 
 pub type AtomicVdfStepNumber = Arc<AtomicU64>;

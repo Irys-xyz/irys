@@ -884,6 +884,7 @@ pub trait BlockProdStrategy {
 
         // build a new block header
         let mut irys_block = IrysBlockHeader {
+            version: 1,
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
             diff,

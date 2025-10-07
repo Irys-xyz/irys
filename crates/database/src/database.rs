@@ -13,6 +13,7 @@ use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
     IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
+    VersionedIrysBlockHeader, VersionedDataTransactionHeader, VersionedCommitmentTransaction,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -73,7 +74,8 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     };
     let mut block_without_chunk = block.clone();
     block_without_chunk.poa.chunk = None;
-    tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
+    let versioned = block_without_chunk.clone().into_versioned();
+    tx.put::<IrysBlockHeaders>(block.block_hash, versioned.into())?;
     Ok(())
 }
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
@@ -84,7 +86,10 @@ pub fn block_header_by_hash<T: DbTx>(
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     let mut block = tx
         .get::<IrysBlockHeaders>(*block_hash)?
-        .map(IrysBlockHeader::from);
+        .map(|wrapped| {
+            let versioned: VersionedIrysBlockHeader = wrapped.into();
+            versioned.into_inner()
+        });
 
     if include_chunk {
         if let Some(ref mut b) = block {
@@ -97,7 +102,8 @@ pub fn block_header_by_hash<T: DbTx>(
 
 /// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
-    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
+    let versioned = tx_header.clone().into_versioned();
+    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, versioned.into())?)
 }
 
 /// Gets a [`DataTransactionHeader`] by it's [`IrysTransactionId`]
@@ -107,7 +113,7 @@ pub fn tx_header_by_txid<T: DbTx>(
 ) -> eyre::Result<Option<DataTransactionHeader>> {
     Ok(tx
         .get::<IrysDataTxHeaders>(*txid)?
-        .map(DataTransactionHeader::from))
+        .map(|wrapped| { let v: VersionedDataTransactionHeader = wrapped.into(); (*v).clone() }))
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -115,7 +121,8 @@ pub fn insert_commitment_tx<T: DbTxMut>(
     tx: &T,
     commitment_tx: &CommitmentTransaction,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<IrysCommitments>(commitment_tx.id, commitment_tx.clone().into())?)
+    let versioned = commitment_tx.clone().into_versioned();
+    Ok(tx.put::<IrysCommitments>(commitment_tx.id, versioned.into())?)
 }
 
 /// Gets a [`CommitmentTransaction`] by it's [`IrysTransactionId`]
@@ -125,7 +132,7 @@ pub fn commitment_tx_by_txid<T: DbTx>(
 ) -> eyre::Result<Option<CommitmentTransaction>> {
     Ok(tx
         .get::<IrysCommitments>(*txid)?
-        .map(CommitmentTransaction::from))
+        .map(|wrapped| { let v: VersionedCommitmentTransaction = wrapped.into(); (*v).clone() }))
 }
 
 /// Takes an [`DataTransactionHeader`] and caches its `data_root` and tx.id in a

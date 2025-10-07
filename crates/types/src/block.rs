@@ -12,6 +12,7 @@ use crate::{
     string_u128, u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave,
     DataTransactionHeader, H256List, IngressProofsList, IrysSignature, Proof, H256, U256,
 };
+use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion, assert_version};
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -154,11 +155,17 @@ impl VDFLimiterInfo {
     }
 }
 
-#[derive(Clone, Debug, Eq, Serialize,
-    Deserialize,
-    PartialEq, )]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 pub enum VersionedIrysBlockHeader {
-    V1(IrysBlockHeader)
+    V1(IrysBlockHeader),
+}
+
+impl Default for VersionedIrysBlockHeader { fn default() -> Self { Self::V1(IrysBlockHeader::default()) } }
+
+impl VersionDiscriminant for VersionedIrysBlockHeader {
+    fn discriminant(&self) -> u8 {
+        match self { Self::V1(_) => 1 }
+    }
 }
 
 impl Deref for VersionedIrysBlockHeader {
@@ -182,14 +189,53 @@ impl DerefMut for VersionedIrysBlockHeader {
 impl Compact for VersionedIrysBlockHeader {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
-        B: bytes::BufMut + AsMut<[u8]> {
-        todo!()
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        match self {
+            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
+        }
     }
 
-    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
-        todo!()
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        let (disc, rest) = split_discriminant(buf);
+        match disc {
+            1 => {
+                let (inner, rest2) = IrysBlockHeader::from_compact(rest, rest.len());
+                (Self::V1(inner), rest2)
+            }
+            other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
+        }
     }
 }
+
+impl Signable for VersionedIrysBlockHeader {
+    fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
+        // discriminant first
+        out.put_u8(self.discriminant());
+        match self {
+            Self::V1(inner) => {
+                // Use existing RLP encode minus skipped fields (derive already skips block_hash & signature).
+                let mut tmp = Vec::new();
+                inner.digest_for_signing(&mut tmp);
+                out.put_slice(&tmp);
+            }
+        }
+    }
+}
+
+impl VersionedIrysBlockHeader {
+    pub fn into_inner(self) -> IrysBlockHeader { match self { Self::V1(h) => h } }
+}
+
+impl IrysBlockHeader {
+    pub fn into_versioned(self) -> VersionedIrysBlockHeader {
+        assert_version(&self);
+        VersionedIrysBlockHeader::V1(self)
+    }
+}
+
+impl Versioned for IrysBlockHeader { const VERSION: u8 = 1; }
+impl HasInnerVersion for IrysBlockHeader { fn inner_version(&self) -> u8 { self.version } }
 
 
 /// Stores deserialized fields from a JSON formatted Irys block header.

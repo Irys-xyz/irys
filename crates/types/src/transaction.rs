@@ -5,6 +5,7 @@ pub use crate::{
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use crate::{TxChunkOffset, UnpackedChunk};
+use crate::versioning::{Signable, VersionDiscriminant, VersioningError, compact_with_discriminant, split_discriminant, Versioned, HasInnerVersion, assert_version};
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 pub use irys_primitives::CommitmentType;
@@ -47,26 +48,15 @@ pub enum CommitmentValidationError {
 }
 
 
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Arbitrary)]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 #[repr(u8)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum VersionedDataTransactionHeader {
     V1(DataTransactionHeader) = 1
 }
 
-impl VersionedDataTransactionHeader {
-    pub fn discriminant(&self) -> u8 {
-        match self {
-            Self::V1(_) => 1,
-        }
-    }
+impl VersionDiscriminant for VersionedDataTransactionHeader {
+    fn discriminant(&self) -> u8 { match self { Self::V1(_) => 1 } }
 }
 
 impl Default for VersionedDataTransactionHeader {
@@ -97,27 +87,59 @@ impl DerefMut for VersionedDataTransactionHeader {
 
 // TODO: write tests for this
 impl Compact for VersionedDataTransactionHeader {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]> {
-        buf.put_u8(self.discriminant());
-        match self {
-            Self::V1(data_transaction_header) => data_transaction_header.to_compact(buf),
-        }
-        
+    fn to_compact<B>(&self, buf: &mut B) -> usize where B: bytes::BufMut + AsMut<[u8]> {
+        match self { Self::V1(inner) => compact_with_discriminant(1, inner, buf) }
     }
-
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let (id, buf) = u8::from_compact(buf, buf.len());
-        match id {
-            1 => {
-                let (header, buf) = DataTransactionHeader::from_compact(buf, buf.len());
-                (Self::V1(header), buf)
-            }
-            _ => unimplemented!()
+        let (disc, rest) = split_discriminant(buf);
+        match disc {
+            1 => { let (inner, rest2) = DataTransactionHeader::from_compact(rest, rest.len()); (Self::V1(inner), rest2) }
+            other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
         }
     }
 }
+
+impl Signable for VersionedDataTransactionHeader {
+    fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
+        out.put_u8(self.discriminant());
+        match self { Self::V1(inner) => { let mut tmp = Vec::new(); inner.encode_for_signing(&mut tmp); out.put_slice(&tmp); } }
+    }
+}
+
+impl DataTransactionHeader { pub fn into_versioned(self) -> VersionedDataTransactionHeader { assert_version(&self); VersionedDataTransactionHeader::V1(self) } }
+impl Versioned for DataTransactionHeader { const VERSION: u8 = 1; }
+impl HasInnerVersion for DataTransactionHeader { fn inner_version(&self) -> u8 { self.version } }
+
+// Commitment Transaction versioned wrapper
+#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
+#[repr(u8)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum VersionedCommitmentTransaction {
+    V1(CommitmentTransaction) = 1,
+}
+
+impl Default for VersionedCommitmentTransaction { fn default() -> Self { Self::V1(CommitmentTransaction::default()) } }
+
+impl VersionDiscriminant for VersionedCommitmentTransaction { fn discriminant(&self) -> u8 { match self { Self::V1(_) => 1 } } }
+
+impl Deref for VersionedCommitmentTransaction { type Target = CommitmentTransaction; fn deref(&self) -> &Self::Target { match self { Self::V1(v) => v } } }
+impl DerefMut for VersionedCommitmentTransaction { fn deref_mut(&mut self) -> &mut Self::Target { match self { Self::V1(v) => v } } }
+
+impl Compact for VersionedCommitmentTransaction {
+    fn to_compact<B>(&self, buf: &mut B) -> usize where B: bytes::BufMut + AsMut<[u8]> { match self { Self::V1(inner) => compact_with_discriminant(1, inner, buf) } }
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) { let (disc, rest) = split_discriminant(buf); match disc { 1 => { let (inner, rest2) = CommitmentTransaction::from_compact(rest, rest.len()); (Self::V1(inner), rest2) } other => panic!("{:?}", VersioningError::UnsupportedVersion(other)) } }
+}
+
+impl Signable for VersionedCommitmentTransaction {
+    fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
+        out.put_u8(self.discriminant());
+        match self { Self::V1(inner) => { let mut tmp = Vec::new(); inner.encode_for_signing(&mut tmp); out.put_slice(&tmp); } }
+    }
+}
+
+impl CommitmentTransaction { pub fn into_versioned(self) -> VersionedCommitmentTransaction { assert_version(&self); VersionedCommitmentTransaction::V1(self) } }
+impl Versioned for CommitmentTransaction { const VERSION: u8 = 1; }
+impl HasInnerVersion for CommitmentTransaction { fn inner_version(&self) -> u8 { self.version } }
 
 #[derive(
     Clone,
@@ -234,10 +256,9 @@ impl DataTransactionHeader {
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
-        let mut bytes = Vec::new();
-        self.encode_for_signing(&mut bytes);
-
-        keccak256(&bytes).0
+        assert_version(self);
+        // Use versioned discriminant-first preimage
+        VersionedDataTransactionHeader::V1(self.clone()).signature_hash()
     }
 
     /// Validates the transaction signature by:
@@ -517,10 +538,8 @@ impl CommitmentTransaction {
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
-        let mut bytes = Vec::new();
-        self.encode_for_signing(&mut bytes);
-
-        keccak256(&bytes).0
+        assert_version(self);
+        VersionedCommitmentTransaction::V1(self.clone()).signature_hash()
     }
 
     /// Returns the value stored in the transaction
