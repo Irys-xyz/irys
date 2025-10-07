@@ -135,6 +135,26 @@ impl DataTransactionHeader {
         }
     }
 }
+impl Default for DataTransactionHeader {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            id: Default::default(),
+            anchor: Default::default(),
+            signer: Default::default(),
+            data_root: Default::default(),
+            data_size: Default::default(),
+            header_size: Default::default(),
+            term_fee: Default::default(),
+            perm_fee: Default::default(),
+            ledger_id: Default::default(),
+            bundle_format: Default::default(),
+            chain_id: Default::default(),
+            signature: Default::default(),
+            promoted_height: Default::default(),
+        }
+    }
+}
 impl Versioned for DataTransactionHeader {
     const VERSION: u8 = 1;
 }
@@ -224,6 +244,22 @@ impl CommitmentTransaction {
         }
     }
 }
+impl Default for CommitmentTransaction {
+    fn default() -> Self {
+        Self {
+            id: Default::default(),
+            anchor: Default::default(),
+            signer: Default::default(),
+            commitment_type: Default::default(),
+            version: 1,
+            chain_id: Default::default(),
+            fee: Default::default(),
+            value: Default::default(),
+            signature: Default::default(),
+        }
+    }
+}
+
 impl Versioned for CommitmentTransaction {
     const VERSION: u8 = 1;
 }
@@ -238,7 +274,6 @@ impl HasInnerVersion for CommitmentTransaction {
     Debug,
     Eq,
     Serialize,
-    Default,
     Deserialize,
     PartialEq,
     Arbitrary,
@@ -421,7 +456,7 @@ impl DataTransactionHeader {
             perm_fee: None,
             ledger_id: 0,
             bundle_format: None,
-            version: 0,
+            version: 1,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
             promoted_height: None,
@@ -439,7 +474,6 @@ pub type TxPathHash = H256;
     Debug,
     Eq,
     Serialize,
-    Default,
     Deserialize,
     PartialEq,
     Arbitrary,
@@ -533,7 +567,7 @@ impl CommitmentTransaction {
             anchor: H256::zero(),
             signer: Address::default(),
             commitment_type: CommitmentType::default(),
-            version: 0,
+            version: 1,
             chain_id: config.chain_id,
             fee: 0,
             value: U256::zero(),

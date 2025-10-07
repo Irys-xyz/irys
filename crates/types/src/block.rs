@@ -248,6 +248,38 @@ impl IrysBlockHeader {
     }
 }
 
+impl Default for IrysBlockHeader {
+    fn default() -> Self {
+        Self {
+            block_hash: Default::default(),
+            signature: Default::default(),
+            version: 1,
+            height: Default::default(),
+            diff: Default::default(),
+            cumulative_diff: Default::default(),
+            solution_hash: Default::default(),
+            last_diff_timestamp: Default::default(),
+            previous_solution_hash: Default::default(),
+            last_epoch_hash: Default::default(),
+            chunk_hash: Default::default(),
+            previous_block_hash: Default::default(),
+            previous_cumulative_diff: Default::default(),
+            poa: Default::default(),
+            reward_address: Default::default(),
+            reward_amount: Default::default(),
+            miner_address: Default::default(),
+            timestamp: Default::default(),
+            vdf_limiter_info: Default::default(),
+            system_ledgers: Default::default(),
+            data_ledgers: Default::default(),
+            evm_block_hash: Default::default(),
+            oracle_irys_price: Default::default(),
+            ema_irys_price: Default::default(),
+            treasury: Default::default(),
+        }
+    }
+}
+
 impl Versioned for IrysBlockHeader {
     const VERSION: u8 = 1;
 }
@@ -262,7 +294,6 @@ impl HasInnerVersion for IrysBlockHeader {
     Clone,
     Debug,
     Eq,
-    Default,
     Serialize,
     Deserialize,
     PartialEq,
