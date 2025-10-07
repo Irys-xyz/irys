@@ -576,14 +576,26 @@ impl PackingService {
             while let Some(msg) = rx.recv().await {
                 // Enqueue into the SM-specific pending queue; create queue if missing
                 let sm_id = msg.storage_module.id;
-                let queue_arc = {
-                    let mut map = job_queues
+
+                // HOT path: try read-lock first to avoid write contention when the queue already exists
+                let queue_arc = if let Some(q) = {
+                    let map_guard = job_queues
+                        .read()
+                        .expect("Unable to acquire pending jobs map read lock");
+                    map_guard.get(&sm_id).cloned()
+                } {
+                    q
+                } else {
+                    // COLD path: create the queue under a write lock
+                    let mut map_guard = job_queues
                         .write()
                         .expect("Unable to acquire pending jobs map write lock");
-                    map.entry(sm_id)
+                    map_guard
+                        .entry(sm_id)
                         .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
                         .clone()
                 };
+
                 // Ignore poisoned lock errors by propagating panic (consistent with existing code)
                 queue_arc.as_ref().write().unwrap().push_back(msg);
                 // signal new activity for waiters
