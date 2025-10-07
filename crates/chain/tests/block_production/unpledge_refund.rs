@@ -7,18 +7,25 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     partition::PartitionAssignment, Address, CommitmentTransaction, ConsensusConfig, NodeConfig,
-    U256,
+    PledgeDataProvider as _, U256,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 use crate::utils::IrysNodeTest;
 
-/// End-to-end: a pledged user unpledges a specific capacity partition.
-/// Inclusion block: fee-only UNPLEDGE; Epoch block: UNPLEDGE_REFUND with value.
+// Test setup: two-node network with genesis producing blocks and the peer starting with three
+// pledged partitions assigned to local storage modules and reflected in treasury accounting.
+//
+// Action: peer submits a single unpledge commitment, we mine the inclusion block, then advance to
+// the epoch boundary that emits refunds.
+//
+// Expectation: inclusion block charges only the commitment fee without touching treasury or SM state,
+// epoch block emits the refund, increases the peer balance by the pledged value, decreases treasury,
+// and clears the local storage module assignment for the partition.
 #[test_log::test(actix_web::test)]
 async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
-    // ---------- Setup ----------
     initialize_tracing();
     let num_blocks_in_epoch = 2_u64;
     let seconds_to_wait = 20_usize;
@@ -295,6 +302,551 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     genesis_node.stop().await;
     peer_node.stop().await;
     Ok(())
+}
+
+// Test setup: single genesis node bootstrapped with exactly three pledged partitions assigned to
+// its local storage modules, treasury funded with the pledge collateral.
+//
+// Action: submit two sequential unpledge commitments for distinct partitions, mine the inclusion
+// block to capture fee effects, then advance to the epoch boundary to trigger refunds.
+//
+// Expectation: inclusion keeps storage module assignments untouched, epoch block emits two refunds
+// matching the commitments, treasury drops by the total refund amount, and only the remaining
+// pledged partition stays assigned.
+#[test_log::test(actix_web::test)]
+async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let seconds_to_wait = 20_usize;
+    let (genesis_node, consensus) = setup_genesis_env(num_blocks_in_epoch, seconds_to_wait).await?;
+
+    let miner_signer = genesis_node.cfg.signer();
+    let miner_addr = miner_signer.address();
+
+    let assigned_partitions: Vec<PartitionAssignment> = {
+        let sms = genesis_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment())
+            .collect()
+    };
+    assert_eq!(
+        assigned_partitions.len(),
+        3,
+        "Genesis node should start with exactly three pledged partitions"
+    );
+    assert!(
+        assigned_partitions
+            .iter()
+            .all(|pa| pa.miner_address == miner_addr),
+        "All initial assignments must belong to the genesis miner"
+    );
+
+    let partitions_to_unpledge: Vec<PartitionAssignment> =
+        assigned_partitions.iter().take(2).copied().collect();
+    assert_eq!(
+        partitions_to_unpledge.len(),
+        2,
+        "Test requires at least two partitions to unpledge"
+    );
+
+    let initial_partition_hashes: Vec<_> = assigned_partitions
+        .iter()
+        .map(|pa| pa.partition_hash)
+        .collect();
+
+    let head_height = genesis_node.get_canonical_chain_height().await;
+    let head_block = genesis_node.get_block_by_height(head_height).await?;
+    let treasury_before = head_block.treasury;
+    let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
+
+    let mut total_refund = U256::from(0_u64);
+    let mut unpledge_txs: Vec<(CommitmentTransaction, PartitionAssignment)> = Vec::new();
+
+    let initial_pledge_count = genesis_node
+        .node_ctx
+        .mempool_pledge_provider
+        .as_ref()
+        .pledge_count(miner_addr)
+        .await;
+    for (idx, target) in partitions_to_unpledge.iter().enumerate() {
+        let anchor = genesis_node.get_anchor().await?;
+        let unsigned = CommitmentTransaction::new_unpledge(
+            &consensus,
+            anchor,
+            &(initial_pledge_count - (idx as u64)),
+            miner_addr,
+            target.partition_hash,
+        )
+        .await;
+        let signer = genesis_node.cfg.signer();
+        let signed = signer
+            .sign_commitment(unsigned)
+            .expect("sign genesis unpledge tx");
+
+        total_refund += signed.value;
+        genesis_node.post_commitment_tx(&signed).await?;
+        genesis_node
+            .wait_for_mempool_commitment_txs(vec![signed.id], seconds_to_wait)
+            .await?;
+        unpledge_txs.push((signed, *target));
+    }
+
+    let inclusion_block = genesis_node.mine_block().await?;
+
+    let inclusion_assignments: Vec<_> = {
+        let sms = genesis_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
+            .collect()
+    };
+    assert_eq!(
+        inclusion_assignments.len(),
+        initial_partition_hashes.len(),
+        "Unpledge inclusion must not alter storage module assignments yet"
+    );
+    for target in &partitions_to_unpledge {
+        assert!(
+            inclusion_assignments.contains(&target.partition_hash),
+            "Partition {} should remain assigned until epoch release",
+            target.partition_hash
+        );
+    }
+
+    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    for (tx, _) in &unpledge_txs {
+        assert!(
+            inclusion_commitments.contains(&tx.id),
+            "Inclusion block missing unpledge commitment {}",
+            tx.id
+        );
+    }
+
+    let inclusion_receipts = reth_ctx
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
+        .expect("receipts should exist for inclusion block");
+    let mut inclusion_unpledge_logs = 0_usize;
+    for receipt in &inclusion_receipts {
+        assert!(
+            !receipt
+                .logs
+                .iter()
+                .any(|log| log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND),
+            "Inclusion block must not contain UNPLEDGE_REFUND logs"
+        );
+        inclusion_unpledge_logs += receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE && log.address == miner_addr
+            })
+            .count();
+    }
+    assert_eq!(
+        inclusion_unpledge_logs,
+        partitions_to_unpledge.len(),
+        "Expected one UNPLEDGE log per commitment in inclusion block"
+    );
+
+    let inclusion_txs = reth_ctx
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
+        .expect("transactions should exist for inclusion block");
+    let expected_irys_refs: HashSet<FixedBytes<32>> =
+        unpledge_txs.iter().map(|(tx, _)| tx.id.into()).collect();
+    let mut matched_irys_refs: HashSet<FixedBytes<32>> = HashSet::new();
+    for tx in inclusion_txs {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
+                if debit.target == miner_addr && expected_irys_refs.contains(&debit.irys_ref) {
+                    matched_irys_refs.insert(debit.irys_ref);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        matched_irys_refs, expected_irys_refs,
+        "Every unpledge commitment should produce a matching shadow debit"
+    );
+
+    assert_eq!(
+        inclusion_block.treasury, treasury_before,
+        "Treasury must remain unchanged during inclusion block"
+    );
+
+    let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
+    let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
+    let epoch_receipts = reth_ctx
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
+        .expect("receipts should exist for epoch block");
+    let mut refund_logs = 0_usize;
+    for receipt in &epoch_receipts {
+        let has_unpledge = receipt
+            .logs
+            .iter()
+            .any(|log| log.topics()[0] == *shadow_tx_topics::UNPLEDGE);
+        assert!(
+            !has_unpledge,
+            "Epoch block must not contain UNPLEDGE inclusion logs"
+        );
+
+        refund_logs += receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND && log.address == miner_addr
+            })
+            .count();
+    }
+    assert_eq!(
+        refund_logs,
+        partitions_to_unpledge.len(),
+        "Epoch block must emit one UNPLEDGE_REFUND per unpledged partition"
+    );
+
+    let epoch_txs = reth_ctx
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
+        .expect("epoch block should have transactions");
+    let expected_refunds: HashMap<FixedBytes<32>, U256> = unpledge_txs
+        .iter()
+        .map(|(tx, _)| (tx.id.into(), tx.value))
+        .collect();
+    let mut matched_refunds: HashMap<FixedBytes<32>, U256> = HashMap::new();
+    for tx in epoch_txs {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
+                if inc.target == miner_addr {
+                    if let Some(expected_amount) = expected_refunds.get(&inc.irys_ref) {
+                        assert_eq!(
+                            U256::from(inc.amount),
+                            *expected_amount,
+                            "Refund amount mismatch for commitment {:?}",
+                            inc.irys_ref
+                        );
+                        matched_refunds.insert(inc.irys_ref, U256::from(inc.amount));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        matched_refunds, expected_refunds,
+        "Epoch block must refund every unpledge commitment"
+    );
+
+    let epoch_prev = genesis_node
+        .get_block_by_height(epoch_block.height - 1)
+        .await?;
+    assert_eq!(
+        epoch_block.treasury,
+        epoch_prev.treasury - total_refund,
+        "Epoch treasury should decrease by total refund amount"
+    );
+
+    let post_epoch_assignments: HashSet<_> = {
+        let sms = genesis_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
+            .collect()
+    };
+    for (_, assignment) in &unpledge_txs {
+        assert!(
+            !post_epoch_assignments.contains(&assignment.partition_hash),
+            "Partition {} should be de-assigned after epoch refund",
+            assignment.partition_hash
+        );
+    }
+    let expected_remaining: HashSet<_> = assigned_partitions
+        .iter()
+        .skip(partitions_to_unpledge.len())
+        .map(|pa| pa.partition_hash)
+        .collect();
+    assert_eq!(
+        post_epoch_assignments, expected_remaining,
+        "Only the non-unpledged partitions should remain assigned locally"
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+// Test setup: Genesis producing blocks and the peer starting with exactly three locally assigned
+// pledged partitions persisted in storage modules and reflected in the treasury snapshot.
+//
+// Action: have the peer submit unpledge commitments for every assigned partition, mine a single
+// inclusion block, then advance to the epoch boundary so all refunds are processed together.
+//
+// Expectation: inclusion reduces the peer balance only by aggregate priority fees and leaves
+// assignments untouched, epoch refunds appear in strictly increasing value order (LIFO semantics),
+// treasury drops by the total refund amount, the peer balance returns to the initial value minus fees,
+// and no storage modules remain assigned to the peer.
+#[test_log::test(actix_web::test)]
+async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let seconds_to_wait = 20_usize;
+    let (genesis_node, peer_node, peer_addr, _capacity_pa, consensus) =
+        setup_env(num_blocks_in_epoch, seconds_to_wait).await?;
+
+    let assigned_sm_hashes =
+        |node: &IrysNodeTest<irys_chain::IrysNodeCtx>| -> Vec<irys_types::H256> {
+            let sms = node.node_ctx.storage_modules_guard.read();
+            sms.iter()
+                .filter_map(|sm| sm.partition_assignment().map(|pa| pa.partition_hash))
+                .collect()
+        };
+
+    let assigned_partitions: Vec<PartitionAssignment> = {
+        let sms = peer_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment())
+            .filter(|pa| pa.ledger_id.is_none())
+            .collect()
+    };
+    assert_eq!(
+        assigned_partitions.len(),
+        3,
+        "Peer must begin with exactly three locally assigned capacity partitions"
+    );
+
+    let pre_hashes = assigned_sm_hashes(&peer_node);
+    assert_eq!(
+        pre_hashes.len(),
+        assigned_partitions.len(),
+        "Storage module count should align with discovered assignments"
+    );
+
+    let head_height = genesis_node.get_canonical_chain_height().await;
+    let head_block = genesis_node.get_block_by_height(head_height).await?;
+    let balance_before_inclusion = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
+
+    let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
+    let mut total_fee = U256::from(0_u64);
+    let mut total_refund = U256::from(0_u64);
+    let mut unpledge_txs: Vec<(CommitmentTransaction, PartitionAssignment)> = Vec::new();
+
+    for target in &assigned_partitions {
+        let anchor = peer_node.get_anchor().await?;
+        let unsigned = CommitmentTransaction::new_unpledge(
+            &consensus,
+            anchor,
+            peer_node.node_ctx.mempool_pledge_provider.as_ref(),
+            peer_addr,
+            target.partition_hash,
+        )
+        .await;
+        let signer = peer_node.cfg.signer();
+        let signed = signer
+            .sign_commitment(unsigned)
+            .expect("sign multi-unpledge tx");
+        total_fee += U256::from(signed.fee);
+        total_refund += signed.value;
+
+        peer_node.post_commitment_tx(&signed).await?;
+        genesis_node
+            .wait_for_mempool(signed.id, seconds_to_wait)
+            .await?;
+        unpledge_txs.push((signed, *target));
+    }
+
+    let inclusion_block = genesis_node.mine_block().await?;
+
+    let inclusion_hashes = assigned_sm_hashes(&peer_node);
+    assert_eq!(
+        inclusion_hashes, pre_hashes,
+        "Inclusion block must not change storage module assignments"
+    );
+
+    let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
+    for (tx, _) in &unpledge_txs {
+        assert!(
+            inclusion_commitments.contains(&tx.id),
+            "Unpledge commitment {tx_id:?} missing from inclusion block",
+            tx_id = tx.id
+        );
+    }
+
+    let inclusion_receipts = reth_ctx
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
+        .expect("receipts present for inclusion block");
+    let mut inclusion_unpledge_logs = 0_usize;
+    for receipt in &inclusion_receipts {
+        assert!(
+            !receipt
+                .logs
+                .iter()
+                .any(|log| log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND),
+            "Inclusion block must not contain refund logs"
+        );
+        inclusion_unpledge_logs += receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE && log.address == peer_addr
+            })
+            .count();
+    }
+    assert_eq!(
+        inclusion_unpledge_logs,
+        unpledge_txs.len(),
+        "Expected one UNPLEDGE log per commitment"
+    );
+
+    let inclusion_txs = reth_ctx
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
+        .expect("transactions available for inclusion block");
+    let expected_irys_refs: HashSet<FixedBytes<32>> =
+        unpledge_txs.iter().map(|(tx, _)| tx.id.into()).collect();
+    let mut matched_irys_refs: HashSet<FixedBytes<32>> = HashSet::new();
+    for tx in inclusion_txs {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
+                if debit.target == peer_addr && expected_irys_refs.contains(&debit.irys_ref) {
+                    matched_irys_refs.insert(debit.irys_ref);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        matched_irys_refs, expected_irys_refs,
+        "Every unpledge commitment should have a decoded shadow debit"
+    );
+
+    let balance_after_inclusion =
+        genesis_node.get_balance(peer_addr, inclusion_block.evm_block_hash);
+    assert_eq!(
+        balance_after_inclusion,
+        balance_before_inclusion - total_fee,
+        "Inclusion must charge only the aggregate priority fees"
+    );
+
+    let prev_header = genesis_node
+        .get_block_by_height(inclusion_block.height - 1)
+        .await?;
+    assert_eq!(
+        inclusion_block.treasury, prev_header.treasury,
+        "Treasury must remain unchanged during inclusion"
+    );
+
+    let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
+    peer_node
+        .wait_until_height(epoch_height, seconds_to_wait)
+        .await
+        .expect("peer should sync epoch block");
+    let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
+
+    let epoch_receipts = reth_ctx
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
+        .expect("epoch receipts available");
+    let mut refund_logs = 0_usize;
+    for receipt in &epoch_receipts {
+        assert!(
+            !receipt
+                .logs
+                .iter()
+                .any(|log| log.topics()[0] == *shadow_tx_topics::UNPLEDGE),
+            "Epoch block must not contain inclusion UNPLEDGE logs"
+        );
+        refund_logs += receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND && log.address == peer_addr
+            })
+            .count();
+    }
+    assert_eq!(
+        refund_logs,
+        unpledge_txs.len(),
+        "Epoch block must emit one refund per unpledge"
+    );
+
+    let epoch_txs = reth_ctx
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
+        .expect("epoch transactions available");
+    let expected_refunds: HashSet<FixedBytes<32>> =
+        unpledge_txs.iter().map(|(tx, _)| tx.id.into()).collect();
+    let mut seen_refs: HashSet<FixedBytes<32>> = HashSet::new();
+    let mut refund_amounts: Vec<U256> = Vec::new();
+    for tx in epoch_txs {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
+                if inc.target == peer_addr && expected_refunds.contains(&inc.irys_ref) {
+                    seen_refs.insert(inc.irys_ref);
+                    refund_amounts.push(U256::from(inc.amount));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen_refs, expected_refunds,
+        "All refund shadow txs must correspond to submitted commitments"
+    );
+    assert_eq!(
+        refund_amounts.len(),
+        unpledge_txs.len(),
+        "Refunds collected should match number of unpledge commitments"
+    );
+    for window in refund_amounts.windows(2) {
+        assert!(
+            window[0] < window[1],
+            "Refund amounts must be strictly increasing (LIFO unpledge semantics)"
+        );
+    }
+
+    let epoch_prev = genesis_node
+        .get_block_by_height(epoch_block.height - 1)
+        .await?;
+    assert_eq!(
+        epoch_block.treasury,
+        epoch_prev.treasury - total_refund,
+        "Treasury must drop by the total refund amount"
+    );
+
+    let balance_after_epoch = genesis_node.get_balance(peer_addr, epoch_block.evm_block_hash);
+    let expected_final_balance = balance_before_inclusion - total_fee;
+    assert_eq!(
+        balance_after_epoch, expected_final_balance,
+        "Final balance should equal initial balance minus aggregate inclusion fees"
+    );
+
+    let post_epoch_hashes = assigned_sm_hashes(&peer_node);
+    assert!(
+        post_epoch_hashes.is_empty(),
+        "Peer storage modules should be fully de-assigned after epoch refunds"
+    );
+
+    genesis_node.stop().await;
+    peer_node.stop().await;
+    Ok(())
+}
+
+async fn setup_genesis_env(
+    num_blocks_in_epoch: u64,
+    seconds_to_wait: usize,
+) -> eyre::Result<(IrysNodeTest<irys_chain::IrysNodeCtx>, ConsensusConfig)> {
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config)
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let consensus = genesis_node.node_ctx.config.node_config.consensus_config();
+
+    Ok((genesis_node, consensus))
 }
 
 async fn setup_env(
