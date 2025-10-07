@@ -157,7 +157,7 @@ impl ChunkCacheService {
                     .expect("Should be able to get block bounds as max_chunk_offset was checked");
                 // Genesis block (height 0) never enters block_index as it has no submit ledger
                 // data, use saturating_sub (defensive).
-                prune_height = block_bounds.height.saturating_sub(1).try_into().ok();
+                prune_height = Some(block_bounds.height.saturating_sub(1));
             }
         }
 
