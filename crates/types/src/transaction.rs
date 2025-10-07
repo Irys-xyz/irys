@@ -1226,7 +1226,7 @@ mod commitment_ordering_tests {
     }
 
     fn partition_hash(tag: u8) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0_u8; 32];
         bytes[31] = tag;
         bytes
     }
