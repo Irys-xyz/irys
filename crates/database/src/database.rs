@@ -12,7 +12,8 @@ use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
+    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -146,6 +147,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         txid_set: vec![tx_header.id],
         block_set: vec![],
         expiry_height: None,
+        cached_at: UnixTimestamp::now_or_panic(),
     });
 
     // If the entry exists, update the timestamp and add the txid if necessary
