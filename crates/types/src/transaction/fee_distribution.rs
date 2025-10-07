@@ -26,12 +26,12 @@
 /// - 5% of term_fee for each ingress-proof provided. These rewards are included in the transaction's `perm_fee` field along with the base permanent storage cost.
 /// - perm_fee total value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 use crate::ingress::IngressProof;
-use crate::storage_pricing::{mul_div, PRECISION_SCALE};
+use crate::storage_pricing::{PRECISION_SCALE, mul_div};
 pub use crate::{
-    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
+    Address, Arbitrary, Base64, Compact, ConsensusConfig, H256, IrysSignature, Node, Proof,
+    Signature, U256, address_base58_stringify, optional_string_u64, string_u64,
 };
-use eyre::{ensure, eyre, OptionExt as _};
+use eyre::{OptionExt as _, ensure, eyre};
 pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
@@ -269,8 +269,8 @@ impl PublishFeeCharges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage_pricing::phantoms::Percentage;
     use crate::storage_pricing::Amount;
+    use crate::storage_pricing::phantoms::Percentage;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -385,10 +385,12 @@ mod tests {
 
         // Should fail due to duplicates
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Duplicate mining addresses not allowed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Duplicate mining addresses not allowed")
+        );
     }
 
     #[test]
@@ -489,10 +491,12 @@ mod tests {
 
         // Should fail with insufficient fee error
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("insufficient to cover ingress proof rewards"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("insufficient to cover ingress proof rewards")
+        );
     }
 
     #[test]
@@ -510,10 +514,12 @@ mod tests {
 
         // Should fail because there's no base storage cost
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must include base storage cost"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must include base storage cost")
+        );
     }
 
     #[test]

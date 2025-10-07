@@ -304,77 +304,64 @@ pub struct CommitmentTransaction {
 
 /// Ordering for CommitmentTransaction prioritizes transactions as follows:
 /// 1. Stake commitments (fee desc, then id tie-breaker)
-/// 2. Pledge & Unpledge (count asc, then fee desc, then id tie-breaker)
-/// 3. Unstake (last, fee desc, then id tie-breaker)
+/// 2. Pledge (count asc, then fee desc, then id tie-breaker)
+/// 3. Unpledge (count asc, then fee desc, then id tie-breaker)
+/// 4. Unstake (last, fee desc, then id tie-breaker)
 impl Ord for CommitmentTransaction {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // First, compare by commitment type (Stake > Pledge > Unpledge > Unstake)
-        match (&self.commitment_type, &other.commitment_type) {
-            (CommitmentType::Stake, CommitmentType::Stake) => {
-                // Both are stakes, sort by fee (higher first), then by id for tie-breaks
-                other
+        use std::cmp::Ordering;
+
+        fn commitment_priority(commitment_type: &CommitmentType) -> u8 {
+            match commitment_type {
+                CommitmentType::Stake => 0,
+                CommitmentType::Pledge { .. } => 1,
+                CommitmentType::Unpledge { .. } => 2,
+                CommitmentType::Unstake => 3,
+            }
+        }
+
+        let self_priority = commitment_priority(&self.commitment_type);
+        let other_priority = commitment_priority(&other.commitment_type);
+
+        match self_priority.cmp(&other_priority) {
+            Ordering::Less => Ordering::Less,
+            Ordering::Greater => Ordering::Greater,
+            Ordering::Equal => match (&self.commitment_type, &other.commitment_type) {
+                (CommitmentType::Stake, CommitmentType::Stake) => other
                     .user_fee()
                     .cmp(&self.user_fee())
-                    .then_with(|| self.id.cmp(&other.id))
-            }
-            (CommitmentType::Stake, _) => std::cmp::Ordering::Less, // Stake comes first
-            (_, CommitmentType::Stake) => std::cmp::Ordering::Greater, // Stake comes first
-            (
-                CommitmentType::Pledge {
-                    pledge_count_before_executing: count_a,
-                },
-                CommitmentType::Pledge {
-                    pledge_count_before_executing: count_b,
-                },
-            ) => count_a
-                .cmp(count_b)
-                .then_with(|| other.user_fee().cmp(&self.user_fee()))
-                .then_with(|| self.id.cmp(&other.id)),
-            (
-                CommitmentType::Unpledge {
-                    pledge_count_before_executing: count_a,
-                    ..
-                },
-                CommitmentType::Unpledge {
-                    pledge_count_before_executing: count_b,
-                    ..
-                },
-            ) => count_a
-                .cmp(count_b)
-                .then_with(|| other.user_fee().cmp(&self.user_fee()))
-                .then_with(|| self.id.cmp(&other.id)),
-            (
-                CommitmentType::Pledge {
-                    pledge_count_before_executing: count_a,
-                },
-                CommitmentType::Unpledge {
-                    pledge_count_before_executing: count_b,
-                    ..
-                },
-            ) => count_a
-                .cmp(count_b)
-                .then_with(|| other.user_fee().cmp(&self.user_fee()))
-                .then_with(|| self.id.cmp(&other.id)),
-            (
-                CommitmentType::Unpledge {
-                    pledge_count_before_executing: count_a,
-                    ..
-                },
-                CommitmentType::Pledge {
-                    pledge_count_before_executing: count_b,
-                },
-            ) => count_a
-                .cmp(count_b)
-                .then_with(|| other.user_fee().cmp(&self.user_fee()))
-                .then_with(|| self.id.cmp(&other.id)),
-            // Unstake always last
-            (CommitmentType::Unstake, CommitmentType::Unstake) => other
-                .user_fee()
-                .cmp(&self.user_fee())
-                .then_with(|| self.id.cmp(&other.id)),
-            (CommitmentType::Unstake, _) => std::cmp::Ordering::Greater,
-            (_, CommitmentType::Unstake) => std::cmp::Ordering::Less,
-            // No fallback: all current variants are covered explicitly
+                    .then_with(|| self.id.cmp(&other.id)),
+                (
+                    CommitmentType::Pledge {
+                        pledge_count_before_executing: count_a,
+                    },
+                    CommitmentType::Pledge {
+                        pledge_count_before_executing: count_b,
+                    },
+                ) => count_a
+                    .cmp(count_b)
+                    .then_with(|| other.user_fee().cmp(&self.user_fee()))
+                    .then_with(|| self.id.cmp(&other.id)),
+                (
+                    CommitmentType::Unpledge {
+                        pledge_count_before_executing: count_a,
+                        ..
+                    },
+                    CommitmentType::Unpledge {
+                        pledge_count_before_executing: count_b,
+                        ..
+                    },
+                ) => count_b
+                    .cmp(count_a)
+                    .then_with(|| other.user_fee().cmp(&self.user_fee()))
+                    .then_with(|| self.id.cmp(&other.id)),
+                (CommitmentType::Unstake, CommitmentType::Unstake) => other
+                    .user_fee()
+                    .cmp(&self.user_fee())
+                    .then_with(|| self.id.cmp(&other.id)),
+                // With unique priorities we should never reach a mixed-type Ordering::Equal
+                _ => Ordering::Equal,
+            },
         }
     }
 }
@@ -1217,14 +1204,16 @@ mod pledge_decay_parametrized_tests {
 #[cfg(test)]
 mod commitment_ordering_tests {
     use super::*;
+    use alloy_primitives::keccak256;
 
     fn create_test_commitment(
         id: &str,
         commitment_type: CommitmentType,
         fee: u64,
     ) -> CommitmentTransaction {
+        let hash: [u8; 32] = keccak256(id.as_bytes()).into();
         CommitmentTransaction {
-            id: H256::from_slice(&[id.as_bytes()[0]; 32]),
+            id: H256::from(hash),
             anchor: H256::zero(),
             signer: Address::default(),
             signature: IrysSignature::default(),
@@ -1234,6 +1223,12 @@ mod commitment_ordering_tests {
             version: 1,
             chain_id: 1,
         }
+    }
+
+    fn partition_hash(tag: u8) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[31] = tag;
+        bytes
     }
 
     #[test]
@@ -1291,6 +1286,37 @@ mod commitment_ordering_tests {
     }
 
     #[test]
+    fn test_unpledge_sorted_by_count_then_fee() {
+        let unpledge_count1_fee50 = create_test_commitment(
+            "unpledge_1_fee50",
+            CommitmentType::Unpledge {
+                pledge_count_before_executing: 1,
+                partition_hash: partition_hash(1),
+            },
+            50,
+        );
+        let unpledge_count1_fee10 = create_test_commitment(
+            "unpledge_1_fee10",
+            CommitmentType::Unpledge {
+                pledge_count_before_executing: 1,
+                partition_hash: partition_hash(2),
+            },
+            10,
+        );
+        let unpledge_count4_fee80 = create_test_commitment(
+            "unpledge_4_fee80",
+            CommitmentType::Unpledge {
+                pledge_count_before_executing: 4,
+                partition_hash: partition_hash(3),
+            },
+            80,
+        );
+
+        assert!(unpledge_count1_fee50 < unpledge_count4_fee80);
+        assert!(unpledge_count1_fee50 < unpledge_count1_fee10);
+    }
+
+    #[test]
     fn test_complete_ordering() {
         // Create commitments with distinct IDs for easier verification
         let stake_high = create_test_commitment("stake_high", CommitmentType::Stake, 150);
@@ -1323,6 +1349,22 @@ mod commitment_ordering_tests {
             },
             300,
         );
+        let unpledge_count1 = create_test_commitment(
+            "unpledge_1",
+            CommitmentType::Unpledge {
+                pledge_count_before_executing: 1,
+                partition_hash: partition_hash(4),
+            },
+            40,
+        );
+        let unpledge_count3 = create_test_commitment(
+            "unpledge_3",
+            CommitmentType::Unpledge {
+                pledge_count_before_executing: 3,
+                partition_hash: partition_hash(5),
+            },
+            20,
+        );
         let unstake = create_test_commitment("unstake", CommitmentType::Unstake, 75);
 
         let mut commitments = vec![
@@ -1333,6 +1375,8 @@ mod commitment_ordering_tests {
             pledge_2_low.clone(),
             pledge_10.clone(),
             unstake.clone(),
+            unpledge_count1.clone(),
+            unpledge_count3.clone(),
         ];
 
         commitments.sort();
@@ -1344,7 +1388,9 @@ mod commitment_ordering_tests {
         // 4. pledge_2_low (Pledge count=2, fee=50)
         // 5. pledge_5 (Pledge count=5, fee=100)
         // 6. pledge_10 (Pledge count=10, fee=300)
-        // 7. unstake (Other type, fee=75)
+        // 7. unpledge_count1 (Unpledge count=1, fee=40)
+        // 8. unpledge_count3 (Unpledge count=3, fee=20)
+        // 9. unstake (Other type, fee=75)
 
         assert_eq!(commitments[0].id, stake_high.id);
         assert_eq!(commitments[1].id, stake_low.id);
@@ -1352,6 +1398,8 @@ mod commitment_ordering_tests {
         assert_eq!(commitments[3].id, pledge_2_low.id);
         assert_eq!(commitments[4].id, pledge_5.id);
         assert_eq!(commitments[5].id, pledge_10.id);
-        assert_eq!(commitments[6].id, unstake.id);
+        assert_eq!(commitments[6].id, unpledge_count1.id);
+        assert_eq!(commitments[7].id, unpledge_count3.id);
+        assert_eq!(commitments[8].id, unstake.id);
     }
 }
