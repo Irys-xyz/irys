@@ -7,7 +7,6 @@ use crate::{
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
-use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
@@ -21,7 +20,7 @@ use irys_domain::{
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
-use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
+use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
@@ -922,10 +921,7 @@ pub async fn shadow_transactions_are_valid(
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
-    let ExecutionData {
-        payload,
-        sidecar: _,
-    } = execution_data.clone();
+    let ExecutionData { payload, sidecar } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
@@ -935,63 +931,99 @@ pub async fn shadow_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
+    // Reject any blob gas usage in the payload
+    if payload_v3.blob_gas_used != 0 {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            blob_gas_used = payload_v3.blob_gas_used,
+            "Rejecting block: blob_gas_used must be zero",
+        );
+        eyre::bail!("block has non-zero blob_gas_used which is disabled");
+    }
+    if payload_v3.excess_blob_gas != 0 {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            excess_blob_gas = payload_v3.excess_blob_gas,
+            "Rejecting block: excess_blob_gas must be zero",
+        );
+        eyre::bail!("block has non-zero excess_blob_gas which is disabled");
+    }
+
+    // Reject any block that carries blob sidecars (EIP-4844).
+    // We keep Cancun active but disable blobs/sidecars entirely.
+    if let Some(versioned_hashes) = sidecar.versioned_hashes() {
+        if !versioned_hashes.is_empty() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                versioned_hashes_len = versioned_hashes.len(),
+                "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+            );
+            eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+        }
+    }
+    // Requests are disabled: reject if any present or if header-level requests hash is set.
+    if let Some(requests) = sidecar.requests() {
+        if !requests.is_empty() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                versioned_hashes_len = requests.len(),
+                "Rejecting block: EIP-7685 requests which are disabled",
+            );
+            eyre::bail!("block contains EIP-7685 requests which are disabled");
+        }
+    }
+    // Note: `requests_hash` may be present even when the requests list is empty.
+    // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
+
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
     let block_timestamp_sec = block.timestamp / 1000;
     ensure!(
-            payload_timestamp == block_timestamp_sec,
-            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
-        );
+        payload_timestamp == block_timestamp_sec,
+        "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+    );
 
     let evm_block: Block = payload_v3.try_into_block()?;
-    // todo(IMPORTANT) validate that we have no blobs, no blob gas usage, and none of the txs have any sidecars with them
 
-    // 2. Extract shadow transactions from the beginning of the block
-    let mut expect_shadow_txs = true;
-    let actual_shadow_txs = evm_block
-        .body
-        .transactions
-        .into_iter()
-        .map(|tx| {
-            if expect_shadow_txs {
-                if Some(*SHADOW_TX_DESTINATION_ADDR) != tx.to() {
-                    // after reaching first non-shadow tx, we scan the rest of the
-                    // txs to check if we don't have any stray shadow txs in there
-                    expect_shadow_txs = false;
-                    ensure!(
-                        !tx.input().starts_with(IRYS_SHADOW_EXEC),
-                        "shadow tx injected in the middle of the block",
-                    );
-                    return Ok(None);
-                }
-                let input = tx.input();
-                if input.strip_prefix(IRYS_SHADOW_EXEC).is_none() {
-                    // after reaching first non-shadow tx, we scan the rest of the
-                    // txs to check if we don't have any stray shadow txs in there
-                    expect_shadow_txs = false;
-                    return Ok(None);
-                };
-                let shadow_tx = ShadowTransaction::decode(&mut &input[..])
-                    .map_err(|e| eyre::eyre!("failed to decode shadow tx: {e}"))?;
-                let tx_signer = tx.into_signed().recover_signer()?;
+    // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
+    if evm_block.header.requests_hash.is_some() {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            "Rejecting block: EIP-7685 requests_hash present which is disabled",
+        );
+        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
+    }
 
-                ensure!(
-                    block.miner_address == tx_signer,
-                    "Shadow tx signer is not the miner"
-                );
-                Ok(Some(shadow_tx))
-            } else {
-                // ensure that no other shadow txs are present in the block
-                let input = tx.input();
-                ensure!(
-                    !(input.starts_with(IRYS_SHADOW_EXEC)),
-                    "shadow tx injected in the middle of the block",
-                );
-                Ok(None)
-            }
-        })
-        .filter_map(std::result::Result::transpose);
+    // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
+    for tx in evm_block.body.transactions.iter() {
+        if tx.is_eip4844() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                "Rejecting block: contains EIP-4844 transaction which is disabled",
+            );
+            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+        }
+    }
+
+    // 3. Extract shadow transactions from the beginning of the block lazily
+    let txs_slice = &evm_block.body.transactions;
+    let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
+        // Verify signer for each yielded shadow tx (must be the miner)
+        let (stx, tx_ref) = res?;
+        let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
+        ensure!(
+            block.miner_address == tx_signer,
+            "Shadow tx signer is not the miner"
+        );
+        Ok(stx)
+    });
 
     // 3. Generate expected shadow transactions
     let expected_txs = generate_expected_shadow_transactions_from_db(
@@ -1010,6 +1042,48 @@ pub async fn shadow_transactions_are_valid(
 
     // 5. Return the execution data for reuse
     Ok(execution_data)
+}
+
+/// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
+///
+/// - Yields shadow transactions at the front of the list.
+/// - If any shadow transaction appears after the first non-shadow, yields a single error and ends.
+fn extract_leading_shadow_txs(
+    txs: &[reth_ethereum_primitives::TransactionSigned],
+) -> impl Iterator<
+    Item = eyre::Result<(
+        ShadowTransaction,
+        &reth_ethereum_primitives::TransactionSigned,
+    )>,
+> + '_ {
+    let mut it = txs.iter();
+    let mut seen_non_shadow = false;
+    let mut reported_error = false;
+    std::iter::from_fn(move || {
+        if reported_error {
+            return None;
+        }
+        for tx in it.by_ref() {
+            match detect_and_decode(tx) {
+                Ok(Some(stx)) => {
+                    if seen_non_shadow {
+                        reported_error = true;
+                        return Some(Err(ShadowTxError::ShadowTxAfterNonShadow.into()));
+                    }
+                    return Some(Ok((stx, tx)));
+                }
+                Ok(None) => {
+                    seen_non_shadow = true;
+                    continue;
+                }
+                Err(e) => {
+                    reported_error = true;
+                    return Some(Err(e.into()));
+                }
+            }
+        }
+        None
+    })
 }
 
 /// Submits the EVM payload to reth for execution layer validation.

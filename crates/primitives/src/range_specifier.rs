@@ -423,8 +423,7 @@ mod bytes_range_specifier_tests {
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("overflow"),
-            "Expected overflow error, got: {}",
-            err
+            "Expected overflow error, got: {err}"
         );
 
         Ok(())

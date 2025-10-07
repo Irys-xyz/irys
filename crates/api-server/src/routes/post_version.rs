@@ -111,7 +111,7 @@ pub async fn post_version(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64,
-        message: Some(format!("Welcome to the network {}", node_name)),
+        message: Some(format!("Welcome to the network {node_name}")),
     });
 
     Ok(HttpResponse::Ok()

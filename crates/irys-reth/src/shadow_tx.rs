@@ -9,13 +9,13 @@
 //! - **Balance increments** correspond to rewards
 //! - **Balance decrements** correspond to storage transaction fees
 
+use alloy_consensus::Transaction as AlloyTransaction;
 use alloy_primitives::keccak256;
-use alloy_primitives::Address;
-use alloy_primitives::FixedBytes;
-use alloy_primitives::U256;
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::io::{Read, Write};
 use std::sync::LazyLock;
+use thiserror::Error;
 
 /// Version constants for ShadowTransaction
 pub const SHADOW_TX_VERSION_V1: u8 = 1;
@@ -571,6 +571,80 @@ impl BorshDeserialize for BlockRewardIncrement {
     }
 }
 
+/// Errors for shadow transaction detection and decoding.
+#[derive(Debug, Error)]
+pub enum ShadowTxError {
+    #[error("missing shadow tx prefix")]
+    MissingPrefix,
+    #[error("decode error: {0}")]
+    Decode(#[from] borsh::io::Error),
+    #[error("shadow tx found after non-shadow tx")]
+    ShadowTxAfterNonShadow,
+}
+
+/// True if `to` matches `SHADOW_TX_DESTINATION_ADDR`.
+pub fn is_shadow_destination(to: Option<Address>) -> bool {
+    matches!(to, Some(addr) if addr == *SHADOW_TX_DESTINATION_ADDR)
+}
+
+/// True if `input` starts with `IRYS_SHADOW_EXEC`.
+pub fn has_shadow_prefix(input: &[u8]) -> bool {
+    input.starts_with(IRYS_SHADOW_EXEC)
+}
+
+/// Encodes a `ShadowTransaction` into call data with the required prefix.
+pub fn encode_prefixed_input(tx: &ShadowTransaction) -> Bytes {
+    let mut buf = Vec::with_capacity(IRYS_SHADOW_EXEC.len() + 512);
+    buf.extend_from_slice(IRYS_SHADOW_EXEC);
+    tx.serialize(&mut buf).expect("Vec::write is infallible");
+    buf.into()
+}
+
+/// Decodes a prefixed input payload into a `ShadowTransaction`.
+/// Returns `MissingPrefix` if the input does not start with the required prefix.
+pub fn try_decode_prefixed(input: &[u8]) -> Result<ShadowTransaction, ShadowTxError> {
+    if !has_shadow_prefix(input) {
+        return Err(ShadowTxError::MissingPrefix);
+    }
+    let mut slice = input;
+    ShadowTransaction::decode(&mut slice).map_err(ShadowTxError::from)
+}
+
+/// Detects and decodes a shadow tx from `(to, input)`.
+/// Returns `Ok(None)` if it is not a shadow tx; otherwise decodes or returns a decode error.
+pub fn detect_and_decode_from_parts(
+    to: Option<Address>,
+    input: &[u8],
+) -> Result<Option<ShadowTransaction>, ShadowTxError> {
+    if !is_shadow_destination(to) || !has_shadow_prefix(input) {
+        return Ok(None);
+    }
+    Ok(Some(try_decode_prefixed(input)?))
+}
+
+pub trait ShadowTxSource {
+    fn to_addr(&self) -> Option<Address>;
+    fn input(&self) -> &[u8];
+}
+
+impl<T> ShadowTxSource for T
+where
+    T: AlloyTransaction,
+{
+    fn to_addr(&self) -> Option<Address> {
+        AlloyTransaction::to(self)
+    }
+    fn input(&self) -> &[u8] {
+        AlloyTransaction::input(self)
+    }
+}
+
+pub fn detect_and_decode<T: ShadowTxSource>(
+    src: &T,
+) -> Result<Option<ShadowTransaction>, ShadowTxError> {
+    detect_and_decode_from_parts(src.to_addr(), src.input())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,7 +827,7 @@ mod tests {
             tx.serialize(&mut buf).unwrap();
 
             let decoded = ShadowTransaction::deserialize_reader(&mut &buf[..]).unwrap();
-            assert_eq!(decoded, tx, "Packet {:?} failed roundtrip", packet);
+            assert_eq!(decoded, tx, "Packet {packet:?} failed roundtrip");
 
             // Verify solution hash is preserved
             let ShadowTransaction::V1 {

@@ -44,7 +44,7 @@ pub mod u64_stringify {
 
         // Parse string back to u128
         s.parse::<u64>()
-            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {}", e)))
+            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {e}")))
     }
 }
 
@@ -196,19 +196,19 @@ impl Decode for U256 {
     }
 }
 
+// NOTE: RLP has specific standards for encoding numbers
+// so we defer to the correct impl used by alloy's U256
 impl Encodable for U256 {
     #[inline]
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        let mut buffer = [0_u8; 32];
-        self.to_big_endian(&mut buffer);
-        buffer.encode(out);
+        let int: alloy_primitives::U256 = (*self).into();
+        int.encode(out);
     }
 }
 
 impl Decodable for U256 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let res = <[u8; 32]>::decode(buf)?;
-        Ok(Self::from_big_endian(&res))
+        alloy_primitives::U256::decode(buf).map(Into::into)
     }
 }
 
@@ -350,7 +350,7 @@ pub mod address_base58_stringify {
 
         // Decode the base58 string into bytes
         let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
+            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {e:?}")))?;
 
         // Ensure the byte array is exactly 20 bytes
         if bytes.len() != 20 {
@@ -502,7 +502,7 @@ pub trait DecodeHash: Sized {
 impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
         let bytes = FromBase58::from_base58(base58_string)
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))?;
+            .map_err(|e| format!("Failed to decode from base58 {e:?}"))?;
         let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
             format!(
                 "Invalid H256 length: expected 32 bytes, got {}",
@@ -827,6 +827,8 @@ pub mod string_u128 {
     }
 }
 
+// note: U256 doesn't have a string_ serialisation mod, as it doesn't need one
+
 fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -891,6 +893,42 @@ mod tests {
 
         // Assert
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_option_u256_rlp() {
+        #[derive(Debug, Eq, PartialEq, RlpEncodable, RlpDecodable)]
+        #[rlp(trailing)]
+        struct Test {
+            a: U256,
+            b: Option<U256>,
+        }
+
+        let data1 = Test {
+            a: U256::from(42_u64),
+            b: Some(U256::zero()),
+        };
+
+        let data2 = Test {
+            a: U256::from(42_u64),
+            b: None,
+        };
+
+        let mut buffer1 = vec![];
+        data1.encode(&mut buffer1);
+        let decoded = Test::decode(&mut &buffer1[..]).unwrap();
+        // Some(0) is decoded as None
+        assert_ne!(data1, decoded);
+
+        let mut buffer2 = vec![];
+        data2.encode(&mut buffer2);
+        // unequal(!) encodings
+        // note: why? seems like if we serialise a Some value it gets an additional trailing `128` on the binary
+        // note: if we really needed to have `0`, we could modify the encoding u256 uses to treat 0 as a different value
+        assert_ne!(buffer1, buffer2);
+        let decoded2 = Test::decode(&mut &buffer2[..]).unwrap();
+        // but decodes "correctly"
+        assert_eq!(decoded2, data2);
     }
 
     #[test]
