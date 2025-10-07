@@ -2,8 +2,10 @@ use irys_types::{CommitmentTransaction, DataTransactionHeader, Signable as _};
 
 #[test]
 fn data_tx_preimage_starts_with_discriminant() {
-    let mut tx = DataTransactionHeader::default();
-    tx.version = 1;
+    let tx = DataTransactionHeader {
+        version: 1,
+        ..Default::default()
+    };
     let versioned = tx.try_into_versioned().unwrap();
     let mut buf = Vec::new();
     versioned.encode_for_signing(&mut buf);

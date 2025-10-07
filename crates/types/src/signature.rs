@@ -183,9 +183,9 @@ mod tests {
 
     // from the JS Client - `txSigningParity`
     const SIG_HEX: &str = "0xa65e24b381f759e7719f69d9ee09274babd564a680c219e5ae29e0acc2317bfb23d79097dad3e0ab5f04a8d45814bbd4184e38fcc8852ccb1f016832166279541b";
-    // BS58 (JSON, hence the escaped quotes) encoded signature
-    // Updated expected base58 signature for version=1 signing preimage (recomputed from SIG_HEX below).
-    const SIG_BS58: &str = "<REGENERATE_AT_RUNTIME>"; // placeholder; will compare dynamically
+    // Base58 encoding of the signature (for version=1 signing preimage)
+    const SIG_BS58: &str =
+        "FgWn1ee5uD8BNxR5jYxQr7rvKSFHispz5DfmhUpkABdhRFneBg7zmpAfmhSLtKL48xL2GGVkLWuAbivQiBYFDWmmk";
 
     // spellchecker:on
 
@@ -236,16 +236,16 @@ mod tests {
 
         assert_eq!(transaction.header.signature, signature2);
 
-        // serde-json
+        // serde-json base58 roundtrip
         let ser = serde_json::to_string(&transaction.header.signature)?;
         let de_ser: IrysSignature = serde_json::from_str(&ser)?;
         assert_eq!(transaction.header.signature, de_ser);
 
+        // Verify base58 encoding matches expected (parity check with JS client)
+        assert_eq!(ser, format!("\"{}\"", SIG_BS58));
+
         // assert parity against regenerated hex
         let decoded_js_sig = Signature::try_from(&hex::decode(&SIG_HEX[2..])?[..])?;
-
-        let d2 = hex::encode(transaction.header.signature.as_bytes());
-        println!("{}", d2);
 
         // let d2 = hex::encode(transaction.header.signature.as_bytes());
         // assert_eq!(
