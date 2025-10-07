@@ -1,3 +1,4 @@
+use std::ops::{Deref, DerefMut};
 pub use crate::ingress::IngressProof;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
@@ -45,6 +46,79 @@ pub enum CommitmentValidationError {
     ForbiddenSigner,
 }
 
+
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Arbitrary)]
+#[repr(u8)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum VersionedDataTransactionHeader {
+    V1(DataTransactionHeader) = 1
+}
+
+impl VersionedDataTransactionHeader {
+    pub fn discriminant(&self) -> u8 {
+        match self {
+            Self::V1(_) => 1,
+        }
+    }
+}
+
+impl Default for VersionedDataTransactionHeader {
+    fn default() -> Self {
+        Self::V1(DataTransactionHeader::default())
+    }
+}
+
+// deref & derefmut will only work while we have a single version
+// this is what allows us to "hide" the complexity for the rest of the codebase.
+impl Deref for VersionedDataTransactionHeader {
+    type Target = DataTransactionHeader;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::V1(v1) => v1,
+        }
+    }
+}
+
+impl DerefMut for VersionedDataTransactionHeader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+                match self {
+            Self::V1(v1) => v1,
+        }
+    }
+}
+
+// TODO: write tests for this
+impl Compact for VersionedDataTransactionHeader {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]> {
+        buf.put_u8(self.discriminant());
+        match self {
+            Self::V1(data_transaction_header) => data_transaction_header.to_compact(buf),
+        }
+        
+    }
+
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        let (id, buf) = u8::from_compact(buf, buf.len());
+        match id {
+            1 => {
+                let (header, buf) = DataTransactionHeader::from_compact(buf, buf.len());
+                (Self::V1(header), buf)
+            }
+            _ => unimplemented!()
+        }
+    }
+}
+
 #[derive(
     Clone,
     Debug,
@@ -64,14 +138,14 @@ pub enum CommitmentValidationError {
 /// We include the Irys prefix to differentiate from EVM transactions.
 #[serde(rename_all = "camelCase", default)]
 pub struct DataTransactionHeader {
+    /// The transaction's version
+    pub version: u8,
+
     /// A 256-bit hash of the transaction signature.
     #[rlp(skip)]
     #[rlp(default)]
     // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
     pub id: H256,
-
-    /// The transaction's version
-    pub version: u8,
 
     /// block_hash of a recent (last 50) blocks or the a recent transaction id
     /// from the signer. Multiple transactions can share the same anchor.

@@ -21,7 +21,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::{Index, IndexMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use tracing::debug;
 
 pub type BlockHash = H256;
@@ -154,6 +154,44 @@ impl VDFLimiterInfo {
     }
 }
 
+#[derive(Clone, Debug, Eq, Serialize,
+    Deserialize,
+    PartialEq, )]
+pub enum VersionedIrysBlockHeader {
+    V1(IrysBlockHeader)
+}
+
+impl Deref for VersionedIrysBlockHeader {
+    type Target = IrysBlockHeader;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::V1(v1) => v1,
+        }
+    }
+}
+
+impl DerefMut for VersionedIrysBlockHeader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::V1(v1) => v1,
+        }
+    }
+}
+
+impl Compact for VersionedIrysBlockHeader {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]> {
+        todo!()
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        todo!()
+    }
+}
+
+
 /// Stores deserialized fields from a JSON formatted Irys block header.
 #[derive(
     Clone,
@@ -171,6 +209,8 @@ impl VDFLimiterInfo {
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
 pub struct IrysBlockHeader {
+
+
     /// The block identifier.
     /// Excluded from RLP encoding as it's derived from the signature hash.
     #[rlp(skip)]
@@ -182,6 +222,10 @@ pub struct IrysBlockHeader {
     #[rlp(skip)]
     #[rlp(default)]
     pub signature: IrysSignature,
+
+    /// The blocks version.
+    /// should always be `1` (for this version anyway)
+    pub version: u8,
 
     /// The block height.
     #[serde(with = "string_u64")]
