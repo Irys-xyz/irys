@@ -91,8 +91,8 @@ impl Decompress for IngressProof {
     }
 }
 
-pub fn generate_ingress_proof_tree(
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+pub fn generate_ingress_proof_tree<C: AsRef<[u8]>>(
+    chunks: impl Iterator<Item = eyre::Result<C>>,
     address: Address,
     and_regular: bool,
 ) -> eyre::Result<(Node, Option<Node>)> {
@@ -127,9 +127,9 @@ pub fn generate_ingress_proof(
     })
 }
 
-pub fn verify_ingress_proof(
-    proof: IngressProof,
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+pub fn verify_ingress_proof<C: AsRef<[u8]>>(
+    proof: &IngressProof,
+    chunks: impl IntoIterator<Item = C>,
     chain_id: ChainId,
 ) -> eyre::Result<bool> {
     if chain_id != proof.chain_id {
@@ -143,7 +143,8 @@ pub fn verify_ingress_proof(
     let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
 
     // re-compute the ingress proof & regular trees & roots
-    let (proof_root, regular_root) = generate_ingress_proof_tree(chunks, recovered_address, true)?;
+    let (proof_root, regular_root) =
+        generate_ingress_proof_tree(chunks.into_iter().map(Ok), recovered_address, true)?;
 
     let data_root = H256(
         regular_root
@@ -229,15 +230,15 @@ mod tests {
 
         // Verify the ingress proof
         assert!(verify_ingress_proof(
-            proof.clone(),
-            chunks.clone().into_iter().map(Ok),
+            &proof,
+            chunks.iter().as_slice(),
             chain_id
         )?);
         let mut reversed = chunks;
         reversed.reverse();
         assert!(!verify_ingress_proof(
-            proof,
-            reversed.into_iter().map(Ok),
+            &proof,
+            reversed.iter().as_slice(),
             chain_id
         )?);
 
@@ -287,15 +288,15 @@ mod tests {
 
         // Verify that testnet proof is valid for testnet
         assert!(verify_ingress_proof(
-            testnet_proof.clone(),
-            chunks.clone().into_iter().map(Ok),
+            &testnet_proof,
+            chunks.iter().as_slice(),
             testnet_chain_id
         )?);
 
         // Verify that mainnet proof is valid for mainnet
         assert!(verify_ingress_proof(
-            mainnet_proof,
-            chunks.clone().into_iter().map(Ok),
+            &mainnet_proof,
+            chunks.iter().as_slice(),
             mainnet_chain_id
         )?);
 
@@ -306,16 +307,16 @@ mod tests {
         // This should fail verification because the signature was created with testnet chain_id
         // but we're trying to verify it with mainnet chain_id
         assert!(!verify_ingress_proof(
-            replay_attack_proof.clone(),
-            chunks.clone().into_iter().map(Ok),
+            &replay_attack_proof,
+            chunks.iter().as_slice(),
             mainnet_chain_id
         )?);
 
         // This should fail verification because there's going to be a mismatch in chain_id
         // even if the proof is valid for testnet
         assert!(!verify_ingress_proof(
-            replay_attack_proof,
-            chunks.into_iter().map(Ok),
+            &replay_attack_proof,
+            chunks.iter().as_slice(),
             testnet_chain_id
         )?);
 

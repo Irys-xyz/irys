@@ -402,8 +402,8 @@ pub fn generate_leaves_from_chunks(
 
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
 /// and_regular can be set to re-use the chunk iterator to produce the "standard" leaves, as well as the ingress proof specific ones for when we validate ingress proofs
-pub fn generate_ingress_leaves(
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
+    chunks: impl Iterator<Item = eyre::Result<C>>,
     address: Address,
     and_regular: bool,
 ) -> Result<(Vec<Node>, Option<Vec<Node>>), Error> {
@@ -412,9 +412,9 @@ pub fn generate_ingress_leaves(
     let mut min_byte_range = 0;
     for chunk in chunks {
         let chunk = chunk?;
-        let chunk = chunk.as_ref(); // double-binding required
-        let data_hash = hash_ingress_sha256(chunk, address);
-        let max_byte_range = min_byte_range + chunk.len();
+        let bytes = chunk.as_ref();
+        let data_hash = hash_ingress_sha256(bytes, address);
+        let max_byte_range = min_byte_range + bytes.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset]);
 
@@ -428,7 +428,7 @@ pub fn generate_ingress_leaves(
         });
 
         if and_regular {
-            let data_hash = hash_sha256(chunk);
+            let data_hash = hash_sha256(bytes);
             let id = hash_all_sha256(vec![&data_hash, &offset]);
             regular_leaves.push(Node {
                 id,
@@ -440,7 +440,7 @@ pub fn generate_ingress_leaves(
             });
         }
 
-        min_byte_range += &chunk.len();
+        min_byte_range += bytes.len();
     }
     Ok((leaves, and_regular.then_some(regular_leaves)))
 }
