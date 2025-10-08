@@ -53,7 +53,7 @@ pub enum CommitmentValidationError {
 
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 #[repr(u8)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum VersionedDataTransactionHeader {
     V1(DataTransactionHeaderV1) = 1,
 }
@@ -180,7 +180,7 @@ impl HasInnerVersion for DataTransactionHeaderV1 {
 // Commitment Transaction versioned wrapper
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum VersionedCommitmentTransaction {
     V1(CommitmentTransactionV1) = 1,
 }
