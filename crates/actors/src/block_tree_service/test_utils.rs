@@ -121,8 +121,7 @@ impl TestCtx {
     ) -> (Self, ServiceReceivers) {
         let task_manager = TaskManager::new(tokio::runtime::Handle::current());
         let task_executor = task_manager.executor();
-        let (service_senders, service_rx) =
-            crate::test_helpers::build_test_service_senders(&config);
+        let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
 
         (
             Self {

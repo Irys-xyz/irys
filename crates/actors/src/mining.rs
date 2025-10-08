@@ -458,8 +458,7 @@ mod tests {
         let arc_rwlock = Arc::new(rwlock);
         let closure_arc = arc_rwlock.clone();
 
-        let (service_senders, mut receivers) =
-            crate::test_helpers::build_test_service_senders(&config);
+        let (service_senders, mut receivers) = crate::test_helpers::build_test_service_senders();
 
         // Spawn task to handle block producer messages
         let closure_arc_clone = closure_arc.clone();
@@ -638,8 +637,7 @@ mod tests {
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
-        let (service_senders, _receivers) =
-            crate::test_helpers::build_test_service_senders(&config);
+        let (service_senders, _receivers) = crate::test_helpers::build_test_service_senders();
 
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());

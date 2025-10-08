@@ -30,9 +30,7 @@ pub mod test_helpers {
 
     /// Build a pair of `ServiceSenders`/`ServiceReceivers` pre-wired with a minimal `PackingHandle`
     /// for tests. This eliminates boilerplate across tests that need a `ServiceSenders` instance.
-    pub fn build_test_service_senders(
-        _config: &irys_types::Config,
-    ) -> (ServiceSenders, ServiceReceivers) {
+    pub fn build_test_service_senders() -> (ServiceSenders, ServiceReceivers) {
         let (tx_packing, _rx_packing) = mpsc::channel(1);
 
         let (service_senders, receivers) = ServiceSenders::new_with_packing_sender(tx_packing);
