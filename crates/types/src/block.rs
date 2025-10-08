@@ -19,7 +19,7 @@ use crate::{
     IrysSignature, Proof, H256, U256,
 };
 use actix::MessageResponse;
-use alloy_primitives::{Address, TxHash, B256};
+use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use openssl::sha;
 use reth_primitives::Header;
@@ -251,9 +251,18 @@ impl VersionedIrysBlockHeader {
     /// Validate the block signature
     pub fn is_signature_valid(&self) -> bool {
         match self {
-            Self::V1(inner) => inner
-                .signature
-                .validate_signature(self.signature_hash(), inner.miner_address),
+            Self::V1(inner) => {
+                // First, verify the signature is valid for the data
+                let signature_valid = inner
+                    .signature
+                    .validate_signature(self.signature_hash(), inner.miner_address);
+
+                // Second, verify the block_hash matches the hash of the signature
+                let expected_block_hash = H256::from(keccak256(inner.signature.as_bytes()).0);
+                let block_hash_valid = inner.block_hash == expected_block_hash;
+
+                signature_valid && block_hash_valid
+            }
         }
     }
 

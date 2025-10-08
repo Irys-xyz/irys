@@ -1319,6 +1319,61 @@ mod tests {
         assert!(signed_tx.is_signature_valid());
     }
 
+    #[test]
+    fn test_data_transaction_signature_validation() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner {
+            signer: SigningKey::random(&mut rand::thread_rng()),
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+        };
+
+        let tx = DataTransaction {
+            header: mock_header(&config),
+            ..Default::default()
+        };
+
+        // Sign the transaction
+        let mut signed_tx = signer.sign_transaction(tx).unwrap();
+
+        // Verify initial signature is valid
+        assert!(signed_tx.header.is_signature_valid());
+
+        // Test: changing the ID should make validation fail
+        signed_tx.header.id = H256::random();
+        assert!(
+            !signed_tx.header.is_signature_valid(),
+            "Signature validation should fail when ID is changed"
+        );
+    }
+
+    #[test]
+    fn test_commitment_transaction_signature_validation() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner {
+            signer: SigningKey::random(&mut rand::thread_rng()),
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+        };
+
+        let tx = mock_commitment_tx(&config);
+
+        // Sign the transaction
+        let mut signed_tx = tx.sign(&signer).unwrap();
+
+        // Verify initial signature is valid
+        assert!(signed_tx.is_signature_valid());
+
+        // Test: changing the ID should make validation fail
+        signed_tx.id = H256::random();
+        assert!(
+            !signed_tx.is_signature_valid(),
+            "Signature validation should fail when ID is changed"
+        );
+    }
+
     fn mock_header(config: &ConsensusConfig) -> VersionedDataTransactionHeader {
         VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::from([255_u8; 32]),
