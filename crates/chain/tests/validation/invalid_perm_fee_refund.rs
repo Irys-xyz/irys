@@ -9,7 +9,7 @@ use irys_actors::{
 };
 use irys_primitives::Address;
 use irys_types::{
-    VersionedCommitmentTransaction, DataLedger, VersionedDataTransactionHeader, H256List, VersionedIrysBlockHeader,
+    VersionedCommitmentTransaction, DataLedger, VersionedDataTransactionHeader, DataTransactionHeaderV1, H256List, VersionedIrysBlockHeader,
     NodeConfig, SystemTransactionLedger, H256, U256,
 };
 use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a data transaction that appears promoted
-    let data_tx = VersionedDataTransactionHeader {
+    let data_tx = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         version: 1,
         anchor: H256::zero(),
@@ -98,7 +98,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         chain_id: 1,
         promoted_height: Some(2), // Mark as promoted!
         signature: Default::default(),
-    };
+    });
 
     // Create an invalid refund for this promoted transaction
     let invalid_refund = (

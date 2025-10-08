@@ -117,7 +117,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
 
     // Create a block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
-        malicious_tx: (*malicious_tx.header).clone(),
+        malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
                 config: Config::new(evil_config),

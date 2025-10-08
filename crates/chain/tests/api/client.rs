@@ -97,11 +97,11 @@ async fn check_transaction_endpoints(
 
     // This method doesn't return anything if there's no error
     api_client
-        .post_transaction(api_address, (*tx.header).clone())
+        .post_transaction(api_address, tx.header.clone())
         .await
         .expect("valid post transaction response");
     api_client
-        .post_transaction(api_address, (*tx_2.header).clone())
+        .post_transaction(api_address, tx_2.header.clone())
         .await
         .expect("valid post transaction response");
 
@@ -245,7 +245,7 @@ async fn api_client_wait_for_promotion_happy_path() {
 
     // Post the transaction header
     api_client
-        .post_transaction(api_address, (*tx.header).clone())
+        .post_transaction(api_address, tx.header.clone())
         .await
         .expect("post_transaction should succeed");
 

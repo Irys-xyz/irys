@@ -234,7 +234,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 
     // produce an invalid block
     let block_prod_strategy = EvilBlockProdStrategy {
-        extra_tx: (*extra_tx.header).clone(),
+        extra_tx: extra_tx.header.clone(),
         prod: ProductionStrategy {
             inner: peer_node.node_ctx.block_producer_inner.clone(),
         },

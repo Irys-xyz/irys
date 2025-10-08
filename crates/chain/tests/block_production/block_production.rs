@@ -1293,7 +1293,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 
     // Create evil block production strategy to force inclusion
     let evil_strategy = EvilBlockProdStrategy {
-        malicious_tx: (*malicious_tx.header).clone(),
+        malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
         },

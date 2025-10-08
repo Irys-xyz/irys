@@ -6,7 +6,7 @@ use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, VersionedCommitmentTransaction, VersionedDataTransactionHeader, IrysTransactionResponse,
+    irys::IrysSigner, VersionedCommitmentTransaction, VersionedDataTransactionHeader, DataTransactionHeaderV1, IrysTransactionResponse,
     NodeConfig, H256,
 };
 use reth_db::Database as _;
@@ -34,10 +34,10 @@ async fn test_get_tx() -> eyre::Result<()> {
     node.node_ctx.start_mining().unwrap();
     let db = node.node_ctx.db.clone();
 
-    let storage_tx = VersionedDataTransactionHeader {
+    let storage_tx = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         ..Default::default()
-    };
+    });
     info!("Generated storage_tx.id: {}", storage_tx.id);
 
     let consensus = &node.node_ctx.config.consensus;
@@ -80,7 +80,7 @@ async fn test_get_tx() -> eyre::Result<()> {
             panic!("Expected Storage transaction, got Commitment")
         }
     };
-    assert_eq!(storage_tx, storage);
+    assert_eq!(storage_tx, VersionedDataTransactionHeader::V1(storage));
 
     // Test commitment transaction
     let id: String = commitment_tx.id.to_string();
@@ -100,7 +100,7 @@ async fn test_get_tx() -> eyre::Result<()> {
             panic!("Expected Commitment transaction, got Storage")
         }
     };
-    assert_eq!(commitment_tx, commitment);
+    assert_eq!(commitment_tx, VersionedCommitmentTransaction::V1(commitment));
     node.node_ctx.stop().await;
     Ok(())
 }

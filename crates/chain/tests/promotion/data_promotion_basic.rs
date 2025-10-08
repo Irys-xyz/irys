@@ -80,7 +80,7 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     let mut unconfirmed_tx: Vec<VersionedDataTransactionHeader> = Vec::new();
     for tx in txs.iter() {
         let header = &tx.header;
-        unconfirmed_tx.push((**header).clone());
+        unconfirmed_tx.push(header.clone());
         let req = TestRequest::post()
             .uri("/v1/tx")
             .set_json(header)
@@ -173,21 +173,21 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
         let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[1];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-        println!("1:{}", block_tx1);
+        println!("1:{:?}", block_tx1);
     } else if block_tx1.height > block_tx2.height {
         let txid_1 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-        println!("1:{}", block_tx2);
-        println!("2:{}", block_tx1);
+        println!("1:{:?}", block_tx2);
+        println!("2:{:?}", block_tx1);
     } else {
         let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         let txid_2 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-        println!("1:{}", block_tx1);
-        println!("2:{}", block_tx2);
+        println!("1:{:?}", block_tx1);
+        println!("2:{:?}", block_tx2);
     }
 
     // ==============================

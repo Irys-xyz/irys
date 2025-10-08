@@ -182,7 +182,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
             if response.status() == StatusCode::OK {
                 let result: VersionedDataTransactionHeader = response.json().await.unwrap();
-                assert_eq!(&*tx.header, &result);
+                assert_eq!(&tx.header, &result);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
                 break;
             }

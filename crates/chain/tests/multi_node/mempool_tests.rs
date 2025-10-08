@@ -1037,7 +1037,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(
         a1_b2_reorg_mempool_txs.submit_tx,
-        vec![(*a_blk1_tx1.header).clone()]
+        vec![a_blk1_tx1.header.clone()]
     );
 
     let a_blk1_tx1_proof1 = {
@@ -1047,7 +1047,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
             .expect("Able to get a_blk1_tx1's ingress proof from DB")
     };
 
-    let mut a_blk1_tx1_published = (*a_blk1_tx1.header).clone();
+    let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
     a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
@@ -1074,7 +1074,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
     // note: as [`get_publish_txs_and_proofs`] resolves ingress proofs, calling get_best_mempool_txs will return the header with an ingress proof.
     // so we have a separate path & assert to ensure the ingress proof is being removed when the tx is orphaned
-    assert_eq!(a_blk1_tx1_mempool, *a_blk1_tx1.header);
+    assert_eq!(a_blk1_tx1_mempool, a_blk1_tx1.header);
 
     // gossip A's orphaned tx to B
     // get it ready for promotion, and then mine a block on B to include it
@@ -2133,7 +2133,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 
     // ingest invalid transaction directly to the mempool
     let res = genesis_node
-        .ingest_data_tx((*invalid_header).clone())
+        .ingest_data_tx(invalid_header.clone())
         .await
         .expect_err("expected failure but got success");
     assert!(
@@ -2143,7 +2143,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     );
 
     // ingest valid transaction
-    genesis_node.ingest_data_tx((*valid_tx.header).clone()).await?;
+    genesis_node.ingest_data_tx(valid_tx.header.clone()).await?;
 
     // wait for all txs to ingress mempool
     genesis_node
@@ -2158,22 +2158,22 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 /// Test mempool rejects stake transactions with invalid fee or value
 #[rstest::rstest]
 #[case::invalid_fee_less_than_required(
-    |tx: &mut CommitmentTransaction, required_fee: u64, _required_value: irys_types::U256| {
+    |tx: &mut VersionedCommitmentTransaction, required_fee: u64, _required_value: irys_types::U256| {
         tx.fee = required_fee / 2; // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
-    |tx: &mut CommitmentTransaction, _required_fee: u64, _required_value: irys_types::U256| {
+    |tx: &mut VersionedCommitmentTransaction, _required_fee: u64, _required_value: irys_types::U256| {
         tx.fee = 0;
     },
 )]
 #[case::invalid_value_less_than_required(
-    |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
+    |tx: &mut VersionedCommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
         tx.value = required_value / irys_types::U256::from(2); // 10000 instead of 20000
     },
 )]
 #[case::invalid_value_more_than_required(
-    |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
+    |tx: &mut VersionedCommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
         tx.value = required_value + irys_types::U256::from(10000); // 30000 instead of 20000
     },
 )]
@@ -2196,7 +2196,7 @@ async fn stake_tx_fee_and_value_validation_test(
     // Create stake transaction and apply the modifier
     let mut stake_tx = VersionedCommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
-    let stake_tx = signer.sign_commitment(stake_tx)?;
+    signer.sign_commitment(&mut stake_tx)?;
 
     // Test that the transaction is rejected with the expected error
     let res = genesis_node
@@ -2217,35 +2217,35 @@ async fn stake_tx_fee_and_value_validation_test(
 #[rstest::rstest]
 #[case::invalid_fee_less_than_required(
     0_u64, // pledge count
-    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
+    |tx: &mut VersionedCommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
         tx.fee = required_fee / 2; // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
     0_u64, // pledge count
-    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
+    |tx: &mut VersionedCommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         tx.fee = 0;
     },
 )]
 #[case::invalid_value_too_low(
     0_u64, // pledge count
-    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
-        let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
+    |tx: &mut VersionedCommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
+        let expected = VersionedCommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected / irys_types::U256::from(2); // Half the expected value
     },
 )]
 #[case::invalid_value_too_high(
     1_u64, // pledge count
-    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
-        let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
+    |tx: &mut VersionedCommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
+        let expected = VersionedCommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected * irys_types::U256::from(2); // Double the expected value
     },
 )]
 #[case::invalid_value_wrong_count(
     2_u64, // pledge count
-    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
+    |tx: &mut VersionedCommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         // Set value that would be correct for pledge count 0, but we're using count 2
-        tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
+        tx.value = VersionedCommitmentTransaction::calculate_pledge_value_at_count(config, 0);
     },
 )]
 #[test_log::test(actix_web::test)]
@@ -2275,7 +2275,7 @@ async fn pledge_tx_fee_validation_test(
 
     // Apply the modification (fee or value)
     tx_modifier(&mut pledge_tx, config, pledge_count, required_fee);
-    let pledge_tx = signer.sign_commitment(pledge_tx)?;
+    signer.sign_commitment(&mut pledge_tx)?;
 
     // Test that the transaction is rejected with the expected error
     let res = genesis_node
@@ -2336,7 +2336,7 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Apply the fee multiplier
     commitment_tx.fee = required_fee * fee_multiplier;
-    let commitment_tx = signer.sign_commitment(commitment_tx)?;
+    signer.sign_commitment(&mut commitment_tx)?;
 
     // Should be accepted
     genesis_node
