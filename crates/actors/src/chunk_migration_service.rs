@@ -132,7 +132,6 @@ impl ChunkMigrationServiceInner {
                     .view_eyre(|tx| tx_header_by_txid(tx, &txid))
                     .unwrap()
                     .unwrap();
-                // DB already returns versioned type
                 txs.push(tx);
             }
             block_tx_map.insert(ledger, txs);

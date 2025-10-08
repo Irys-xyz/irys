@@ -109,7 +109,6 @@ impl EpochReplayData {
                     // First try to get the commitment tx from the DB
                     let opt = commitment_tx_by_txid(&read_tx, txid)?;
                     opt.or_else(|| {
-                        // The recovered map already contains versioned types
                         recovered.commitment_txs.get(txid).cloned()
                     })
                     .ok_or_else(|| {

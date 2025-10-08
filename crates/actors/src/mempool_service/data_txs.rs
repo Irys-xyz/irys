@@ -36,7 +36,6 @@ impl Inner {
             if let Ok(read_tx) = self.read_tx() {
                 if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
                     debug!("Got tx {} from DB", &tx);
-                    // tx_header is already versioned from DB
                     found_txs.push(Some(tx_header));
                     continue;
                 }

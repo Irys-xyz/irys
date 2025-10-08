@@ -238,12 +238,12 @@ impl IrysBlockHeader {
         Self::V1(IrysBlockHeaderV1::new_mock_header())
     }
 
-    /// Get the block hash (convenience method for Arc<VersionedIrysBlockHeader>)
+    /// Get the block hash (convenience method for Arc<IrysBlockHeader>)
     pub fn block_hash(&self) -> BlockHash {
         self.block_hash
     }
 
-    /// Get the block height (convenience method for Arc<VersionedIrysBlockHeader>)
+    /// Get the block height (convenience method for Arc<IrysBlockHeader>)
     pub fn height(&self) -> u64 {
         self.height
     }

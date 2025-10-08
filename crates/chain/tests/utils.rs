@@ -2934,7 +2934,7 @@ pub fn get_block_parent(
     // Loop tough all the blocks and find the one that contains the txid
     for block_header in block_headers.values() {
         if block_header.data_ledgers[ledger].tx_ids.0.contains(&txid) {
-            // block_header is CompactIrysBlockHeader wrapping VersionedIrysBlockHeader
+            // block_header is CompactIrysBlockHeader wrapping IrysBlockHeader
             let versioned: irys_types::IrysBlockHeader = block_header.clone().into();
             return Some(versioned);
         }

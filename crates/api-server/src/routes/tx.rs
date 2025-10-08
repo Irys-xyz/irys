@@ -111,7 +111,6 @@ pub fn get_storage_transaction(
         .map_err(|_| ApiError::Internal {
             err: String::from("db error while looking up Irys transaction"),
         })?;
-    // DB returns versioned type
     opt.ok_or(ApiError::ErrNoId {
         id: tx_id.to_string(),
         err: String::from("storage tx not found"),
@@ -129,7 +128,6 @@ pub fn get_commitment_transaction(
         .map_err(|_| ApiError::Internal {
             err: String::from("db error while looking up commitment transaction"),
         })?;
-    // DB returns versioned type
     opt.ok_or(ApiError::ErrNoId {
         id: tx_id.to_string(),
         err: String::from("commitment tx not found"),

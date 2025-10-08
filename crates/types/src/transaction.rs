@@ -159,7 +159,7 @@ impl alloy_rlp::Decodable for DataTransactionHeader {
         }
         let discriminant = buf[0];
         *buf = &buf[1..];
-        
+
         match discriminant {
             1 => {
                 let inner = DataTransactionHeaderV1::decode(buf)?;
@@ -318,7 +318,7 @@ impl alloy_rlp::Decodable for CommitmentTransaction {
         }
         let discriminant = buf[0];
         *buf = &buf[1..];
-        
+
         match discriminant {
             1 => {
                 let inner = CommitmentTransactionV1::decode(buf)?;
@@ -1246,7 +1246,8 @@ mod tests {
         // Assert
         // zero out the id and signature, those do not get encoded
         original_header.id = H256::zero();
-        original_header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        original_header.signature =
+            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(original_header, decoded_header);
         // Verify version discriminant is preserved in RLP encoding
         assert_eq!(decoded_header.version, 1);
@@ -1266,7 +1267,8 @@ mod tests {
         // Assert
         // zero out the id and signature, those do not get encoded
         original_tx.id = H256::zero();
-        original_tx.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        original_tx.signature =
+            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in RLP encoding
         assert_eq!(decoded_tx.version, 1);
@@ -1279,14 +1281,15 @@ mod tests {
         let mut original_header = mock_header(&config);
 
         // action - test Compact encoding/decoding the outer versioned structure
-        let mut buffer = vec![0u8; 1024];
+        let mut buffer = vec![0_u8; 1024];
         let size = original_header.to_compact(&mut buffer);
         let (decoded_header, _rest) = DataTransactionHeader::from_compact(&buffer[..size], size);
 
         // Assert
         // zero out the id and signature, those do not get encoded
         original_header.id = H256::zero();
-        original_header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        original_header.signature =
+            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(original_header, decoded_header);
         // Verify version discriminant is preserved in Compact encoding
         assert_eq!(decoded_header.version, 1);
@@ -1300,14 +1303,15 @@ mod tests {
         let mut original_tx = mock_commitment_tx(&config);
 
         // action - test Compact encoding/decoding the outer versioned structure
-        let mut buffer = vec![0u8; 1024];
+        let mut buffer = vec![0_u8; 1024];
         let size = original_tx.to_compact(&mut buffer);
         let (decoded_tx, _rest) = CommitmentTransaction::from_compact(&buffer[..size], size);
 
         // Assert
         // zero out the id and signature, those do not get encoded
         original_tx.id = H256::zero();
-        original_tx.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        original_tx.signature =
+            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in Compact encoding
         assert_eq!(decoded_tx.version, 1);
@@ -1325,7 +1329,7 @@ mod tests {
             serde_json::to_string_pretty(&original_header).expect("Failed to serialize");
 
         println!("{}", &serialized);
-        // Deserialize the JSON back to VersionedDataTransactionHeader
+        // Deserialize the JSON back to DataTransactionHeader
         let deserialized: DataTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
@@ -1343,7 +1347,7 @@ mod tests {
         let serialized = serde_json::to_string_pretty(&original_tx).expect("Failed to serialize");
 
         println!("{}", &serialized);
-        // Deserialize the JSON back to a VersionedCommitmentTransaction
+        // Deserialize the JSON back to a CommitmentTransaction
         let deserialized: CommitmentTransaction =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 

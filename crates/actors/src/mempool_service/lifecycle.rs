@@ -386,7 +386,6 @@ impl Inner {
                     .iter()
                     .find(|c| c.id == *orphan_commitment_tx_id)
                 {
-                    // tx is already versioned from the map
                     orphaned_full_commitment_txs
                         .insert(*orphan_commitment_tx_id, commitment_tx.clone());
                 };
@@ -426,7 +425,7 @@ impl Inner {
     /// Steps:
     /// 1) slice just the confirmed block ranges for each fork (old and new)
     /// 2) reduce down both forks to a `HashMap<DataLedger, HashSet<IrysTransactionId>>`
-    ///     with a secondary `HashMap<DataLedger, HashMap<IrysTransactionId, Arc<VersionedIrysBlockHeader>>>` for reverse txid -> block lookups
+    ///     with a secondary `HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>` for reverse txid -> block lookups
     /// 3) reduce these reductions down to just the list of orphaned transactions, using a set diff
     /// 4) handle orphaned Submit transactions
     ///     4.1) re-submit them back to the mempool

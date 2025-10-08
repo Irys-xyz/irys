@@ -1099,7 +1099,7 @@ impl Inner {
             // insert block into mempool without poa
             let mut block_without_chunk = (*block).clone();
             // todo: would there be any harm in leaving the PoA chunk in,
-            // and storing Arc<VersionedIrysBlockHeader> in the `prevalidated_blocks`?
+            // and storing Arc<IrysBlockHeader> in the `prevalidated_blocks`?
             block_without_chunk.poa.chunk = None;
             mempool_state_guard
                 .prevalidated_blocks
@@ -1162,7 +1162,6 @@ impl Inner {
                 .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            // commitment_tx is already versioned from DB
             let _ = self
                 .handle_ingress_commitment_tx_message(commitment_tx)
                 .await
@@ -1172,7 +1171,6 @@ impl Inner {
         }
 
         for (_txid, storage_tx) in recovered.storage_txs {
-            // storage_tx is already versioned from DB
             let _ = self
                 .handle_data_tx_ingress_message(storage_tx)
                 .await

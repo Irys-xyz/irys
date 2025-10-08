@@ -251,7 +251,6 @@ impl CommitmentSnapshot {
         // Sort commitments directly
         all_commitments.sort();
 
-        // Return the already-versioned commitments
         all_commitments
     }
 
