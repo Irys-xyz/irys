@@ -16,7 +16,7 @@ use crate::{
     chunk_migration_service::ChunkMigrationServiceMessage, packing::PackingRequest,
     services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
 };
-use eyre::eyre;
+use eyre::{eyre, OptionExt};
 use irys_config::StorageSubmodulesConfig;
 use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
 use irys_domain::{
@@ -136,8 +136,8 @@ impl StorageModuleServiceInner {
                 .map(|module| (module.id, module.clone()))
                 .collect()
         };
-        let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();
-        let mut packing_modules: Vec<Arc<StorageModule>> = Vec::new();
+        let mut assigned_modules = Vec::new();
+        let mut packing_modules = Vec::new();
 
         debug!("StorageModuleInfos:\n{:#?}", storage_module_info_update);
 
@@ -188,45 +188,79 @@ impl StorageModuleServiceInner {
         }
 
         for sm_info in storage_module_info_update.iter() {
-            let Some(info_pa) = sm_info.partition_assignment else {
-                continue;
-            };
-
+            // Get the existing StorageModule from our state with the same storage module id
             let existing = local_modules_by_id
                 .get(&sm_info.id)
-                .expect("StorageModuleInfo must reference an existing storage module id");
+                .ok_or_eyre("StorageModuleInfo must reference an existing storage module id")?;
 
+            // Did this storage module from our state get assigned a new partition_hash ?
+            if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
+                existing.assign_partition(sm_info.partition_assignment.unwrap(), update_height);
+
+                // Record this storage module as needing packing, the protocol will always assign a new partition_hash
+                // to capacity for 1 epoch so we can schedule this formerly unassigned storage module for packing
+                packing_modules.push(existing.clone());
+
+                // Skip any further validations for now
+                continue;
+            }
+
+            // Get the path for this module - this is the only place the storage module id can be used as an index
             let path = &self.submodules_config.submodule_paths[sm_info.id];
 
-            self.validate_packing_params(existing, path, sm_info.id)?;
+            // Validate the path
+            // ARCHITECTURE NOTE: Configuration vs. Implementation Mismatch
+            //
+            // There's a fundamental disconnect between the configuration system and the storage module design:
+            //
+            // 1. Original Design Intent:
+            //    The StorageModule system was designed to support multiple submodules per StorageModule,
+            //    allowing several smaller storage units to be combined into a single 16TB logical partition.
+            //
+            // 2. Current Configuration Limitation:
+            //    The configuration system lacks the capability to express this many-to-one relationship.
+            //
+            // 3. Testnet Simplification:
+            //    For Testnet, we adopt a simplified 1:1 mapping where each StorageModule contains
+            //    exactly one submodule representing a full 16TB partition.
+            //
+            // This limitation should be addressed in future versions to fully realize the original
+            // flexible storage architecture. see [`system_ledger::get_genesis_commitments()`] and
+            // [`EpochServiceActor::map_storage_modules_to_partition_assignments`] for reference
+            if *path != sm_info.submodules[0].1 {
+                return Err(eyre::eyre!("Submodule paths don't match"));
+            }
 
-            match existing.partition_assignment() {
-                None => {
-                    existing.assign_partition(info_pa, update_height);
-                    packing_modules.push(existing.clone());
+            // Validate the in memory storage module against on-disk packing parameters
+            if let Some(info_pa) = sm_info.partition_assignment {
+                // Validate the existing storage module info as it exists in our local state
+                // vs. the existing packing params on disk to make sure everything is in sync
+                // before updating the partition assignment
+                match self.validate_packing_params(existing, path, sm_info.id) {
+                    Ok(()) => {}
+                    Err(err) => panic!("{}", err),
                 }
-                Some(existing_pa) if existing_pa != info_pa => {
-                    let ledger_before = existing_pa.ledger_id;
-                    let slot_before = existing_pa.slot_index;
 
+                // Check to see if there's been a change in the ledger assignment for the partition_has
+                // moved from Capacity->LedgerSlot or LedgerSlot->Capacity
+                let existing_pa = existing.partition_assignment().unwrap();
+                if info_pa.ledger_id != existing_pa.ledger_id
+                    || info_pa.slot_index != existing_pa.slot_index
+                {
+                    let ledger_before = existing_pa.ledger_id;
+
+                    // Update the storage modules partition assignment (and packing params toml)
+                    // to match ledger/capacity reassignment
                     existing.assign_partition(info_pa, update_height);
 
-                    match (ledger_before, info_pa.ledger_id) {
-                        (Some(_), None) => {
-                            packing_modules.push(existing.clone());
-                        }
-                        (None, Some(_)) => {
-                            assigned_modules.push(existing.clone());
-                        }
-                        (Some(before), Some(after))
-                            if before != after || slot_before != info_pa.slot_index =>
-                        {
-                            assigned_modules.push(existing.clone());
-                        }
-                        _ => {}
+                    if ledger_before.is_some() && info_pa.ledger_id.is_none() {
+                        // This storage module is expiring from LedgerSlot->Capacity
+                        packing_modules.push(existing.clone());
+                    } else if ledger_before.is_none() && info_pa.ledger_id.is_some() {
+                        // This storage module is assigned Capacity->LedgerSlot
+                        assigned_modules.push(existing.clone());
                     }
                 }
-                _ => {}
             }
         }
 
