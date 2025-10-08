@@ -9,7 +9,7 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_primitives::CommitmentType;
-use irys_types::{CommitmentTransaction, NodeConfig};
+use irys_types::{CommitmentTransaction, NodeConfig, U256};
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -308,6 +308,106 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         outcome,
         BlockValidationOutcome::Discarded,
         "block containing invalid unpledge count should be rejected"
+    );
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+#[test_log::test(actix_web::test)]
+async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub commitment: CommitmentTransaction,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &irys_types::IrysBlockHeader,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let commitment = self.commitment.clone();
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![commitment.clone()],
+                commitment_txs_to_bill: vec![commitment],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+                commitment_refund_events: vec![],
+            })
+        }
+    }
+
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let genesis_signer = genesis_node.cfg.signer();
+    let genesis_addr = genesis_signer.address();
+    let assignments = genesis_node.get_partition_assignments(genesis_addr);
+    eyre::ensure!(
+        !assignments.is_empty(),
+        "genesis node must expose at least one partition for invalid value test"
+    );
+
+    let consensus = &genesis_node.node_ctx.config.consensus;
+    let anchor = genesis_node.get_anchor().await?;
+
+    let mut unpledge_tx = CommitmentTransaction::new_unpledge(
+        consensus,
+        anchor,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+        genesis_addr,
+        assignments[0].partition_hash,
+    )
+    .await;
+
+    // Corrupt the refund amount
+    unpledge_tx.value = unpledge_tx.value.saturating_add(U256::from(1_u64));
+
+    let invalid_unpledge = genesis_signer.sign_commitment(unpledge_tx)?;
+
+    gossip_commitment_to_node(&genesis_node, &invalid_unpledge).await?;
+
+    let block_prod_strategy = EvilBlockProdStrategy {
+        commitment: invalid_unpledge.clone(),
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (block, _stats, _payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
+
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        Arc::clone(&block),
+        vec![invalid_unpledge],
+        false,
+    )
+    .await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert_eq!(
+        outcome,
+        BlockValidationOutcome::Discarded,
+        "block containing invalid unpledge refund amount should be rejected"
     );
 
     genesis_node.stop().await;
