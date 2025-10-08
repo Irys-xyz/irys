@@ -1,6 +1,7 @@
 mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
+mod unpledge_partition;
 
 use std::sync::Arc;
 
