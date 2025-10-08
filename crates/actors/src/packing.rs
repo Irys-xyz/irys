@@ -517,11 +517,11 @@ pub enum PackingServiceMessage {
 }
 
 #[derive(Debug, Clone)]
-pub struct PackingWaiter {
+pub struct PackingIdleWaiter {
     packing_service_sender: tokio::sync::mpsc::Sender<PackingServiceMessage>,
 }
 
-impl PackingWaiter {
+impl PackingIdleWaiter {
     pub async fn wait_for_idle(&self, timeout: Option<Duration>) -> eyre::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.packing_service_sender
@@ -573,9 +573,9 @@ impl PackingHandle {
         self.sender.clone()
     }
 
-    /// Create a PackingWaiter that can wait for the service to become idle.
-    pub fn waiter(&self) -> PackingWaiter {
-        PackingWaiter {
+    /// Create a PackingIdleWaiter that can wait for the service to become idle.
+    pub fn waiter(&self) -> PackingIdleWaiter {
+        PackingIdleWaiter {
             packing_service_sender: self.packing_service_sender.clone(),
         }
     }

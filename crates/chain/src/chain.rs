@@ -103,7 +103,7 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
-    pub packing_waiter: irys_actors::packing::PackingWaiter,
+    pub packing_waiter: irys_actors::packing::PackingIdleWaiter,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
