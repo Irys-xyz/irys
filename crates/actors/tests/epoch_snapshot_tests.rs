@@ -448,10 +448,13 @@ async fn partition_expiration_and_repacking_test() {
         active_workers: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         config: irys_actors::packing::PackingConfig::new(&std::sync::Arc::new(config.clone())),
     };
-    let packing_handle = irys_actors::packing::PackingHandle::from_parts(tx_packing, internals);
+    let packing_handle =
+        irys_actors::packing::PackingHandle::from_parts(tx_packing.clone(), internals);
 
-    // Create ServiceSenders for testing (with packing handle)
-    let (service_senders, mut receivers) = ServiceSenders::new_with_packing_handle(packing_handle);
+    // Create ServiceSenders for testing (channel-first), then set handle for waiters
+    let (service_senders, mut receivers) =
+        ServiceSenders::new_with_packing_sender(tx_packing.clone());
+    service_senders.set_packing_handle(packing_handle);
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {

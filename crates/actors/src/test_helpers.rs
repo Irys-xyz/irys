@@ -33,8 +33,21 @@ pub mod test_helpers {
     pub fn build_test_service_senders(
         config: &irys_types::Config,
     ) -> (ServiceSenders, ServiceReceivers) {
-        let handle = build_test_packing_handle(config);
-        ServiceSenders::new(handle)
+        let (tx_packing, _rx_packing) = mpsc::channel(1);
+
+        // Build a minimal handle using the same sender for consistency
+        let internals = Internals {
+            pending_jobs: Arc::new(RwLock::new(HashMap::new())),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            active_workers: Arc::new(AtomicUsize::new(0)),
+            config: PackingConfig::new(&Arc::new(config.clone())),
+        };
+        let handle = PackingHandle::from_parts(tx_packing.clone(), internals);
+
+        let (service_senders, receivers) = ServiceSenders::new_with_packing_sender(tx_packing);
+        // Provide the handle so code that needs wait_for_packing continues to work
+        service_senders.set_packing_handle(handle);
+        (service_senders, receivers)
     }
 }
 
