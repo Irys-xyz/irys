@@ -146,7 +146,6 @@ pub async fn get_transaction(
         get_commitment_tx_in_parallel(&vec, &state.mempool_service, &state.db).await
     {
         if let Some(tx) = result.pop() {
-            // Extract inner type for API response
             return Ok(IrysTransactionResponse::Commitment(tx));
         }
     };
@@ -155,7 +154,6 @@ pub async fn get_transaction(
         get_data_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
     {
         if let Some(tx) = result.pop() {
-            // Extract inner type for API response
             return Ok(IrysTransactionResponse::Storage(tx));
         }
     };
