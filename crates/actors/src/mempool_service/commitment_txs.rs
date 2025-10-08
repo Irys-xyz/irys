@@ -135,6 +135,7 @@ impl Inner {
         );
         match commitment_status {
             CommitmentSnapshotStatus::Unknown
+            | CommitmentSnapshotStatus::Accepted
             // The transaction should be ingerssed anyway, as it may be used on a fork.
             // All of these txs are valid in them by themselves, it's just that the current state of the mempool and
             // snapshots does not accept them in their current form. Yet we still should cache them in case of reorg.
@@ -230,7 +231,6 @@ impl Inner {
             }
 
             // tx cannot be accepted in any form
-            CommitmentSnapshotStatus::Accepted => return Err(TxIngressError::Skipped),
             CommitmentSnapshotStatus::Unsupported => {
                 return Err(TxIngressError::Other("unsupported tx type".to_string()))
             }
