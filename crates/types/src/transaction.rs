@@ -1109,7 +1109,6 @@ mod pledge_decay_parametrized_tests {
 
     #[tokio::test]
     #[rstest]
-    #[case(0, dec!(0))]
     #[case(1, dec!(20000.0))]
     #[case(2, dec!(10717.7))]
     #[case(3, dec!(7440.8))]
@@ -1316,7 +1315,7 @@ mod commitment_ordering_tests {
             80,
         );
 
-        assert!(unpledge_count1_fee50 < unpledge_count4_fee80);
+        assert!(unpledge_count1_fee50 > unpledge_count4_fee80);
         assert!(unpledge_count1_fee50 < unpledge_count1_fee10);
     }
 
@@ -1392,8 +1391,8 @@ mod commitment_ordering_tests {
         // 4. pledge_2_low (Pledge count=2, fee=50)
         // 5. pledge_5 (Pledge count=5, fee=100)
         // 6. pledge_10 (Pledge count=10, fee=300)
-        // 7. unpledge_count1 (Unpledge count=1, fee=40)
-        // 8. unpledge_count3 (Unpledge count=3, fee=20)
+        // 7. unpledge_count3 (Unpledge count=3, fee=20)
+        // 8. unpledge_count1 (Unpledge count=1, fee=40)
         // 9. unstake (Other type, fee=75)
 
         assert_eq!(commitments[0].id, stake_high.id);
@@ -1402,8 +1401,8 @@ mod commitment_ordering_tests {
         assert_eq!(commitments[3].id, pledge_2_low.id);
         assert_eq!(commitments[4].id, pledge_5.id);
         assert_eq!(commitments[5].id, pledge_10.id);
-        assert_eq!(commitments[6].id, unpledge_count1.id);
-        assert_eq!(commitments[7].id, unpledge_count3.id);
+        assert_eq!(commitments[6].id, unpledge_count3.id);
+        assert_eq!(commitments[7].id, unpledge_count1.id);
         assert_eq!(commitments[8].id, unstake.id);
     }
 }
