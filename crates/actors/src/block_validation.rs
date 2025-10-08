@@ -2051,10 +2051,10 @@ pub async fn data_txs_are_valid(
                 }
 
                 // Verify each ingress proof against the actual chunks
-                for proof in tx_proofs.iter().cloned() {
+                for proof in tx_proofs.iter() {
                     let ok = irys_types::ingress::verify_ingress_proof(
                         proof,
-                        chunks.clone().into_iter().map(Ok),
+                        &chunks,
                         config.consensus.chain_id,
                     )
                     .map_err(|e| PreValidationError::InvalidIngressProof {
