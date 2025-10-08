@@ -2,7 +2,8 @@ use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
-    partition::PartitionHash, Base64, ChunkPathHash, Compact, TxChunkOffset, UnpackedChunk, H256,
+    partition::PartitionHash, Base64, ChunkPathHash, Compact, TxChunkOffset, UnixTimestamp,
+    UnpackedChunk, H256,
 };
 use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
@@ -90,6 +91,11 @@ pub struct CachedDataRoot {
     /// If None, pruning falls back to block inclusion history.
     #[serde(default)]
     pub expiry_height: Option<u64>,
+
+    /// Unix timestamp (seconds) when this data root was first cached
+    /// Used for FIFO eviction strategies (both time-based and size-based)
+    #[serde(default)]
+    pub cached_at: UnixTimestamp,
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
