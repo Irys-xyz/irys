@@ -144,7 +144,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
         .waiter()
         .wait_for_idle(Some(Duration::from_secs(99999)))
         .await?;
-    storage_module.sync_pending_chunks()?;
+    storage_module.force_sync_pending_chunks()?;
 
     // assert
     // check that the chunks are marked as packed
