@@ -90,7 +90,9 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>,
+        response: oneshot::Sender<
+            eyre::Result<Option<(Arc<irys_types::IrysBlockHeader>, EthBuiltPayload)>>,
+        >,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
