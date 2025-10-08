@@ -184,7 +184,6 @@ impl Inner {
                 }
             }
 
-            // Gossip transaction (use original inner type for network transmission)
             self.service_senders
                 .gossip_broadcast
                 .send(GossipBroadcastMessage::from(commitment_tx.clone()))
