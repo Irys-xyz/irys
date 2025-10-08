@@ -134,7 +134,13 @@ impl Inner {
             &commitment_status
         );
         match commitment_status {
-            CommitmentSnapshotStatus::Unknown => {
+            CommitmentSnapshotStatus::Unknown
+            // The transaction should be ingerssed anyway, as it may be used on a fork.
+            // All of these txs are valid in them by themselves, it's just that the current state of the mempool and
+            // snapshots does not accept them in their current form. Yet we still should cache them in case of reorg.
+            | CommitmentSnapshotStatus::InvalidPledgeCount
+            | CommitmentSnapshotStatus::PartitionNotOwned
+            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
                 let mut mempool_state_guard = self.mempool_state.write().await;
                 // Add the commitment tx to the valid tx list to be included in the next block
                 trace!(
@@ -189,12 +195,7 @@ impl Inner {
                     .send(GossipBroadcastMessage::from(commitment_tx.clone()))
                     .expect("Failed to send gossip data");
             }
-            // All of these txs are valid in them by themselves, it's just that the current state of the mempool and
-            // snapshots does not accept them in their current form. Yet we still should cache them in case of reorg.
-            CommitmentSnapshotStatus::Unstaked
-            | CommitmentSnapshotStatus::InvalidPledgeCount
-            | CommitmentSnapshotStatus::PartitionNotOwned
-            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+            CommitmentSnapshotStatus::Unstaked => {
                 tracing::warn!(
                     "commitment tx {} status {:?}",
                     &commitment_tx.id,
@@ -438,6 +439,9 @@ impl Inner {
 
         // Reject unsupported or invalid commitment types/targets
         match cache_status {
+            CommitmentSnapshotStatus::Unknown | CommitmentSnapshotStatus::Accepted => {
+                return cache_status
+            }
             CommitmentSnapshotStatus::Unsupported
             | CommitmentSnapshotStatus::InvalidPledgeCount
             | CommitmentSnapshotStatus::PartitionNotOwned
@@ -448,33 +452,28 @@ impl Inner {
                 );
                 return cache_status;
             }
-            _ => {}
-        }
-
-        // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentSnapshotStatus::Unstaked) {
-            let mempool_state_guard = self.mempool_state.read().await;
-            // Get pending transactions for this address
-            if let Some(pending) = mempool_state_guard
-                .valid_commitment_tx
-                .get(&commitment_tx.signer)
-            {
-                // Check if there's at least one pending stake transaction
-                if pending
-                    .iter()
-                    .any(|c| c.commitment_type == CommitmentType::Stake)
+            CommitmentSnapshotStatus::Unstaked => {
+                // For unstaked addresses, check for pending stake transactions
+                let mempool_state_guard = self.mempool_state.read().await;
+                // Get pending transactions for this address
+                if let Some(pending) = mempool_state_guard
+                    .valid_commitment_tx
+                    .get(&commitment_tx.signer)
                 {
-                    // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
-                    return CommitmentSnapshotStatus::Unknown;
+                    // Check if there's at least one pending stake transaction
+                    if pending
+                        .iter()
+                        .any(|c| c.commitment_type == CommitmentType::Stake)
+                    {
+                        // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
+                        return CommitmentSnapshotStatus::Unknown;
+                    }
                 }
+
+                // No pending stakes found
+                warn!("Commitment is unstaked: {}", commitment_tx.id);
+                return CommitmentSnapshotStatus::Unstaked;
             }
-
-            // No pending stakes found
-            warn!("Commitment is unstaked: {}", commitment_tx.id);
-            return CommitmentSnapshotStatus::Unstaked;
         }
-
-        // Pass-through: keep Unknown for fresh tx; Accepted indicates known duplicate
-        cache_status
     }
 }

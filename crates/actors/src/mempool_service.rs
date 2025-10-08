@@ -1317,7 +1317,6 @@ pub struct MempoolState {
     pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
-    // todo : rename to `pending commitments` as it also contains unpledges (and unstakes in the future)
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
     /// pre-validated blocks that have passed pre-validation in discovery service
     pub prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
