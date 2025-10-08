@@ -21,6 +21,7 @@ use crate::{
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use derive_more::Display;
 use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
@@ -160,7 +161,7 @@ impl VDFLimiterInfo {
     }
 }
 
-#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Display)]
 pub enum IrysBlockHeader {
     V1(IrysBlockHeaderV1),
 }
