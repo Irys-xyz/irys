@@ -15,6 +15,22 @@ use irys_types::{
 use irys_utils::listener::create_listener;
 use tokio::sync::mpsc::channel;
 
+async fn wait_for_packing_worker_ready(base_url_v1: &str, timeout: Duration) -> eyre::Result<()> {
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(resp) = client.get(format!("{}/info", base_url_v1)).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+        if start.elapsed() > timeout {
+            eyre::bail!("remote packing worker not ready after {:?}", timeout);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[actix::test]
 pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
@@ -38,6 +54,10 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
 
     let (tx, rx) = channel(1);
     let exit_handle = tokio::spawn(start_worker(packing_config.clone(), listener, rx));
+
+    // Wait for remote packing worker to be ready
+    let base_url = format!("http://{}:{}/v1", &local_addr.ip(), &local_addr.port());
+    wait_for_packing_worker_ready(&base_url, Duration::from_secs(10)).await?;
 
     // setup
     let partition_hash = PartitionHash::zero();
