@@ -51,9 +51,10 @@ use irys_types::{
     H256List, SyncMode, H256, U256,
 };
 use irys_types::{
-    Base64, ChunkBytes, VersionedCommitmentTransaction, Config, ConsensusConfig, DataTransaction,
-    VersionedDataTransactionHeader, DatabaseProvider, VersionedIrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    Base64, ChunkBytes, Config, ConsensusConfig, DataTransaction, DatabaseProvider,
+    IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress,
+    TxChunkOffset, UnpackedChunk, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    VersionedIrysBlockHeader,
 };
 use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
@@ -1700,7 +1701,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(blocks)
     }
 
-    pub fn gossip_block_to_peers(&self, block_header: &Arc<VersionedIrysBlockHeader>) -> eyre::Result<()> {
+    pub fn gossip_block_to_peers(
+        &self,
+        block_header: &Arc<VersionedIrysBlockHeader>,
+    ) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
@@ -2138,7 +2142,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    pub async fn ingest_data_tx(&self, data_tx: VersionedDataTransactionHeader) -> Result<(), AddTxError> {
+    pub async fn ingest_data_tx(
+        &self,
+        data_tx: VersionedDataTransactionHeader,
+    ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result = self
             .node_ctx
@@ -2855,8 +2862,13 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     config: &ConsensusConfig,
     pledge_provider: &P,
 ) -> VersionedCommitmentTransaction {
-    let mut pledge_tx =
-        VersionedCommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
+    let mut pledge_tx = VersionedCommitmentTransaction::new_pledge(
+        config,
+        *anchor,
+        pledge_provider,
+        signer.address(),
+    )
+    .await;
     signer.sign_commitment(&mut pledge_tx).unwrap();
     pledge_tx
 }

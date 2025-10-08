@@ -207,7 +207,9 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, VersionedDataTransactionHeader> {
+    pub async fn get_all_storage_tx(
+        &self,
+    ) -> HashMap<IrysTransactionId, VersionedDataTransactionHeader> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the storage transactions

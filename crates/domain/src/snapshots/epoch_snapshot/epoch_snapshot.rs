@@ -11,8 +11,8 @@ use irys_types::{
     NodeConfig, SimpleRNG, VersionedIrysBlockHeader, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, Address, VersionedCommitmentTransaction, ConsensusConfig, DataLedger,
-    PartitionChunkOffset,
+    partition_chunk_offset_ie, Address, ConsensusConfig, DataLedger, PartitionChunkOffset,
+    VersionedCommitmentTransaction,
 };
 use openssl::sha;
 use std::collections::{HashSet, VecDeque};
@@ -119,7 +119,8 @@ impl EpochSnapshot {
         epoch_replay_data: Vec<EpochBlockData>,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         // Initialize as None for the first iteration
-        let mut previous_epoch_block: Option<VersionedIrysBlockHeader> = self.previous_epoch_block.clone();
+        let mut previous_epoch_block: Option<VersionedIrysBlockHeader> =
+            self.previous_epoch_block.clone();
 
         for replay_data in epoch_replay_data {
             let block_header = replay_data.epoch_block;
@@ -200,7 +201,10 @@ impl EpochSnapshot {
         Ok(())
     }
 
-    fn is_epoch_block(&self, block_header: &VersionedIrysBlockHeader) -> Result<(), EpochSnapshotError> {
+    fn is_epoch_block(
+        &self,
+        block_header: &VersionedIrysBlockHeader,
+    ) -> Result<(), EpochSnapshotError> {
         if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
@@ -1152,8 +1156,8 @@ mod tests {
     use crate::{CommitmentState, PartitionAssignments};
     use irys_database::data_ledger::Ledgers;
 
-        use irys_types::{
-        Config, ConsensusConfig, ConsensusOptions, DataLedger, VersionedIrysBlockHeader, NodeConfig,
+    use irys_types::{
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, NodeConfig, VersionedIrysBlockHeader,
     };
 
     /// Validate that `calculate_additional_slots` allocates new slots when the
@@ -1240,20 +1244,10 @@ mod tests {
                 tx_ids: H256List(vec![comm_tx_1.id, comm_tx_2.id]),
             });
 
-            let valid_commitments = vec![
-                comm_tx_1.clone(),
-                comm_tx_2.clone(),
-            ];
+            let valid_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone()];
             let too_few_commitments = vec![comm_tx_1.clone()];
-            let too_many_commitments = vec![
-                comm_tx_1.clone(),
-                comm_tx_2.clone(),
-                comm_tx_2,
-            ];
-            let valid_count_but_invalid_id = vec![
-                comm_tx_1,
-                unrelated_tx,
-            ];
+            let too_many_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone(), comm_tx_2];
+            let valid_count_but_invalid_id = vec![comm_tx_1, unrelated_tx];
 
             let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
             assert!(res.is_ok());

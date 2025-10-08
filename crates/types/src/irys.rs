@@ -1,7 +1,8 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable, Address, Base64,
-    DataLedger, DataTransaction, IrysSignature, Signature, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, VersionRequest, H256, U256,
+    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Address,
+    Base64, DataLedger, DataTransaction, IrysSignature, Signature, VersionRequest,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    U256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -126,10 +127,7 @@ impl IrysSigner {
         Ok(transaction)
     }
 
-    pub fn sign_commitment(
-        &self,
-        commitment: &mut VersionedCommitmentTransaction,
-    ) -> Result<()> {
+    pub fn sign_commitment(&self, commitment: &mut VersionedCommitmentTransaction) -> Result<()> {
         // Store the signer address
         commitment.signer = Address::from_public_key(self.signer.verifying_key());
         commitment.version = 1;
@@ -229,7 +227,7 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use crate::versioning::Signable;
+    use crate::versioning::Signable as _;
     use crate::{hash_sha256, validate_chunk, H256};
     use rand::Rng as _;
     use reth_primitives::transaction::recover_signer;

@@ -463,7 +463,6 @@ mod tests {
 
     /// Test that BlockPriorityMeta ordering works correctly with manual Ord
     #[test]
-    #[expect(clippy::redundant_clone)] // False positive: header1 is used after clone
     fn test_validation_priority_ordering() {
         let mut header1 = VersionedIrysBlockHeader::new_mock_header();
         header1.height = 100;
@@ -521,8 +520,9 @@ mod tests {
         };
 
         // Create priority metadata
-        let mkprio =
-            |header: &VersionedIrysBlockHeader, state: BlockPriority| BlockPriorityMeta::new(header, state);
+        let mkprio = |header: &VersionedIrysBlockHeader, state: BlockPriority| {
+            BlockPriorityMeta::new(header, state)
+        };
 
         // Create a priority queue
         let mut queue: PriorityQueue<BlockHash, (BlockPriorityMeta, ())> = PriorityQueue::new();

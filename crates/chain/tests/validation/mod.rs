@@ -13,8 +13,8 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, DataTransactionHeaderV1, H256List, VersionedIrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, H256,
+    DataTransactionHeaderV1, H256List, NodeConfig, SystemTransactionLedger,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
@@ -215,7 +215,9 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     invalid_pledge.value = U256::from(1_000_000); // Invalid! Should use calculate_pledge_value_at_count
 
     // Sign the commitment
-    genesis_config.signer().sign_commitment(&mut invalid_pledge)?;
+    genesis_config
+        .signer()
+        .sign_commitment(&mut invalid_pledge)?;
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -308,8 +310,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 
     // Create a stake commitment
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut stake =
-        VersionedCommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
+    let mut stake = VersionedCommitmentTransaction::new_stake(
+        consensus_config,
+        genesis_node.get_anchor().await?,
+    );
     stake.signer = test_signer.address();
     stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
     test_signer.sign_commitment(&mut stake)?;
@@ -424,8 +428,10 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 
     // Create a different commitment that's NOT in the snapshot
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut wrong_commitment =
-        VersionedCommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
+    let mut wrong_commitment = VersionedCommitmentTransaction::new_stake(
+        consensus_config,
+        genesis_node.get_anchor().await?,
+    );
     wrong_commitment.signer = test_signer.address();
     test_signer.sign_commitment(&mut wrong_commitment)?;
     genesis_node.mine_block().await?;

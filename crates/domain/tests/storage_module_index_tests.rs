@@ -14,8 +14,8 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     partition_chunk_offset_ii, Base64, Config, ConsensusConfig, ConsensusOptions, DataTransaction,
-    VersionedDataTransactionHeader, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
-    PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk, H256,
+    DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PartitionChunkOffset,
+    PartitionChunkRange, TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader, H256,
 };
 use openssl::sha;
 use reth_db::Database as _;

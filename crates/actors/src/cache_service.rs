@@ -279,9 +279,8 @@ mod tests {
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
-        app_state::DatabaseProvider, Base64, Config, DataTransactionHeaderV1,
-        VersionedDataTransactionHeader, VersionedIrysBlockHeader, NodeConfig, TxChunkOffset,
-        UnpackedChunk,
+        app_state::DatabaseProvider, Base64, Config, DataTransactionHeaderV1, NodeConfig,
+        TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
     };
     use std::sync::{Arc, RwLock};
 

@@ -64,10 +64,9 @@ use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
-    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii,
-    Address, BlockIndexItem, Config, DataLedger, DataTransactionHeaderV1,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    LedgerChunkRange, H256, U256,
+    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
+    BlockIndexItem, Config, DataLedger, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
@@ -732,6 +731,7 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::DataTransactionHeaderV1;
 
     #[test]
     fn test_aggregate_miner_fees_handles_duplicates() {

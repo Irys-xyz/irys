@@ -5,7 +5,9 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use irys_actors::packing::wait_for_packing;
-use irys_types::{irys::IrysSigner, DataTransaction, VersionedDataTransactionHeader, LedgerChunkOffset};
+use irys_types::{
+    irys::IrysSigner, DataTransaction, LedgerChunkOffset, VersionedDataTransactionHeader,
+};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
 use tracing::debug;

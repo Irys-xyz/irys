@@ -1,4 +1,4 @@
-use irys_types::{VersionedCommitmentTransaction, ConsensusConfig, VersionedDataTransactionHeader};
+use irys_types::{ConsensusConfig, VersionedCommitmentTransaction, VersionedDataTransactionHeader};
 
 #[test]
 fn data_tx_version_is_1() {

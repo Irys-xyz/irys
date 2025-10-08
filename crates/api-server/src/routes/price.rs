@@ -7,7 +7,7 @@ use base58::FromBase58 as _;
 use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
-    transaction::{VersionedCommitmentTransaction, PledgeDataProvider as _},
+    transaction::{PledgeDataProvider as _, VersionedCommitmentTransaction},
     Address, DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};

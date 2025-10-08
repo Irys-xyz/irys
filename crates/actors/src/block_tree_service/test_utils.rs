@@ -7,7 +7,9 @@ use irys_domain::{
     dummy_ema_snapshot, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
     EpochSnapshot,
 };
-use irys_types::{storage_pricing::TOKEN_SCALE, Config, VersionedIrysBlockHeader, IrysTokenPrice, H256};
+use irys_types::{
+    storage_pricing::TOKEN_SCALE, Config, IrysTokenPrice, VersionedIrysBlockHeader, H256,
+};
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
@@ -28,7 +30,10 @@ pub fn build_genesis_tree_with_n_blocks(
     (genesis_tree(&mut blocks), prices)
 }
 
-pub fn build_tree(init_height: u64, max_height: u64) -> (Vec<VersionedIrysBlockHeader>, Vec<PriceInfo>) {
+pub fn build_tree(
+    init_height: u64,
+    max_height: u64,
+) -> (Vec<VersionedIrysBlockHeader>, Vec<PriceInfo>) {
     let blocks = (init_height..(max_height + init_height).saturating_add(1))
         .map(|height| {
             let mut header = VersionedIrysBlockHeader::new_mock_header();

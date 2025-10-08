@@ -1,7 +1,8 @@
 use irys_types::irys::IrysSigner;
-use irys_types::versioning::Signable;
+use irys_types::versioning::Signable as _;
 use irys_types::{
-    VersionedCommitmentTransaction, ConsensusConfig, DataTransaction, VersionedDataTransactionHeader, Signable as _,
+    ConsensusConfig, DataTransaction, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader,
 };
 
 #[test]
@@ -48,11 +49,11 @@ fn commitment_tx_signing_uses_discriminant() {
     assert_eq!(preimage[0], 1);
 
     // Actually test signing works with the versioned structure
-    signer.sign_commitment(&mut tx).expect("signing should succeed");
+    signer
+        .sign_commitment(&mut tx)
+        .expect("signing should succeed");
 
     // Verify the signature is valid
     let sig_hash = tx.signature_hash();
-    assert!(tx
-        .signature
-        .validate_signature(sig_hash, signer.address()));
+    assert!(tx.signature.validate_signature(sig_hash, signer.address()));
 }

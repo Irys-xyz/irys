@@ -7,8 +7,9 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
-    VersionedCommitmentTransaction, Config, DataLedger, VersionedDataTransactionHeader, DataTransactionLedger,
-    H256List, VersionedIrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
+    Config, DataLedger, DataTransactionLedger, H256List, NodeConfig, SystemTransactionLedger,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    U256,
 };
 use std::sync::Arc;
 

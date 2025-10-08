@@ -1,7 +1,8 @@
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
+    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, IrysTransactionResponse, NodeInfo,
+    PeerResponse, VersionRequest, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    H256,
 };
 pub use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -468,16 +469,13 @@ mod tests {
         let mut mock = MockApiClient::default();
         let tx_id = H256::random();
         let tx_header = VersionedDataTransactionHeader::default();
-        let inner_header = match &tx_header {
-            VersionedDataTransactionHeader::V1(v1) => v1.clone(),
-        };
         mock.expected_transactions
-            .insert(tx_id, IrysTransactionResponse::Storage(inner_header.clone()));
+            .insert(tx_id, IrysTransactionResponse::Storage(tx_header.clone()));
 
         let result = mock
             .get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id)
             .await
             .unwrap();
-        assert_eq!(result, IrysTransactionResponse::Storage(inner_header));
+        assert_eq!(result, IrysTransactionResponse::Storage(tx_header));
     }
 }

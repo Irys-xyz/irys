@@ -1,4 +1,7 @@
-use irys_types::{VersionedCommitmentTransaction, VersionedDataTransactionHeader, DataTransactionHeaderV1, Signable as _};
+use irys_types::{
+    DataTransactionHeaderV1, Signable as _, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader,
+};
 
 #[test]
 fn data_tx_preimage_starts_with_discriminant() {

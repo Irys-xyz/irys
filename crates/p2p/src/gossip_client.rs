@@ -8,9 +8,8 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
-    VersionedIrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
-    DATA_REQUEST_RETRIES,
+    Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest, PeerAddress,
+    PeerListItem, PeerNetworkError, VersionedIrysBlockHeader, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};

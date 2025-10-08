@@ -13,9 +13,9 @@ use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
     partition_chunk_offset_ie, Address, Base64, Config, ConsensusConfig, DataLedger,
-    DataSyncServiceConfig, DataTransaction, VersionedIrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
-    NodeConfig, PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig,
-    TxChunkOffset, UnpackedChunk, H256,
+    DataSyncServiceConfig, DataTransaction, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig, TxChunkOffset,
+    UnpackedChunk, VersionedIrysBlockHeader, H256,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;

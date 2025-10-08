@@ -29,7 +29,9 @@ pub struct MinerCommitments {
 }
 
 impl CommitmentSnapshot {
-    pub fn new_from_commitments(commitment_txs: Option<Vec<VersionedCommitmentTransaction>>) -> Self {
+    pub fn new_from_commitments(
+        commitment_txs: Option<Vec<VersionedCommitmentTransaction>>,
+    ) -> Self {
         let mut snapshot = Self::default();
 
         if let Some(commitment_txs) = commitment_txs {
@@ -250,7 +252,7 @@ impl CommitmentSnapshot {
 
         // Sort commitments directly
         all_commitments.sort();
-        
+
         // Return the already-versioned commitments
         all_commitments
     }

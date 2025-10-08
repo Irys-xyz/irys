@@ -100,7 +100,10 @@ impl BlockTree {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
     #[cfg(any(feature = "test-utils", test))]
-    pub fn new(genesis_block: &VersionedIrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
+    pub fn new(
+        genesis_block: &VersionedIrysBlockHeader,
+        consensus_config: ConsensusConfig,
+    ) -> Self {
         use crate::dummy_epoch_snapshot;
 
         let block_hash = genesis_block.block_hash;
@@ -938,7 +941,10 @@ impl BlockTree {
     }
 
     /// Collect previous blocks up to the last on-chain block
-    pub fn get_fork_blocks(&self, block: &VersionedIrysBlockHeader) -> Vec<&VersionedIrysBlockHeader> {
+    pub fn get_fork_blocks(
+        &self,
+        block: &VersionedIrysBlockHeader,
+    ) -> Vec<&VersionedIrysBlockHeader> {
         let mut prev_hash = block.previous_block_hash;
         let mut fork_blocks = Vec::new();
 
@@ -965,7 +971,11 @@ impl BlockTree {
     fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockMetadata,
-    ) -> Option<(&'a BlockMetadata, Vec<&'a VersionedIrysBlockHeader>, SystemTime)> {
+    ) -> Option<(
+        &'a BlockMetadata,
+        Vec<&'a VersionedIrysBlockHeader>,
+        SystemTime,
+    )> {
         let mut current_entry = block;
         let mut prev_block = &current_entry.block;
         let mut depth_count = 0;
@@ -2440,7 +2450,7 @@ mod tests {
         new_block: VersionedIrysBlockHeader,
         previous_block: &VersionedIrysBlockHeader,
     ) -> VersionedIrysBlockHeader {
-        let mut new_block = new_block.clone();
+        let mut new_block = new_block;
         new_block.previous_block_hash = previous_block.block_hash();
         new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;

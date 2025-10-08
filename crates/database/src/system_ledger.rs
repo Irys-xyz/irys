@@ -106,9 +106,13 @@ async fn create_pledge_commitment_transaction(
     config: &Config,
     provider: &impl PledgeDataProvider,
 ) -> VersionedCommitmentTransaction {
-    let mut pledge_commitment =
-        VersionedCommitmentTransaction::new_pledge(&config.consensus, anchor, provider, signer.address())
-            .await;
+    let mut pledge_commitment = VersionedCommitmentTransaction::new_pledge(
+        &config.consensus,
+        anchor,
+        provider,
+        signer.address(),
+    )
+    .await;
 
     signer
         .sign_commitment(&mut pledge_commitment)
@@ -150,7 +154,8 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<VersionedCommitment
     let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
-    let mut stake_commitment = VersionedCommitmentTransaction::new_stake(&config.consensus, H256::default());
+    let mut stake_commitment =
+        VersionedCommitmentTransaction::new_stake(&config.consensus, H256::default());
 
     signer
         .sign_commitment(&mut stake_commitment)
@@ -276,7 +281,8 @@ pub async fn add_test_commitments_for_signer(
     let mut anchor = H256::random();
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
-        let mut stake_commitment = VersionedCommitmentTransaction::new_stake(&config.consensus, H256::default());
+        let mut stake_commitment =
+            VersionedCommitmentTransaction::new_stake(&config.consensus, H256::default());
 
         signer
             .sign_commitment(&mut stake_commitment)

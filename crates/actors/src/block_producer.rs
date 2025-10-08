@@ -31,11 +31,10 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, VersionedCommitmentTransaction,
-    Config, DataLedger, VersionedDataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
-    H256List, VersionedIrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo,
-    H256, U256,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, Config, DataLedger,
+    DataTransactionLedger, GossipBroadcastMessage, H256List, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -91,9 +90,8 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response: oneshot::Sender<
-            eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>>,
-        >,
+        response:
+            oneshot::Sender<eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>>>,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
@@ -471,7 +469,9 @@ pub trait BlockProdStrategy {
     ///
     /// Returns the selected parent block header and its EMA snapshot.
     #[tracing::instrument(skip(self), level = "debug")]
-    async fn parent_irys_block(&self) -> eyre::Result<(VersionedIrysBlockHeader, Arc<EmaSnapshot>)> {
+    async fn parent_irys_block(
+        &self,
+    ) -> eyre::Result<(VersionedIrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
         // Use BlockValidationTracker to select the parent block

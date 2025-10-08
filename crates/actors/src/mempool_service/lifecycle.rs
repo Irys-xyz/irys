@@ -5,8 +5,8 @@ use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
 use irys_types::{
-    get_ingress_proofs, DataLedger, IrysTransactionCommon,
-    IrysTransactionId, VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256,
+    get_ingress_proofs, DataLedger, IrysTransactionCommon, IrysTransactionId,
+    VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256,
 };
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
@@ -387,7 +387,8 @@ impl Inner {
                     .find(|c| c.id == *orphan_commitment_tx_id)
                 {
                     // tx is already versioned from the map
-                    orphaned_full_commitment_txs.insert(*orphan_commitment_tx_id, commitment_tx.clone());
+                    orphaned_full_commitment_txs
+                        .insert(*orphan_commitment_tx_id, commitment_tx.clone());
                 };
             }
         }

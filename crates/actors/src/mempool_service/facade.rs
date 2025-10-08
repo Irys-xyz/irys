@@ -5,8 +5,8 @@ use crate::mempool_service::{
 use crate::services::ServiceSenders;
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, Base64, VersionedIrysBlockHeader, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, H256,
+    chunk::UnpackedChunk, Base64, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    VersionedIrysBlockHeader, H256,
 };
 use irys_types::{Address, IngressProof};
 use std::collections::HashSet;

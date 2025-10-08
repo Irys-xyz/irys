@@ -6,7 +6,9 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
-use irys_types::{irys::IrysSigner, VersionedCommitmentTransaction, CommitmentTransactionV1, NodeConfig, H256};
+use irys_types::{
+    irys::IrysSigner, CommitmentTransactionV1, NodeConfig, VersionedCommitmentTransaction, H256,
+};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -311,8 +313,10 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?;
     info!("Commitment whitelist test: stake tx from a whitelisted account accepted");
 
-    let mut stake_tx2 =
-        VersionedCommitmentTransaction::new_stake(&config.consensus_config(), block_1.irys.block_hash);
+    let mut stake_tx2 = VersionedCommitmentTransaction::new_stake(
+        &config.consensus_config(),
+        block_1.irys.block_hash,
+    );
     account2.sign_commitment(&mut stake_tx2)?;
     let response2 = api_client
         .post_commitment_transaction(peer_socket_address, stake_tx2.clone())

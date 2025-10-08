@@ -168,8 +168,8 @@ mod tests {
     use super::*;
 
     use crate::{
-        irys::IrysSigner, ConsensusConfig, DataTransaction, VersionedDataTransactionHeader,
-        H256, U256,
+        irys::IrysSigner, ConsensusConfig, DataTransaction, VersionedDataTransactionHeader, H256,
+        U256,
     };
     use alloy_core::hex;
     use alloy_primitives::Address;

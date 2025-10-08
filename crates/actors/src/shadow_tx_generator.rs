@@ -5,8 +5,8 @@ use irys_reth::shadow_tx::{
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    Address, VersionedCommitmentTransaction, ConsensusConfig, VersionedDataTransactionHeader, IngressProofsList,
-    VersionedIrysBlockHeader, H256, U256,
+    Address, ConsensusConfig, IngressProofsList, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -333,7 +333,10 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(())
     }
 
-    fn process_commitment_transaction(&self, tx: &VersionedCommitmentTransaction) -> Result<ShadowMetadata> {
+    fn process_commitment_transaction(
+        &self,
+        tx: &VersionedCommitmentTransaction,
+    ) -> Result<ShadowMetadata> {
         // Keep existing commitment transaction logic unchanged
         let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
         let fee = Uint::from(tx.fee);
@@ -672,7 +675,7 @@ mod tests {
     use irys_primitives::CommitmentType;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
-        VersionedIrysBlockHeader, IrysSignature, Signature, H256,
+        IrysSignature, Signature, VersionedIrysBlockHeader, H256,
     };
     use itertools::Itertools as _;
     use openssl::sha;

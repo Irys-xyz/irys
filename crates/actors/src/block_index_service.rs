@@ -1,8 +1,8 @@
 use eyre::eyre;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
-    BlockHash, BlockIndexItem, ConsensusConfig, VersionedIrysBlockHeader, TokioServiceHandle,
-    VersionedDataTransactionHeader, H256, U256,
+    BlockHash, BlockIndexItem, ConsensusConfig, TokioServiceHandle, VersionedDataTransactionHeader,
+    VersionedIrysBlockHeader, H256, U256,
 };
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};

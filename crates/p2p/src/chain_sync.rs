@@ -1364,8 +1364,8 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, VersionedIrysBlockHeader,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, NodeConfig,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, VersionedIrysBlockHeader,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -1635,9 +1635,9 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, VersionedIrysBlockHeader,
-            NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
-            SyncMode,
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, NodeConfig, NodeInfo,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
+            VersionedIrysBlockHeader,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};

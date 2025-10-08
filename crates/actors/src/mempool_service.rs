@@ -30,8 +30,8 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    app_state::DatabaseProvider, Config, VersionedIrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
-    H256, U256,
+    app_state::DatabaseProvider, Config, IrysTransactionCommon, IrysTransactionId,
+    VersionedIrysBlockHeader, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -39,8 +39,8 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, Base64, ChunkPathHash, VersionedCommitmentTransaction, CommitmentValidationError, DataRoot,
-    VersionedDataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
+    Address, Base64, ChunkPathHash, CommitmentValidationError, DataRoot, MempoolConfig,
+    TxChunkOffset, UnpackedChunk, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
 };
 use irys_types::{IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
@@ -134,7 +134,11 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Vec<Option<VersionedDataTransactionHeader>>>,
     ),
     /// Get block header from the mempool cache
-    GetBlockHeader(H256, bool, oneshot::Sender<Option<VersionedIrysBlockHeader>>),
+    GetBlockHeader(
+        H256,
+        bool,
+        oneshot::Sender<Option<VersionedIrysBlockHeader>>,
+    ),
     InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
@@ -1086,7 +1090,10 @@ impl Inner {
     }
 
     /// ingest a block into the mempool
-    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<VersionedIrysBlockHeader>>) {
+    async fn handle_ingress_blocks_message(
+        &self,
+        prevalidated_blocks: Vec<Arc<VersionedIrysBlockHeader>>,
+    ) {
         let mut mempool_state_guard = self.mempool_state.write().await;
         for block in prevalidated_blocks {
             // insert poa into mempool
@@ -1317,7 +1324,8 @@ pub struct MempoolState {
     pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
-    pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, VersionedCommitmentTransaction>>,
+    pub pending_pledges:
+        LruCache<Address, LruCache<IrysTransactionId, VersionedCommitmentTransaction>>,
     /// pre-validated blocks that have passed pre-validation in discovery service
     pub prevalidated_blocks: HashMap<H256, VersionedIrysBlockHeader>,
     pub prevalidated_blocks_poa: HashMap<H256, Base64>,

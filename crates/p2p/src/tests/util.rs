@@ -27,11 +27,11 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    VersionedCommitmentTransaction, Config, DataTransaction, VersionedDataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
-    VersionedIrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    UnpackedChunk, VersionRequest, H256,
+    Config, DataTransaction, DatabaseProvider, GossipBroadcastMessage, GossipData,
+    GossipDataRequest, GossipRequest, IngressProof, IrysTransactionResponse, NodeConfig, NodeInfo,
+    PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo,
+    TokioServiceHandle, TxChunkOffset, UnpackedChunk, VersionRequest,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -274,11 +274,7 @@ impl ApiClient for ApiClientStub {
             .get(&tx_id)
             .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
             .clone();
-        // Extract inner V1 type for IrysTransactionResponse
-        let inner_header = match versioned_header {
-            VersionedDataTransactionHeader::V1(v1) => v1,
-        };
-        Ok(IrysTransactionResponse::Storage(inner_header))
+        Ok(IrysTransactionResponse::Storage(versioned_header))
     }
 
     async fn post_transaction(

@@ -146,9 +146,7 @@ impl VersionedDataTransactionHeader {
     pub fn new(config: &ConsensusConfig) -> Self {
         Self::V1(DataTransactionHeaderV1::new(config))
     }
-
 }
-
 
 impl Default for DataTransactionHeaderV1 {
     fn default() -> Self {
@@ -296,7 +294,9 @@ impl VersionedCommitmentTransaction {
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
-        Self::V1(CommitmentTransactionV1::new_pledge(config, anchor, provider, signer_address).await)
+        Self::V1(
+            CommitmentTransactionV1::new_pledge(config, anchor, provider, signer_address).await,
+        )
     }
 
     /// Create a new unpledge transaction that refunds the most recent pledge's cost
@@ -306,10 +306,11 @@ impl VersionedCommitmentTransaction {
         provider: &impl PledgeDataProvider,
         signer_address: Address,
     ) -> Self {
-        Self::V1(CommitmentTransactionV1::new_unpledge(config, anchor, provider, signer_address).await)
+        Self::V1(
+            CommitmentTransactionV1::new_unpledge(config, anchor, provider, signer_address).await,
+        )
     }
 }
-
 
 impl Default for CommitmentTransactionV1 {
     fn default() -> Self {
@@ -449,7 +450,6 @@ impl DataTransactionHeaderV1 {
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
         self.encode(out)
     }
-
 }
 
 /// Wrapper for the underlying DataTransactionHeader fields, this wrapper
@@ -877,7 +877,8 @@ impl VersionedDataTransactionHeader {
 
 impl IrysTransactionCommon for VersionedDataTransactionHeader {
     fn is_signature_valid(&self) -> bool {
-        self.signature.validate_signature(self.signature_hash(), self.signer)
+        self.signature
+            .validate_signature(self.signature_hash(), self.signer)
             && keccak256(self.signature.as_bytes()).0 == self.id.0
     }
 
@@ -945,7 +946,8 @@ impl VersionedCommitmentTransaction {
 
 impl IrysTransactionCommon for VersionedCommitmentTransaction {
     fn is_signature_valid(&self) -> bool {
-        self.signature.validate_signature(self.signature_hash(), self.signer)
+        self.signature
+            .validate_signature(self.signature_hash(), self.signer)
             && keccak256(self.signature.as_bytes()).0 == self.id.0
     }
 
@@ -1100,20 +1102,20 @@ impl From<VersionedCommitmentTransaction> for IrysTransaction {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum IrysTransactionResponse {
     #[serde(rename = "commitment")]
-    Commitment(CommitmentTransactionV1),
+    Commitment(VersionedCommitmentTransaction),
 
     #[serde(rename = "storage")]
-    Storage(DataTransactionHeaderV1),
+    Storage(VersionedDataTransactionHeader),
 }
 
-impl From<CommitmentTransactionV1> for IrysTransactionResponse {
-    fn from(tx: CommitmentTransactionV1) -> Self {
+impl From<VersionedCommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: VersionedCommitmentTransaction) -> Self {
         Self::Commitment(tx)
     }
 }
 
-impl From<DataTransactionHeaderV1> for IrysTransactionResponse {
-    fn from(tx: DataTransactionHeaderV1) -> Self {
+impl From<VersionedDataTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: VersionedDataTransactionHeader) -> Self {
         Self::Storage(tx)
     }
 }
@@ -1178,9 +1180,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let header_versioned = mock_header(&config);
         // Extract inner type for RLP round-trip testing
-        let mut header = match header_versioned {
-            VersionedDataTransactionHeader::V1(inner) => inner,
-        };
+        let VersionedDataTransactionHeader::V1(mut header) = header_versioned;
 
         // action
         let mut buffer = vec![];
@@ -1200,9 +1200,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let header_versioned = mock_commitment_tx(&config);
         // Extract inner type for RLP round-trip testing
-        let mut header = match header_versioned {
-            VersionedCommitmentTransaction::V1(inner) => inner,
-        };
+        let VersionedCommitmentTransaction::V1(mut header) = header_versioned;
 
         // action
         let mut buffer = vec![];

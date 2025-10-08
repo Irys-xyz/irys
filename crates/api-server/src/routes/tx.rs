@@ -11,8 +11,8 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    option_u64_stringify, u64_stringify, VersionedCommitmentTransaction, DataLedger, VersionedDataTransactionHeader,
-    IrysTransactionResponse, H256,
+    option_u64_stringify, u64_stringify, DataLedger, IrysTransactionResponse,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -149,7 +149,7 @@ pub async fn get_transaction(
     {
         if let Some(tx) = result.pop() {
             // Extract inner type for API response
-            return Ok(IrysTransactionResponse::Commitment((*tx).clone()));
+            return Ok(IrysTransactionResponse::Commitment(tx));
         }
     };
 
@@ -158,7 +158,7 @@ pub async fn get_transaction(
     {
         if let Some(tx) = result.pop() {
             // Extract inner type for API response
-            return Ok(IrysTransactionResponse::Storage((*tx).clone()));
+            return Ok(IrysTransactionResponse::Storage(tx));
         }
     };
 

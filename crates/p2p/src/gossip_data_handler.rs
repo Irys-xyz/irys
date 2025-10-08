@@ -12,10 +12,9 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, VersionedCommitmentTransaction, VersionedDataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysTransactionResponse,
-    PeerListItem, UnpackedChunk,
-    VersionedIrysBlockHeader, H256,
+    BlockHash, EvmBlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
+    IngressProof, IrysTransactionResponse, PeerListItem, UnpackedChunk,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;

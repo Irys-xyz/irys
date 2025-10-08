@@ -115,7 +115,7 @@ async fn check_transaction_endpoints(
 
     assert_eq!(
         retrieved_tx,
-        IrysTransactionResponse::Storage((*tx.header).clone())
+        IrysTransactionResponse::Storage(tx.header.clone())
     );
 
     let txs = api_client
@@ -124,8 +124,8 @@ async fn check_transaction_endpoints(
         .expect("valid get transactions response");
 
     assert_eq!(txs.len(), 2);
-    assert!(txs.contains(&IrysTransactionResponse::Storage((*tx.header).clone())));
-    assert!(txs.contains(&IrysTransactionResponse::Storage((*tx_2.header).clone())));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx.header.clone())));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx_2.header.clone())));
 }
 
 async fn check_get_block_endpoint(

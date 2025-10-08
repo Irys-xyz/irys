@@ -19,7 +19,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     use irys_domain::EmaSnapshot;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
-        VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, SystemTransactionLedger,
+        SystemTransactionLedger, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+        VersionedIrysBlockHeader,
     };
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;
@@ -83,7 +84,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
-        ) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, Option<AdjustmentStats>)>> {
+        ) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, Option<AdjustmentStats>)>>
+        {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,

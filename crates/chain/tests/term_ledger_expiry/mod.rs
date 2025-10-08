@@ -6,7 +6,7 @@ use alloy_genesis::GenesisAccount;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     fee_distribution::TermFeeCharges, irys::IrysSigner, Address, ConsensusConfig, DataLedger,
-    DataTransaction, VersionedIrysBlockHeader, NodeConfig, U256,
+    DataTransaction, NodeConfig, VersionedIrysBlockHeader, U256,
 };
 use reth::providers::TransactionsProvider as _;
 use reth::rpc::types::TransactionTrait as _;

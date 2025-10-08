@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use alloy_genesis::GenesisAccount;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{irys::IrysSigner, DataLedger, IrysTransactionCommon as _, NodeConfig, U256};
+use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, U256};
 use reth::rpc::types::TransactionTrait as _;
 use tracing::{debug, info};
 

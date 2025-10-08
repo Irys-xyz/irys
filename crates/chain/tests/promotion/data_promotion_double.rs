@@ -6,7 +6,9 @@ use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{tables::IngressProofs, walk_all};
-use irys_types::{irys::IrysSigner, DataTransaction, VersionedDataTransactionHeader, LedgerChunkOffset};
+use irys_types::{
+    irys::IrysSigner, DataTransaction, LedgerChunkOffset, VersionedDataTransactionHeader,
+};
 use irys_types::{DataLedger, NodeConfig};
 use reth_db::Database as _;
 use std::time::Duration;

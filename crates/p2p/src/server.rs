@@ -18,8 +18,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
-    Address, VersionedCommitmentTransaction, VersionedDataTransactionHeader, GossipDataRequest, GossipRequest,
-    IngressProof, VersionedIrysBlockHeader, PeerListItem, UnpackedChunk,
+    Address, GossipDataRequest, GossipRequest, IngressProof, PeerListItem, UnpackedChunk,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;

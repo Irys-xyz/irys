@@ -20,7 +20,9 @@ use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_primitives::range_specifier::ChunkRangeSpecifier;
 use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
 use irys_types::{irys::IrysSigner, Address};
-use irys_types::{Base64, VersionedDataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{
+    Base64, NodeConfig, TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader,
+};
 
 use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 

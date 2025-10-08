@@ -3,7 +3,7 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_types::{IrysBlockHeaderV1, VersionedIrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeaderV1, NodeConfig, VersionedIrysBlockHeader},
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -258,17 +258,21 @@ impl BlockStatusProvider {
         starting_block: Option<&VersionedIrysBlockHeader>,
     ) -> Vec<VersionedIrysBlockHeader> {
         let first_block = starting_block
-            .map(|parent| VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
-                block_hash: BlockHash::random(),
-                height: parent.height + 1,
-                previous_block_hash: parent.block_hash,
-                ..IrysBlockHeaderV1::new_mock_header()
-            }))
-            .unwrap_or_else(|| VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
-                block_hash: BlockHash::random(),
-                height: 1,
-                ..IrysBlockHeaderV1::new_mock_header()
-            }));
+            .map(|parent| {
+                VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+                    block_hash: BlockHash::random(),
+                    height: parent.height + 1,
+                    previous_block_hash: parent.block_hash,
+                    ..IrysBlockHeaderV1::new_mock_header()
+                })
+            })
+            .unwrap_or_else(|| {
+                VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+                    block_hash: BlockHash::random(),
+                    height: 1,
+                    ..IrysBlockHeaderV1::new_mock_header()
+                })
+            });
 
         let mut blocks = vec![first_block];
 

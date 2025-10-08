@@ -1,8 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use irys_types::{
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256,
-};
+use irys_types::{VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256};
 
 pub struct RecoveredMempoolState {
     pub commitment_txs: HashMap<H256, VersionedCommitmentTransaction>,
@@ -33,12 +31,14 @@ impl RecoveredMempoolState {
                     }
 
                     match tokio::fs::read_to_string(&path).await {
-                        Ok(json) => match serde_json::from_str::<VersionedCommitmentTransaction>(&json) {
-                            Ok(tx) => {
-                                commitment_txs.insert(tx.id, tx);
+                        Ok(json) => {
+                            match serde_json::from_str::<VersionedCommitmentTransaction>(&json) {
+                                Ok(tx) => {
+                                    commitment_txs.insert(tx.id, tx);
+                                }
+                                Err(_) => tracing::warn!("Failed to parse {:?}", path),
                             }
-                            Err(_) => tracing::warn!("Failed to parse {:?}", path),
-                        },
+                        }
                         Err(_) => tracing::debug!("Failed to read {:?}", path),
                     }
                 }
@@ -54,12 +54,14 @@ impl RecoveredMempoolState {
                     }
 
                     match tokio::fs::read_to_string(&path).await {
-                        Ok(json) => match serde_json::from_str::<VersionedDataTransactionHeader>(&json) {
-                            Ok(tx) => {
-                                storage_txs.insert(tx.id, tx);
+                        Ok(json) => {
+                            match serde_json::from_str::<VersionedDataTransactionHeader>(&json) {
+                                Ok(tx) => {
+                                    storage_txs.insert(tx.id, tx);
+                                }
+                                Err(_) => tracing::warn!("Failed to parse {:?}", path),
                             }
-                            Err(_) => tracing::warn!("Failed to parse {:?}", path),
-                        },
+                        }
                         Err(_) => tracing::debug!("Failed to read {:?}", path),
                     }
                 }

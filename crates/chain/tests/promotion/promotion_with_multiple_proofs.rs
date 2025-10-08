@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use assert_matches::assert_matches;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, VersionedCommitmentTransaction, NodeConfig};
+use irys_types::{irys::IrysSigner, NodeConfig, VersionedCommitmentTransaction};
 
 #[actix_web::test]
 async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {

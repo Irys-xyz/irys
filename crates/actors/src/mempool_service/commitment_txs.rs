@@ -133,7 +133,7 @@ impl Inner {
             &commitment_tx.id,
             &commitment_status
         );
-        
+
         if commitment_status == CommitmentSnapshotStatus::Accepted {
             let mut mempool_state_guard = self.mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
@@ -173,7 +173,8 @@ impl Inner {
                     // todo switch _ to actually handle the result
                     let _ = self
                         .handle_message(MempoolServiceMessage::IngestCommitmentTx(
-                            pledge_tx.clone(), oneshot_tx,
+                            pledge_tx.clone(),
+                            oneshot_tx,
                         ))
                         .await;
 
@@ -287,7 +288,9 @@ impl Inner {
 
     /// should really only be called by persist_mempool_to_disk, all other scenarios need a more
     /// subtle filtering of commitment state, recently confirmed? pending? valid? etc.
-    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, VersionedCommitmentTransaction> {
+    pub async fn get_all_commitment_tx(
+        &self,
+    ) -> HashMap<IrysTransactionId, VersionedCommitmentTransaction> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions

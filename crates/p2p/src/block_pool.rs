@@ -17,9 +17,8 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeaderV1,
-    VersionedIrysBlockHeader, IrysTransactionResponse, PeerNetworkError,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage,
+    IrysTransactionResponse, PeerNetworkError, VersionedIrysBlockHeader,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -690,7 +689,7 @@ where
                     let id = commitment_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_commitment_transaction_ingress(VersionedCommitmentTransaction::V1(commitment_tx))
+                        .handle_commitment_transaction_ingress(commitment_tx)
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
@@ -712,7 +711,7 @@ where
                     let id = storage_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_data_transaction_ingress(VersionedDataTransactionHeader::V1(storage_tx))
+                        .handle_data_transaction_ingress(storage_tx)
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
@@ -1063,6 +1062,7 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::IrysBlockHeaderV1;
     use std::sync::Arc;
 
     fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<VersionedIrysBlockHeader> {

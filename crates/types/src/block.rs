@@ -15,8 +15,8 @@ use crate::{
     serialization::{optional_string_u64, string_u64},
     string_u128,
     transaction::VersionedDataTransactionHeader,
-    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave,
-    H256List, IngressProofsList, IrysSignature, Proof, H256, U256,
+    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave, H256List, IngressProofsList,
+    IrysSignature, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{Address, TxHash, B256};
@@ -251,9 +251,9 @@ impl VersionedIrysBlockHeader {
     /// Validate the block signature
     pub fn is_signature_valid(&self) -> bool {
         match self {
-            Self::V1(inner) => {
-                inner.signature.validate_signature(self.signature_hash(), inner.miner_address)
-            }
+            Self::V1(inner) => inner
+                .signature
+                .validate_signature(self.signature_hash(), inner.miner_address),
         }
     }
 
@@ -267,8 +267,6 @@ impl VersionedIrysBlockHeader {
         self.timestamp
     }
 }
-
-
 
 impl Default for IrysBlockHeaderV1 {
     fn default() -> Self {
@@ -1287,7 +1285,8 @@ mod tests {
 
     #[test]
     fn test_validate_tx_path() {
-        let mut txs: Vec<VersionedDataTransactionHeader> = vec![VersionedDataTransactionHeader::default(); 10];
+        let mut txs: Vec<VersionedDataTransactionHeader> =
+            vec![VersionedDataTransactionHeader::default(); 10];
         for tx in txs.iter_mut() {
             tx.data_root = H256::from([3_u8; 32]);
             tx.data_size = 64

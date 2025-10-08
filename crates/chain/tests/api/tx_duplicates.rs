@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{irys::IrysSigner, VersionedCommitmentTransaction, DataLedger, NodeConfig, H256};
+use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, VersionedCommitmentTransaction, H256};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
@@ -64,7 +64,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
     let consensus = &node.node_ctx.config.consensus;
-    let mut stake_tx = VersionedCommitmentTransaction::new_stake(consensus, node.get_anchor().await?);
+    let mut stake_tx =
+        VersionedCommitmentTransaction::new_stake(consensus, node.get_anchor().await?);
 
     // Post the stake commitment and await it in the mempool
     signer.sign_commitment(&mut stake_tx).unwrap();

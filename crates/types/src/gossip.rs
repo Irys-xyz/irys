@@ -1,6 +1,6 @@
 use crate::{
-    BlockHash, ChunkPathHash, VersionedCommitmentTransaction, VersionedDataTransactionHeader, IngressProof,
-    VersionedIrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
+    BlockHash, ChunkPathHash, IngressProof, IrysTransactionId, UnpackedChunk,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 use alloy_primitives::{Address, B256};
 use reth::core::primitives::SealedBlock;

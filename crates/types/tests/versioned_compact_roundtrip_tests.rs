@@ -1,6 +1,6 @@
 use irys_types::{
-    Compact, VersionedCommitmentTransaction, ConsensusConfig, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
-    H256,
+    Compact as _, ConsensusConfig, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    VersionedIrysBlockHeader, H256,
 };
 
 #[test]
@@ -67,8 +67,7 @@ fn test_versioned_commitment_transaction_compact_roundtrip() {
     assert_eq!(buf[0], 1, "first byte should be the discriminant");
 
     // Decode from compact format
-    let (decoded_versioned, rest) =
-        VersionedCommitmentTransaction::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = VersionedCommitmentTransaction::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty(), "entire buffer should be consumed");
 
@@ -111,16 +110,12 @@ fn test_versioned_data_transaction_header_compact_with_default() {
 fn test_versioned_commitment_transaction_compact_with_default() {
     // Test with Default implementation which sets version = 1
     let versioned = VersionedCommitmentTransaction::default();
-    assert_eq!(
-        versioned.version, 1,
-        "default should set version to 1"
-    );
+    assert_eq!(versioned.version, 1, "default should set version to 1");
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);
 
-    let (decoded_versioned, rest) =
-        VersionedCommitmentTransaction::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = VersionedCommitmentTransaction::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty());
     assert_eq!(decoded_versioned, versioned);
@@ -132,7 +127,7 @@ fn test_versioned_block_header_from_compact_panics_on_unsupported_version() {
     // Create a buffer with an unsupported discriminant (99)
     let mut buf = vec![99_u8];
     // Add some dummy data (the compact representation expects more than just the discriminant)
-    buf.extend_from_slice(&[0u8; 100]);
+    buf.extend_from_slice(&[0_u8; 100]);
 
     // This should panic with UnsupportedVersion error
     let _ = VersionedIrysBlockHeader::from_compact(&buf, buf.len());
@@ -143,7 +138,7 @@ fn test_versioned_block_header_from_compact_panics_on_unsupported_version() {
 fn test_versioned_data_transaction_header_from_compact_panics_on_unsupported_version() {
     // Create a buffer with an unsupported discriminant (99)
     let mut buf = vec![99_u8];
-    buf.extend_from_slice(&[0u8; 100]);
+    buf.extend_from_slice(&[0_u8; 100]);
 
     // This should panic with UnsupportedVersion error
     let _ = VersionedDataTransactionHeader::from_compact(&buf, buf.len());
@@ -154,7 +149,7 @@ fn test_versioned_data_transaction_header_from_compact_panics_on_unsupported_ver
 fn test_versioned_commitment_transaction_from_compact_panics_on_unsupported_version() {
     // Create a buffer with an unsupported discriminant (99)
     let mut buf = vec![99_u8];
-    buf.extend_from_slice(&[0u8; 100]);
+    buf.extend_from_slice(&[0_u8; 100]);
 
     // This should panic with UnsupportedVersion error
     let _ = VersionedCommitmentTransaction::from_compact(&buf, buf.len());

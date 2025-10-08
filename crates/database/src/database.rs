@@ -68,7 +68,10 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 }
 
 /// Inserts a [`VersionedIrysBlockHeader`] into [`IrysBlockHeaders`]
-pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &VersionedIrysBlockHeader) -> eyre::Result<()> {
+pub fn insert_block_header<T: DbTxMut>(
+    tx: &T,
+    block: &VersionedIrysBlockHeader,
+) -> eyre::Result<()> {
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
     };
@@ -98,7 +101,10 @@ pub fn block_header_by_hash<T: DbTx>(
 }
 
 /// Inserts a [`VersionedDataTransactionHeader`] into [`IrysDataTxHeaders`]
-pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &VersionedDataTransactionHeader) -> eyre::Result<()> {
+pub fn insert_tx_header<T: DbTxMut>(
+    tx: &T,
+    tx_header: &VersionedDataTransactionHeader,
+) -> eyre::Result<()> {
     Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
@@ -386,12 +392,13 @@ mod tests {
         assert_eq!(result, Some(tx_header));
 
         // Write a commitment tx
-        let commitment_tx = VersionedCommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
-            // Override some defaults to insure deserialization is working
-            id: H256::from([10_u8; 32]),
-            version: 1,
-            ..Default::default()
-        });
+        let commitment_tx =
+            VersionedCommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
+                // Override some defaults to insure deserialization is working
+                id: H256::from([10_u8; 32]),
+                version: 1,
+                ..Default::default()
+            });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 
         // Read a commitment tx

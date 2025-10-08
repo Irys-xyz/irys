@@ -6,7 +6,8 @@ use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, VersionedCommitmentTransaction, CommitmentTransactionV1, CommitmentType, NodeConfig, H256, U256,
+    irys::IrysSigner, Address, CommitmentTransactionV1, CommitmentType, NodeConfig,
+    VersionedCommitmentTransaction, H256, U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;

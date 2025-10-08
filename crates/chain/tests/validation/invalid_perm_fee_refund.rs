@@ -9,8 +9,9 @@ use irys_actors::{
 };
 use irys_primitives::Address;
 use irys_types::{
-    VersionedCommitmentTransaction, DataLedger, VersionedDataTransactionHeader, DataTransactionHeaderV1, H256List, VersionedIrysBlockHeader,
-    NodeConfig, SystemTransactionLedger, H256, U256,
+    DataLedger, DataTransactionHeaderV1, H256List, NodeConfig, SystemTransactionLedger,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    U256,
 };
 use std::collections::BTreeMap;
 

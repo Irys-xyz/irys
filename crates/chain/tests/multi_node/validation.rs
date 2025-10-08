@@ -7,8 +7,8 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
-    NodeConfig, H256, U256,
+    storage_pricing::Amount, NodeConfig, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
 };
 use reth::payload::EthBuiltPayload;
 

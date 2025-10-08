@@ -16,9 +16,9 @@ use irys_domain::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    get_ingress_proofs, BlockHash, VersionedCommitmentTransaction, Config, DataLedger,
-    VersionedDataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, VersionedIrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle,
+    get_ingress_proofs, BlockHash, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,
+    IrysTransactionId, TokioServiceHandle, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -576,7 +576,7 @@ impl BlockDiscoveryServiceInner {
                     // Compare using Deref - versioned types deref to inner types
                     let commitments_match = expected_commitment_tx
                         .iter()
-                        .map(|c| &**c)  // Deref to inner CommitmentTransaction
+                        .map(|c| &**c) // Deref to inner CommitmentTransaction
                         .eq(arc_commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(

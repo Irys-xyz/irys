@@ -6,8 +6,8 @@ use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_types::{
-    irys::IrysSigner, Base64, VersionedDataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
-    UnpackedChunk,
+    irys::IrysSigner, Base64, NodeConfig, PackedChunk, TxChunkOffset, UnpackedChunk,
+    VersionedDataTransactionHeader,
 };
 use rand::Rng as _;
 use std::time::Duration;

@@ -82,9 +82,7 @@ pub async fn fetch_genesis_commitments(
         .await?
         .into_iter()
         .filter_map(|tx| match tx {
-            IrysTransactionResponse::Commitment(commitment_tx) => {
-                Some(VersionedCommitmentTransaction::V1(commitment_tx))
-            }
+            IrysTransactionResponse::Commitment(commitment_tx) => Some(commitment_tx),
             IrysTransactionResponse::Storage(_) => None,
         })
         .collect())

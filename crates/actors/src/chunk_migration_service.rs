@@ -11,9 +11,8 @@ use irys_domain::{
 use irys_storage::{ie, ii, InclusiveInterval as _};
 use irys_types::{
     app_state::DatabaseProvider, Base64, BlockHash, Config, DataLedger, DataRoot,
-    DataTransactionLedger, VersionedIrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
-    TokioServiceHandle, TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader,
-    H256,
+    DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, Proof, TokioServiceHandle,
+    TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{

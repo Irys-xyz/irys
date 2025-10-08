@@ -973,9 +973,9 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-        VersionedCommitmentTransaction, Config, VersionedDataTransactionHeader, IrysTransactionResponse, NodeConfig,
-        NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
+        AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, Config,
+        IrysTransactionResponse, NodeConfig, NodeInfo, PeerNetworkServiceMessage, RethPeerInfo,
+        VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::net::{IpAddr, SocketAddr};

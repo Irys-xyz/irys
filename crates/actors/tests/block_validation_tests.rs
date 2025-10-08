@@ -4,7 +4,7 @@ use irys_actors::block_validation::{
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
     compute_solution_hash, partition::PartitionAssignment, Address, Base64, BlockIndexItem,
-    ConsensusConfig, DataLedger, VersionedIrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    ConsensusConfig, DataLedger, LedgerIndexItem, PoaData, VersionedIrysBlockHeader, H256,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

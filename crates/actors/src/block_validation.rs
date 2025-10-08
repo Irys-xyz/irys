@@ -30,10 +30,9 @@ use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, Address, VersionedCommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    VersionedDataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, VersionedIrysBlockHeader,
-    PoaData,
-    H256, U256,
+    validate_path, Address, Config, ConsensusConfig, DataLedger, DataTransactionLedger,
+    DifficultyAdjustmentConfig, PoaData, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{BlockHash, LedgerChunkRange};
@@ -1435,7 +1434,7 @@ pub async fn commitment_txs_are_valid(
                 EitherOrBoth::Both(actual, expected) => {
                     // Compare the inner types (Deref gives us &CommitmentTransaction)
                     ensure!(
-                        &**actual == &**expected,
+                        **actual == **expected,
                         "Epoch block commitment mismatch at position {}. Expected: {:?}, Got: {:?}",
                         idx,
                         expected,
@@ -1470,7 +1469,7 @@ pub async fn commitment_txs_are_valid(
             VersionedCommitmentTransaction::V1(inner) => matches!(
                 inner.commitment_type,
                 CommitmentType::Stake | CommitmentType::Pledge { .. }
-            )
+            ),
         })
         .collect();
 
@@ -2287,8 +2286,8 @@ mod tests {
     use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, IrysBlockHeaderV1, VersionedDataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
-        Signature, H256, U256,
+        DataTransaction, DataTransactionLedger, H256List, IrysBlockHeaderV1, NodeConfig, Signature,
+        VersionedDataTransactionHeader, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;

@@ -55,10 +55,9 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
-    CloneableJoinHandle, Config, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
-    ServiceSet, TokioServiceHandle, VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256,
-    U256,
+    CloneableJoinHandle, Config, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange,
+    PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet, TokioServiceHandle,
+    VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256, U256,
 };
 use irys_types::{BlockHash, EvmBlockHash};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -330,7 +329,10 @@ impl IrysNode {
         evm_block_hash: EvmBlockHash,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
-    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
+    ) -> (
+        VersionedIrysBlockHeader,
+        Vec<VersionedCommitmentTransaction>,
+    ) {
         info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
 
         // Check if blockchain data already exists
@@ -365,7 +367,10 @@ impl IrysNode {
         &self,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
-    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
+    ) -> (
+        VersionedIrysBlockHeader,
+        Vec<VersionedCommitmentTransaction>,
+    ) {
         // Get the genesis block hash from index
         let block_item = block_index
             .get_item(0)
@@ -402,13 +407,16 @@ impl IrysNode {
     async fn create_new_genesis_block(
         &self,
         evm_block_hash: EvmBlockHash,
-    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
+    ) -> (
+        VersionedIrysBlockHeader,
+        Vec<VersionedCommitmentTransaction>,
+    ) {
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             evm_block_hash,
             self.config.consensus.number_of_ingress_proofs_total,
         );
-        
+
         // Generate genesis commitments from configuration
         let commitments = get_genesis_commitments(&self.config).await;
 
@@ -468,7 +476,10 @@ impl IrysNode {
     async fn fetch_genesis_from_trusted_peer(
         &self,
         expected_genesis_hash: H256,
-    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
+    ) -> (
+        VersionedIrysBlockHeader,
+        Vec<VersionedCommitmentTransaction>,
+    ) {
         tracing::Span::current().record(
             "expected_genesis_hash",
             format_args!("{}", expected_genesis_hash),
@@ -1923,7 +1934,8 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let mut stake_tx = VersionedCommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
+        let mut stake_tx =
+            VersionedCommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         signer.sign_commitment(&mut stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();

@@ -1,6 +1,6 @@
 use irys_types::{
-    versioning::VersioningError, VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
-    DataTransactionHeaderV1, IrysBlockHeaderV1, CommitmentTransactionV1,
+    CommitmentTransactionV1, DataTransactionHeaderV1, IrysBlockHeaderV1,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
 };
 
 #[test]

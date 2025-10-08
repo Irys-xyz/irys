@@ -19,9 +19,8 @@ use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, Config, DataLedger, DatabaseProvider, H256List, VersionedIrysBlockHeader,
-    TokioServiceHandle, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
-    H256,
+    Address, BlockHash, Config, DataLedger, DatabaseProvider, H256List, TokioServiceHandle,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -264,7 +263,8 @@ impl BlockTreeServiceInner {
         all_txs.extend(publish_txs.clone());
         all_txs.extend(submit_txs.clone());
 
-        let mut all_txs_map: HashMap<DataLedger, Vec<VersionedDataTransactionHeader>> = HashMap::new();
+        let mut all_txs_map: HashMap<DataLedger, Vec<VersionedDataTransactionHeader>> =
+            HashMap::new();
         all_txs_map.insert(DataLedger::Submit, submit_txs);
         all_txs_map.insert(DataLedger::Publish, publish_txs);
 

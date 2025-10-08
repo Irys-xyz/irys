@@ -5,7 +5,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_types::{VersionedCommitmentTransaction};
+use irys_types::VersionedCommitmentTransaction;
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `CommitmentTransaction` type,
