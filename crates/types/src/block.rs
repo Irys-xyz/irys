@@ -1055,7 +1055,7 @@ impl BlockIndexItem {
 
 #[cfg(test)]
 mod tests {
-    use crate::ingress::IngressProof;
+    use crate::ingress::{IngressProof, IngressProofV1};
     use crate::{validate_path, Config, NodeConfig};
 
     use super::*;
@@ -1142,12 +1142,12 @@ mod tests {
             tx_ids: H256List(vec![]),
             total_chunks: 55,
             expires: None,
-            proofs: Some(IngressProofsList(vec![IngressProof {
+            proofs: Some(IngressProofsList(vec![IngressProof::V1(IngressProofV1 {
                 proof: H256::random(),
                 signature: IrysSignature::new(Signature::test_signature()),
                 data_root: H256::random(),
                 chain_id: 1,
-            }])),
+            })])),
             required_proof_count: None,
         };
 

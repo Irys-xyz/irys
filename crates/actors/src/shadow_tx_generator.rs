@@ -670,12 +670,12 @@ impl RollingHash {
 mod tests {
     use super::*;
     use irys_primitives::CommitmentType;
+    use irys_types::ingress::IngressProofV1;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
         IrysBlockHeader, IrysSignature, Signature, H256,
     };
     use itertools::Itertools as _;
-    use openssl::sha;
 
     fn create_test_commitment(
         commitment_type: CommitmentType,
@@ -733,12 +733,13 @@ mod tests {
         let proof = H256::from([12_u8; 32]);
         let chain_id = 1_u64;
 
-        // Create the message that would be signed
-        let mut hasher = sha::Sha256::new();
-        hasher.update(&proof.0);
-        hasher.update(&data_root.0);
-        hasher.update(&chain_id.to_be_bytes());
-        let prehash = hasher.finish();
+        // Create the message that would be signed using the official prehash generation
+        let prehash = IngressProof::generate_prehash(
+            &proof,
+            &data_root,
+            chain_id,
+            IngressProof::CURRENT_VERSION,
+        );
 
         // Sign the message with the signer's internal signing key
         // Note: sign_prehash_recoverable is a method on k256::ecdsa::SigningKey
@@ -748,12 +749,12 @@ mod tests {
             .unwrap()
             .into();
 
-        IngressProof {
+        IngressProof::V1(IngressProofV1 {
             signature: IrysSignature::new(signature),
             data_root,
             proof,
             chain_id,
-        }
+        })
     }
 
     #[test]
