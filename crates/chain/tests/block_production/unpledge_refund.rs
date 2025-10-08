@@ -83,9 +83,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     // ---------- Assert (inclusion): storage modules not released yet ----------
     let inclusion_hashes = assigned_sm_hashes(&peer_node);
     assert!(
-        inclusion_hashes
-            .iter()
-            .any(|h| *h == capacity_pa.partition_hash),
+        inclusion_hashes.contains(&capacity_pa.partition_hash),
         "Target partition should still be assigned after inclusion (release only at epoch)"
     );
 
@@ -256,9 +254,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let epoch_hashes = assigned_sm_hashes(&peer_node);
     tracing::error!(hash = ?capacity_pa.partition_hash, "hash unassigned");
     assert!(
-        !epoch_hashes
-            .iter()
-            .any(|h| *h == capacity_pa.partition_hash),
+        !epoch_hashes.contains(&capacity_pa.partition_hash),
         "Target partition must be unassigned from storage modules at epoch boundary"
     );
 

@@ -839,7 +839,7 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
@@ -871,7 +871,7 @@ mod tests {
             &config,
             &[],
             &[],
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &empty_fees,
             &[],
@@ -916,7 +916,7 @@ mod tests {
             ),
         ];
 
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
@@ -998,7 +998,7 @@ mod tests {
             &config,
             &commitments,
             &[],
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &empty_fees,
             &[],
@@ -1028,7 +1028,7 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
@@ -1079,7 +1079,7 @@ mod tests {
             &config,
             &[],
             &submit_txs,
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &empty_fees,
             &[],
@@ -1157,7 +1157,7 @@ mod tests {
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(20000000);
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: submit_txs.clone(),
             proofs: Some(IngressProofsList(proofs)),
         };
@@ -1265,7 +1265,7 @@ mod tests {
             &config,
             &[],
             &submit_txs,
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &empty_fees,
             &[],
@@ -1315,7 +1315,7 @@ mod tests {
             user_perm_fee_refunds: Vec::new(),
         };
 
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
@@ -1359,7 +1359,7 @@ mod tests {
             &config,
             &[],
             &[],
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &expired_fees,
             &[],
@@ -1415,7 +1415,7 @@ mod tests {
             user_perm_fee_refunds,
         };
 
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
@@ -1459,7 +1459,7 @@ mod tests {
             &config,
             &[],
             &[],
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &expired_fees,
             &[],
@@ -1495,7 +1495,7 @@ mod tests {
             user_perm_fee_refunds: Vec::new(),
         };
 
-        let mut publish_ledger = PublishLedgerWithTxs {
+        let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
             proofs: None,
         };
@@ -1521,7 +1521,7 @@ mod tests {
             &config,
             &[],
             &[],
-            &mut publish_ledger,
+            &publish_ledger,
             initial_treasury,
             &expired_fees,
             &[],

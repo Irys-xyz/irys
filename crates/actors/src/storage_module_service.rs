@@ -16,7 +16,7 @@ use crate::{
     chunk_migration_service::ChunkMigrationServiceMessage, packing::PackingRequest,
     services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
 };
-use eyre::{eyre, OptionExt};
+use eyre::{eyre, OptionExt as _};
 use irys_config::StorageSubmodulesConfig;
 use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
 use irys_domain::{

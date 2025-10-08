@@ -145,7 +145,7 @@ pub struct BlockProducerInner {
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnpledgeRefundEvent {
     pub account: Address,
     pub amount: U256,
@@ -157,6 +157,12 @@ impl Ord for UnpledgeRefundEvent {
         self.amount
             .cmp(&other.amount)
             .then(self.irys_ref_txid.cmp(&other.irys_ref_txid))
+    }
+}
+
+impl PartialOrd for UnpledgeRefundEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

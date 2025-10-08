@@ -602,7 +602,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
+        self.perm_fee.unwrap_or_default() + self.term_fee
     }
 
     fn signer(&self) -> Address {

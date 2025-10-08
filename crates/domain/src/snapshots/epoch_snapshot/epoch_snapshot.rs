@@ -1411,7 +1411,7 @@ mod tests {
                 .contains_key(&ph));
 
             // Removed from active set
-            assert!(!snapshot.all_active_partitions.iter().any(|h| *h == ph));
+            assert!(!snapshot.all_active_partitions.contains(&ph));
 
             // Removed pledge entry
             let entries = snapshot
@@ -1438,7 +1438,7 @@ mod tests {
                 .contains_key(&ph));
 
             // Removed from active set
-            assert!(!snapshot.all_active_partitions.iter().any(|h| *h == ph));
+            assert!(!snapshot.all_active_partitions.contains(&ph));
 
             // Removed pledge entry
             let entries = snapshot

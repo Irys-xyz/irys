@@ -1182,7 +1182,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
 
     // Lookup publish ledger for term fee rewards
-    let mut publish_ledger_with_txs =
+    let publish_ledger_with_txs =
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     // Get treasury balance from previous block
@@ -1227,7 +1227,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &config.consensus,
         &commitment_txs,
         &data_txs,
-        &mut publish_ledger_with_txs,
+        &publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
         &commitment_refund_events,
