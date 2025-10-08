@@ -231,7 +231,7 @@ impl StorageModuleServiceInner {
 
         // For each storage module assigned to a data ledger, we need to update the data_root indexes
         // that may overlap the assigned slot so that it can index chunks
-        let mut blocks_to_migrate: BTreeMap<u128, BlockHash> = BTreeMap::new();
+        let mut blocks_to_migrate: BTreeMap<u64, BlockHash> = BTreeMap::new();
         for assigned_sm in assigned_modules {
             // Rebuild indexes
             let ledger_id = assigned_sm
@@ -316,7 +316,7 @@ impl StorageModuleServiceInner {
                     let bi = self.block_index.read();
                     for height in start_block..=end_block {
                         let block_hash = bi
-                            .get_item(height.try_into().unwrap())
+                            .get_item(height)
                             .expect("block item to be present in index")
                             .block_hash;
                         blocks_to_migrate.insert(height, block_hash);
