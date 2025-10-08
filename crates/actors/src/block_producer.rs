@@ -169,10 +169,11 @@ impl PartialOrd for UnpledgeRefundEvent {
 /// Named result bundle for mempool-derived inputs to block production.
 #[derive(Debug, Clone)]
 pub struct MempoolTxsBundle {
-    /// commitment txs for the commitment ledger (only epoch blocks)
+    /// Commitment txs included in the commitment ledger
     pub commitment_txs: Vec<CommitmentTransaction>,
 
-    /// commitment txs for immediate block inclusion, will also bill the user (non epoch blocks)
+    /// commitment txs included in the commitment ledger and billed to
+    /// the user during shadow tx processing (empty on epochs)
     pub commitment_txs_to_bill: Vec<CommitmentTransaction>,
 
     pub submit_txs: Vec<DataTransactionHeader>,

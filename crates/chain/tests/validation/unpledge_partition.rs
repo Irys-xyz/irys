@@ -414,3 +414,126 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
 
     Ok(())
 }
+
+#[test_log::test(actix_web::test)]
+async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
+    struct EvilEpochStrategy {
+        pub prod: ProductionStrategy,
+        pub commitments: Vec<CommitmentTransaction>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilEpochStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &irys_types::IrysBlockHeader,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let mut commitments = self.commitments.clone();
+            commitments.sort(); // mimic canonical ordering
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: commitments.clone(),
+                commitment_txs_to_bill: commitments,
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+                commitment_refund_events: vec![],
+            })
+        }
+    }
+
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let genesis_signer = genesis_node.cfg.signer();
+    let genesis_addr = genesis_signer.address();
+    let assignments = genesis_node.get_partition_assignments(genesis_addr);
+    eyre::ensure!(
+        assignments.len() >= 2,
+        "genesis node must expose at least two partitions for epoch extra unpledge test"
+    );
+
+    let consensus = &genesis_node.node_ctx.config.consensus;
+    let anchor = genesis_node.get_anchor().await?;
+
+    // Legitimate unpledge that will be included before the epoch boundary
+    let legitimate_unpledge = CommitmentTransaction::new_unpledge(
+        consensus,
+        anchor,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+        genesis_addr,
+        assignments[0].partition_hash,
+    )
+    .await;
+    let legitimate_unpledge = genesis_signer.sign_commitment(legitimate_unpledge)?;
+
+    gossip_commitment_to_node(&genesis_node, &legitimate_unpledge).await?;
+    let inclusion_block = genesis_node.mine_block().await?;
+    assert_ne!(
+        inclusion_block.height % num_blocks_in_epoch as u64,
+        0,
+        "Inclusion block must not be an epoch block"
+    );
+
+    // Craft an extra unpledge that never appeared on-chain
+    let extra_unpledge = CommitmentTransaction::new_unpledge(
+        consensus,
+        genesis_node.get_anchor().await?,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+        genesis_addr,
+        assignments[1].partition_hash,
+    )
+    .await;
+    let extra_unpledge = genesis_signer.sign_commitment(extra_unpledge)?;
+    gossip_commitment_to_node(&genesis_node, &extra_unpledge).await?;
+
+    let commitments = vec![legitimate_unpledge.clone(), extra_unpledge.clone()];
+    let block_prod_strategy = EvilEpochStrategy {
+        commitments: commitments.clone(),
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (block, _stats, _payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
+
+    assert_eq!(
+        block.height % num_blocks_in_epoch as u64,
+        0,
+        "Malicious block must be at epoch boundary"
+    );
+
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        Arc::clone(&block),
+        commitments,
+        false,
+    )
+    .await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert_eq!(
+        outcome,
+        BlockValidationOutcome::Discarded,
+        "epoch block with extra unpledge should be rejected"
+    );
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
