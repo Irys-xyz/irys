@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
@@ -42,11 +42,10 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let mut consensus = node.cfg.consensus.clone();
     let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
@@ -266,15 +265,11 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     let mut consensus = genesis_node.cfg.consensus.clone();
     let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
-    wait_for_packing(
-        genesis_node
-            .node_ctx
-            .service_senders
-            .packing_handle()
-            .clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    genesis_node
+        .node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // Wait a little for a peer to connect
     tokio::time::sleep(Duration::from_secs(1)).await;

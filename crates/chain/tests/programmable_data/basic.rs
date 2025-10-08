@@ -14,7 +14,6 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
 use irys_primitives::precompile::IrysPrecompileOffsets;
 use irys_primitives::range_specifier::ChunkRangeSpecifier;
@@ -71,11 +70,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         ),
     ]);
     let node = IrysNodeTest::new_genesis(testing_config).start().await;
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // let signer: PrivateKeySigner = config.mining_signer.signer.into();
     // let wallet = EthereumWallet::from(signer.clone());

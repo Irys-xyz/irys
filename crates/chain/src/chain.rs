@@ -103,6 +103,7 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
+    pub packing_waiter: irys_actors::packing::PackingWaiter,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -958,7 +959,6 @@ impl IrysNode {
             packing_rx,
             packing_tx.clone(),
         );
-        service_senders.set_packing_handle(packing_handle.clone());
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1312,6 +1312,7 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_state_readonly,
             service_senders: service_senders.clone(),
+            packing_waiter: packing_handle.waiter(),
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),

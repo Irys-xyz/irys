@@ -11,14 +11,14 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
 use tokio::{
     sync::{
         mpsc::error::{SendError, TrySendError},
-        Notify, Semaphore,
+        oneshot, Notify, Semaphore,
     },
     task::yield_now,
 };
@@ -511,6 +511,34 @@ pub struct Internals {
     pub config: PackingConfig,
 }
 
+#[derive(Debug)]
+pub enum PackingServiceMessage {
+    Drain { respond_to: oneshot::Sender<()> },
+}
+
+#[derive(Debug, Clone)]
+pub struct PackingWaiter {
+    packing_service_sender: tokio::sync::mpsc::Sender<PackingServiceMessage>,
+}
+
+impl PackingWaiter {
+    pub async fn wait_for_idle(&self, timeout: Option<Duration>) -> eyre::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.packing_service_sender
+            .send(PackingServiceMessage::Drain { respond_to: tx })
+            .await
+            .map_err(|e| eyre!("control channel closed: {}", e))?;
+        tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async move {
+            rx.await
+                .map_err(|e| eyre!("waiter dropped: {}", e))
+                .map(|_| ())
+        })
+        .await
+        .map_err(|_| eyre!("timed out waiting for packing to become idle"))??;
+        Ok(())
+    }
+}
+
 /// waits for any pending & active packing tasks to complete
 /// A lightweight, Tokio-native handle for enqueueing packing requests and introspecting service state.
 #[derive(Debug, Clone)]
@@ -518,6 +546,7 @@ pub struct PackingHandle {
     sender: tokio::sync::mpsc::Sender<PackingRequest>,
     internals: Internals,
     notify: Arc<Notify>,
+    packing_service_sender: tokio::sync::mpsc::Sender<PackingServiceMessage>,
 }
 
 impl PackingHandle {
@@ -544,16 +573,26 @@ impl PackingHandle {
         self.sender.clone()
     }
 
+    /// Create a PackingWaiter that can wait for the service to become idle.
+    pub fn waiter(&self) -> PackingWaiter {
+        PackingWaiter {
+            packing_service_sender: self.packing_service_sender.clone(),
+        }
+    }
+
     /// Construct a PackingHandle from its parts.
     /// Useful for tests or custom wiring where the receiver loop is managed externally.
     pub fn from_parts(
         sender: tokio::sync::mpsc::Sender<PackingRequest>,
         internals: Internals,
     ) -> Self {
+        let (packing_service_sender, _ctrl_rx) =
+            tokio::sync::mpsc::channel::<PackingServiceMessage>(1);
         Self {
             sender,
             internals,
             notify: Arc::new(Notify::new()),
+            packing_service_sender,
         }
     }
 }
@@ -586,163 +625,143 @@ impl PackingService {
             active_workers: self.active_workers.clone(),
         };
 
-        // Spawn the receiver loop
-        let notify = self.notify.clone();
-        runtime_handle.spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                // Enqueue into the SM-specific pending queue; create queue if missing
-                let sm_id = msg.storage_module.id;
+        // Control channel for waiter/introspection
+        let (packing_service_sender, mut ctrl_rx) =
+            tokio::sync::mpsc::channel::<PackingServiceMessage>(64);
 
-                // HOT path: try read-lock first to avoid write contention when the queue already exists
-                let queue_arc = if let Some(q) = {
-                    let map_guard = job_queues
-                        .read()
-                        .expect("Unable to acquire pending jobs map read lock");
-                    map_guard.get(&sm_id).cloned()
-                } {
-                    q
-                } else {
-                    // COLD path: create the queue under a write lock
-                    let mut map_guard = job_queues
-                        .write()
-                        .expect("Unable to acquire pending jobs map write lock");
-                    map_guard
-                        .entry(sm_id)
-                        .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
-                        .clone()
+        // Shared list of pending drain responders
+        let pending_waiters: Arc<Mutex<Vec<oneshot::Sender<()>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // Helper to flush pending waiters if the system is idle
+        let flush_if_idle = {
+            let internals = internals.clone();
+            let pending = pending_waiters.clone();
+            move || {
+                let queued_jobs = {
+                    let map = internals.pending_jobs.read().unwrap();
+                    map.values()
+                        .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
                 };
-
-                // Ignore poisoned lock errors by propagating panic (consistent with existing code)
-                queue_arc.as_ref().write().unwrap().push_back(msg);
-                // signal new activity for waiters
-                notify.notify_waiters();
+                let available_permits = internals.semaphore.available_permits();
+                let target_permits = internals.config.concurrency as usize;
+                let active = internals.active_workers.load(Ordering::Relaxed);
+                if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                    let mut guard = pending.lock().unwrap();
+                    for tx in guard.drain(..) {
+                        let _ = tx.send(());
+                    }
+                }
             }
-        });
+        };
+
+        // Spawn a watcher that listens to state-change notifications and flushes pending waiters when idle
+        {
+            let notify = self.notify.clone();
+            let internals = internals.clone();
+            let pending = pending_waiters.clone();
+            runtime_handle.spawn(async move {
+                loop {
+                    notify.notified().await;
+                    let queued_jobs = {
+                        let map = internals.pending_jobs.read().unwrap();
+                        map.values()
+                            .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+                    };
+                    let available_permits = internals.semaphore.available_permits();
+                    let target_permits = internals.config.concurrency as usize;
+                    let active = internals.active_workers.load(Ordering::Relaxed);
+                    if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                        let mut guard = pending.lock().unwrap();
+                        for tx in guard.drain(..) {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            });
+        }
+
+        // Spawn the receiver loop handling both job and control channels
+        {
+            let notify = self.notify.clone();
+            let internals_ctrl = internals.clone();
+            runtime_handle.spawn(async move {
+                loop {
+                    tokio::select! {
+                        Some(msg) = rx.recv() => {
+                            // Enqueue into the SM-specific pending queue; create queue if missing
+                            let sm_id = msg.storage_module.id;
+
+                            // HOT path: try read-lock first to avoid write contention when the queue already exists
+                            let queue_arc = if let Some(q) = {
+                                let map_guard = job_queues
+                                    .read()
+                                    .expect("Unable to acquire pending jobs map read lock");
+                                map_guard.get(&sm_id).cloned()
+                            } {
+                                q
+                            } else {
+                                // COLD path: create the queue under a write lock
+                                let mut map_guard = job_queues
+                                    .write()
+                                    .expect("Unable to acquire pending jobs map write lock");
+                                map_guard
+                                    .entry(sm_id)
+                                    .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
+                                    .clone()
+                            };
+
+                            // Ignore poisoned lock errors by propagating panic (consistent with existing code)
+                            queue_arc.as_ref().write().unwrap().push_back(msg);
+                            // signal new activity for waiters
+                            notify.notify_waiters();
+                            // best-effort flush
+                            flush_if_idle();
+                        },
+                        Some(ctrl) = ctrl_rx.recv() => {
+                            match ctrl {
+                                PackingServiceMessage::Drain { respond_to } => {
+                                    // fast-path if already idle
+                                    let queued_jobs = {
+                                        let map = internals_ctrl.pending_jobs.read().unwrap();
+                                        map.values()
+                                            .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+                                    };
+                                    let available_permits = internals_ctrl.semaphore.available_permits();
+                                    let target_permits = internals_ctrl.config.concurrency as usize;
+                                    let active = internals_ctrl.active_workers.load(Ordering::Relaxed);
+                                    if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                                        let _ = respond_to.send(());
+                                    } else {
+                                        // store waiter and wait for state-change watcher to flush
+                                        pending_waiters.lock().unwrap().push(respond_to);
+                                    }
+                                }
+                            }
+                        },
+                        else => break,
+                    }
+                }
+            });
+        }
 
         PackingHandle {
             sender,
             internals,
             notify: self.notify.clone(),
+            packing_service_sender,
         }
     }
 
     /// Spawn a Tokio task that receives PackingRequest messages and pushes them into the internal queues.
     /// Returns a `PackingHandle` for interacting with the service.
     pub fn spawn_tokio_service(&self, runtime_handle: tokio::runtime::Handle) -> PackingHandle {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<PackingRequest>(5_000);
-
-        // Clone references to the shared internals so both the service and observers see the same state
-        let job_queues = self.pending_jobs.clone();
-
-        // Build an Internals snapshot that shares the same underlying Arcs as the service
-        let internals = Internals {
-            pending_jobs: self.pending_jobs.clone(),
-            semaphore: self.semaphore.clone(),
-            config: self.packing_config.clone(),
-            active_workers: self.active_workers.clone(),
-        };
-
-        // Spawn the receiver loop
-        let notify = self.notify.clone();
-        runtime_handle.spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                // Enqueue into the SM-specific pending queue; create queue if missing
-                let sm_id = msg.storage_module.id;
-
-                // HOT path: try read-lock first to avoid write contention when the queue already exists
-                let queue_arc = if let Some(q) = {
-                    let map_guard = job_queues
-                        .read()
-                        .expect("Unable to acquire pending jobs map read lock");
-                    map_guard.get(&sm_id).cloned()
-                } {
-                    q
-                } else {
-                    // COLD path: create the queue under a write lock
-                    let mut map_guard = job_queues
-                        .write()
-                        .expect("Unable to acquire pending jobs map write lock");
-                    map_guard
-                        .entry(sm_id)
-                        .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
-                        .clone()
-                };
-
-                // Ignore poisoned lock errors by propagating panic (consistent with existing code)
-                queue_arc.as_ref().write().unwrap().push_back(msg);
-                // signal new activity for waiters
-                notify.notify_waiters();
-            }
-        });
-
-        PackingHandle {
-            sender: tx,
-            internals,
-            notify: self.notify.clone(),
-        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<PackingRequest>(5_000);
+        self.attach_receiver_loop(runtime_handle, rx, tx)
     }
 }
 
 /// waits for any pending & active packing tasks to complete
-pub async fn wait_for_packing(
-    handle: PackingHandle,
-    timeout: Option<Duration>,
-) -> eyre::Result<()> {
-    let internals = handle.internals();
-    let notify = handle.notify.clone();
-    tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
-        // short warmup and require observing activity before we apply the strong barrier.
-        // This avoids a race where we check before any work is observed and return prematurely.
-        // Wait briefly for a state-change notification if no activity has been observed, avoiding immediate-return races.
-        let mut observed_activity = false;
-
-        loop {
-            // Counts all jobs in all job queues
-            let queued_jobs = {
-                let map = internals.pending_jobs.read().unwrap();
-                map.values()
-                    .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
-            };
-
-            let available_permits = internals.semaphore.available_permits();
-            let target_permits = internals.config.concurrency as usize;
-            let active = internals.active_workers.load(Ordering::Relaxed);
-
-            // Record that we've seen the system do something
-            if !observed_activity
-                && (queued_jobs > 0 || active > 0 || available_permits < target_permits)
-            {
-                observed_activity = true;
-            }
-
-            if queued_jobs == 0 && active == 0 {
-                if !observed_activity {
-                    // Wait briefly for a state change; if none, return early (nothing to wait for)
-                    if tokio::time::timeout(Duration::from_millis(100), notify.notified())
-                        .await
-                        .is_ok()
-                    {
-                        continue;
-                    }
-                    break Some(());
-                }
-
-                // Strong barrier: wait for all permits to be available,
-                // ensuring no local CPU workers are still running.
-                let needed: u32 = internals.config.concurrency.into();
-                let _permit = internals.semaphore.acquire_many(needed).await.unwrap();
-                drop(_permit);
-                break Some(());
-            } else {
-                // Wait for a state change rather than polling
-                notify.notified().await
-            }
-        }
-    })
-    .await?
-    .ok_or_else(|| eyre!("timed out waiting for packing to complete"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
@@ -757,9 +776,7 @@ mod tests {
         StorageSyncConfig,
     };
 
-    use crate::packing::{
-        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingRequest, PackingService,
-    };
+    use crate::packing::{cast_vec_u8_to_vec_u8_array, PackingRequest, PackingService};
 
     #[test_log::test(actix::test)]
     async fn test_packing_actor() -> eyre::Result<()> {
@@ -831,7 +848,10 @@ mod tests {
 
         // action
         handle.send(request)?;
-        wait_for_packing(handle, Some(Duration::from_secs(99999))).await?;
+        handle
+            .waiter()
+            .wait_for_idle(Some(Duration::from_secs(99999)))
+            .await?;
         storage_module.force_sync_pending_chunks()?;
 
         // assert

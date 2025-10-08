@@ -8,7 +8,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    packing::{PackingHandle, PackingSender},
+    packing::PackingSender,
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
@@ -18,7 +18,7 @@ use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{
     broadcast,
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -60,24 +60,6 @@ impl ServiceSenders {
 
     pub fn packing_sender(&self) -> PackingSender {
         self.0.packing_sender.clone()
-    }
-
-    pub fn packing_handle(&self) -> PackingHandle {
-        self.0
-            .packing_handle
-            .lock()
-            .expect("packing_handle mutex poisoned")
-            .clone()
-            .expect("packing_handle not configured")
-    }
-
-    pub fn set_packing_handle(&self, handle: PackingHandle) {
-        let mut guard = self
-            .0
-            .packing_handle
-            .lock()
-            .expect("packing_handle mutex poisoned");
-        *guard = Some(handle);
     }
 }
 
@@ -124,7 +106,6 @@ pub struct ServiceSendersInner {
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
     pub packing_sender: PackingSender,
-    pub packing_handle: Mutex<Option<PackingHandle>>,
 }
 
 impl ServiceSendersInner {
@@ -180,7 +161,6 @@ impl ServiceSendersInner {
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
             packing_sender: sender,
-            packing_handle: Mutex::new(None),
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,

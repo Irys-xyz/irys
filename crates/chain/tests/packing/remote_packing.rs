@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, num::NonZero, sync::Arc, time::Duration};
 
-use irys_actors::packing::{wait_for_packing, PackingRequest};
+use irys_actors::packing::PackingRequest;
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing_worker::worker::start_worker;
@@ -107,7 +107,10 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
 
     // action
     handle.send(request)?;
-    wait_for_packing(handle, Some(Duration::from_secs(99999))).await?;
+    handle
+        .waiter()
+        .wait_for_idle(Some(Duration::from_secs(99999)))
+        .await?;
     storage_module.sync_pending_chunks()?;
 
     // assert

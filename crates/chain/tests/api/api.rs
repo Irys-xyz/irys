@@ -3,7 +3,6 @@ use actix_http::StatusCode;
 use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_types::{
     irys::IrysSigner, Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
@@ -50,11 +49,10 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
 
     let app = node.start_public_api().await;
 
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;

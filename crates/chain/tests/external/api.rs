@@ -2,7 +2,7 @@ use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_testing_utils::initialize_tracing;
@@ -62,11 +62,10 @@ async fn external_api() -> eyre::Result<()> {
     info!("started node {}", &node.cfg.http.bind_port);
 
     node.node_ctx.stop_mining()?;
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",

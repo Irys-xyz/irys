@@ -1,7 +1,7 @@
 use crate::utils::*;
 use assert_matches::assert_matches;
 use eyre::eyre;
-use irys_actors::packing::wait_for_packing;
+
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
@@ -405,11 +405,10 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Initialize packing and mining
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
