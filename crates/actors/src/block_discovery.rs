@@ -257,7 +257,6 @@ impl BlockDiscoveryServiceInner {
         let block_tree_guard = self.block_tree_guard.clone();
         let config = self.config.clone();
         let db = self.db.clone();
-        let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
@@ -526,8 +525,8 @@ impl BlockDiscoveryServiceInner {
         };
 
         let validation_result = prevalidate_block(
-            block_header,
-            previous_block_header,
+            (*new_block_header).clone(),
+            previous_block_header.clone(),
             parent_epoch_snapshot.clone(),
             config,
             reward_curve,
@@ -574,8 +573,11 @@ impl BlockDiscoveryServiceInner {
                     let expected_commitment_tx = parent_commitment_snapshot.get_epoch_commitments();
 
                     // Validate epoch block has expected commitments in correct order
-                    let commitments_match =
-                        expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
+                    // Compare using Deref - versioned types deref to inner types
+                    let commitments_match = expected_commitment_tx
+                        .iter()
+                        .map(|c| &**c) // Deref to inner CommitmentTransaction
+                        .eq(arc_commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",

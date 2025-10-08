@@ -6,8 +6,8 @@ use alloy_genesis::GenesisAccount;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IrysTransactionResponse,
-    NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
+    IrysTransactionResponse, NodeConfig, H256,
 };
 use reth_db::Database as _;
 use tokio::time::Duration;
@@ -34,10 +34,10 @@ async fn test_get_tx() -> eyre::Result<()> {
     node.node_ctx.start_mining().unwrap();
     let db = node.node_ctx.db.clone();
 
-    let storage_tx = DataTransactionHeader {
+    let storage_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         ..Default::default()
-    };
+    });
     info!("Generated storage_tx.id: {}", storage_tx.id);
 
     let consensus = &node.node_ctx.config.consensus;

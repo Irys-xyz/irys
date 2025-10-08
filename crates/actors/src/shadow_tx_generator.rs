@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon as _, H256, U256,
+    IrysBlockHeader, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -671,8 +671,8 @@ mod tests {
     use super::*;
     use irys_primitives::CommitmentType;
     use irys_types::{
-        ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
-        Signature, H256,
+        ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
+        IrysBlockHeader, IrysSignature, Signature, H256,
     };
     use itertools::Itertools as _;
     use openssl::sha;
@@ -684,7 +684,7 @@ mod tests {
     ) -> CommitmentTransaction {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
-        CommitmentTransaction {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
             id: H256::from([7_u8; 32]),
             commitment_type,
             anchor: H256::from([8_u8; 32]),
@@ -694,7 +694,7 @@ mod tests {
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
             version: 1,
             chain_id: config.chain_id,
-        }
+        })
     }
 
     fn create_data_tx_header(
@@ -723,9 +723,9 @@ mod tests {
             .expect("Failed to create publish transaction");
 
         // Modify the header to reflect the original perm_fee intent
-        let mut header = tx.header;
+        let mut header = (*tx.header).clone();
         header.perm_fee = perm_fee;
-        header
+        DataTransactionHeader::V1(header)
     }
 
     fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {

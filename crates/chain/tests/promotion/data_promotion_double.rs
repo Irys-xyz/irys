@@ -180,7 +180,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    println!("1:{}", block_tx1);
+    println!("1:{:?}", block_tx1);
 
     // ==============================
     // Verify chunk ordering in publish ledger storage module
@@ -329,7 +329,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    println!("1:{}", block_tx1);
+    println!("1:{:?}", block_tx1);
     //     println!("2:{}", block_tx2);
 
     // ==============================

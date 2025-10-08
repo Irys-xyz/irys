@@ -731,6 +731,7 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::DataTransactionHeaderV1;
 
     #[test]
     fn test_aggregate_miner_fees_handles_duplicates() {
@@ -739,19 +740,19 @@ mod tests {
         let config = Config::new(node_config);
 
         // Create test transactions
-        let tx1 = DataTransactionHeader {
+        let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             term_fee: U256::from(1000),
             data_size: 100,
             ..Default::default()
-        };
+        });
 
-        let tx2 = DataTransactionHeader {
+        let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             term_fee: U256::from(2000),
             data_size: 200,
             ..Default::default()
-        };
+        });
 
         // Create miners with duplicates
         let miner1 = Address::random();

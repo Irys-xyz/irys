@@ -13,8 +13,8 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, H256,
+    CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
+    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
@@ -111,7 +111,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     invalid_pledge.value = U256::from(1_000_000); // Invalid!
 
     // Sign the commitment
-    let invalid_pledge = test_signer.sign_commitment(invalid_pledge)?;
+    test_signer.sign_commitment(&mut invalid_pledge)?;
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -215,7 +215,9 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     invalid_pledge.value = U256::from(1_000_000); // Invalid! Should use calculate_pledge_value_at_count
 
     // Sign the commitment
-    let invalid_pledge = genesis_config.signer().sign_commitment(invalid_pledge)?;
+    genesis_config
+        .signer()
+        .sign_commitment(&mut invalid_pledge)?;
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -312,18 +314,18 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     stake.signer = test_signer.address();
     stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
-    let stake = test_signer.sign_commitment(stake)?;
+    test_signer.sign_commitment(&mut stake)?;
 
     // Create a pledge commitment
     let _pledge_count = 0;
-    let pledge = CommitmentTransaction::new_pledge(
+    let mut pledge = CommitmentTransaction::new_pledge(
         consensus_config,
         genesis_node.get_anchor().await?,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
         test_signer.address(),
     )
     .await;
-    let pledge = test_signer.sign_commitment(pledge)?;
+    test_signer.sign_commitment(&mut pledge)?;
 
     // Create block with commitments in WRONG order (pledge before stake)
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -427,7 +429,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     let mut wrong_commitment =
         CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     wrong_commitment.signer = test_signer.address();
-    let wrong_commitment = test_signer.sign_commitment(wrong_commitment)?;
+    test_signer.sign_commitment(&mut wrong_commitment)?;
     genesis_node.mine_block().await?;
 
     // Now mine block 2 (epoch block) with wrong commitment
@@ -666,7 +668,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let data_root = H256(root.id);
 
     // Create data transaction header
-    let data_tx = DataTransactionHeader {
+    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         version: 1,
         anchor: H256::zero(),
@@ -681,7 +683,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         chain_id: 1,
         promoted_height: Some(1),
         signature: Default::default(),
-    };
+    });
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
     let chain_id = 1_u64;
@@ -727,7 +729,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         };
 
         // Store the data transaction
-        let versioned = data_tx.clone().try_into_versioned()?;
+        let versioned = data_tx.clone();
         tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(versioned))?;
 
         // Store the ingress proofs (with duplicates from same address)

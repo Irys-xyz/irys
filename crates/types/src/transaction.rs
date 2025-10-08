@@ -53,12 +53,12 @@ pub enum CommitmentValidationError {
 
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 #[repr(u8)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum VersionedDataTransactionHeader {
-    V1(DataTransactionHeader) = 1,
+#[serde(untagged)]
+pub enum DataTransactionHeader {
+    V1(DataTransactionHeaderV1) = 1,
 }
 
-impl VersionDiscriminant for VersionedDataTransactionHeader {
+impl VersionDiscriminant for DataTransactionHeader {
     fn discriminant(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
@@ -66,16 +66,30 @@ impl VersionDiscriminant for VersionedDataTransactionHeader {
     }
 }
 
-impl Default for VersionedDataTransactionHeader {
+impl Default for DataTransactionHeader {
     fn default() -> Self {
-        Self::V1(DataTransactionHeader::default())
+        Self::V1(DataTransactionHeaderV1::default())
+    }
+}
+
+impl Ord for DataTransactionHeader {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::V1(a), Self::V1(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for DataTransactionHeader {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
 // deref & derefmut will only work while we have a single version
 // this is what allows us to "hide" the complexity for the rest of the codebase.
-impl Deref for VersionedDataTransactionHeader {
-    type Target = DataTransactionHeader;
+impl Deref for DataTransactionHeader {
+    type Target = DataTransactionHeaderV1;
 
     fn deref(&self) -> &Self::Target {
         match self {
@@ -84,7 +98,7 @@ impl Deref for VersionedDataTransactionHeader {
     }
 }
 
-impl DerefMut for VersionedDataTransactionHeader {
+impl DerefMut for DataTransactionHeader {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             Self::V1(v1) => v1,
@@ -93,7 +107,7 @@ impl DerefMut for VersionedDataTransactionHeader {
 }
 
 // TODO: write tests for this
-impl Compact for VersionedDataTransactionHeader {
+impl Compact for DataTransactionHeader {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -106,7 +120,7 @@ impl Compact for VersionedDataTransactionHeader {
         let (disc, rest) = split_discriminant(buf);
         match disc {
             1 => {
-                let (inner, rest2) = DataTransactionHeader::from_compact(rest, rest.len());
+                let (inner, rest2) = DataTransactionHeaderV1::from_compact(rest, rest.len());
                 (Self::V1(inner), rest2)
             }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
@@ -114,7 +128,7 @@ impl Compact for VersionedDataTransactionHeader {
     }
 }
 
-impl Signable for VersionedDataTransactionHeader {
+impl Signable for DataTransactionHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
         match self {
@@ -127,16 +141,43 @@ impl Signable for VersionedDataTransactionHeader {
     }
 }
 
-impl DataTransactionHeader {
-    /// Fallible conversion that inspects the inner version field.
-    pub fn try_into_versioned(self) -> Result<VersionedDataTransactionHeader, VersioningError> {
-        match self.version {
-            1 => Ok(VersionedDataTransactionHeader::V1(self)),
-            other => Err(VersioningError::UnsupportedVersion(other)),
+impl alloy_rlp::Encodable for DataTransactionHeader {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        // Encode discriminant followed by inner struct
+        out.put_u8(self.discriminant());
+        match self {
+            Self::V1(inner) => inner.encode(out),
         }
     }
 }
-impl Default for DataTransactionHeader {
+
+impl alloy_rlp::Decodable for DataTransactionHeader {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        // Read discriminant
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+        let discriminant = buf[0];
+        *buf = &buf[1..];
+
+        match discriminant {
+            1 => {
+                let inner = DataTransactionHeaderV1::decode(buf)?;
+                Ok(Self::V1(inner))
+            }
+            _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
+        }
+    }
+}
+
+impl DataTransactionHeader {
+    /// Create a new DataTransactionHeader wrapped in the versioned wrapper
+    pub fn new(config: &ConsensusConfig) -> Self {
+        Self::V1(DataTransactionHeaderV1::new(config))
+    }
+}
+
+impl Default for DataTransactionHeaderV1 {
     fn default() -> Self {
         Self {
             version: 1,
@@ -156,30 +197,44 @@ impl Default for DataTransactionHeader {
         }
     }
 }
-impl Versioned for DataTransactionHeader {
+impl Versioned for DataTransactionHeaderV1 {
     const VERSION: u8 = 1;
 }
-impl HasInnerVersion for DataTransactionHeader {
+impl HasInnerVersion for DataTransactionHeaderV1 {
     fn inner_version(&self) -> u8 {
         self.version
     }
 }
 
 // Commitment Transaction versioned wrapper
-#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
+#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum VersionedCommitmentTransaction {
-    V1(CommitmentTransaction) = 1,
+#[serde(untagged)]
+pub enum CommitmentTransaction {
+    V1(CommitmentTransactionV1) = 1,
 }
 
-impl Default for VersionedCommitmentTransaction {
+impl Default for CommitmentTransaction {
     fn default() -> Self {
-        Self::V1(CommitmentTransaction::default())
+        Self::V1(CommitmentTransactionV1::default())
     }
 }
 
-impl VersionDiscriminant for VersionedCommitmentTransaction {
+impl Ord for CommitmentTransaction {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::V1(a), Self::V1(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for CommitmentTransaction {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl VersionDiscriminant for CommitmentTransaction {
     fn discriminant(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
@@ -187,15 +242,15 @@ impl VersionDiscriminant for VersionedCommitmentTransaction {
     }
 }
 
-impl Deref for VersionedCommitmentTransaction {
-    type Target = CommitmentTransaction;
+impl Deref for CommitmentTransaction {
+    type Target = CommitmentTransactionV1;
     fn deref(&self) -> &Self::Target {
         match self {
             Self::V1(v) => v,
         }
     }
 }
-impl DerefMut for VersionedCommitmentTransaction {
+impl DerefMut for CommitmentTransaction {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             Self::V1(v) => v,
@@ -203,7 +258,15 @@ impl DerefMut for VersionedCommitmentTransaction {
     }
 }
 
-impl Compact for VersionedCommitmentTransaction {
+impl CommitmentTransaction {
+    /// Calculate the value for a pledge at the given count
+    /// Delegates to the inner type's implementation
+    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
+        CommitmentTransactionV1::calculate_pledge_value_at_count(config, pledge_count)
+    }
+}
+
+impl Compact for CommitmentTransaction {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -216,7 +279,7 @@ impl Compact for VersionedCommitmentTransaction {
         let (disc, rest) = split_discriminant(buf);
         match disc {
             1 => {
-                let (inner, rest2) = CommitmentTransaction::from_compact(rest, rest.len());
+                let (inner, rest2) = CommitmentTransactionV1::from_compact(rest, rest.len());
                 (Self::V1(inner), rest2)
             }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
@@ -224,7 +287,7 @@ impl Compact for VersionedCommitmentTransaction {
     }
 }
 
-impl Signable for VersionedCommitmentTransaction {
+impl Signable for CommitmentTransaction {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
         match self {
@@ -237,15 +300,77 @@ impl Signable for VersionedCommitmentTransaction {
     }
 }
 
-impl CommitmentTransaction {
-    pub fn try_into_versioned(self) -> Result<VersionedCommitmentTransaction, VersioningError> {
-        match self.version {
-            1 => Ok(VersionedCommitmentTransaction::V1(self)),
-            other => Err(VersioningError::UnsupportedVersion(other)),
+impl alloy_rlp::Encodable for CommitmentTransaction {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        // Encode discriminant followed by inner struct
+        out.put_u8(self.discriminant());
+        match self {
+            Self::V1(inner) => inner.encode(out),
         }
     }
 }
-impl Default for CommitmentTransaction {
+
+impl alloy_rlp::Decodable for CommitmentTransaction {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        // Read discriminant
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+        let discriminant = buf[0];
+        *buf = &buf[1..];
+
+        match discriminant {
+            1 => {
+                let inner = CommitmentTransactionV1::decode(buf)?;
+                Ok(Self::V1(inner))
+            }
+            _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
+        }
+    }
+}
+
+impl CommitmentTransaction {
+    /// Create a new CommitmentTransaction wrapped in the versioned wrapper
+    pub fn new(config: &ConsensusConfig) -> Self {
+        Self::V1(CommitmentTransactionV1::new(config))
+    }
+
+    /// Create a new stake transaction with the configured stake fee as value
+    pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
+        Self::V1(CommitmentTransactionV1::new_stake(config, anchor))
+    }
+
+    /// Create a new unstake transaction with the configured stake fee as value
+    pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
+        Self::V1(CommitmentTransactionV1::new_unstake(config, anchor))
+    }
+
+    /// Create a new pledge transaction with decreasing cost per pledge
+    pub async fn new_pledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        Self::V1(
+            CommitmentTransactionV1::new_pledge(config, anchor, provider, signer_address).await,
+        )
+    }
+
+    /// Create a new unpledge transaction that refunds the most recent pledge's cost
+    pub async fn new_unpledge(
+        config: &ConsensusConfig,
+        anchor: H256,
+        provider: &impl PledgeDataProvider,
+        signer_address: Address,
+    ) -> Self {
+        Self::V1(
+            CommitmentTransactionV1::new_unpledge(config, anchor, provider, signer_address).await,
+        )
+    }
+}
+
+impl Default for CommitmentTransactionV1 {
     fn default() -> Self {
         Self {
             id: Default::default(),
@@ -261,10 +386,10 @@ impl Default for CommitmentTransaction {
     }
 }
 
-impl Versioned for CommitmentTransaction {
+impl Versioned for CommitmentTransactionV1 {
     const VERSION: u8 = 1;
 }
-impl HasInnerVersion for CommitmentTransaction {
+impl HasInnerVersion for CommitmentTransactionV1 {
     fn inner_version(&self) -> u8 {
         self.version
     }
@@ -288,7 +413,7 @@ impl HasInnerVersion for CommitmentTransaction {
 /// We include the Irys prefix to differentiate from EVM transactions.
 /// NOTE: be CAREFUL with using serde(default) it should ONLY be for `Option`al fields.
 #[serde(rename_all = "camelCase")]
-pub struct DataTransactionHeader {
+pub struct DataTransactionHeaderV1 {
     /// The transaction's version
     pub version: u8,
 
@@ -349,19 +474,19 @@ pub struct DataTransactionHeader {
 }
 
 /// Ordering for DataTransactionHeader by transaction ID
-impl Ord for DataTransactionHeader {
+impl Ord for DataTransactionHeaderV1 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
     }
 }
 
-impl PartialOrd for DataTransactionHeader {
+impl PartialOrd for DataTransactionHeaderV1 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl DataTransactionHeader {
+impl DataTransactionHeaderV1 {
     /// RLP Encoding of Transactions for Signing
     ///
     /// When RLP encoding a transaction for signing, an extra byte is included
@@ -383,26 +508,6 @@ impl DataTransactionHeader {
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
         self.encode(out)
     }
-
-    /// Fallible signature hash that returns an error for unsupported versions.
-    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
-        let versioned = self.clone().try_into_versioned()?;
-        Ok(versioned.signature_hash())
-    }
-
-    /// Validates the transaction signature by:
-    /// 1.) generating the prehash
-    /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
-    pub fn is_signature_valid(&self) -> bool {
-        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
-        let id_matches_signature = self.id.0 == id;
-        match self.signature_hash() {
-            Ok(sig_hash) => {
-                id_matches_signature && self.signature.validate_signature(sig_hash, self.signer)
-            }
-            Err(_e) => false,
-        }
-    }
 }
 
 /// Wrapper for the underlying DataTransactionHeader fields, this wrapper
@@ -420,7 +525,7 @@ pub struct DataTransaction {
 }
 
 impl DataTransaction {
-    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
+    pub fn signature_hash(&self) -> [u8; 32] {
         self.header.signature_hash()
     }
 
@@ -445,7 +550,7 @@ impl DataTransaction {
     }
 }
 
-impl DataTransactionHeader {
+impl DataTransactionHeaderV1 {
     pub fn new(config: &ConsensusConfig) -> Self {
         Self {
             id: H256::zero(),
@@ -463,6 +568,31 @@ impl DataTransactionHeader {
             signature: Signature::test_signature().into(),
             promoted_height: None,
         }
+    }
+
+    /// Simple getter methods for IrysTransaction compatibility
+    pub fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    pub fn signer(&self) -> Address {
+        self.signer
+    }
+
+    pub fn signature(&self) -> &IrysSignature {
+        &self.signature
+    }
+
+    pub fn anchor(&self) -> H256 {
+        self.anchor
+    }
+
+    pub fn user_fee(&self) -> U256 {
+        self.term_fee
+    }
+
+    pub fn total_cost(&self) -> U256 {
+        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
     }
 }
 
@@ -488,7 +618,7 @@ pub type TxPathHash = H256;
 /// Stores deserialized fields from a JSON formatted commitment transaction.
 /// NOTE: be CAREFUL with using serde(default) it should ONLY be for `Option`al fields.
 #[serde(rename_all = "camelCase")]
-pub struct CommitmentTransaction {
+pub struct CommitmentTransactionV1 {
     // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
     #[rlp(skip)]
     #[rlp(default)]
@@ -530,7 +660,7 @@ pub struct CommitmentTransaction {
 /// 1. Stake commitments (sorted by fee, highest first)
 /// 2. Pledge commitments (sorted by pledge_count_before_executing ascending, then by fee descending)
 /// 3. Other commitment types (sorted by fee)
-impl Ord for CommitmentTransaction {
+impl Ord for CommitmentTransactionV1 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // First, compare by commitment type (Stake > Pledge/Unpledge)
         match (&self.commitment_type, &other.commitment_type) {
@@ -556,13 +686,13 @@ impl Ord for CommitmentTransaction {
     }
 }
 
-impl PartialOrd for CommitmentTransaction {
+impl PartialOrd for CommitmentTransactionV1 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl CommitmentTransaction {
+impl CommitmentTransactionV1 {
     /// Create a new CommitmentTransaction with default values from config
     pub fn new(config: &ConsensusConfig) -> Self {
         Self {
@@ -668,28 +798,42 @@ impl CommitmentTransaction {
         self.encode(out)
     }
 
-    pub fn signature_hash(&self) -> Result<[u8; 32], VersioningError> {
-        let versioned = self.clone().try_into_versioned()?;
-        Ok(versioned.signature_hash())
-    }
-
     /// Returns the value stored in the transaction
     pub fn commitment_value(&self) -> U256 {
         self.value
     }
 
-    /// Validates the transaction signature by:
-    /// 1.) generating the prehash (signature_hash)
-    /// 2.) recovering the sender address, and comparing it to the tx's sender (sender MUST be part of the prehash)
-    pub fn is_signature_valid(&self) -> bool {
-        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
-        let id_matches_signature = self.id.0 == id;
-        match self.signature_hash() {
-            Ok(sig_hash) => {
-                id_matches_signature && self.signature.validate_signature(sig_hash, self.signer)
-            }
-            Err(_e) => false,
-        }
+    /// Returns the user fee for prioritization
+    pub fn user_fee(&self) -> U256 {
+        U256::from(self.fee)
+    }
+
+    /// Returns the total cost including value
+    pub fn total_cost(&self) -> U256 {
+        let additional_fee = match &self.commitment_type {
+            CommitmentType::Stake => self.value,
+            CommitmentType::Pledge { .. } => self.value,
+            CommitmentType::Unpledge { .. } => U256::zero(),
+            CommitmentType::Unstake => U256::zero(),
+        };
+        U256::from(self.fee).saturating_add(additional_fee)
+    }
+
+    /// Simple getter methods for IrysTransaction compatibility
+    pub fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    pub fn signer(&self) -> Address {
+        self.signer
+    }
+
+    pub fn signature(&self) -> &IrysSignature {
+        &self.signature
+    }
+
+    pub fn anchor(&self) -> H256 {
+        self.anchor
     }
 
     /// Validates that the commitment transaction has a sufficient fee
@@ -777,9 +921,23 @@ pub trait IrysTransactionCommon {
         Self: Sized;
 }
 
+impl DataTransactionHeader {
+    pub fn user_fee(&self) -> U256 {
+        // Return term_fee as the user fee for prioritization
+        // todo: use TermFeeCharges to get the fee that will go to the miner
+        self.term_fee
+    }
+
+    pub fn total_cost(&self) -> U256 {
+        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
+    }
+}
+
 impl IrysTransactionCommon for DataTransactionHeader {
     fn is_signature_valid(&self) -> bool {
-        self.is_signature_valid()
+        self.signature
+            .validate_signature(self.signature_hash(), self.signer)
+            && keccak256(self.signature.as_bytes()).0 == self.id.0
     }
 
     fn id(&self) -> IrysTransactionId {
@@ -787,7 +945,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
+        self.total_cost()
     }
 
     fn signer(&self) -> Address {
@@ -803,9 +961,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        // Return term_fee as the user fee for prioritization
-        // todo: use TermFeeCharges to get the fee that will go to the miner
-        self.term_fee
+        self.user_fee()
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -814,9 +970,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
         // Store the signer address
         self.signer = Address::from_public_key(signer.signer.verifying_key());
+        self.version = 1;
 
         // Create the signature hash and sign it
-        let prehash = self.signature_hash()?;
+        let prehash = self.signature_hash();
         let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
         self.signature = IrysSignature::new(signature);
@@ -829,16 +986,12 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 }
 
-impl IrysTransactionCommon for CommitmentTransaction {
-    fn is_signature_valid(&self) -> bool {
-        self.is_signature_valid()
+impl CommitmentTransaction {
+    pub fn user_fee(&self) -> U256 {
+        U256::from(self.fee)
     }
 
-    fn id(&self) -> IrysTransactionId {
-        self.id
-    }
-
-    fn total_cost(&self) -> U256 {
+    pub fn total_cost(&self) -> U256 {
         let additional_fee = match &self.commitment_type {
             CommitmentType::Stake => self.value,
             CommitmentType::Pledge { .. } => self.value,
@@ -846,6 +999,22 @@ impl IrysTransactionCommon for CommitmentTransaction {
             CommitmentType::Unstake => U256::zero(),
         };
         U256::from(self.fee).saturating_add(additional_fee)
+    }
+}
+
+impl IrysTransactionCommon for CommitmentTransaction {
+    fn is_signature_valid(&self) -> bool {
+        self.signature
+            .validate_signature(self.signature_hash(), self.signer)
+            && keccak256(self.signature.as_bytes()).0 == self.id.0
+    }
+
+    fn id(&self) -> IrysTransactionId {
+        self.id
+    }
+
+    fn total_cost(&self) -> U256 {
+        self.total_cost()
     }
 
     fn signer(&self) -> Address {
@@ -861,7 +1030,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn user_fee(&self) -> U256 {
-        U256::from(self.fee)
+        self.user_fee()
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -871,7 +1040,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
         self.signer = signer.address();
 
         // Create the signature hash and sign it
-        let prehash = self.signature_hash()?;
+        let prehash = self.signature_hash();
         let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
         self.signature = IrysSignature::new(signature);
@@ -927,13 +1096,6 @@ impl IrysTransactionCommon for IrysTransaction {
             Self::Commitment(tx) => tx.id(),
         }
     }
-
-    // fn total_fee(&self) -> u64 {
-    //     match self {
-    //         Self::Data(tx) => tx.total_fee(),
-    //         Self::Commitment(tx) => tx.total_fee(),
-    //     }
-    // }
 
     fn signer(&self) -> Address {
         match self {
@@ -1076,7 +1238,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let mut header = mock_header(&config);
 
-        // action
+        // action - test RLP encoding/decoding the outer versioned structure
         let mut buffer = vec![];
         header.encode(&mut buffer);
         let decoded = DataTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
@@ -1086,6 +1248,8 @@ mod tests {
         header.id = H256::zero();
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(header, decoded);
+        // Verify version discriminant is preserved in RLP encoding
+        assert_eq!(decoded.version, 1);
     }
 
     #[test]
@@ -1094,7 +1258,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let mut header = mock_commitment_tx(&config);
 
-        // action
+        // test RLP encoding/decoding the outer versioned structure
         let mut buffer = vec![];
         header.encode(&mut buffer);
         let decoded = CommitmentTransaction::decode(&mut buffer.as_slice()).unwrap();
@@ -1104,6 +1268,46 @@ mod tests {
         header.id = H256::zero();
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(header, decoded);
+        // Verify version discriminant is preserved in RLP encoding
+        assert_eq!(decoded.version, 1);
+    }
+
+    #[test]
+    fn test_irys_transaction_header_compact_round_trip() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let original_header = mock_header(&config);
+
+        // action - test Compact encoding/decoding the outer versioned structure
+        let mut buffer = vec![];
+        original_header.to_compact(&mut buffer);
+        let (decoded_header, rest) = DataTransactionHeader::from_compact(&buffer, buffer.len());
+
+        // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
+        assert_eq!(original_header, decoded_header);
+        // Verify version discriminant is preserved in Compact encoding
+        assert_eq!(decoded_header.version, 1);
+        assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+        assert!(rest.is_empty(), "the whole buffer should be consumed");
+    }
+
+    #[test]
+    fn test_commitment_transaction_compact_round_trip() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let original_tx = mock_commitment_tx(&config);
+
+        // action - test Compact encoding/decoding the outer versioned structure
+        let mut buffer = vec![];
+        original_tx.to_compact(&mut buffer);
+        let (decoded_tx, rest) = CommitmentTransaction::from_compact(&buffer, buffer.len());
+
+        // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
+        assert_eq!(original_tx, decoded_tx);
+        // Verify version discriminant is preserved in Compact encoding
+        assert_eq!(decoded_tx.version, 1);
+        assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+        assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
 
     #[test]
@@ -1135,7 +1339,7 @@ mod tests {
         let serialized = serde_json::to_string_pretty(&original_tx).expect("Failed to serialize");
 
         println!("{}", &serialized);
-        // Deserialize the JSON back to a commitment tx
+        // Deserialize the JSON back to a CommitmentTransaction
         let deserialized: CommitmentTransaction =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
@@ -1145,26 +1349,19 @@ mod tests {
 
     #[test]
     fn test_tx_encode_and_signing() {
-        // setup
         let config = ConsensusConfig::testing();
-        let original_header = mock_header(&config);
-        let mut sig_data = Vec::new();
-        original_header.encode(&mut sig_data);
-        let dec: DataTransactionHeader =
-            DataTransactionHeader::decode(&mut sig_data.as_slice()).unwrap();
-
-        // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
 
-        // Test signing the header directly using the trait method
-        let signed_header = dec.sign(&signer).unwrap();
+        // Test signing the header directly using the outer versioned type
+        let header = mock_header(&config);
+        let signed_header = header.sign(&signer).unwrap();
         assert!(signed_header.is_signature_valid());
 
-        // Also test the old way for IrysTransaction
+        // Also test with DataTransaction
         let tx = DataTransaction {
             header: mock_header(&config),
             ..Default::default()
@@ -1176,22 +1373,16 @@ mod tests {
 
     #[test]
     fn test_commitment_tx_encode_and_signing() {
-        // setup
         let config = ConsensusConfig::testing();
-        let original_tx = mock_commitment_tx(&config);
-        let mut sig_data = Vec::new();
-        original_tx.encode(&mut sig_data);
-        let _dec = CommitmentTransaction::decode(&mut sig_data.as_slice()).unwrap();
-
-        // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
 
-        // Test using the new trait method
-        let signed_tx = original_tx.clone().sign(&signer).unwrap();
+        // Test signing the outer versioned type directly
+        let tx = mock_commitment_tx(&config);
+        let signed_tx = tx.sign(&signer).unwrap();
 
         println!(
             "{}",
@@ -1201,8 +1392,63 @@ mod tests {
         assert!(signed_tx.is_signature_valid());
     }
 
+    #[test]
+    fn test_data_transaction_signature_validation() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner {
+            signer: SigningKey::random(&mut rand::thread_rng()),
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+        };
+
+        let tx = DataTransaction {
+            header: mock_header(&config),
+            ..Default::default()
+        };
+
+        // Sign the transaction
+        let mut signed_tx = signer.sign_transaction(tx).unwrap();
+
+        // Verify initial signature is valid
+        assert!(signed_tx.header.is_signature_valid());
+
+        // Test: changing the ID should make validation fail
+        signed_tx.header.id = H256::random();
+        assert!(
+            !signed_tx.header.is_signature_valid(),
+            "Signature validation should fail when ID is changed"
+        );
+    }
+
+    #[test]
+    fn test_commitment_transaction_signature_validation() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner {
+            signer: SigningKey::random(&mut rand::thread_rng()),
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+        };
+
+        let tx = mock_commitment_tx(&config);
+
+        // Sign the transaction
+        let mut signed_tx = tx.sign(&signer).unwrap();
+
+        // Verify initial signature is valid
+        assert!(signed_tx.is_signature_valid());
+
+        // Test: changing the ID should make validation fail
+        signed_tx.id = H256::random();
+        assert!(
+            !signed_tx.is_signature_valid(),
+            "Signature validation should fail when ID is changed"
+        );
+    }
+
     fn mock_header(config: &ConsensusConfig) -> DataTransactionHeader {
-        DataTransactionHeader {
+        DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::from([255_u8; 32]),
             anchor: H256::from([1_u8; 32]),
             signer: Address::default(),
@@ -1217,7 +1463,7 @@ mod tests {
             version: 1,
             promoted_height: None,
             signature: Signature::test_signature().into(),
-        }
+        })
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
@@ -1282,7 +1528,7 @@ mod pledge_decay_parametrized_tests {
 
         // Create a new pledge transaction
         let pledge_tx =
-            CommitmentTransaction::new_pledge(&config, H256::zero(), &provider, signer_address)
+            CommitmentTransactionV1::new_pledge(&config, H256::zero(), &provider, signer_address)
                 .await;
 
         // Convert actual value to decimal for comparison
@@ -1336,7 +1582,7 @@ mod pledge_decay_parametrized_tests {
 
         // Create an unpledge transaction
         let unpledge_tx =
-            CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer_address)
+            CommitmentTransactionV1::new_unpledge(&config, H256::zero(), &provider, signer_address)
                 .await;
 
         // Verify the commitment type is correct
@@ -1372,8 +1618,8 @@ mod commitment_ordering_tests {
         id: &str,
         commitment_type: CommitmentType,
         fee: u64,
-    ) -> CommitmentTransaction {
-        CommitmentTransaction {
+    ) -> CommitmentTransactionV1 {
+        CommitmentTransactionV1 {
             id: H256::from_slice(&[id.as_bytes()[0]; 32]),
             anchor: H256::zero(),
             signer: Address::default(),

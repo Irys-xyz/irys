@@ -12,9 +12,7 @@ use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
-    MEGABYTE,
+    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -75,8 +73,7 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     };
     let mut block_without_chunk = block.clone();
     block_without_chunk.poa.chunk = None;
-    let versioned = block_without_chunk.try_into_versioned()?;
-    tx.put::<IrysBlockHeaders>(block.block_hash, versioned.into())?;
+    tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
     Ok(())
 }
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
@@ -86,8 +83,8 @@ pub fn block_header_by_hash<T: DbTx>(
     include_chunk: bool,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     let mut block = tx.get::<IrysBlockHeaders>(*block_hash)?.map(|wrapped| {
-        let versioned: VersionedIrysBlockHeader = wrapped.into();
-        versioned.into_inner()
+        let versioned: IrysBlockHeader = wrapped.into();
+        versioned
     });
 
     if include_chunk {
@@ -101,8 +98,7 @@ pub fn block_header_by_hash<T: DbTx>(
 
 /// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
-    let versioned = tx_header.clone().try_into_versioned()?;
-    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, versioned.into())?)
+    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
 /// Gets a [`DataTransactionHeader`] by it's [`IrysTransactionId`]
@@ -111,8 +107,8 @@ pub fn tx_header_by_txid<T: DbTx>(
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
     Ok(tx.get::<IrysDataTxHeaders>(*txid)?.map(|wrapped| {
-        let v: VersionedDataTransactionHeader = wrapped.into();
-        (*v).clone()
+        let v: DataTransactionHeader = wrapped.into();
+        v
     }))
 }
 
@@ -121,8 +117,7 @@ pub fn insert_commitment_tx<T: DbTxMut>(
     tx: &T,
     commitment_tx: &CommitmentTransaction,
 ) -> eyre::Result<()> {
-    let versioned = commitment_tx.clone().try_into_versioned()?;
-    Ok(tx.put::<IrysCommitments>(commitment_tx.id, versioned.into())?)
+    Ok(tx.put::<IrysCommitments>(commitment_tx.id, commitment_tx.clone().into())?)
 }
 
 /// Gets a [`CommitmentTransaction`] by it's [`IrysTransactionId`]
@@ -131,12 +126,12 @@ pub fn commitment_tx_by_txid<T: DbTx>(
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<CommitmentTransaction>> {
     Ok(tx.get::<IrysCommitments>(*txid)?.map(|wrapped| {
-        let v: VersionedCommitmentTransaction = wrapped.into();
-        (*v).clone()
+        let v: CommitmentTransaction = wrapped.into();
+        v
     }))
 }
 
-/// Takes an [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
+/// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
@@ -373,10 +368,10 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader {
+        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1 {
             version: 1,
             ..Default::default()
-        };
+        });
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -387,12 +382,12 @@ mod tests {
         assert_eq!(result, Some(tx_header));
 
         // Write a commitment tx
-        let commitment_tx = CommitmentTransaction {
+        let commitment_tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             // Override some defaults to insure deserialization is working
             id: H256::from([10_u8; 32]),
             version: 1,
             ..Default::default()
-        };
+        });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 
         // Read a commitment tx

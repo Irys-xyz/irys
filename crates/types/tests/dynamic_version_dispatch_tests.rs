@@ -1,60 +1,60 @@
 use irys_types::{
-    versioning::VersioningError, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+    CommitmentTransaction, CommitmentTransactionV1, ConsensusConfig, DataTransactionHeader,
+    DataTransactionHeaderV1, IrysBlockHeader, IrysBlockHeaderV1,
 };
 
 #[test]
-fn data_tx_try_into_versioned_supported() {
-    let header = DataTransactionHeader {
+fn data_tx_v1_construction_from_inner() {
+    // Test that we can construct a versioned type from an inner V1 type
+    let header = DataTransactionHeaderV1 {
         version: 1,
         ..Default::default()
     };
-    header.try_into_versioned().expect("v1 must be supported");
+    let versioned = DataTransactionHeader::V1(header);
+    assert_eq!(versioned.version, 1);
 }
 
 #[test]
-fn data_tx_try_into_versioned_unsupported() {
-    let header = DataTransactionHeader {
-        version: 42,
-        ..Default::default()
-    };
-    let err = header.try_into_versioned().unwrap_err();
-    matches!(err, VersioningError::UnsupportedVersion(42));
+fn data_tx_uses_new_constructor() {
+    // Prefer using the public constructor for normal usage
+    let config = ConsensusConfig::testing();
+    let versioned = DataTransactionHeader::new(&config);
+    assert_eq!(versioned.version, 1);
 }
 
 #[test]
-fn block_header_try_into_versioned_supported() {
-    let header = IrysBlockHeader {
+fn block_header_v1_construction_from_inner() {
+    // Test that we can construct a versioned type from an inner V1 type
+    let header = IrysBlockHeaderV1 {
         version: 1,
         ..Default::default()
     };
-    header.try_into_versioned().expect("v1 must be supported");
+    let versioned = IrysBlockHeader::V1(header);
+    assert_eq!(versioned.version, 1);
 }
 
 #[test]
-fn block_header_try_into_versioned_unsupported() {
-    let header = IrysBlockHeader {
-        version: 7,
-        ..Default::default()
-    };
-    let err = header.try_into_versioned().unwrap_err();
-    matches!(err, VersioningError::UnsupportedVersion(7));
+fn block_header_uses_new_constructor() {
+    // Prefer using the public constructor for normal usage
+    let versioned = IrysBlockHeader::new_mock_header();
+    assert_eq!(versioned.version, 1);
 }
 
 #[test]
-fn commitment_tx_try_into_versioned_supported() {
-    let tx = CommitmentTransaction {
+fn commitment_tx_v1_construction_from_inner() {
+    // Test that we can construct a versioned type from an inner V1 type
+    let tx = CommitmentTransactionV1 {
         version: 1,
         ..Default::default()
     };
-    tx.try_into_versioned().expect("v1 must be supported");
+    let versioned = CommitmentTransaction::V1(tx);
+    assert_eq!(versioned.version, 1);
 }
 
 #[test]
-fn commitment_tx_try_into_versioned_unsupported() {
-    let tx = CommitmentTransaction {
-        version: 3,
-        ..Default::default()
-    };
-    let err = tx.try_into_versioned().unwrap_err();
-    matches!(err, VersioningError::UnsupportedVersion(3));
+fn commitment_tx_uses_new_constructor() {
+    // Prefer using the public constructor for normal usage
+    let config = ConsensusConfig::testing();
+    let versioned = CommitmentTransaction::new_stake(&config, irys_types::H256::zero());
+    assert_eq!(versioned.version, 1);
 }

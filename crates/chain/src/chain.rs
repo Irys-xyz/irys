@@ -407,6 +407,7 @@ impl IrysNode {
             evm_block_hash,
             self.config.consensus.number_of_ingress_proofs_total,
         );
+
         // Generate genesis commitments from configuration
         let commitments = get_genesis_commitments(&self.config).await;
 
@@ -1921,8 +1922,8 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
-        let stake_tx = signer.sign_commitment(stake_tx)?;
+        let mut stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
+        signer.sign_commitment(&mut stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
         debug!("Posted stake tx {:?}", &stake_tx.id);
@@ -1950,7 +1951,7 @@ async fn stake_and_pledge(
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             &config.consensus,
             latest_block_hash,
             mempool_pledge_provider.as_ref(),
@@ -1958,7 +1959,7 @@ async fn stake_and_pledge(
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx)?;
+        signer.sign_commitment(&mut pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         debug!(

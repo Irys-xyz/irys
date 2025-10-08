@@ -199,7 +199,7 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = DataTransactionHeader {
+        let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
@@ -215,7 +215,7 @@ mod tests {
             version: 1,
             promoted_height: None,
             signature: Default::default(),
-        };
+        });
 
         let transaction = DataTransaction {
             header: original_header,
@@ -223,7 +223,7 @@ mod tests {
         };
         let transaction = irys_signer.sign_transaction(transaction)?;
         assert!(transaction.header.signature.validate_signature(
-            transaction.signature_hash()?,
+            transaction.signature_hash(),
             Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
         ));
 

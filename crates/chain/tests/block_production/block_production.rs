@@ -19,7 +19,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
+    IrysBlockHeader, NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;

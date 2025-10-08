@@ -90,9 +90,7 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response: oneshot::Sender<
-            eyre::Result<Option<(Arc<irys_types::IrysBlockHeader>, EthBuiltPayload)>>,
-        >,
+        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
@@ -883,7 +881,7 @@ pub trait BlockProdStrategy {
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
         // build a new block header
-        let mut irys_block = IrysBlockHeader {
+        let mut irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             version: 1,
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
@@ -947,7 +945,7 @@ pub trait BlockProdStrategy {
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
-        };
+        });
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
