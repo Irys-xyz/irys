@@ -5,10 +5,45 @@ use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    mempool_service::MempoolServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_types::{CommitmentTransaction, NodeConfig};
+use tokio::sync::oneshot;
+use tracing::debug;
+
+async fn gossip_commitment_to_node(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    commitment: &CommitmentTransaction,
+) -> eyre::Result<()> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    node.node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestCommitmentTx(
+            commitment.clone(),
+            resp_tx,
+        ))?;
+
+    match resp_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            debug!(
+                tx_id = ?commitment.id,
+                ?err,
+                "Commitment gossip rejected by mempool"
+            );
+        }
+        Err(recv_err) => {
+            debug!(
+                tx_id = ?commitment.id,
+                ?recv_err,
+                "Commitment gossip channel dropped"
+            );
+        }
+    }
+    Ok(())
+}
 
 #[test_log::test(actix_web::test)]
 async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
@@ -108,6 +143,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
+
+    for node in [&genesis_node, &victim_node, &evil_node] {
+        gossip_commitment_to_node(node, &invalid_unpledge).await?;
+    }
 
     send_block_to_block_tree(
         &genesis_node.node_ctx,

@@ -1425,6 +1425,18 @@ pub async fn commitment_txs_are_valid(
         })?;
     }
 
+    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
+        let read = block_tree_guard.read();
+        let commitment_snapshot = read.get_commitment_snapshot(&block.previous_block_hash)?;
+        let epoch_snapshot = read
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .ok_or_eyre(format!(
+                "Parent epoch snapshot missing for block {}",
+                block.previous_block_hash
+            ))?;
+        (commitment_snapshot, epoch_snapshot)
+    };
+
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
@@ -1434,9 +1446,6 @@ pub async fn commitment_txs_are_valid(
         );
 
         // Get expected commitments from parent's snapshot
-        let parent_commitment_snapshot = block_tree_guard
-            .read()
-            .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
@@ -1474,6 +1483,25 @@ pub async fn commitment_txs_are_valid(
 
         debug!("Epoch block commitment transaction validation successful");
         return Ok(());
+    }
+
+    // Regular block validation: ensure unpledge targets are owned by signer in parent snapshot
+    for tx in &actual_commitments {
+        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
+            let partition_hash = H256::from(partition_hash);
+            let owner = parent_epoch_snapshot
+                .partition_assignments
+                .get_assignment(partition_hash)
+                .map(|assignment| assignment.miner_address);
+            ensure!(
+                owner == Some(tx.signer),
+                "Unpledge commitment {} targets partition {} not owned by signer {} (owner {:?})",
+                tx.id,
+                partition_hash,
+                tx.signer,
+                owner
+            );
+        }
     }
 
     // Regular block validation: check priority ordering for stake and pledge commitments
