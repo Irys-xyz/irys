@@ -855,6 +855,19 @@ mod tests {
 
         // action
         handle.send(request)?;
+
+        // Wait until packing starts to avoid racing the idle waiter
+        let wait_start = std::time::Instant::now();
+        loop {
+            if !storage_module.get_intervals(ChunkType::Entropy).is_empty() {
+                break;
+            }
+            if wait_start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
         handle
             .waiter()
             .wait_for_idle(Some(Duration::from_secs(99999)))
