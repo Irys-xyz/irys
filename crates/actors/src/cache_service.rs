@@ -324,13 +324,12 @@ impl ChunkCacheService {
     fn prune_cache_by_time(&self, max_age_seconds: u64) -> eyre::Result<()> {
         let now = irys_types::UnixTimestamp::now()
             .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
-        let now_secs = now.as_secs();
 
-        let expiry_threshold = now_secs.saturating_sub(max_age_seconds);
+        let expiry_threshold = now.saturating_sub_secs(max_age_seconds);
 
         debug!(
-            now = now_secs,
-            threshold = expiry_threshold,
+            now = now.as_secs(),
+            threshold = expiry_threshold.as_secs(),
             max_age_seconds,
             "Time-based eviction: checking for expired entries"
         );
@@ -342,11 +341,11 @@ impl ChunkCacheService {
 
         for (data_root, cached) in entries {
             // Stop when we reach entries that are still fresh
-            if cached.cached_at.as_secs() >= expiry_threshold {
+            if cached.cached_at >= expiry_threshold {
                 break;
             }
 
-            let age_seconds = now_secs.saturating_sub(cached.cached_at.as_secs());
+            let age_seconds = now.saturating_seconds_since(cached.cached_at);
             debug!(
                 ?data_root,
                 cached_at = cached.cached_at.as_secs(),
@@ -411,7 +410,6 @@ impl ChunkCacheService {
         // Get current timestamp once for age calculations
         let now = irys_types::UnixTimestamp::now()
             .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
-        let now_secs = now.as_secs();
 
         // Evict oldest entries until we're under the limit (with margin)
         for (data_root, cached) in entries {
@@ -419,7 +417,7 @@ impl ChunkCacheService {
                 break;
             }
 
-            let age_seconds = now_secs.saturating_sub(cached.cached_at.as_secs());
+            let age_seconds = now.saturating_seconds_since(cached.cached_at);
 
             debug!(
                 ?data_root,
@@ -739,8 +737,7 @@ mod tests {
             // Insert entries at different ages
             let mut inserted_roots = Vec::new();
             for age in &entry_ages_seconds {
-                let timestamp =
-                    irys_types::UnixTimestamp::from_secs(now.as_secs().saturating_sub(*age));
+                let timestamp = now.saturating_sub_secs(*age);
                 let root = insert_entry_with_timestamp(&service, timestamp)?;
                 inserted_roots.push((root, *age));
             }
@@ -806,8 +803,7 @@ mod tests {
 
             // Insert 5 recent entries (all within 1 minute)
             for i in 0..5 {
-                let timestamp =
-                    irys_types::UnixTimestamp::from_secs(now.as_secs().saturating_sub(i * 10));
+                let timestamp = now.saturating_sub_secs(i * 10);
                 insert_entry_with_timestamp(&service, timestamp)?;
             }
 
@@ -829,9 +825,7 @@ mod tests {
 
             // Insert 5 old entries (all > 2 hours old)
             for i in 0..5 {
-                let timestamp = irys_types::UnixTimestamp::from_secs(
-                    now.as_secs().saturating_sub(7200 + i * 100),
-                );
+                let timestamp = now.saturating_sub_secs(7200 + i * 100);
                 insert_entry_with_timestamp(&service, timestamp)?;
             }
 
@@ -852,15 +846,15 @@ mod tests {
             let now = irys_types::UnixTimestamp::now()?;
 
             // Entry exactly at threshold (3600 seconds old)
-            let at_threshold = irys_types::UnixTimestamp::from_secs(now.as_secs() - 3600);
+            let at_threshold = now.saturating_sub_secs(3600);
             let root_at = insert_entry_with_timestamp(&service, at_threshold)?;
 
             // Entry just under threshold (3599 seconds old)
-            let under_threshold = irys_types::UnixTimestamp::from_secs(now.as_secs() - 3599);
+            let under_threshold = now.saturating_sub_secs(3599);
             let root_under = insert_entry_with_timestamp(&service, under_threshold)?;
 
             // Entry just over threshold (3601 seconds old)
-            let over_threshold = irys_types::UnixTimestamp::from_secs(now.as_secs() - 3601);
+            let over_threshold = now.saturating_sub_secs(3601);
             let root_over = insert_entry_with_timestamp(&service, over_threshold)?;
 
             service.prune_cache_by_time(3600)?;
@@ -1047,13 +1041,13 @@ mod tests {
             let now = irys_types::UnixTimestamp::now()?;
 
             // Insert entries with known timestamps (oldest to newest)
-            let oldest_ts = irys_types::UnixTimestamp::from_secs(now.as_secs() - 1000);
+            let oldest_ts = now.saturating_sub_secs(1000);
             let oldest_root = insert_entry_with_timestamp(&service, oldest_ts)?;
 
-            let middle_ts = irys_types::UnixTimestamp::from_secs(now.as_secs() - 500);
+            let middle_ts = now.saturating_sub_secs(500);
             let middle_root = insert_entry_with_timestamp(&service, middle_ts)?;
 
-            let newest_ts = irys_types::UnixTimestamp::from_secs(now.as_secs() - 100);
+            let newest_ts = now.saturating_sub_secs(100);
             let newest_root = insert_entry_with_timestamp(&service, newest_ts)?;
 
             // Fill cache over limit

@@ -44,12 +44,6 @@ use std::time::SystemTime;
 pub struct UnixTimestamp(u64);
 
 impl UnixTimestamp {
-    /// Zero timestamp (Unix epoch: 1970-01-01 00:00:00 UTC)
-    pub const ZERO: Self = Self(0);
-
-    /// Maximum representable timestamp
-    pub const MAX: Self = Self(u64::MAX);
-
     /// Creates a UnixTimestamp from the current system time
     ///
     /// # Security Considerations
@@ -75,16 +69,6 @@ impl UnixTimestamp {
         ))
     }
 
-    /// Creates a UnixTimestamp from the current system time
-    ///
-    /// # Panics
-    ///
-    /// Panics if the system time is before the Unix epoch.
-    #[inline]
-    pub fn now_or_panic() -> Self {
-        Self::now().expect("System time before Unix epoch")
-    }
-
     /// Creates a UnixTimestamp from seconds since Unix epoch
     #[inline]
     pub const fn from_secs(secs: u64) -> Self {
@@ -97,80 +81,16 @@ impl UnixTimestamp {
         self.0
     }
 
-    ///
-    /// Returns None if overflow occurs
-    #[inline]
-    pub const fn checked_add_secs(self, secs: u64) -> Option<Self> {
-        match self.0.checked_add(secs) {
-            Some(val) => Some(Self(val)),
-            None => None,
-        }
-    }
-
-    /// Saturating addition with duration in seconds
-    #[inline]
-    pub const fn saturating_add_secs(self, secs: u64) -> Self {
-        Self(self.0.saturating_add(secs))
-    }
-
-    /// Checked subtraction of duration in seconds
-    ///
-    /// Returns None if underflow occurs
-    #[inline]
-    pub const fn checked_sub_secs(self, secs: u64) -> Option<Self> {
-        match self.0.checked_sub(secs) {
-            Some(val) => Some(Self(val)),
-            None => None,
-        }
-    }
-
     /// Saturating subtraction of duration in seconds
     #[inline]
     pub const fn saturating_sub_secs(self, secs: u64) -> Self {
         Self(self.0.saturating_sub(secs))
     }
 
-    /// Returns the number of seconds between two timestamps
-    ///
-    /// Returns None if self < other (negative duration)
-    #[inline]
-    pub const fn seconds_since(self, other: Self) -> Option<u64> {
-        self.0.checked_sub(other.0)
-    }
-
-    /// Returns the duration between two timestamps
-    ///
-    /// Returns None if self < other (negative duration)
-    #[inline]
-    pub fn duration_since(self, other: Self) -> Option<std::time::Duration> {
-        self.seconds_since(other)
-            .map(std::time::Duration::from_secs)
-    }
-
     /// Returns the saturated number of seconds between two timestamps
     #[inline]
     pub const fn saturating_seconds_since(self, other: Self) -> u64 {
         self.0.saturating_sub(other.0)
-    }
-
-    /// Returns the saturated duration between two timestamps
-    #[inline]
-    pub fn saturating_duration_since(self, other: Self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.saturating_seconds_since(other))
-    }
-
-    /// Checks if this timestamp has passed (is before current time)
-    ///
-    /// Returns `false` if unable to determine current time
-    #[inline]
-    pub fn has_passed(self) -> bool {
-        Self::now().is_ok_and(|now| self < now)
-    }
-
-    /// Returns true if this is the zero timestamp
-    #[inline]
-    pub const fn is_zero(self) -> bool {
-        self.0 == 0
     }
 }
 
@@ -250,12 +170,6 @@ mod tests {
     use rstest::rstest;
 
     #[test]
-    fn test_zero_timestamp() {
-        assert_eq!(UnixTimestamp::ZERO.as_secs(), 0);
-        assert!(UnixTimestamp::ZERO.is_zero());
-    }
-
-    #[test]
     fn test_from_secs() {
         let ts = UnixTimestamp::from_secs(1609459200);
         assert_eq!(ts.as_secs(), 1609459200);
@@ -265,117 +179,22 @@ mod tests {
     fn test_now() {
         let ts = UnixTimestamp::now().expect("Failed to get current time");
         assert!(ts.as_secs() > 0);
-        assert!(!ts.is_zero());
     }
 
     #[test]
-    fn test_now_or_panic() {
-        let ts = UnixTimestamp::now_or_panic();
-        assert!(ts.as_secs() > 0);
-        assert!(!ts.is_zero());
-    }
-
-    #[test]
-    fn test_arithmetic() {
+    fn test_saturating_sub() {
         let ts = UnixTimestamp::from_secs(100);
-
-        assert_eq!(ts.checked_add_secs(50), Some(UnixTimestamp::from_secs(150)));
-        assert_eq!(ts.saturating_add_secs(50), UnixTimestamp::from_secs(150));
-
-        assert_eq!(ts.checked_sub_secs(30), Some(UnixTimestamp::from_secs(70)));
         assert_eq!(ts.saturating_sub_secs(30), UnixTimestamp::from_secs(70));
-
-        assert_eq!(ts.checked_sub_secs(200), None);
-        assert_eq!(ts.saturating_sub_secs(200), UnixTimestamp::ZERO);
-    }
-
-    #[rstest]
-    #[case(UnixTimestamp::MAX, 1, None)]
-    #[case(UnixTimestamp::MAX, u64::MAX, None)]
-    #[case(UnixTimestamp::from_secs(u64::MAX - 1), 1, Some(UnixTimestamp::MAX))]
-    #[case(UnixTimestamp::from_secs(u64::MAX - 1), 2, None)]
-    #[case(UnixTimestamp::ZERO, 0, Some(UnixTimestamp::ZERO))]
-    #[case(UnixTimestamp::ZERO, 1, Some(UnixTimestamp::from_secs(1)))]
-    #[case(UnixTimestamp::from_secs(100), 50, Some(UnixTimestamp::from_secs(150)))]
-    fn test_checked_add_edge_cases(
-        #[case] base: UnixTimestamp,
-        #[case] secs: u64,
-        #[case] expected: Option<UnixTimestamp>,
-    ) {
-        assert_eq!(base.checked_add_secs(secs), expected);
-    }
-
-    #[rstest]
-    #[case(UnixTimestamp::MAX, 1, UnixTimestamp::MAX)]
-    #[case(UnixTimestamp::MAX, u64::MAX, UnixTimestamp::MAX)]
-    #[case(UnixTimestamp::from_secs(u64::MAX - 1), 10, UnixTimestamp::MAX)]
-    #[case(UnixTimestamp::from_secs(100), 50, UnixTimestamp::from_secs(150))]
-    fn test_saturating_add_edge_cases(
-        #[case] base: UnixTimestamp,
-        #[case] secs: u64,
-        #[case] expected: UnixTimestamp,
-    ) {
-        assert_eq!(base.saturating_add_secs(secs), expected);
-    }
-
-    #[rstest]
-    #[case(UnixTimestamp::ZERO, 1, None)]
-    #[case(UnixTimestamp::ZERO, u64::MAX, None)]
-    #[case(UnixTimestamp::from_secs(100), 101, None)]
-    #[case(UnixTimestamp::from_secs(100), 100, Some(UnixTimestamp::ZERO))]
-    #[case(UnixTimestamp::from_secs(100), 50, Some(UnixTimestamp::from_secs(50)))]
-    fn test_checked_sub_edge_cases(
-        #[case] base: UnixTimestamp,
-        #[case] secs: u64,
-        #[case] expected: Option<UnixTimestamp>,
-    ) {
-        assert_eq!(base.checked_sub_secs(secs), expected);
-    }
-
-    #[rstest]
-    #[case(UnixTimestamp::ZERO, 1, UnixTimestamp::ZERO)]
-    #[case(UnixTimestamp::ZERO, u64::MAX, UnixTimestamp::ZERO)]
-    #[case(UnixTimestamp::from_secs(50), 100, UnixTimestamp::ZERO)]
-    #[case(UnixTimestamp::from_secs(100), 50, UnixTimestamp::from_secs(50))]
-    fn test_saturating_sub_edge_cases(
-        #[case] base: UnixTimestamp,
-        #[case] secs: u64,
-        #[case] expected: UnixTimestamp,
-    ) {
-        assert_eq!(base.saturating_sub_secs(secs), expected);
+        assert_eq!(ts.saturating_sub_secs(200), UnixTimestamp::from_secs(0));
     }
 
     #[test]
-    fn test_seconds_since() {
+    fn test_saturating_seconds_since() {
         let ts1 = UnixTimestamp::from_secs(100);
         let ts2 = UnixTimestamp::from_secs(50);
 
-        assert_eq!(ts1.seconds_since(ts2), Some(50));
-        assert_eq!(ts2.seconds_since(ts1), None);
         assert_eq!(ts1.saturating_seconds_since(ts2), 50);
         assert_eq!(ts2.saturating_seconds_since(ts1), 0);
-    }
-
-    #[test]
-    fn test_duration_since() {
-        let ts1 = UnixTimestamp::from_secs(100);
-        let ts2 = UnixTimestamp::from_secs(50);
-
-        assert_eq!(
-            ts1.duration_since(ts2),
-            Some(std::time::Duration::from_secs(50))
-        );
-
-        assert_eq!(ts2.duration_since(ts1), None);
-
-        assert_eq!(
-            ts1.saturating_duration_since(ts2),
-            std::time::Duration::from_secs(50)
-        );
-        assert_eq!(
-            ts2.saturating_duration_since(ts1),
-            std::time::Duration::from_secs(0)
-        );
     }
 
     #[test]
@@ -435,9 +254,9 @@ mod tests {
         if !should_error {
             // Verify the decoded values are correct
             if input == [0; 8] {
-                assert_eq!(result.unwrap(), UnixTimestamp::ZERO);
+                assert_eq!(result.unwrap(), UnixTimestamp::from_secs(0));
             } else if input == [0xFF; 8] {
-                assert_eq!(result.unwrap(), UnixTimestamp::MAX);
+                assert_eq!(result.unwrap(), UnixTimestamp::from_secs(u64::MAX));
             }
         }
     }
@@ -487,7 +306,7 @@ mod tests {
     #[test]
     fn test_default() {
         let ts: UnixTimestamp = Default::default();
-        assert_eq!(ts, UnixTimestamp::ZERO);
+        assert_eq!(ts, UnixTimestamp::from_secs(0));
     }
 }
 
@@ -539,35 +358,6 @@ mod property_tests {
             prop_assert_eq!(original, from_json);
         }
 
-        /// Property: checked_add and checked_sub are inverse operations
-        #[test]
-        fn add_sub_inverse(secs in 0_u64..u64::MAX/2, duration in 0_u64..u64::MAX/2) {
-            let ts = UnixTimestamp::from_secs(secs);
-
-            if let Some(added) = ts.checked_add_secs(duration) {
-                let subtracted = added.checked_sub_secs(duration);
-                prop_assert_eq!(subtracted, Some(ts));
-            }
-        }
-
-        /// Property: saturating_add always succeeds and is >= original
-        #[test]
-        fn saturating_add_monotonic(secs in any::<u64>(), duration in any::<u64>()) {
-            let ts = UnixTimestamp::from_secs(secs);
-            let result = ts.saturating_add_secs(duration);
-
-            // Result should be >= original (monotonic)
-            prop_assert!(result >= ts);
-
-            // If no overflow, should equal checked version
-            if let Some(checked) = ts.checked_add_secs(duration) {
-                prop_assert_eq!(result, checked);
-            } else {
-                // On overflow, should saturate to MAX
-                prop_assert_eq!(result, UnixTimestamp::MAX);
-            }
-        }
-
         /// Property: saturating_sub always succeeds and is <= original
         #[test]
         fn saturating_sub_monotonic(secs in any::<u64>(), duration in any::<u64>()) {
@@ -576,50 +366,15 @@ mod property_tests {
 
             // Result should be <= original (monotonic)
             prop_assert!(result <= ts);
-
-            // If no underflow, should equal checked version
-            if let Some(checked) = ts.checked_sub_secs(duration) {
-                prop_assert_eq!(result, checked);
-            } else {
-                // On underflow, should saturate to ZERO
-                prop_assert_eq!(result, UnixTimestamp::ZERO);
-            }
         }
 
-        /// Property: Ordering is consistent with underlying u64
+        /// Property: saturating_seconds_since is consistent with subtraction
         #[test]
-        fn ordering_consistent_with_u64(a in any::<u64>(), b in any::<u64>()) {
+        fn saturating_seconds_since_consistent(a in any::<u64>(), b in any::<u64>()) {
             let ts_a = UnixTimestamp::from_secs(a);
             let ts_b = UnixTimestamp::from_secs(b);
 
-            prop_assert_eq!(ts_a < ts_b, a < b);
-            prop_assert_eq!(ts_a == ts_b, a == b);
-            prop_assert_eq!(ts_a > ts_b, a > b);
-            prop_assert_eq!(ts_a <= ts_b, a <= b);
-            prop_assert_eq!(ts_a >= ts_b, a >= b);
-        }
-
-        /// Property: seconds_since is consistent with subtraction
-        #[test]
-        fn seconds_since_consistent(a in any::<u64>(), b in any::<u64>()) {
-            let ts_a = UnixTimestamp::from_secs(a);
-            let ts_b = UnixTimestamp::from_secs(b);
-
-            prop_assert_eq!(ts_a.seconds_since(ts_b), a.checked_sub(b));
             prop_assert_eq!(ts_a.saturating_seconds_since(ts_b), a.saturating_sub(b));
-        }
-
-        /// Property: duration_since is consistent with seconds_since
-        #[test]
-        fn duration_since_consistent(a in any::<u64>(), b in any::<u64>()) {
-            let ts_a = UnixTimestamp::from_secs(a);
-            let ts_b = UnixTimestamp::from_secs(b);
-
-            let expected_duration = ts_a.seconds_since(ts_b).map(std::time::Duration::from_secs);
-            prop_assert_eq!(ts_a.duration_since(ts_b), expected_duration);
-
-            let expected_saturating = std::time::Duration::from_secs(ts_a.saturating_seconds_since(ts_b));
-            prop_assert_eq!(ts_a.saturating_duration_since(ts_b), expected_saturating);
         }
     }
 }
