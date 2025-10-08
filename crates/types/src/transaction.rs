@@ -1278,44 +1278,38 @@ mod tests {
     fn test_irys_transaction_header_compact_round_trip() {
         // setup
         let config = ConsensusConfig::testing();
-        let mut original_header = mock_header(&config);
+        let original_header = mock_header(&config);
 
         // action - test Compact encoding/decoding the outer versioned structure
-        let mut buffer = vec![0_u8; 1024];
-        let size = original_header.to_compact(&mut buffer);
-        let (decoded_header, _rest) = DataTransactionHeader::from_compact(&buffer[..size], size);
+        let mut buffer = vec![];
+        original_header.to_compact(&mut buffer);
+        let (decoded_header, rest) = DataTransactionHeader::from_compact(&buffer, buffer.len());
 
-        // Assert
-        // zero out the id and signature, those do not get encoded
-        original_header.id = H256::zero();
-        original_header.signature =
-            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_header, decoded_header);
         // Verify version discriminant is preserved in Compact encoding
         assert_eq!(decoded_header.version, 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+        assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
 
     #[test]
     fn test_commitment_transaction_compact_round_trip() {
         // setup
         let config = ConsensusConfig::testing();
-        let mut original_tx = mock_commitment_tx(&config);
+        let original_tx = mock_commitment_tx(&config);
 
         // action - test Compact encoding/decoding the outer versioned structure
-        let mut buffer = vec![0_u8; 1024];
-        let size = original_tx.to_compact(&mut buffer);
-        let (decoded_tx, _rest) = CommitmentTransaction::from_compact(&buffer[..size], size);
+        let mut buffer = vec![];
+        original_tx.to_compact(&mut buffer);
+        let (decoded_tx, rest) = CommitmentTransaction::from_compact(&buffer, buffer.len());
 
-        // Assert
-        // zero out the id and signature, those do not get encoded
-        original_tx.id = H256::zero();
-        original_tx.signature =
-            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in Compact encoding
         assert_eq!(decoded_tx.version, 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+        assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
 
     #[test]
