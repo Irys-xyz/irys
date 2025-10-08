@@ -45,9 +45,8 @@ async fn send_block_to_block_tree(
 // from the consensus config.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
     use irys_primitives::CommitmentType;
-    use irys_types::{H256List, SystemTransactionLedger, U256};
+    use irys_types::U256;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -63,12 +62,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let invalid_stake = self.invalid_stake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.invalid_stake.id]),
-                }],
-                commitment_txs_to_bill: vec![self.invalid_stake.clone()],
+                commitment_txs: vec![invalid_stake.clone()],
+                commitment_txs_to_bill: vec![invalid_stake],
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
@@ -143,9 +140,8 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(actix_web::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
     use irys_primitives::CommitmentType;
-    use irys_types::{H256List, SystemTransactionLedger, U256};
+    use irys_types::U256;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -161,12 +157,10 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
             &self,
             _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let invalid_pledge = self.invalid_pledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.invalid_pledge.id]),
-                }],
-                commitment_txs_to_bill: vec![self.invalid_pledge.clone()],
+                commitment_txs: vec![invalid_pledge.clone()],
+                commitment_txs_to_bill: vec![invalid_pledge],
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
@@ -241,9 +235,6 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
 // The assertion will fail (block will be discarded) because stake commitments must come before pledge commitments.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
-    use irys_types::{H256List, SystemTransactionLedger};
-
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -259,12 +250,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
             &self,
             _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.commitments[0].id, self.commitments[1].id]),
-                }],
-                commitment_txs_to_bill: self.commitments.clone(),
+                commitment_txs: commitments.clone(),
+                commitment_txs_to_bill: commitments,
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
@@ -370,11 +359,8 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
             _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.wrong_commitment.id]),
-                }],
-                commitment_txs_to_bill: vec![self.wrong_commitment.clone()],
+                commitment_txs: vec![self.wrong_commitment.clone()],
+                commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
@@ -597,7 +583,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
             );
 
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![],
+                commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
@@ -760,9 +746,6 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 // commitments from the parent's snapshot.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
-    use irys_types::{H256List, SystemTransactionLedger};
-
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -778,10 +761,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
             _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![]),
-                }],
+                commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {

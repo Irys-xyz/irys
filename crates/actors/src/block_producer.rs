@@ -145,21 +145,34 @@ pub struct BlockProducerInner {
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub struct UnpledgeRefundEvent {
     pub account: Address,
     pub amount: U256,
     pub irys_ref_txid: H256,
 }
 
+impl Ord for UnpledgeRefundEvent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.amount
+            .cmp(&other.amount)
+            .then(self.irys_ref_txid.cmp(&other.irys_ref_txid))
+    }
+}
+
 /// Named result bundle for mempool-derived inputs to block production.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MempoolTxsBundle {
-    pub system_ledgers: Vec<SystemTransactionLedger>,
+    /// commitment txs for the commitment ledger (only epoch blocks)
+    pub commitment_txs: Vec<CommitmentTransaction>,
+
+    /// commitment txs for immediate block inclusion, will also bill the user (non epoch blocks)
     pub commitment_txs_to_bill: Vec<CommitmentTransaction>,
+
     pub submit_txs: Vec<DataTransactionHeader>,
     pub publish_txs: PublishLedgerWithTxs,
     pub aggregated_miner_fees: LedgerExpiryBalanceDelta,
+
     /// Unpledge refund events to emit on epoch blocks; empty on non-epoch blocks
     pub commitment_refund_events: Vec<UnpledgeRefundEvent>,
 }
@@ -437,14 +450,15 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let mut mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
+        let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
+
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
-                &mut mempool_bundle,
+                &mempool_bundle,
                 block_reward,
                 current_timestamp,
                 solution.solution_hash,
@@ -631,7 +645,7 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
-        mempool: &mut MempoolTxsBundle,
+        mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
         solution_hash: H256,
@@ -652,7 +666,7 @@ pub trait BlockProdStrategy {
             &self.inner().config.consensus,
             &mempool.commitment_txs_to_bill,
             &mempool.submit_txs,
-            &mut mempool.publish_txs,
+            &mempool.publish_txs,
             initial_treasury_balance,
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
@@ -892,6 +906,19 @@ pub trait BlockProdStrategy {
         let submit_total_chunks =
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
+        let system_ledgers = if !mempool_bundle.commitment_txs.is_empty() {
+            let mut txids = H256List::new();
+            for ctx in mempool_bundle.commitment_txs.iter() {
+                txids.push(ctx.id);
+            }
+            vec![SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: txids,
+            }]
+        } else {
+            vec![]
+        };
+
         // build a new block header
         let mut irys_block = IrysBlockHeader {
             block_hash: H256::zero(), // block_hash is initialized after signing
@@ -911,7 +938,7 @@ pub trait BlockProdStrategy {
             miner_address: solution.mining_address,
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
             timestamp: current_timestamp,
-            system_ledgers: mempool_bundle.system_ledgers,
+            system_ledgers,
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
@@ -1097,11 +1124,13 @@ pub trait BlockProdStrategy {
         prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<MempoolTxsBundle> {
         // Fetch mempool once
-        let mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
+        let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
+        // Sort txs to be of deterministic order
+        mempool_txs.submit_tx.sort();
+        mempool_txs.commitment_tx.sort();
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
-        // Non-epoch blocks: bill commitments and return early
         if !is_epoch {
             debug!(
                 block_height,
@@ -1123,18 +1152,12 @@ pub trait BlockProdStrategy {
             .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
             .await?;
 
-        let system_ledger = self.build_commitment_ledger_epoch(&parent_commitment_snapshot);
         let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
 
-        let system_ledgers = if !system_ledger.tx_ids.is_empty() {
-            vec![system_ledger]
-        } else {
-            Vec::new()
-        };
-
         Ok(MempoolTxsBundle {
-            system_ledgers,
-            commitment_txs_to_bill: Vec::new(),
+            // on epoch blocks we don't bill the end-user
+            commitment_txs: parent_commitment_snapshot.get_epoch_commitments(),
+            commitment_txs_to_bill: vec![],
             submit_txs: mempool_txs.submit_tx,
             publish_txs: mempool_txs.publish_tx,
             aggregated_miner_fees,
@@ -1215,23 +1238,9 @@ pub trait BlockProdStrategy {
     }
 
     fn build_non_epoch_bundle(&self, mempool_txs: MempoolTxs) -> MempoolTxsBundle {
-        let mut txids = H256List::new();
-        for ctx in mempool_txs.commitment_tx.iter() {
-            txids.push(ctx.id);
-        }
-        let system_transaction_ledger = SystemTransactionLedger {
-            ledger_id: SystemLedger::Commitment.into(),
-            tx_ids: txids,
-        };
-        let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
-            vec![system_transaction_ledger]
-        } else {
-            Vec::new()
-        };
-
         MempoolTxsBundle {
-            system_ledgers,
-            commitment_txs_to_bill: mempool_txs.commitment_tx,
+            commitment_txs_to_bill: mempool_txs.commitment_tx.clone(),
+            commitment_txs: mempool_txs.commitment_tx,
             submit_txs: mempool_txs.submit_tx,
             publish_txs: mempool_txs.publish_tx,
             aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),

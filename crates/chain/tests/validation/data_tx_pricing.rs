@@ -54,7 +54,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![],
+                commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
                 publish_txs: PublishLedgerWithTxs {

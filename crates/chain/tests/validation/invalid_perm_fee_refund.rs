@@ -8,10 +8,7 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_primitives::Address;
-use irys_types::{
-    DataLedger, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, H256, U256,
-};
+use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256};
 use std::collections::BTreeMap;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
@@ -35,16 +32,11 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Include the data transaction in submit ledger
-            let data_ledger = SystemTransactionLedger {
-                ledger_id: DataLedger::Submit as u32,
-                tx_ids: H256List(vec![self.data_tx.id]),
-            };
-
             // Create an invalid refund - refunding a promoted transaction
             let user_perm_fee_refunds = vec![self.invalid_refund];
 
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![data_ledger],
+                commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.data_tx.clone()],
                 publish_txs: PublishLedgerWithTxs {
@@ -173,7 +165,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
             let user_perm_fee_refunds = vec![self.invalid_refund];
 
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![],
+                commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {

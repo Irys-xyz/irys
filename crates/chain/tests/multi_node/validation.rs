@@ -29,7 +29,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
@@ -177,17 +177,18 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
-            mempool.submit_txs.push(self.extra_tx.clone());
+            let mut tampered_mempool = mempool.clone();
+            tampered_mempool.submit_txs.push(self.extra_tx.clone());
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    mempool,
+                    &tampered_mempool,
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
@@ -262,7 +263,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
@@ -270,13 +271,14 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             // NOTE: We reverse the order of txs, this means
             // that during validation the irys block txs will not match the
             // reth block txs
-            assert_eq!(mempool.submit_txs.len(), 2);
-            mempool.submit_txs.reverse();
+            let mut tampered_mempool = mempool.clone();
+            assert_eq!(tampered_mempool.submit_txs.len(), 2);
+            tampered_mempool.submit_txs.reverse();
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    mempool,
+                    &tampered_mempool,
                     reward_amount,
                     timestamp_ms,
                     solution_hash,

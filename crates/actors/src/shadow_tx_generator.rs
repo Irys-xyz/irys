@@ -138,14 +138,11 @@ impl<'a> ShadowTxGenerator<'a> {
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
-        publish_ledger: &'a mut PublishLedgerWithTxs,
+        publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
     ) -> Result<Self> {
-        // Sort publish ledger transactions by id for deterministic processing
-        publish_ledger.txs.sort();
-
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
         for tx in &publish_ledger.txs {

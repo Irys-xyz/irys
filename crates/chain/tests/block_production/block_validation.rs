@@ -47,7 +47,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
             solution_hash: H256,

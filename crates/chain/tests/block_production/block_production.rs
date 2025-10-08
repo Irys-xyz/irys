@@ -1047,8 +1047,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     Ok(())
 }
 
-// This test produces a block with an invalid PoA chunk.
-// A new block will not be built on the invalid block.
+// This test produces a block with invalid tx ordering.
 #[test_log::test(actix_web::test)]
 async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
@@ -1066,20 +1065,22 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             &self,
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
-            if mempool.submit_txs.len() >= 2 {
-                mempool.submit_txs.reverse();
+            let mut tampered_mempool = mempool.clone();
+            if tampered_mempool.submit_txs.len() >= 2 {
+                tracing::error!("reversing");
+                tampered_mempool.submit_txs.reverse();
             }
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     prev_evm_block,
-                    mempool,
+                    &tampered_mempool,
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
@@ -1213,7 +1214,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Force inclusion of malicious tx in Submit ledger, bypassing mempool validation
             Ok(irys_actors::block_producer::MempoolTxsBundle {
-                system_ledgers: vec![],
+                commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
                 publish_txs: PublishLedgerWithTxs {
@@ -1471,7 +1472,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             _solution_hash: H256,
