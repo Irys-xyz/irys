@@ -881,7 +881,7 @@ pub trait BlockProdStrategy {
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
         // build a new block header
-        let irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
+        let mut irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             version: 1,
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
@@ -949,10 +949,9 @@ pub trait BlockProdStrategy {
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
-        let mut versioned_block = irys_block;
-        block_signer.sign_block_header(&mut versioned_block)?;
+        block_signer.sign_block_header(&mut irys_block)?;
 
-        let block = Arc::new(versioned_block);
+        let block = Arc::new(irys_block);
         Ok(Some((block, stats)))
     }
 

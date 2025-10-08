@@ -141,6 +141,35 @@ impl Signable for DataTransactionHeader {
     }
 }
 
+impl alloy_rlp::Encodable for DataTransactionHeader {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        // Encode discriminant followed by inner struct
+        out.put_u8(self.discriminant());
+        match self {
+            Self::V1(inner) => inner.encode(out),
+        }
+    }
+}
+
+impl alloy_rlp::Decodable for DataTransactionHeader {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        // Read discriminant
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+        let discriminant = buf[0];
+        *buf = &buf[1..];
+        
+        match discriminant {
+            1 => {
+                let inner = DataTransactionHeaderV1::decode(buf)?;
+                Ok(Self::V1(inner))
+            }
+            _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
+        }
+    }
+}
+
 impl DataTransactionHeader {
     /// Create a new DataTransactionHeader wrapped in the versioned wrapper
     pub fn new(config: &ConsensusConfig) -> Self {
@@ -267,6 +296,35 @@ impl Signable for CommitmentTransaction {
                 inner.encode_for_signing(&mut tmp);
                 out.put_slice(&tmp);
             }
+        }
+    }
+}
+
+impl alloy_rlp::Encodable for CommitmentTransaction {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        // Encode discriminant followed by inner struct
+        out.put_u8(self.discriminant());
+        match self {
+            Self::V1(inner) => inner.encode(out),
+        }
+    }
+}
+
+impl alloy_rlp::Decodable for CommitmentTransaction {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        // Read discriminant
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::InputTooShort);
+        }
+        let discriminant = buf[0];
+        *buf = &buf[1..];
+        
+        match discriminant {
+            1 => {
+                let inner = CommitmentTransactionV1::decode(buf)?;
+                Ok(Self::V1(inner))
+            }
+            _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
         }
     }
 }
@@ -1178,40 +1236,82 @@ mod tests {
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
         let config = ConsensusConfig::testing();
-        let header_versioned = mock_header(&config);
-        // Extract inner type for RLP round-trip testing
-        let DataTransactionHeader::V1(mut header) = header_versioned;
+        let mut original_header = mock_header(&config);
 
-        // action
+        // action - test RLP encoding/decoding the outer versioned structure
         let mut buffer = vec![];
-        header.encode(&mut buffer);
-        let decoded = DataTransactionHeaderV1::decode(&mut buffer.as_slice()).unwrap();
+        original_header.encode(&mut buffer);
+        let decoded_header = DataTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
         // zero out the id and signature, those do not get encoded
-        header.id = H256::zero();
-        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
-        assert_eq!(header, decoded);
+        original_header.id = H256::zero();
+        original_header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(original_header, decoded_header);
+        // Verify version discriminant is preserved in RLP encoding
+        assert_eq!(decoded_header.version, 1);
     }
 
     #[test]
     fn test_commitment_transaction_rlp_round_trip() {
         // setup
         let config = ConsensusConfig::testing();
-        let header_versioned = mock_commitment_tx(&config);
-        // Extract inner type for RLP round-trip testing
-        let CommitmentTransaction::V1(mut header) = header_versioned;
+        let mut original_tx = mock_commitment_tx(&config);
 
-        // action
+        // test RLP encoding/decoding the outer versioned structure
         let mut buffer = vec![];
-        header.encode(&mut buffer);
-        let decoded = CommitmentTransactionV1::decode(&mut buffer.as_slice()).unwrap();
+        original_tx.encode(&mut buffer);
+        let decoded_tx = CommitmentTransaction::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
         // zero out the id and signature, those do not get encoded
-        header.id = H256::zero();
-        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
-        assert_eq!(header, decoded);
+        original_tx.id = H256::zero();
+        original_tx.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(original_tx, decoded_tx);
+        // Verify version discriminant is preserved in RLP encoding
+        assert_eq!(decoded_tx.version, 1);
+    }
+
+    #[test]
+    fn test_irys_transaction_header_compact_round_trip() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let mut original_header = mock_header(&config);
+
+        // action - test Compact encoding/decoding the outer versioned structure
+        let mut buffer = vec![0u8; 1024];
+        let size = original_header.to_compact(&mut buffer);
+        let (decoded_header, _rest) = DataTransactionHeader::from_compact(&buffer[..size], size);
+
+        // Assert
+        // zero out the id and signature, those do not get encoded
+        original_header.id = H256::zero();
+        original_header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(original_header, decoded_header);
+        // Verify version discriminant is preserved in Compact encoding
+        assert_eq!(decoded_header.version, 1);
+        assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+    }
+
+    #[test]
+    fn test_commitment_transaction_compact_round_trip() {
+        // setup
+        let config = ConsensusConfig::testing();
+        let mut original_tx = mock_commitment_tx(&config);
+
+        // action - test Compact encoding/decoding the outer versioned structure
+        let mut buffer = vec![0u8; 1024];
+        let size = original_tx.to_compact(&mut buffer);
+        let (decoded_tx, _rest) = CommitmentTransaction::from_compact(&buffer[..size], size);
+
+        // Assert
+        // zero out the id and signature, those do not get encoded
+        original_tx.id = H256::zero();
+        original_tx.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(original_tx, decoded_tx);
+        // Verify version discriminant is preserved in Compact encoding
+        assert_eq!(decoded_tx.version, 1);
+        assert_eq!(buffer[0], 1); // First byte should be the version discriminant
     }
 
     #[test]
@@ -1253,28 +1353,16 @@ mod tests {
 
     #[test]
     fn test_tx_encode_and_signing() {
-        // setup
         let config = ConsensusConfig::testing();
-        let original_header = mock_header(&config);
-        // For RLP encoding without discriminant, extract inner type
-        let mut sig_data = Vec::new();
-        match &original_header {
-            DataTransactionHeader::V1(inner) => inner.encode(&mut sig_data),
-        }
-        // Decode back to inner type
-        let decoded_inner = DataTransactionHeaderV1::decode(&mut sig_data.as_slice()).unwrap();
-        // Wrap it back to versioned
-        let versioned = DataTransactionHeader::V1(decoded_inner);
-
-        // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
 
-        // Test signing the header directly using the trait method with versioned type
-        let signed_header = versioned.sign(&signer).unwrap();
+        // Test signing the header directly using the outer versioned type
+        let header = mock_header(&config);
+        let signed_header = header.sign(&signer).unwrap();
         assert!(signed_header.is_signature_valid());
 
         // Also test with DataTransaction
@@ -1289,27 +1377,16 @@ mod tests {
 
     #[test]
     fn test_commitment_tx_encode_and_signing() {
-        // setup
         let config = ConsensusConfig::testing();
-        let original_tx = mock_commitment_tx(&config);
-        // For RLP encoding without discriminant, extract inner type
-        let mut sig_data = Vec::new();
-        match &original_tx {
-            CommitmentTransaction::V1(inner) => inner.encode(&mut sig_data),
-        }
-        // Decode back to inner type and wrap
-        let decoded_inner = CommitmentTransactionV1::decode(&mut sig_data.as_slice()).unwrap();
-        let _dec = CommitmentTransaction::V1(decoded_inner);
-
-        // action
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
 
-        // Test using the trait method with versioned type
-        let signed_tx = original_tx.sign(&signer).unwrap();
+        // Test signing the outer versioned type directly
+        let tx = mock_commitment_tx(&config);
+        let signed_tx = tx.sign(&signer).unwrap();
 
         println!(
             "{}",
