@@ -723,9 +723,9 @@ mod tests {
             .expect("Failed to create publish transaction");
 
         // Modify the header to reflect the original perm_fee intent
-        let mut header = (*tx.header).clone();
+        let mut header = tx.header;
         header.perm_fee = perm_fee;
-        DataTransactionHeader::V1(header)
+        header
     }
 
     fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
