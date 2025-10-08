@@ -675,14 +675,12 @@ impl EpochSnapshot {
         let mut stake_commitments: Vec<CommitmentTransaction> = Vec::new();
         let mut pledge_commitments: Vec<CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments {
-            match commitment_tx {
-                CommitmentTransaction::V1(ref inner) => match inner.commitment_type {
-                    irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
-                    irys_primitives::CommitmentType::Pledge { .. } => {
-                        pledge_commitments.push(commitment_tx)
-                    }
-                    _ => unimplemented!(),
-                },
+            match commitment_tx.commitment_type {
+                irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
+                irys_primitives::CommitmentType::Pledge { .. } => {
+                    pledge_commitments.push(commitment_tx)
+                }
+                _ => unimplemented!(),
             }
         }
 

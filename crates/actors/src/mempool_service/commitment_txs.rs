@@ -173,8 +173,7 @@ impl Inner {
                     // todo switch _ to actually handle the result
                     let _ = self
                         .handle_message(MempoolServiceMessage::IngestCommitmentTx(
-                            pledge_tx,
-                            oneshot_tx,
+                            pledge_tx, oneshot_tx,
                         ))
                         .await;
 

@@ -2437,10 +2437,9 @@ mod tests {
     }
 
     fn extend_chain(
-        new_block: IrysBlockHeader,
+        mut new_block: IrysBlockHeader,
         previous_block: &IrysBlockHeader,
     ) -> IrysBlockHeader {
-        let mut new_block = new_block;
         new_block.previous_block_hash = previous_block.block_hash();
         new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;

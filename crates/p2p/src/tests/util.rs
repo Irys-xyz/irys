@@ -269,12 +269,12 @@ impl ApiClient for ApiClientStub {
         _peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        let data_tx_header = self
+        Ok(self
             .txs
             .get(&tx_id)
             .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
-            .clone();
-        Ok(IrysTransactionResponse::Storage(data_tx_header))
+            .clone()
+            .into())
     }
 
     async fn post_transaction(

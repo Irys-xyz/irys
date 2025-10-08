@@ -1464,11 +1464,12 @@ pub async fn commitment_txs_are_valid(
     // Regular block validation: check priority ordering for stake and pledge commitments
     let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
         .iter()
-        .filter(|tx| matches!(
+        .filter(|tx| {
+            matches!(
                 tx.commitment_type,
                 CommitmentType::Stake | CommitmentType::Pledge { .. }
-            ),
-        )
+            )
+        })
         .collect();
 
     if stake_and_pledge_txs.is_empty() {

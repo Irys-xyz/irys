@@ -1236,42 +1236,40 @@ mod tests {
     fn test_irys_transaction_header_rlp_round_trip() {
         // setup
         let config = ConsensusConfig::testing();
-        let mut original_header = mock_header(&config);
+        let mut header = mock_header(&config);
 
         // action - test RLP encoding/decoding the outer versioned structure
         let mut buffer = vec![];
-        original_header.encode(&mut buffer);
-        let decoded_header = DataTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
+        header.encode(&mut buffer);
+        let decoded = DataTransactionHeader::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
         // zero out the id and signature, those do not get encoded
-        original_header.id = H256::zero();
-        original_header.signature =
-            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
-        assert_eq!(original_header, decoded_header);
+        header.id = H256::zero();
+        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded_header.version, 1);
+        assert_eq!(decoded.version, 1);
     }
 
     #[test]
     fn test_commitment_transaction_rlp_round_trip() {
         // setup
         let config = ConsensusConfig::testing();
-        let mut original_tx = mock_commitment_tx(&config);
+        let mut header = mock_commitment_tx(&config);
 
         // test RLP encoding/decoding the outer versioned structure
         let mut buffer = vec![];
-        original_tx.encode(&mut buffer);
-        let decoded_tx = CommitmentTransaction::decode(&mut buffer.as_slice()).unwrap();
+        header.encode(&mut buffer);
+        let decoded = CommitmentTransaction::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
         // zero out the id and signature, those do not get encoded
-        original_tx.id = H256::zero();
-        original_tx.signature =
-            IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
-        assert_eq!(original_tx, decoded_tx);
+        header.id = H256::zero();
+        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded_tx.version, 1);
+        assert_eq!(decoded.version, 1);
     }
 
     #[test]

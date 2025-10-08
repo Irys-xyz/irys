@@ -124,8 +124,8 @@ async fn check_transaction_endpoints(
         .expect("valid get transactions response");
 
     assert_eq!(txs.len(), 2);
-    assert!(txs.contains(&IrysTransactionResponse::Storage(tx.header.clone())));
-    assert!(txs.contains(&IrysTransactionResponse::Storage(tx_2.header.clone())));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx.header)));
+    assert!(txs.contains(&IrysTransactionResponse::Storage(tx_2.header)));
 }
 
 async fn check_get_block_endpoint(
