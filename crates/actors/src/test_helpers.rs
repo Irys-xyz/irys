@@ -35,12 +35,6 @@ pub mod test_helpers {
     ) -> (ServiceSenders, ServiceReceivers) {
         let (tx_packing, _rx_packing) = mpsc::channel(1);
 
-        let internals = Internals {
-            pending_jobs: Arc::new(RwLock::new(HashMap::new())),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
-            active_workers: Arc::new(AtomicUsize::new(0)),
-            config: PackingConfig::new(&Arc::new(config.clone())),
-        };
         let (service_senders, receivers) = ServiceSenders::new_with_packing_sender(tx_packing);
         // Provide the handle so code that needs wait_for_packing continues to work
 

@@ -545,7 +545,7 @@ impl PackingWaiter {
 pub struct PackingHandle {
     sender: tokio::sync::mpsc::Sender<PackingRequest>,
     internals: Internals,
-    notify: Arc<Notify>,
+
     packing_service_sender: tokio::sync::mpsc::Sender<PackingServiceMessage>,
 }
 
@@ -591,7 +591,7 @@ impl PackingHandle {
         Self {
             sender,
             internals,
-            notify: Arc::new(Notify::new()),
+
             packing_service_sender,
         }
     }
@@ -748,7 +748,7 @@ impl PackingService {
         PackingHandle {
             sender,
             internals,
-            notify: self.notify.clone(),
+
             packing_service_sender,
         }
     }

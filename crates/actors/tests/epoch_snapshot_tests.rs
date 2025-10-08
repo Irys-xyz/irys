@@ -441,13 +441,6 @@ async fn partition_expiration_and_repacking_test() {
             let _ = pack_req_tx.send(packing_req);
         }
     });
-    // minimal Internals for handle construction
-    let internals = irys_actors::packing::Internals {
-        pending_jobs: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-        semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
-        active_workers: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        config: irys_actors::packing::PackingConfig::new(&std::sync::Arc::new(config.clone())),
-    };
 
     // Create ServiceSenders for testing (channel-first)
     let (service_senders, mut receivers) =
