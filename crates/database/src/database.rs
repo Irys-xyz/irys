@@ -83,10 +83,9 @@ pub fn block_header_by_hash<T: DbTx>(
     block_hash: &BlockHash,
     include_chunk: bool,
 ) -> eyre::Result<Option<IrysBlockHeader>> {
-    let mut block = tx.get::<IrysBlockHeaders>(*block_hash)?.map(|wrapped| {
-        let versioned: IrysBlockHeader = wrapped.into();
-        versioned
-    });
+    let mut block = tx
+        .get::<IrysBlockHeaders>(*block_hash)?
+        .map(IrysBlockHeader::from);
 
     if include_chunk {
         if let Some(ref mut b) = block {
@@ -107,10 +106,9 @@ pub fn tx_header_by_txid<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
-    Ok(tx.get::<IrysDataTxHeaders>(*txid)?.map(|wrapped| {
-        let v: DataTransactionHeader = wrapped.into();
-        v
-    }))
+    Ok(tx
+        .get::<IrysDataTxHeaders>(*txid)?
+        .map(DataTransactionHeader::from))
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -126,10 +124,9 @@ pub fn commitment_tx_by_txid<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<CommitmentTransaction>> {
-    Ok(tx.get::<IrysCommitments>(*txid)?.map(|wrapped| {
-        let v: CommitmentTransaction = wrapped.into();
-        v
-    }))
+    Ok(tx
+        .get::<IrysCommitments>(*txid)?
+        .map(CommitmentTransaction::from))
 }
 
 /// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a

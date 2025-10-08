@@ -729,8 +729,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         };
 
         // Store the data transaction
-        let versioned = data_tx.clone();
-        tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(versioned))?;
+        tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
 
         // Store the ingress proofs (with duplicates from same address)
         for cached_proof in &duplicate_proofs {
