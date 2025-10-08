@@ -1,11 +1,13 @@
 use irys_database::{
     db::IrysDatabaseExt as _,
+    db_cache::CachedDataRoot,
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
-    Config, DataLedger, DatabaseProvider, LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
+    CacheEvictionStrategy, Config, DataLedger, DataRoot, DatabaseProvider, LedgerChunkOffset,
+    TokioServiceHandle, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -83,12 +85,10 @@ impl ChunkCacheService {
             tokio::select! {
                 biased;
 
-                // Check for shutdown signal
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for chunk cache service");
                     break;
                 }
-                // Handle messages
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
@@ -133,7 +133,9 @@ impl ChunkCacheService {
     }
 
     fn on_epoch_processed(&self, epoch_snapshot: Arc<EpochSnapshot>) -> eyre::Result<()> {
-        // Find the block height of the first block to add data to the active submit ledger slots
+        // Find pruning horizon: one block before where active submit ledger slots begin.
+        // Data roots from earlier blocks can be safely evicted as they're no longer needed
+        // for current epoch validation.
         let ledger_id = DataLedger::Submit;
         let first_unexpired_slot_index: u64 = epoch_snapshot
             .get_first_unexpired_slot_index(ledger_id)
@@ -153,7 +155,9 @@ impl ChunkCacheService {
                     .read()
                     .get_block_bounds(ledger_id, LedgerChunkOffset::from(chunk_offset))
                     .expect("Should be able to get block bounds as max_chunk_offset was checked");
-                prune_height = Some((block_bounds.height - 1).try_into().unwrap());
+                // Genesis block (height 0) never enters block_index as it has no submit ledger
+                // data, use saturating_sub (defensive).
+                prune_height = Some(block_bounds.height.saturating_sub(1));
             }
         }
 
@@ -202,20 +206,52 @@ impl ChunkCacheService {
             (chunk_cache_size / GIGABYTE as u64),
             ingress_proof_count
         );
-        // TODO: add code to prune chunks BEFORE their absolute expiry epoch based on the number of chunks
-        // (and add a config value to the cache config for this ^)
+
+        // Dispatch to appropriate eviction strategy
+        match &self.config.node_config.cache.eviction_strategy {
+            CacheEvictionStrategy::TimeBased { max_age_seconds } => {
+                debug!(max_age_seconds, "Running time-based cache eviction");
+                self.prune_cache_by_time(*max_age_seconds)?;
+            }
+            CacheEvictionStrategy::SizeBased {
+                max_cache_size_bytes,
+            } => {
+                // Check if size limit is exceeded
+                let size_limit_exceeded = chunk_cache_size > *max_cache_size_bytes;
+
+                if size_limit_exceeded {
+                    info!(
+                        size_exceeded = size_limit_exceeded,
+                        current_size_gb = (chunk_cache_size / GIGABYTE as u64),
+                        max_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
+                        current_count = chunk_cache_count,
+                        "Cache limit exceeded, performing size-based eviction (FIFO)"
+                    );
+
+                    self.prune_cache_by_size(
+                        chunk_cache_count,
+                        chunk_cache_size,
+                        *max_cache_size_bytes,
+                    )?;
+                } else {
+                    debug!("Cache within size limits, no eviction needed");
+                }
+            }
+        }
+
         Ok(())
     }
 
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
         let mut chunks_pruned: u64 = 0;
         let write_tx = self.db.tx_mut()?;
-        // Iterate all CachedDataRoots and compute the latest block height they were included in
         let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
         while let Some((data_root, cached)) = walker.next().transpose()? {
-            // Determine pruning horizon: prefer last inclusion height from block_set,
-            // otherwise fall back to expiry_height (if set). If neither is available, skip pruning.
+            // Pruning horizon priority: block inclusion > expiry height > skip
+            // Rationale: Confirmed blocks provide the most reliable pruning point.
+            // Unconfirmed mempool entries use expiry_height as a conservative fallback.
+            // Entries without either metadata are likely still active and should not be pruned.
             let mut inclusion_max_height: Option<u64> = None;
             for block_hash in cached.block_set.iter() {
                 if let Some(block_header) =
@@ -253,17 +289,169 @@ impl ChunkCacheService {
                     ?prune_height,
                     "expiring cached data for data root",
                 );
-                // Remove ingress proofs
                 write_tx.delete::<IngressProofs>(data_root, None)?;
-                // Remove cached chunks and index
                 chunks_pruned = chunks_pruned
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
-                // Remove cached data root entry
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
             }
         }
         debug!(?chunks_pruned, "Pruned chunks");
         write_tx.commit()?;
+
+        Ok(())
+    }
+
+    /// Collects all cached data roots with their metadata for FIFO eviction
+    /// Returns entries sorted by cached_at timestamp (oldest first)
+    fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
+        let tx = self.db.tx()?;
+        let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+        let mut walker = cursor.walk(None)?;
+        let mut entries = Vec::new();
+
+        while let Some((data_root, cached)) = walker.next().transpose()? {
+            entries.push((data_root, cached));
+        }
+
+        // Sort by cached_at timestamp (oldest first for FIFO eviction)
+        entries.sort_by_key(|(_, cached)| cached.cached_at);
+
+        Ok(entries)
+    }
+
+    /// Prunes cache entries older than max_age_seconds
+    /// Uses FIFO eviction based on cached_at timestamp
+    fn prune_cache_by_time(&self, max_age_seconds: u64) -> eyre::Result<()> {
+        let now = irys_types::UnixTimestamp::now()
+            .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
+
+        let expiry_threshold = now.saturating_sub_secs(max_age_seconds);
+
+        debug!(
+            now = now.as_secs(),
+            threshold = expiry_threshold.as_secs(),
+            max_age_seconds,
+            "Time-based eviction: checking for expired entries"
+        );
+
+        let entries = self.collect_cache_entries_by_age()?;
+
+        let mut evicted_count = 0_u64;
+        let mut evicted_size = 0_u64;
+
+        for (data_root, cached) in entries {
+            // Stop when we reach entries that are still fresh
+            if cached.cached_at >= expiry_threshold {
+                break;
+            }
+
+            let age_seconds = now.saturating_seconds_since(cached.cached_at);
+            debug!(
+                ?data_root,
+                cached_at = cached.cached_at.as_secs(),
+                age_seconds,
+                "Evicting expired cache entry"
+            );
+
+            // Calculate approximate size contribution
+            let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
+            let approx_size = chunk_count * self.config.consensus.chunk_size;
+
+            // Each entry gets its own transaction for incremental progress.
+            // Batching would be faster but risks all-or-nothing failure on large evictions.
+            let write_tx = self.db.tx_mut()?;
+            write_tx.delete::<IngressProofs>(data_root, None)?;
+            let chunks_removed = delete_cached_chunks_by_data_root(&write_tx, data_root)?;
+            write_tx.delete::<CachedDataRoots>(data_root, None)?;
+            write_tx.commit()?;
+
+            evicted_count += chunks_removed;
+            evicted_size += approx_size;
+        }
+
+        info!(
+            evicted_count,
+            evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            max_age_seconds,
+            "Time-based cache eviction complete"
+        );
+
+        Ok(())
+    }
+
+    /// Prunes cache entries to bring cache size under configured limit
+    /// Uses FIFO eviction based on cached_at timestamp (oldest first)
+    fn prune_cache_by_size(
+        &self,
+        current_chunk_count: u64,
+        current_chunk_size: u64,
+        max_cache_size_bytes: u64,
+    ) -> eyre::Result<()> {
+        // Evict to 90% of limit to prevent thrashing near the boundary.
+        // Example: If limit is 10GB, evict down to 9GB. This provides a 1GB buffer
+        // before next eviction triggers
+        let target_size_with_margin = max_cache_size_bytes.saturating_mul(9) / 10;
+
+        debug!(
+            current_size_gb = (current_chunk_size / GIGABYTE as u64),
+            target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
+            target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
+            "Size-based eviction: cache limit exceeded"
+        );
+
+        // Collect all entries sorted by age (oldest first)
+        let entries = self.collect_cache_entries_by_age()?;
+
+        let mut evicted_count = 0_u64;
+        let mut evicted_size = 0_u64;
+        let mut running_chunk_count = current_chunk_count;
+        let mut running_chunk_size = current_chunk_size;
+
+        // Get current timestamp once for age calculations
+        let now = irys_types::UnixTimestamp::now()
+            .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
+
+        // Evict oldest entries until we're under the limit (with margin)
+        for (data_root, cached) in entries {
+            if running_chunk_size <= target_size_with_margin {
+                break;
+            }
+
+            let age_seconds = now.saturating_seconds_since(cached.cached_at);
+
+            debug!(
+                ?data_root,
+                cached_at = cached.cached_at.as_secs(),
+                age_seconds,
+                data_size = cached.data_size,
+                "Evicting oldest cache entry to free space"
+            );
+
+            // Calculate approximate size contribution of this data root
+            let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
+            let approx_size = chunk_count * self.config.consensus.chunk_size;
+
+            // Each entry gets its own transaction for incremental progress.
+            // Batching would be faster but risks all-or-nothing failure on large evictions.
+            let write_tx = self.db.tx_mut()?;
+            write_tx.delete::<IngressProofs>(data_root, None)?;
+            let chunks_removed = delete_cached_chunks_by_data_root(&write_tx, data_root)?;
+            write_tx.delete::<CachedDataRoots>(data_root, None)?;
+            write_tx.commit()?;
+
+            evicted_count += chunks_removed;
+            evicted_size += approx_size;
+            running_chunk_count = running_chunk_count.saturating_sub(chunks_removed);
+            running_chunk_size = running_chunk_size.saturating_sub(approx_size);
+        }
+
+        info!(
+            evicted_count,
+            evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            remaining_count = running_chunk_count,
+            remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
+            "Size-based cache eviction complete (FIFO)"
+        );
 
         Ok(())
     }
@@ -440,5 +628,506 @@ mod tests {
         })??;
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    async fn setup_test_service_with_strategy(
+        strategy: irys_types::CacheEvictionStrategy,
+    ) -> eyre::Result<ChunkCacheService> {
+        let mut node_config = NodeConfig::testing();
+        node_config.cache.eviction_strategy = strategy;
+        let config = Config::new(node_config);
+
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config)
+            .await
+            .wrap_err("failed to build BlockIndex for test")?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        Ok(ChunkCacheService {
+            config: config.clone(),
+            block_index_guard,
+            block_tree_guard,
+            db: db.clone(),
+            msg_rx: rx,
+            shutdown: shutdown_rx,
+        })
+    }
+
+    fn insert_entry_with_timestamp(
+        service: &ChunkCacheService,
+        timestamp: irys_types::UnixTimestamp,
+    ) -> eyre::Result<DataRoot> {
+        use rand::Rng as _;
+
+        let mut rng = rand::thread_rng();
+        let random_bytes: [u8; 32] = rng.gen();
+        let data_root = DataRoot::from(random_bytes);
+
+        service.db.update(|wtx| {
+            let cached = irys_database::db_cache::CachedDataRoot {
+                data_size: 1024, // 1 KB
+                txid_set: vec![],
+                block_set: vec![],
+                expiry_height: None,
+                cached_at: timestamp,
+            };
+            wtx.put::<CachedDataRoots>(data_root, cached)?;
+            eyre::Ok(())
+        })??;
+
+        Ok(data_root)
+    }
+
+    fn get_cache_entry_count(service: &ChunkCacheService) -> eyre::Result<usize> {
+        service
+            .db
+            .view_eyre(|tx| Ok(tx.entries::<CachedDataRoots>()?))
+    }
+
+    fn cache_contains(service: &ChunkCacheService, root: DataRoot) -> eyre::Result<bool> {
+        service
+            .db
+            .view_eyre(|tx| Ok(tx.get::<CachedDataRoots>(root)?.is_some()))
+    }
+
+    // ========================================================================
+    // Time-Based Eviction Tests
+    // ========================================================================
+
+    mod time_based_eviction {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case(3600, vec![7200, 5400, 1800, 600], vec![1800, 600], "1h threshold: evicts entries >1h old")]
+        #[case(1800, vec![3600, 1800, 900, 300], vec![1800, 900, 300], "30m threshold: evicts entries >30m old")]
+        #[case(7200, vec![10800, 7200, 3600, 1800], vec![7200, 3600, 1800], "2h threshold: evicts entries >2h old")]
+        #[case(600, vec![1200, 600, 300, 60], vec![600, 300, 60], "10m threshold: evicts entries >10m old")]
+        #[tokio::test]
+        async fn test_time_based_eviction_thresholds(
+            #[case] max_age_seconds: u64,
+            #[case] entry_ages_seconds: Vec<u64>,
+            #[case] expected_remaining_ages: Vec<u64>,
+            #[case] description: &str,
+        ) -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::TimeBased { max_age_seconds };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            let now = irys_types::UnixTimestamp::now()?;
+
+            // Insert entries at different ages
+            let mut inserted_roots = Vec::new();
+            for age in &entry_ages_seconds {
+                let timestamp = now.saturating_sub_secs(*age);
+                let root = insert_entry_with_timestamp(&service, timestamp)?;
+                inserted_roots.push((root, *age));
+            }
+
+            let initial_count = get_cache_entry_count(&service)?;
+            assert_eq!(
+                initial_count,
+                entry_ages_seconds.len(),
+                "All entries should be inserted"
+            );
+
+            // Run eviction
+            service.prune_cache_by_time(max_age_seconds)?;
+
+            // Verify expected entries remain
+            let final_count = get_cache_entry_count(&service)?;
+            assert_eq!(
+                final_count,
+                expected_remaining_ages.len(),
+                "Test case '{}': Expected {} entries, got {}",
+                description,
+                expected_remaining_ages.len(),
+                final_count
+            );
+
+            // Verify correct entries were kept
+            for age in &expected_remaining_ages {
+                let exists = inserted_roots.iter().any(|(root, entry_age)| {
+                    entry_age == age && cache_contains(&service, *root).unwrap_or(false)
+                });
+                assert!(
+                    exists,
+                    "Entry with age {} should remain - {}",
+                    age, description
+                );
+            }
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_time_based_eviction_empty_cache() -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::TimeBased {
+                max_age_seconds: 3600,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            // Run eviction on empty cache - should not error
+            service.prune_cache_by_time(3600)?;
+
+            assert_eq!(get_cache_entry_count(&service)?, 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_time_based_eviction_all_fresh() -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::TimeBased {
+                max_age_seconds: 3600,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            let now = irys_types::UnixTimestamp::now()?;
+
+            // Insert 5 recent entries (all within 1 minute)
+            for i in 0..5 {
+                let timestamp = now.saturating_sub_secs(i * 10);
+                insert_entry_with_timestamp(&service, timestamp)?;
+            }
+
+            // Evict with 1 hour threshold - should keep all
+            service.prune_cache_by_time(3600)?;
+
+            assert_eq!(get_cache_entry_count(&service)?, 5);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_time_based_eviction_all_expired() -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::TimeBased {
+                max_age_seconds: 1800,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            let now = irys_types::UnixTimestamp::now()?;
+
+            // Insert 5 old entries (all > 2 hours old)
+            for i in 0..5 {
+                let timestamp = now.saturating_sub_secs(7200 + i * 100);
+                insert_entry_with_timestamp(&service, timestamp)?;
+            }
+
+            // Evict with 30 minute threshold - should remove all
+            service.prune_cache_by_time(1800)?;
+
+            assert_eq!(get_cache_entry_count(&service)?, 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_time_based_eviction_boundary() -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::TimeBased {
+                max_age_seconds: 3600,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            let now = irys_types::UnixTimestamp::now()?;
+
+            // Entry exactly at threshold (3600 seconds old)
+            let at_threshold = now.saturating_sub_secs(3600);
+            let root_at = insert_entry_with_timestamp(&service, at_threshold)?;
+
+            // Entry just under threshold (3599 seconds old)
+            let under_threshold = now.saturating_sub_secs(3599);
+            let root_under = insert_entry_with_timestamp(&service, under_threshold)?;
+
+            // Entry just over threshold (3601 seconds old)
+            let over_threshold = now.saturating_sub_secs(3601);
+            let root_over = insert_entry_with_timestamp(&service, over_threshold)?;
+
+            service.prune_cache_by_time(3600)?;
+
+            // Entries at or under threshold should remain
+            assert!(cache_contains(&service, root_at)?);
+            assert!(cache_contains(&service, root_under)?);
+
+            // Entry over threshold should be evicted
+            assert!(!cache_contains(&service, root_over)?);
+
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Size-Based Eviction Tests
+    // ========================================================================
+
+    mod size_based_eviction {
+        use super::*;
+        use rstest::rstest;
+
+        fn fill_cache_to_size(
+            service: &ChunkCacheService,
+            target_size: u64,
+        ) -> eyre::Result<Vec<DataRoot>> {
+            use rand::Rng as _;
+
+            let chunk_size = service.config.consensus.chunk_size;
+            let mut roots = Vec::new();
+            let mut current_size = 0_u64;
+            let mut rng = rand::thread_rng();
+            let mut pending_entries = Vec::new();
+
+            while current_size < target_size {
+                let entry_size = chunk_size.min(target_size - current_size);
+
+                // Generate unique random data_root to avoid collisions
+                let random_bytes: [u8; 32] = rng.gen();
+                let root = DataRoot::from(random_bytes);
+
+                let cached = irys_database::db_cache::CachedDataRoot {
+                    data_size: entry_size,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now().unwrap(),
+                };
+
+                pending_entries.push((root, cached));
+                roots.push(root);
+                current_size += entry_size.div_ceil(chunk_size) * chunk_size;
+
+                // Batch writes every 100 entries for better performance
+                if pending_entries.len() >= 100 {
+                    service.db.update(|wtx| {
+                        for (root, cached) in pending_entries.drain(..) {
+                            wtx.put::<CachedDataRoots>(root, cached)?;
+                        }
+                        eyre::Ok(())
+                    })??;
+                }
+            }
+
+            // Write any remaining entries
+            if !pending_entries.is_empty() {
+                service.db.update(|wtx| {
+                    for (root, cached) in pending_entries {
+                        wtx.put::<CachedDataRoots>(root, cached)?;
+                    }
+                    eyre::Ok(())
+                })??;
+            }
+
+            Ok(roots)
+        }
+
+        fn get_cache_total_size(service: &ChunkCacheService) -> eyre::Result<u64> {
+            let chunk_size = service.config.consensus.chunk_size;
+            service.db.view_eyre(|tx| {
+                let mut total_size = 0_u64;
+                let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+                let mut walker = cursor.walk(None)?;
+
+                while let Some((_, cached)) = walker.next().transpose()? {
+                    let chunk_count = cached.data_size.div_ceil(chunk_size);
+                    total_size += chunk_count * chunk_size;
+                }
+
+                Ok(total_size)
+            })
+        }
+
+        #[rstest]
+        #[case(100_000, 150_000, 90_000, "150% of limit evicts to 90%")]
+        #[case(100_000, 110_000, 90_000, "110% of limit evicts to 90%")]
+        #[case(100_000, 200_000, 90_000, "200% of limit evicts to 90%")]
+        #[case(50_000, 75_000, 45_000, "Small cache (50KB) respects 90% rule")]
+        #[tokio::test]
+        async fn test_size_based_eviction_hysteresis(
+            #[case] max_size: u64,
+            #[case] initial_size: u64,
+            #[case] expected_max_final_size: u64,
+            #[case] description: &str,
+        ) -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::SizeBased {
+                max_cache_size_bytes: max_size,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            // Fill cache to initial size
+            fill_cache_to_size(&service, initial_size)?;
+
+            let initial_count = get_cache_entry_count(&service)?;
+            let actual_initial_size = get_cache_total_size(&service)?;
+
+            // Run eviction
+            service.prune_cache_by_size(initial_count as u64, actual_initial_size, max_size)?;
+
+            // Verify final size
+            let final_size = get_cache_total_size(&service)?;
+            let chunk_size = service.config.consensus.chunk_size;
+
+            assert!(
+                final_size <= expected_max_final_size + chunk_size,
+                "Test case '{}': Expected max ~{} bytes, got {} bytes",
+                description,
+                expected_max_final_size,
+                final_size
+            );
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_size_based_eviction_under_limit() -> eyre::Result<()> {
+            let max_size = 100_000;
+            let strategy = irys_types::CacheEvictionStrategy::SizeBased {
+                max_cache_size_bytes: max_size,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            // Fill to 80% of limit
+            let initial_size = (max_size as f64 * 0.8) as u64;
+            fill_cache_to_size(&service, initial_size)?;
+
+            let count_before = get_cache_entry_count(&service)?;
+            let size_before = get_cache_total_size(&service)?;
+
+            // Run eviction - should not evict anything
+            service.prune_cache_by_size(count_before as u64, size_before, max_size)?;
+
+            let count_after = get_cache_entry_count(&service)?;
+            let size_after = get_cache_total_size(&service)?;
+
+            assert_eq!(count_before, count_after, "No entries should be evicted");
+            assert_eq!(size_before, size_after, "Size should remain unchanged");
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_size_based_eviction_empty_cache() -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::SizeBased {
+                max_cache_size_bytes: 1_000_000,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            // Run eviction on empty cache - should not error
+            service.prune_cache_by_size(0, 0, 1_000_000)?;
+
+            assert_eq!(get_cache_entry_count(&service)?, 0);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn test_size_based_eviction_fifo_order() -> eyre::Result<()> {
+            let strategy = irys_types::CacheEvictionStrategy::SizeBased {
+                max_cache_size_bytes: 50_000,
+            };
+            let service = setup_test_service_with_strategy(strategy).await?;
+
+            let now = irys_types::UnixTimestamp::now()?;
+
+            // Insert entries with known timestamps (oldest to newest)
+            let oldest_ts = now.saturating_sub_secs(1000);
+            let oldest_root = insert_entry_with_timestamp(&service, oldest_ts)?;
+
+            let middle_ts = now.saturating_sub_secs(500);
+            let middle_root = insert_entry_with_timestamp(&service, middle_ts)?;
+
+            let newest_ts = now.saturating_sub_secs(100);
+            let newest_root = insert_entry_with_timestamp(&service, newest_ts)?;
+
+            // Fill cache over limit
+            fill_cache_to_size(&service, 100_000)?;
+
+            let count = get_cache_entry_count(&service)?;
+            let size = get_cache_total_size(&service)?;
+
+            // Evict to bring under limit
+            service.prune_cache_by_size(count as u64, size, 50_000)?;
+
+            // Oldest entry should be evicted first
+            assert!(
+                !cache_contains(&service, oldest_root)?,
+                "Oldest entry should be evicted"
+            );
+
+            // Middle and newest might or might not be evicted depending on size,
+            // but if one remains, it should be the newest
+            let middle_exists = cache_contains(&service, middle_root)?;
+            let newest_exists = cache_contains(&service, newest_root)?;
+
+            if middle_exists {
+                // If middle exists, newest must also exist (FIFO ordering)
+                assert!(
+                    newest_exists,
+                    "FIFO order violated: middle exists but newest doesn't"
+                );
+            }
+
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // FIFO Ordering Property Tests
+    // ========================================================================
+
+    #[cfg(test)]
+    mod fifo_properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn fifo_ordering_always_maintained(
+                timestamps in prop::collection::vec(100_u64..1_000_000, 5..20)
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let strategy = irys_types::CacheEvictionStrategy::SizeBased {
+                        max_cache_size_bytes: 10_000_000,
+                    };
+                    let service = setup_test_service_with_strategy(strategy)
+                        .await
+                        .unwrap();
+
+                    // Insert entries with random timestamps
+                    for ts in &timestamps {
+                        let timestamp = irys_types::UnixTimestamp::from_secs(*ts);
+                        insert_entry_with_timestamp(&service, timestamp)
+                            .unwrap();
+                    }
+
+                    // Collect entries and verify sorted
+                    let entries = service.collect_cache_entries_by_age().unwrap();
+
+                    for window in entries.windows(2) {
+                        prop_assert!(
+                            window[0].1.cached_at <= window[1].1.cached_at,
+                            "FIFO order violated: {} > {}",
+                            window[0].1.cached_at.as_secs(),
+                            window[1].1.cached_at.as_secs()
+                        );
+                    }
+
+                    Ok::<(), proptest::test_runner::TestCaseError>(())
+                })
+                .unwrap();
+            }
+        }
     }
 }
