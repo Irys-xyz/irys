@@ -15,8 +15,8 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
 };
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot,
-    EpochSnapshot, ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -1485,7 +1485,11 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
-    // Regular block validation: ensure unpledge targets are owned by signer in parent snapshot
+    // Regular block validation: ensure commitments align with snapshot state
+    let mut simulated_snapshot = CommitmentSnapshot {
+        commitments: parent_commitment_snapshot.commitments.clone(),
+    };
+
     for tx in &actual_commitments {
         if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
             let partition_hash = H256::from(partition_hash);
@@ -1502,6 +1506,14 @@ pub async fn commitment_txs_are_valid(
                 owner
             );
         }
+
+        let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
+        ensure!(
+            status == CommitmentSnapshotStatus::Accepted,
+            "Commitment {} rejected by snapshot validation with status {:?}",
+            tx.id,
+            status
+        );
     }
 
     // Regular block validation: check priority ordering for stake and pledge commitments
