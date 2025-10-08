@@ -565,10 +565,10 @@ impl<'a> ShadowTxGenerator<'a> {
                     })?;
             }
             irys_primitives::CommitmentType::Unstake => {
-                self.deduct_from_treasury_for_payout(tx.value)?;
+                // Unstake handled on epoch boundary
             }
             irys_primitives::CommitmentType::Unpledge { .. } => {
-                // No treasury changes at inclusion for unpledge
+                // Unpledge handled on epoch boundary
             }
         }
 

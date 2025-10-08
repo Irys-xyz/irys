@@ -124,12 +124,12 @@ impl StorageModuleServiceInner {
     #[tracing::instrument(skip_all, err)]
     async fn handle_partition_assignments_update(
         &mut self,
-        storage_module_infos: Arc<Vec<StorageModuleInfo>>,
+        storage_module_info_update: Arc<Vec<StorageModuleInfo>>,
         update_height: u64,
     ) -> eyre::Result<()> {
         // Read the current storage modules once, outside the loop
         // this is the current state of the storage modules prior of the partition assignments update
-        let modules_by_id: HashMap<usize, Arc<StorageModule>> = {
+        let local_modules_by_id: HashMap<usize, Arc<StorageModule>> = {
             let modules_guard = self.storage_modules.read().unwrap();
             modules_guard
                 .iter()
@@ -139,25 +139,26 @@ impl StorageModuleServiceInner {
         let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();
         let mut packing_modules: Vec<Arc<StorageModule>> = Vec::new();
 
-        debug!("StorageModuleInfos:\n{:#?}", storage_module_infos);
+        debug!("StorageModuleInfos:\n{:#?}", storage_module_info_update);
 
-        let info_by_id: HashMap<usize, &StorageModuleInfo> = storage_module_infos
+        let update_info_by_id: HashMap<usize, &StorageModuleInfo> = storage_module_info_update
             .iter()
             .map(|info| (info.id, info))
             .collect();
 
-        for info in storage_module_infos.iter() {
-            if !modules_by_id.contains_key(&info.id) {
-                panic!(
+        for info in storage_module_info_update.iter() {
+            if !local_modules_by_id.contains_key(&info.id) {
+                eyre::bail!(
                     "StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}",
                     info.id, info
                 );
             }
         }
 
-        for (module_id, module) in modules_by_id.iter() {
-            match info_by_id.get(module_id) {
+        for (module_id, module) in local_modules_by_id.iter() {
+            match update_info_by_id.get(module_id) {
                 None => {
+                    // storage module is present locally, not present in the update
                     self.clear_assignment_if_outdated(module, update_height, "missing_from_update");
                 }
                 Some(sm_info) => {
@@ -170,12 +171,12 @@ impl StorageModuleServiceInner {
 
                     let path = &self.submodules_config.submodule_paths[sm_info.id];
 
-                    // ARCHITECTURE NOTE: Configuration vs. Implementation Mismatch
                     if *path != sm_info.submodules[0].1 {
                         return Err(eyre::eyre!("Submodule paths don't match"));
                     }
 
                     if sm_info.partition_assignment.is_none() {
+                        // storage module is present locally, present in the incoming update, but it has no partition assignment
                         self.clear_assignment_if_outdated(
                             module,
                             update_height,
@@ -186,21 +187,18 @@ impl StorageModuleServiceInner {
             }
         }
 
-        for sm_info in storage_module_infos.iter() {
+        for sm_info in storage_module_info_update.iter() {
             let Some(info_pa) = sm_info.partition_assignment else {
                 continue;
             };
 
-            let existing = modules_by_id
+            let existing = local_modules_by_id
                 .get(&sm_info.id)
                 .expect("StorageModuleInfo must reference an existing storage module id");
 
             let path = &self.submodules_config.submodule_paths[sm_info.id];
 
-            match self.validate_packing_params(existing, path, sm_info.id) {
-                Ok(()) => {}
-                Err(err) => panic!("{}", err),
-            }
+            self.validate_packing_params(existing, path, sm_info.id)?;
 
             match existing.partition_assignment() {
                 None => {
