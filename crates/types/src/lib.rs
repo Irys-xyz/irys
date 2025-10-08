@@ -23,6 +23,7 @@ pub mod signature;
 pub mod simple_rng;
 pub mod storage;
 pub mod storage_pricing;
+pub mod time;
 pub mod transaction;
 pub mod version;
 pub mod versioning;
@@ -40,6 +41,7 @@ pub use gossip::*;
 pub use serialization::*;
 pub use signature::*;
 pub use storage::*;
+pub use time::*;
 pub use transaction::*;
 
 pub use alloy_primitives::{Address, Signature};

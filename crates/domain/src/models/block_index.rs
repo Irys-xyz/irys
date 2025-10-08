@@ -183,7 +183,7 @@ impl BlockIndex {
         block_bounds.start_chunk_offset = previous_item.ledgers[ledger_index].total_chunks;
         block_bounds.end_chunk_offset = found_item.ledgers[ledger_index].total_chunks;
         block_bounds.tx_root = found_item.ledgers[ledger_index].tx_root;
-        block_bounds.height = block_height as u128;
+        block_bounds.height = block_height;
 
         Ok(block_bounds)
     }
@@ -241,7 +241,7 @@ impl BlockIndex {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BlockBounds {
     /// Block height where these bounds apply
-    pub height: u128,
+    pub height: u64,
     /// Target ledger (Publish or Submit)
     pub ledger: DataLedger,
     /// First chunk offset included in this block (inclusive)

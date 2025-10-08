@@ -140,6 +140,7 @@ impl IrysNodeCtx {
     }
 
     pub async fn stop(self) {
+        info!("stop function called, shutting down...");
         let _ = self.stop_mining();
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
