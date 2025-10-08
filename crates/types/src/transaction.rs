@@ -506,7 +506,6 @@ impl DataTransactionHeaderV1 {
     /// This method ensures that the transaction signature reflects only the
     /// essential data needed for validation and security purposes.
     pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
-
         self.encode(out)
     }
 }
