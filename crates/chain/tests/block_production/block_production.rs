@@ -18,8 +18,8 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
+    irys::IrysSigner, storage_pricing::Amount, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    VersionedIrysBlockHeader, IrysTransactionCommon as _, NodeConfig, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -1064,10 +1064,10 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
         async fn create_evm_block(
             &self,
-            prev_block_header: &IrysBlockHeader,
+            prev_block_header: &VersionedIrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
+            commitment_txs_to_bill: &[VersionedCommitmentTransaction],
+            submit_txs: &[VersionedDataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
@@ -1206,7 +1206,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
     // Evil strategy that forces inclusion of a transaction from underfunded user
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub malicious_tx: DataTransactionHeader,
+        pub malicious_tx: VersionedDataTransactionHeader,
     }
 
     #[async_trait::async_trait]
@@ -1217,11 +1217,11 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<irys_types::SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -1293,7 +1293,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 
     // Create evil block production strategy to force inclusion
     let evil_strategy = EvilBlockProdStrategy {
-        malicious_tx: malicious_tx.header.clone(),
+        malicious_tx: (*malicious_tx.header).clone(),
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
         },
@@ -1483,10 +1483,10 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
 
         async fn create_evm_block(
             &self,
-            prev_block_header: &IrysBlockHeader,
+            prev_block_header: &VersionedIrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
+            commitment_txs_to_bill: &[VersionedCommitmentTransaction],
+            submit_txs: &[VersionedDataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,

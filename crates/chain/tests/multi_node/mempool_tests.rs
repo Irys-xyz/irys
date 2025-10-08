@@ -13,8 +13,8 @@ use irys_reth_node_bridge::{
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
-    IngressProofsList, IrysBlockHeader, NodeConfig, H256,
+    irys::IrysSigner, VersionedCommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
+    IngressProofsList, VersionedIrysBlockHeader, NodeConfig, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -588,11 +588,11 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // Validate the peer blocks create forks with different transactions
-    let peer1_block: Arc<IrysBlockHeader> = peer1_node
+    let peer1_block: Arc<VersionedIrysBlockHeader> = peer1_node
         .get_block_by_height(expected_height)
         .await?
         .into();
-    let peer2_block: Arc<IrysBlockHeader> = peer2_node
+    let peer2_block: Arc<VersionedIrysBlockHeader> = peer2_node
         .get_block_by_height(expected_height)
         .await?
         .into();
@@ -1037,7 +1037,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(
         a1_b2_reorg_mempool_txs.submit_tx,
-        vec![a_blk1_tx1.header.clone()]
+        vec![(*a_blk1_tx1.header).clone()]
     );
 
     let a_blk1_tx1_proof1 = {
@@ -1047,7 +1047,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
             .expect("Able to get a_blk1_tx1's ingress proof from DB")
     };
 
-    let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
+    let mut a_blk1_tx1_published = (*a_blk1_tx1.header).clone();
     a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
     // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
@@ -1074,7 +1074,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
     // note: as [`get_publish_txs_and_proofs`] resolves ingress proofs, calling get_best_mempool_txs will return the header with an ingress proof.
     // so we have a separate path & assert to ensure the ingress proof is being removed when the tx is orphaned
-    assert_eq!(a_blk1_tx1_mempool, a_blk1_tx1.header);
+    assert_eq!(a_blk1_tx1_mempool, *a_blk1_tx1.header);
 
     // gossip A's orphaned tx to B
     // get it ready for promotion, and then mine a block on B to include it
@@ -1514,7 +1514,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let post_wait_stake_commitment =
         async |peer: &IrysNodeTest<IrysNodeCtx>,
                genesis: &IrysNodeTest<IrysNodeCtx>|
-               -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
+               -> eyre::Result<(VersionedCommitmentTransaction, VersionedCommitmentTransaction)> {
             let stake_tx = peer.post_stake_commitment(None).await?;
             genesis
                 .wait_for_mempool(stake_tx.id, seconds_to_wait)
@@ -1868,7 +1868,7 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     let post_wait_stake_commitment =
         async |peer: &IrysNodeTest<IrysNodeCtx>,
                genesis: &IrysNodeTest<IrysNodeCtx>|
-               -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
+               -> eyre::Result<(VersionedCommitmentTransaction, VersionedCommitmentTransaction)> {
             let stake_tx = peer.post_stake_commitment(None).await?;
             genesis
                 .wait_for_mempool(stake_tx.id, seconds_to_wait)
@@ -2133,7 +2133,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 
     // ingest invalid transaction directly to the mempool
     let res = genesis_node
-        .ingest_data_tx(invalid_header.clone())
+        .ingest_data_tx((*invalid_header).clone())
         .await
         .expect_err("expected failure but got success");
     assert!(
@@ -2143,7 +2143,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
     );
 
     // ingest valid transaction
-    genesis_node.ingest_data_tx(valid_tx.header.clone()).await?;
+    genesis_node.ingest_data_tx((*valid_tx.header).clone()).await?;
 
     // wait for all txs to ingress mempool
     genesis_node
@@ -2179,7 +2179,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 )]
 #[test_log::test(actix_web::test)]
 async fn stake_tx_fee_and_value_validation_test(
-    #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
+    #[case] tx_modifier: fn(&mut VersionedCommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
@@ -2194,7 +2194,7 @@ async fn stake_tx_fee_and_value_validation_test(
     let required_value = config.stake_value.amount;
 
     // Create stake transaction and apply the modifier
-    let mut stake_tx = CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
+    let mut stake_tx = VersionedCommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
     let stake_tx = signer.sign_commitment(stake_tx)?;
 
@@ -2251,7 +2251,7 @@ async fn stake_tx_fee_and_value_validation_test(
 #[test_log::test(actix_web::test)]
 async fn pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
-    #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
+    #[case] tx_modifier: fn(&mut VersionedCommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
@@ -2265,7 +2265,7 @@ async fn pledge_tx_fee_validation_test(
     let required_fee = config.mempool.commitment_fee;
 
     // Create pledge transaction with modifications
-    let mut pledge_tx = CommitmentTransaction::new_pledge(
+    let mut pledge_tx = VersionedCommitmentTransaction::new_pledge(
         config,
         genesis_node.get_anchor().await?,
         &pledge_count,
@@ -2318,12 +2318,12 @@ async fn commitment_tx_valid_higher_fee_test(
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
         CommitmentType::Stake => {
-            CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
+            VersionedCommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
         }
         CommitmentType::Pledge {
             pledge_count_before_executing: count,
         } => {
-            CommitmentTransaction::new_pledge(
+            VersionedCommitmentTransaction::new_pledge(
                 config,
                 genesis_node.get_anchor().await?,
                 &{ count },

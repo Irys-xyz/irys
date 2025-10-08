@@ -8,7 +8,7 @@ use alloy_primitives::{Bytes, B256, U256};
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
-use irys_types::{IrysBlockHeader, NodeConfig};
+use irys_types::{VersionedIrysBlockHeader, NodeConfig};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
@@ -16,7 +16,7 @@ use reth::primitives::Block;
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
+    block: Arc<VersionedIrysBlockHeader>,
     skip_vdf_validation: bool,
 ) -> eyre::Result<()> {
     use irys_actors::block_tree_service::BlockTreeServiceMessage;
@@ -40,7 +40,7 @@ async fn send_block_to_block_tree(
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(
     genesis_node: &IrysNodeTest<IrysNodeCtx>,
-) -> eyre::Result<(Arc<IrysBlockHeader>, reth::payload::EthBuiltPayload)> {
+) -> eyre::Result<(Arc<VersionedIrysBlockHeader>, reth::payload::EthBuiltPayload)> {
     let block_prod_strategy = ProductionStrategy {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };

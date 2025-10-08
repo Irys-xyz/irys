@@ -13,7 +13,7 @@
 //! then by height (lower first) and VDF steps (fewer first).
 
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, IrysBlockHeader};
+use irys_types::{BlockHash, VersionedIrysBlockHeader};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
 use std::sync::atomic::Ordering;
@@ -48,7 +48,7 @@ pub(super) struct BlockPriorityMeta {
 }
 
 impl BlockPriorityMeta {
-    pub(super) fn new(block: &IrysBlockHeader, state: BlockPriority) -> Self {
+    pub(super) fn new(block: &VersionedIrysBlockHeader, state: BlockPriority) -> Self {
         Self {
             height: block.height,
             state,
@@ -125,7 +125,7 @@ pub(super) struct CurrentVdfTask {
     pub priority: BlockPriorityMeta,
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
     pub handle: JoinHandle<(VdfValidationResult, BlockValidationTask)>,
-    pub block: Arc<IrysBlockHeader>,
+    pub block: Arc<VersionedIrysBlockHeader>,
 }
 
 /// Simplified VDF scheduler with preemption
@@ -281,7 +281,7 @@ impl ValidationCoordinator {
 
     /// Calculate priority for a block
     #[instrument(skip_all, fields(block_hash = %block.block_hash, block_height = %block.height))]
-    pub(super) fn calculate_priority(&self, block: &IrysBlockHeader) -> BlockPriorityMeta {
+    pub(super) fn calculate_priority(&self, block: &VersionedIrysBlockHeader) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
 
@@ -457,7 +457,7 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
-    use irys_types::{serialization::H256List, BlockHash, IrysBlockHeader, H256};
+    use irys_types::{serialization::H256List, BlockHash, VersionedIrysBlockHeader, H256};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
@@ -465,11 +465,11 @@ mod tests {
     #[test]
     #[expect(clippy::redundant_clone)] // False positive: header1 is used after clone
     fn test_validation_priority_ordering() {
-        let mut header1 = IrysBlockHeader::new_mock_header();
+        let mut header1 = VersionedIrysBlockHeader::new_mock_header();
         header1.height = 100;
         header1.vdf_limiter_info.steps = H256List(vec![Default::default(); 5]); // 5 VDF steps
 
-        let mut header2 = IrysBlockHeader::new_mock_header();
+        let mut header2 = VersionedIrysBlockHeader::new_mock_header();
         header2.height = 200;
         header2.vdf_limiter_info.steps = H256List(vec![Default::default(); 10]); // 10 VDF steps
 
@@ -513,7 +513,7 @@ mod tests {
     fn test_priority_queue_ordering() {
         // Create headers with different properties
         let mkheader = |height: u64, vdf_steps: usize| {
-            let mut header = IrysBlockHeader::new_mock_header();
+            let mut header = VersionedIrysBlockHeader::new_mock_header();
             header.height = height;
             header.block_hash = BlockHash::random();
             header.vdf_limiter_info.steps = H256List(vec![Default::default(); vdf_steps]);
@@ -522,7 +522,7 @@ mod tests {
 
         // Create priority metadata
         let mkprio =
-            |header: &IrysBlockHeader, state: BlockPriority| BlockPriorityMeta::new(header, state);
+            |header: &VersionedIrysBlockHeader, state: BlockPriority| BlockPriorityMeta::new(header, state);
 
         // Create a priority queue
         let mut queue: PriorityQueue<BlockHash, (BlockPriorityMeta, ())> = PriorityQueue::new();
@@ -590,9 +590,9 @@ mod tests {
     /// Helper function to setup a canonical chain scenario with n blocks  
     fn setup_canonical_chain_scenario(
         max_height: u64,
-    ) -> (BlockTreeReadGuard, Vec<Arc<IrysBlockHeader>>) {
+    ) -> (BlockTreeReadGuard, Vec<Arc<VersionedIrysBlockHeader>>) {
         // Create genesis block
-        let mut genesis = IrysBlockHeader::new_mock_header();
+        let mut genesis = VersionedIrysBlockHeader::new_mock_header();
         genesis.height = 0;
         genesis.block_hash = H256::random();
         genesis.cumulative_diff = 0.into();
@@ -606,7 +606,7 @@ mod tests {
 
         // Create canonical chain
         for height in 1..=max_height {
-            let mut header = IrysBlockHeader::new_mock_header();
+            let mut header = VersionedIrysBlockHeader::new_mock_header();
             header.height = height;
             header.previous_block_hash = last_hash;
             header.block_hash = H256::random();
@@ -655,7 +655,7 @@ mod tests {
             let mut last_hash = tip.block_hash;
 
             for height in 4..=5 {
-                let mut header = IrysBlockHeader::new_mock_header();
+                let mut header = VersionedIrysBlockHeader::new_mock_header();
                 header.height = height;
                 header.previous_block_hash = last_hash;
                 header.block_hash = H256::random();
@@ -703,7 +703,7 @@ mod tests {
 
             // Create an alternative block at height 3 (competing with canonical block at height 3)
             for height in 3..=10 {
-                let mut header = IrysBlockHeader::new_mock_header();
+                let mut header = VersionedIrysBlockHeader::new_mock_header();
                 header.height = height;
                 header.previous_block_hash = last_hash;
                 header.block_hash = H256::random();

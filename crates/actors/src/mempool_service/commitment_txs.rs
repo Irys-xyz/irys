@@ -4,8 +4,8 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionCommon as _, IrysTransactionId, H256,
+    Address, CommitmentValidationError, GossipBroadcastMessage, IrysTransactionId,
+    VersionedCommitmentTransaction, H256,
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
@@ -15,7 +15,7 @@ impl Inner {
     #[instrument(skip_all)]
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
-        commitment_tx: CommitmentTransaction,
+        commitment_tx: VersionedCommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
@@ -133,6 +133,7 @@ impl Inner {
             &commitment_tx.id,
             &commitment_status
         );
+        
         if commitment_status == CommitmentSnapshotStatus::Accepted {
             let mut mempool_state_guard = self.mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
@@ -172,7 +173,7 @@ impl Inner {
                     // todo switch _ to actually handle the result
                     let _ = self
                         .handle_message(MempoolServiceMessage::IngestCommitmentTx(
-                            pledge_tx, oneshot_tx,
+                            pledge_tx.clone(), oneshot_tx,
                         ))
                         .await;
 
@@ -182,7 +183,7 @@ impl Inner {
                 }
             }
 
-            // Gossip transaction
+            // Gossip transaction (use original inner type for network transmission)
             self.service_senders
                 .gossip_broadcast
                 .send(GossipBroadcastMessage::from(commitment_tx.clone()))
@@ -238,10 +239,10 @@ impl Inner {
 
     /// read specified commitment txs from mempool
     #[instrument(skip_all, name = "get_commitment_tx")]
-    pub async fn handle_get_commitment_tx_message(
+    pub async fn handle_get_commitment_transactions_message(
         &self,
         commitment_tx_ids: Vec<H256>,
-    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+    ) -> HashMap<IrysTransactionId, VersionedCommitmentTransaction> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
@@ -286,7 +287,7 @@ impl Inner {
 
     /// should really only be called by persist_mempool_to_disk, all other scenarios need a more
     /// subtle filtering of commitment state, recently confirmed? pending? valid? etc.
-    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, VersionedCommitmentTransaction> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
@@ -357,7 +358,7 @@ impl Inner {
 
     fn validate_funding(
         &self,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: &VersionedCommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         // Get the current balance of the transaction signer
         let balance: irys_types::U256 = self
@@ -404,7 +405,7 @@ impl Inner {
 
     pub async fn get_commitment_status(
         &self,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: &VersionedCommitmentTransaction,
     ) -> CommitmentSnapshotStatus {
         // Get the commitment snapshot for the current canonical chain
         let (commitment_snapshot, epoch_snapshot) = {

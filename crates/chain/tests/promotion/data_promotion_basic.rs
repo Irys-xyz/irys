@@ -5,7 +5,7 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use irys_actors::packing::wait_for_packing;
-use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
+use irys_types::{irys::IrysSigner, DataTransaction, VersionedDataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
 use tracing::debug;
@@ -77,10 +77,10 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     }
 
     // Post the 3 transactions & initialize some state to track their confirmation
-    let mut unconfirmed_tx: Vec<DataTransactionHeader> = Vec::new();
+    let mut unconfirmed_tx: Vec<VersionedDataTransactionHeader> = Vec::new();
     for tx in txs.iter() {
         let header = &tx.header;
-        unconfirmed_tx.push(header.clone());
+        unconfirmed_tx.push((**header).clone());
         let req = TestRequest::post()
             .uri("/v1/tx")
             .set_json(header)

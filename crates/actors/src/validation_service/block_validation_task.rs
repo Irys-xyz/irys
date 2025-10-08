@@ -26,7 +26,7 @@ use crate::block_validation::{
 };
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, IrysBlockHeader};
+use irys_types::{BlockHash, VersionedIrysBlockHeader};
 use irys_vdf::state::CancelEnum;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -44,7 +44,7 @@ enum ParentValidationResult {
 /// Handles the execution of a single block validation task
 #[derive(Clone)]
 pub(super) struct BlockValidationTask {
-    pub block: Arc<IrysBlockHeader>,
+    pub block: Arc<VersionedIrysBlockHeader>,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub skip_vdf_validation: bool,
@@ -80,7 +80,7 @@ impl Ord for BlockValidationTask {
 
 impl BlockValidationTask {
     pub(super) fn new(
-        block: Arc<IrysBlockHeader>,
+        block: Arc<VersionedIrysBlockHeader>,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         skip_vdf_validation: bool,

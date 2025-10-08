@@ -1,7 +1,9 @@
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
-use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
+use irys_types::{
+    Config, DatabaseProvider, VersionedCommitmentTransaction, VersionedIrysBlockHeader,
+};
 use reth_db::Database as _;
 use std::collections::VecDeque;
 
@@ -10,16 +12,16 @@ use crate::block_index_guard::BlockIndexReadGuard;
 #[derive(Debug, Clone)]
 /// Represents an epoch block and its associated commitment transactions
 pub struct EpochBlockData {
-    pub epoch_block: IrysBlockHeader,
-    pub commitments: Vec<CommitmentTransaction>,
+    pub epoch_block: VersionedIrysBlockHeader,
+    pub commitments: Vec<VersionedCommitmentTransaction>,
 }
 
 #[derive(Debug, Clone)]
 /// Represents the complete historical epoch data needed for replay
 /// Contains the genesis block, genesis commitments, and all subsequent epoch blocks
 pub struct EpochReplayData {
-    pub genesis_block_header: IrysBlockHeader,
-    pub genesis_commitments: Vec<CommitmentTransaction>,
+    pub genesis_block_header: VersionedIrysBlockHeader,
+    pub genesis_commitments: Vec<VersionedCommitmentTransaction>,
     pub epoch_blocks: Vec<EpochBlockData>,
 }
 
@@ -108,11 +110,14 @@ impl EpochReplayData {
                 .map(|txid| {
                     // First try to get the commitment tx from the DB
                     let opt = commitment_tx_by_txid(&read_tx, txid)?;
-                    opt.or_else(|| recovered.commitment_txs.get(txid).cloned())
-                        .ok_or_else(|| {
-                            // If we can't find it, there's no continuing
-                            eyre::eyre!("Commitment transaction not found: txid={}", txid)
-                        })
+                    opt.or_else(|| {
+                        // The recovered map already contains versioned types
+                        recovered.commitment_txs.get(txid).cloned()
+                    })
+                    .ok_or_else(|| {
+                        // If we can't find it, there's no continuing
+                        eyre::eyre!("Commitment transaction not found: txid={}", txid)
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap_or_else(|_| panic!("Able to fetch all commitment transactions from database for epoch block {} at height {}", block.block_hash, block.height));

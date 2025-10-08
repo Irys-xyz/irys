@@ -7,16 +7,16 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    H256List, IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
+    VersionedCommitmentTransaction, Config, DataLedger, VersionedDataTransactionHeader, DataTransactionLedger,
+    H256List, VersionedIrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
+    block: Arc<VersionedIrysBlockHeader>,
+    commitment_txs: Vec<VersionedCommitmentTransaction>,
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -39,7 +39,7 @@ async fn send_block_to_block_tree(
 async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub malicious_tx: DataTransactionHeader,
+        pub malicious_tx: VersionedDataTransactionHeader,
     }
 
     #[async_trait::async_trait]
@@ -50,11 +50,11 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -117,7 +117,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
 
     // Create a block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
-        malicious_tx: malicious_tx.header.clone(),
+        malicious_tx: (*malicious_tx.header).clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
                 config: Config::new(evil_config),

@@ -55,9 +55,10 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
-    CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
+    CloneableJoinHandle, Config, NodeConfig, NodeMode,
     OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
-    ServiceSet, TokioServiceHandle, H256, U256,
+    ServiceSet, TokioServiceHandle, VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256,
+    U256,
 };
 use irys_types::{BlockHash, EvmBlockHash};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -329,7 +330,7 @@ impl IrysNode {
         evm_block_hash: EvmBlockHash,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
         info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
 
         // Check if blockchain data already exists
@@ -364,7 +365,7 @@ impl IrysNode {
         &self,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
         // Get the genesis block hash from index
         let block_item = block_index
             .get_item(0)
@@ -401,12 +402,13 @@ impl IrysNode {
     async fn create_new_genesis_block(
         &self,
         evm_block_hash: EvmBlockHash,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             evm_block_hash,
             self.config.consensus.number_of_ingress_proofs_total,
         );
+        
         // Generate genesis commitments from configuration
         let commitments = get_genesis_commitments(&self.config).await;
 
@@ -466,7 +468,7 @@ impl IrysNode {
     async fn fetch_genesis_from_trusted_peer(
         &self,
         expected_genesis_hash: H256,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> (VersionedIrysBlockHeader, Vec<VersionedCommitmentTransaction>) {
         tracing::Span::current().record(
             "expected_genesis_hash",
             format_args!("{}", expected_genesis_hash),
@@ -524,8 +526,8 @@ impl IrysNode {
     /// * `eyre::Result<()>` - Success or error result of the database operations
     fn persist_genesis_block_and_commitments(
         &self,
-        genesis_block: &IrysBlockHeader,
-        genesis_commitments: &[CommitmentTransaction],
+        genesis_block: &VersionedIrysBlockHeader,
+        genesis_commitments: &[VersionedCommitmentTransaction],
         irys_db: &DatabaseProvider,
         block_index: &mut BlockIndex,
     ) -> eyre::Result<()> {
@@ -746,7 +748,7 @@ impl IrysNode {
 
     fn init_services_thread(
         config: Config,
-        latest_block: Arc<IrysBlockHeader>,
+        latest_block: Arc<VersionedIrysBlockHeader>,
         genesis_hash: H256,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
         mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
@@ -924,7 +926,7 @@ impl IrysNode {
         vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         block_index: Arc<RwLock<BlockIndex>>,
-        latest_block: Arc<IrysBlockHeader>,
+        latest_block: Arc<VersionedIrysBlockHeader>,
         irys_provider: IrysRethProvider,
         task_exec: &TaskExecutor,
         http_listener: TcpListener,
@@ -1460,7 +1462,7 @@ impl IrysNode {
         vdf_shutdown_receiver: mpsc::Receiver<()>,
         vdf_fast_forward_receiver: mpsc::UnboundedReceiver<VdfStep>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
-        latest_block: Arc<IrysBlockHeader>,
+        latest_block: Arc<VersionedIrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
         broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
@@ -1734,7 +1736,7 @@ impl IrysNode {
 fn read_latest_block_data(
     block_index: &BlockIndex,
     irys_db: &DatabaseProvider,
-) -> (u64, Arc<IrysBlockHeader>) {
+) -> (u64, Arc<VersionedIrysBlockHeader>) {
     // Read latest from the block index; if no entries, panic
     let latest_block_index = block_index
         .get_latest_item()
@@ -1888,7 +1890,7 @@ async fn stake_and_pledge(
 
     let api_uri = config.node_config.local_api_url();
 
-    let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
+    let post_commitment_tx = async |commitment_tx: &VersionedCommitmentTransaction| {
         let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment_tx", api_uri);
 
@@ -1921,8 +1923,8 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
-        let stake_tx = signer.sign_commitment(stake_tx)?;
+        let mut stake_tx = VersionedCommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
+        signer.sign_commitment(&mut stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
         debug!("Posted stake tx {:?}", &stake_tx.id);
@@ -1950,7 +1952,7 @@ async fn stake_and_pledge(
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = VersionedCommitmentTransaction::new_pledge(
             &config.consensus,
             latest_block_hash,
             mempool_pledge_provider.as_ref(),
@@ -1958,7 +1960,7 @@ async fn stake_and_pledge(
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx)?;
+        signer.sign_commitment(&mut pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         debug!(

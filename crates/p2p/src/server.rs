@@ -18,8 +18,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
-    Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
-    IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    Address, VersionedCommitmentTransaction, VersionedDataTransactionHeader, GossipDataRequest, GossipRequest,
+    IngressProof, VersionedIrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
@@ -143,7 +143,7 @@ where
     )]
     async fn handle_block(
         server: Data<Self>,
-        irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
+        irys_block_header_json: web::Json<GossipRequest<VersionedIrysBlockHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
@@ -243,7 +243,7 @@ where
 
     async fn handle_transaction(
         server: Data<Self>,
-        irys_transaction_header_json: web::Json<GossipRequest<DataTransactionHeader>>,
+        irys_transaction_header_json: web::Json<GossipRequest<VersionedDataTransactionHeader>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
@@ -278,7 +278,7 @@ where
 
     async fn handle_commitment_tx(
         server: Data<Self>,
-        commitment_tx_json: web::Json<GossipRequest<CommitmentTransaction>>,
+        commitment_tx_json: web::Json<GossipRequest<VersionedCommitmentTransaction>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {

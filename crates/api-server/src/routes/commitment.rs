@@ -5,7 +5,7 @@ use actix_web::{
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_types::CommitmentTransaction;
+use irys_types::{VersionedCommitmentTransaction};
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `CommitmentTransaction` type,
@@ -14,7 +14,7 @@ use irys_types::CommitmentTransaction;
 /// delivery and transaction validation.
 pub async fn post_commitment_tx(
     state: web::Data<ApiState>,
-    body: Json<CommitmentTransaction>,
+    body: Json<VersionedCommitmentTransaction>,
 ) -> actix_web::Result<HttpResponse> {
     let tx = body.into_inner();
 

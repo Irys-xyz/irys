@@ -7,7 +7,7 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
+    DataLedger, GossipBroadcastMessage, IrysTransactionId, VersionedDataTransactionHeader, H256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
@@ -20,7 +20,7 @@ impl Inner {
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
-    ) -> Vec<Option<DataTransactionHeader>> {
+    ) -> Vec<Option<VersionedDataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
         let mempool_state_guard = self.mempool_state.read().await;
 
@@ -36,7 +36,8 @@ impl Inner {
             if let Ok(read_tx) = self.read_tx() {
                 if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
                     debug!("Got tx {} from DB", &tx);
-                    found_txs.push(Some(tx_header.clone()));
+                    // tx_header is already versioned from DB
+                    found_txs.push(Some(tx_header));
                     continue;
                 }
             }
@@ -50,7 +51,7 @@ impl Inner {
 
     pub async fn handle_data_tx_ingress_message(
         &mut self,
-        mut tx: DataTransactionHeader,
+        mut tx: VersionedDataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
 
@@ -206,7 +207,7 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, DataTransactionHeader> {
+    pub async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, VersionedDataTransactionHeader> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the storage transactions
@@ -275,7 +276,7 @@ impl Inner {
     /// # Notes
     /// - Only considers Submit ledger transactions (filters out Publish, etc.)
     /// - Only examines blocks within the configured `anchor_expiry_depth`
-    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<DataTransactionHeader> {
+    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<VersionedDataTransactionHeader> {
         // Get the current canonical chain head to establish our starting point for block traversal
         // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
         let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())

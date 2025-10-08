@@ -7,7 +7,7 @@ use irys_domain::{
     dummy_ema_snapshot, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
     EpochSnapshot,
 };
-use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysTokenPrice, H256};
+use irys_types::{storage_pricing::TOKEN_SCALE, Config, VersionedIrysBlockHeader, IrysTokenPrice, H256};
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
@@ -28,10 +28,10 @@ pub fn build_genesis_tree_with_n_blocks(
     (genesis_tree(&mut blocks), prices)
 }
 
-pub fn build_tree(init_height: u64, max_height: u64) -> (Vec<IrysBlockHeader>, Vec<PriceInfo>) {
+pub fn build_tree(init_height: u64, max_height: u64) -> (Vec<VersionedIrysBlockHeader>, Vec<PriceInfo>) {
     let blocks = (init_height..(max_height + init_height).saturating_add(1))
         .map(|height| {
-            let mut header = IrysBlockHeader::new_mock_header();
+            let mut header = VersionedIrysBlockHeader::new_mock_header();
             header.height = height;
             // add a random constant to the price to differentiate it from the height
             header.oracle_irys_price = deterministic_price(height);
@@ -55,7 +55,7 @@ pub fn deterministic_price(height: u64) -> IrysTokenPrice {
     IrysTokenPrice::new(amount)
 }
 
-pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
+pub fn genesis_tree(blocks: &mut [(VersionedIrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
     let mut block_hash = if blocks[0].0.block_hash == H256::default() {
         H256::random()
     } else {
@@ -152,7 +152,7 @@ pub fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<Pr
     // Build linear chain without any forks
     let mut last_hash = H256::default();
     for height in 0..=max_height {
-        let mut header = IrysBlockHeader::new_mock_header();
+        let mut header = VersionedIrysBlockHeader::new_mock_header();
         header.height = height;
         header.oracle_irys_price = deterministic_price(height);
         header.ema_irys_price = deterministic_price(height);
@@ -223,7 +223,7 @@ pub fn create_and_apply_fork(
     {
         let mut tree = block_tree_guard.write();
         for height in (common_ancestor_height + 1)..=fork_height {
-            let mut header = IrysBlockHeader::new_mock_header();
+            let mut header = VersionedIrysBlockHeader::new_mock_header();
             header.height = height;
             header.previous_block_hash = last_hash;
             // Use different prices to distinguish from old fork

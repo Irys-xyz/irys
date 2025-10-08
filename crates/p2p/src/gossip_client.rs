@@ -9,7 +9,8 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
-    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
+    VersionedIrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
+    DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -405,7 +406,7 @@ impl GossipClient {
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+    ) -> Result<(Address, Arc<VersionedIrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequest::Block(block_hash);
         self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
             .await
@@ -433,7 +434,7 @@ impl GossipClient {
         block_hash: BlockHash,
         peer: &(Address, PeerListItem),
         peer_list: &PeerList,
-    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+    ) -> Result<(Address, Arc<VersionedIrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequest::Block(block_hash);
         match self
             .pull_data_and_update_the_score(peer, data_request, peer_list)
@@ -472,7 +473,7 @@ impl GossipClient {
         }
     }
 
-    fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+    fn block(gossip_data: GossipData) -> Result<Arc<VersionedIrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
             GossipData::Block(block) => Ok(block),
             _ => Err(PeerNetworkError::UnexpectedData(format!(

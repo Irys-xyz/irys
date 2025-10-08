@@ -154,7 +154,7 @@ async fn post_transaction_header(client: &RemoteNodeClient, tx: &DataTransaction
 
     client
         .api_client
-        .post_transaction(socket_addr, tx.header.clone())
+        .post_transaction(socket_addr, (*tx.header).clone())
         .await?;
 
     Ok(())

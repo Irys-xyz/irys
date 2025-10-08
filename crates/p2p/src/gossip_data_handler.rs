@@ -12,9 +12,10 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
-    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
+    BlockHash, VersionedCommitmentTransaction, VersionedDataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysTransactionResponse,
+    PeerListItem, UnpackedChunk,
+    VersionedIrysBlockHeader, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -133,7 +134,7 @@ where
 
     pub(crate) async fn handle_transaction(
         &self,
-        transaction_request: GossipRequest<DataTransactionHeader>,
+        transaction_request: GossipRequest<VersionedDataTransactionHeader>,
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",
@@ -244,7 +245,7 @@ where
 
     pub(crate) async fn handle_commitment_tx(
         &self,
-        transaction_request: GossipRequest<CommitmentTransaction>,
+        transaction_request: GossipRequest<VersionedCommitmentTransaction>,
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
@@ -335,7 +336,7 @@ where
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
-                data: irys_block.as_ref().clone(),
+                data: (*irys_block).clone(),
             },
             peer_info.address.api,
             peer_info.address.gossip,
@@ -365,7 +366,7 @@ where
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
-                data: irys_block.as_ref().clone(),
+                data: (*irys_block).clone(),
             },
             peer_info.address.api,
             peer_info.address.gossip,
@@ -375,7 +376,7 @@ where
 
     pub(crate) async fn handle_block_header(
         &self,
-        block_header_request: GossipRequest<IrysBlockHeader>,
+        block_header_request: GossipRequest<VersionedIrysBlockHeader>,
         source_api_address: SocketAddr,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {

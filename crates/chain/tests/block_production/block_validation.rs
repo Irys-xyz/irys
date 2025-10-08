@@ -19,7 +19,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     use irys_domain::EmaSnapshot;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
-        CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
+        VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, SystemTransactionLedger,
     };
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;
@@ -37,7 +37,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 
         fn block_reward(
             &self,
-            prev_block_header: &IrysBlockHeader,
+            prev_block_header: &VersionedIrysBlockHeader,
             _current_timestamp: u128,
         ) -> eyre::Result<Amount<irys_types::storage_pricing::phantoms::Irys>> {
             self.prod
@@ -46,10 +46,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 
         async fn create_evm_block(
             &self,
-            prev_block_header: &IrysBlockHeader,
+            prev_block_header: &VersionedIrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
+            commitment_txs_to_bill: &[VersionedCommitmentTransaction],
+            submit_txs: &[VersionedDataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
@@ -74,8 +74,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         async fn produce_block_without_broadcasting(
             &self,
             solution: &SolutionContext,
-            prev_block_header: &IrysBlockHeader,
-            submit_txs: Vec<DataTransactionHeader>,
+            prev_block_header: &VersionedIrysBlockHeader,
+            submit_txs: Vec<VersionedDataTransactionHeader>,
             publish_txs: PublishLedgerWithTxs,
             system_transaction_ledger: Vec<SystemTransactionLedger>,
             _current_timestamp: u128,
@@ -83,7 +83,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
-        ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
+        ) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, Option<AdjustmentStats>)>> {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,

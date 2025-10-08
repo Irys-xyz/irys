@@ -64,6 +64,6 @@ async fn heavy_test_mine_tx() {
         .get_storage_tx_header_from_mempool(&tx.header.id)
         .await
         .expect("expected storage tx to be found in mempool");
-    assert_eq!(tx_header, tx.header);
+    assert_eq!(tx_header, *tx.header);
     irys_node.stop().await;
 }

@@ -3,8 +3,8 @@
 
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
-    LedgerIndexItem, NodeConfig, H256,
+    BlockIndexItem, DataLedger, LedgerChunkOffset, LedgerIndexItem, NodeConfig,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
 };
 use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -88,13 +88,13 @@ impl BlockIndex {
     #[instrument(skip_all, err, fields(%block_hash=block.block_hash, %block_height=block.height))]
     pub fn push_block(
         &mut self,
-        block: &IrysBlockHeader,
-        all_txs: &[DataTransactionHeader],
+        block: &VersionedIrysBlockHeader,
+        all_txs: &[VersionedDataTransactionHeader],
         chunk_size: u64,
     ) -> eyre::Result<()> {
         /// Inner function: Calculates the total number of full chunks needed to store transactions
         /// Each transaction's data is padded to the next full chunk boundary
-        fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
+        fn calculate_chunks_added(txs: &[VersionedDataTransactionHeader], chunk_size: u64) -> u64 {
             let bytes_added = txs.iter().fold(0, |acc, tx| {
                 acc + tx.data_size.div_ceil(chunk_size) * chunk_size
             });

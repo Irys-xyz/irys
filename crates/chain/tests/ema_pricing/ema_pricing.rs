@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use crate::utils::IrysNodeTest;
 use irys_domain::{get_canonical_chain, BlockTreeReadGuard};
-use irys_types::{storage_pricing::Amount, IrysBlockHeader, NodeConfig, OracleConfig, H256};
+use irys_types::{storage_pricing::Amount, VersionedIrysBlockHeader, NodeConfig, OracleConfig, H256};
 use rust_decimal_macros::dec;
 
 fn get_block(
     block_tree_read_guard: BlockTreeReadGuard,
     block_hash: H256,
-) -> Option<Arc<IrysBlockHeader>> {
+) -> Option<Arc<VersionedIrysBlockHeader>> {
     block_tree_read_guard
         .read()
         .get_block(&block_hash)

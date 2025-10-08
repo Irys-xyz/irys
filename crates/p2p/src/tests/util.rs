@@ -27,9 +27,9 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
+    VersionedCommitmentTransaction, Config, DataTransaction, VersionedDataTransactionHeader, DatabaseProvider,
     GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
-    IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    VersionedIrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
     UnpackedChunk, VersionRequest, H256,
 };
@@ -46,10 +46,10 @@ use tracing::{debug, warn, Span};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
-    pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
+    pub txs: Arc<RwLock<Vec<VersionedDataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
-    pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
+    pub migrated_blocks: Arc<RwLock<Vec<Arc<VersionedIrysBlockHeader>>>>,
 }
 
 impl MempoolStub {
@@ -68,7 +68,7 @@ impl MempoolStub {
 impl MempoolFacade for MempoolStub {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: DataTransactionHeader,
+        tx_header: VersionedDataTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
@@ -98,7 +98,7 @@ impl MempoolFacade for MempoolStub {
 
     async fn handle_commitment_transaction_ingress(
         &self,
-        _tx_header: CommitmentTransaction,
+        _tx_header: VersionedCommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
@@ -144,13 +144,13 @@ impl MempoolFacade for MempoolStub {
         &self,
         _block_hash: H256,
         _include_chunk: bool,
-    ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
+    ) -> std::result::Result<Option<VersionedIrysBlockHeader>, TxReadError> {
         Ok(None)
     }
 
     async fn migrate_block(
         &self,
-        irys_block_header: Arc<IrysBlockHeader>,
+        irys_block_header: Arc<VersionedIrysBlockHeader>,
     ) -> std::result::Result<usize, TxIngressError> {
         self.migrated_blocks
             .write()
@@ -181,13 +181,13 @@ impl MempoolFacade for MempoolStub {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
-    pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
+    pub blocks: Arc<RwLock<Vec<Arc<VersionedIrysBlockHeader>>>>,
     pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessage>>,
     pub block_status_provider: BlockStatusProvider,
 }
 
 impl BlockDiscoveryStub {
-    pub(crate) fn get_blocks(&self) -> Vec<Arc<IrysBlockHeader>> {
+    pub(crate) fn get_blocks(&self) -> Vec<Arc<VersionedIrysBlockHeader>> {
         self.blocks.read().unwrap().clone()
     }
 }
@@ -196,7 +196,7 @@ impl BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
+        block: Arc<VersionedIrysBlockHeader>,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.block_status_provider
@@ -223,7 +223,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 
 #[derive(Clone)]
 pub(crate) struct ApiClientStub {
-    pub txs: HashMap<H256, DataTransactionHeader>,
+    pub txs: HashMap<H256, VersionedDataTransactionHeader>,
     pub block_index_handler: Arc<
         RwLock<Box<dyn Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static>>,
     >,
@@ -269,18 +269,22 @@ impl ApiClient for ApiClientStub {
         _peer: SocketAddr,
         tx_id: H256,
     ) -> Result<IrysTransactionResponse> {
-        Ok(self
+        let versioned_header = self
             .txs
             .get(&tx_id)
             .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
-            .clone()
-            .into())
+            .clone();
+        // Extract inner V1 type for IrysTransactionResponse
+        let inner_header = match versioned_header {
+            VersionedDataTransactionHeader::V1(v1) => v1,
+        };
+        Ok(IrysTransactionResponse::Storage(inner_header))
     }
 
     async fn post_transaction(
         &self,
         _api_address: SocketAddr,
-        _transaction: DataTransactionHeader,
+        _transaction: VersionedDataTransactionHeader,
     ) -> Result<()> {
         Ok(())
     }
@@ -288,7 +292,7 @@ impl ApiClient for ApiClientStub {
     async fn post_commitment_transaction(
         &self,
         _peer: SocketAddr,
-        _transaction: CommitmentTransaction,
+        _transaction: VersionedCommitmentTransaction,
     ) -> Result<()> {
         Ok(())
     }
@@ -371,9 +375,9 @@ pub(crate) struct GossipServiceTestFixture {
     #[expect(dead_code)]
     pub peer_network_handle: TokioServiceHandle,
     pub peer_list: PeerList,
-    pub mempool_txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
+    pub mempool_txs: Arc<RwLock<Vec<VersionedDataTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
+    pub discovery_blocks: Arc<RwLock<Vec<Arc<VersionedIrysBlockHeader>>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
     #[expect(dead_code)]
@@ -836,7 +840,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     api_client_stub: T,
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
-    let genesis_block = IrysBlockHeader::new_mock_header();
+    let genesis_block = VersionedIrysBlockHeader::new_mock_header();
     let block_index = BlockIndex::new(&config.node_config)
         .await
         .expect("expected to create a block index");

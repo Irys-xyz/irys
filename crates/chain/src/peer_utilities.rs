@@ -2,7 +2,8 @@ use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
 use irys_types::block::CombinedBlockHeader;
 use irys_types::{
-    BlockIndexItem, CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, H256,
+    BlockIndexItem, IrysTransactionResponse, VersionedCommitmentTransaction,
+    VersionedIrysBlockHeader, H256,
 };
 use std::net::SocketAddr;
 use tracing::{info, warn};
@@ -53,7 +54,7 @@ pub async fn peer_list_endpoint_request(
 pub async fn fetch_genesis_block(
     peer: &SocketAddr,
     client: &awc::Client,
-) -> Option<IrysBlockHeader> {
+) -> Option<VersionedIrysBlockHeader> {
     let url = format!("http://{}", peer);
     let mut result_genesis = block_index_endpoint_request(&url, 0, 1).await;
 
@@ -67,8 +68,8 @@ pub async fn fetch_genesis_block(
 
 pub async fn fetch_genesis_commitments(
     peer: &SocketAddr,
-    irys_block_header: &IrysBlockHeader,
-) -> eyre::Result<Vec<CommitmentTransaction>> {
+    irys_block_header: &VersionedIrysBlockHeader,
+) -> eyre::Result<Vec<VersionedCommitmentTransaction>> {
     let api_client = IrysApiClient::new();
     let system_txs: Vec<H256> = irys_block_header
         .system_ledgers
@@ -81,7 +82,9 @@ pub async fn fetch_genesis_commitments(
         .await?
         .into_iter()
         .filter_map(|tx| match tx {
-            IrysTransactionResponse::Commitment(commitment_tx) => Some(commitment_tx),
+            IrysTransactionResponse::Commitment(commitment_tx) => {
+                Some(VersionedCommitmentTransaction::V1(commitment_tx))
+            }
             IrysTransactionResponse::Storage(_) => None,
         })
         .collect())
@@ -123,7 +126,7 @@ pub async fn fetch_block(
     peer: &SocketAddr,
     client: &awc::Client,
     block_index_item: &BlockIndexItem,
-) -> Option<IrysBlockHeader> {
+) -> Option<VersionedIrysBlockHeader> {
     let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash,);
 
     match client.get(url.clone()).send().await {

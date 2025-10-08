@@ -17,8 +17,9 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError,
+    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeaderV1,
+    VersionedIrysBlockHeader, IrysTransactionResponse, PeerNetworkError,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -107,7 +108,7 @@ where
 
 #[derive(Clone, Debug)]
 pub(crate) struct CachedBlock {
-    pub(crate) header: Arc<IrysBlockHeader>,
+    pub(crate) header: Arc<VersionedIrysBlockHeader>,
     pub(crate) is_processing: bool,
     pub(crate) is_fast_tracking: bool,
 }
@@ -133,7 +134,7 @@ impl BlockCacheGuard {
         }
     }
 
-    async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
+    async fn add_block(&self, block_header: Arc<VersionedIrysBlockHeader>, is_fast_tracking: bool) {
         self.inner
             .write()
             .await
@@ -212,7 +213,7 @@ impl BlockCacheInner {
         }
     }
 
-    fn add_block(&mut self, block_header: Arc<IrysBlockHeader>, fast_track: bool) {
+    fn add_block(&mut self, block_header: Arc<VersionedIrysBlockHeader>, fast_track: bool) {
         let block_hash = block_header.block_hash;
         let previous_block_hash = block_header.previous_block_hash;
         self.blocks.put(
@@ -322,7 +323,7 @@ where
 
     async fn validate_and_submit_reth_payload<A: ApiClient>(
         &self,
-        block_header: &IrysBlockHeader,
+        block_header: &VersionedIrysBlockHeader,
         reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     ) -> Result<(), BlockPoolError> {
@@ -514,7 +515,7 @@ where
     #[instrument(skip_all, target = "BlockPool")]
     pub(crate) async fn process_block<A: ApiClient>(
         &self,
-        block_header: Arc<IrysBlockHeader>,
+        block_header: Arc<VersionedIrysBlockHeader>,
         skip_validation_for_fast_track: bool,
     ) -> Result<ProcessBlockResult, BlockPoolError> {
         check_block_status(
@@ -689,7 +690,7 @@ where
                     let id = commitment_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_commitment_transaction_ingress(commitment_tx)
+                        .handle_commitment_transaction_ingress(VersionedCommitmentTransaction::V1(commitment_tx))
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
@@ -711,7 +712,7 @@ where
                     let id = storage_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_data_transaction_ingress(storage_tx)
+                        .handle_data_transaction_ingress(VersionedDataTransactionHeader::V1(storage_tx))
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
@@ -949,7 +950,7 @@ where
     pub(crate) async fn get_block_data(
         &self,
         block_hash: &BlockHash,
-    ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {
+    ) -> Result<Option<Arc<VersionedIrysBlockHeader>>, BlockPoolError> {
         if let Some(header) = self.blocks_cache.get_block_header_cloned(block_hash).await {
             return Ok(Some(Arc::clone(&header.header)));
         }
@@ -1064,13 +1065,13 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<IrysBlockHeader> {
-        let header = IrysBlockHeader {
+    fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<VersionedIrysBlockHeader> {
+        let header = VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             block_hash: BlockHash::repeat_byte(block_byte),
             previous_block_hash: BlockHash::repeat_byte(parent_byte),
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
         Arc::new(header)
     }
 

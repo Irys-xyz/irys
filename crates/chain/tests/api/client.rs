@@ -97,11 +97,11 @@ async fn check_transaction_endpoints(
 
     // This method doesn't return anything if there's no error
     api_client
-        .post_transaction(api_address, tx.header.clone())
+        .post_transaction(api_address, (*tx.header).clone())
         .await
         .expect("valid post transaction response");
     api_client
-        .post_transaction(api_address, tx_2.header.clone())
+        .post_transaction(api_address, (*tx_2.header).clone())
         .await
         .expect("valid post transaction response");
 
@@ -115,7 +115,7 @@ async fn check_transaction_endpoints(
 
     assert_eq!(
         retrieved_tx,
-        IrysTransactionResponse::Storage(tx.header.clone())
+        IrysTransactionResponse::Storage((*tx.header).clone())
     );
 
     let txs = api_client
@@ -124,8 +124,8 @@ async fn check_transaction_endpoints(
         .expect("valid get transactions response");
 
     assert_eq!(txs.len(), 2);
-    assert!(txs.contains(&IrysTransactionResponse::Storage(tx.header)));
-    assert!(txs.contains(&IrysTransactionResponse::Storage(tx_2.header)));
+    assert!(txs.contains(&IrysTransactionResponse::Storage((*tx.header).clone())));
+    assert!(txs.contains(&IrysTransactionResponse::Storage((*tx_2.header).clone())));
 }
 
 async fn check_get_block_endpoint(
@@ -245,7 +245,7 @@ async fn api_client_wait_for_promotion_happy_path() {
 
     // Post the transaction header
     api_client
-        .post_transaction(api_address, tx.header.clone())
+        .post_transaction(api_address, (*tx.header).clone())
         .await
         .expect("post_transaction should succeed");
 

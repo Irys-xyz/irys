@@ -1,7 +1,7 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    DataLedger, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
-    VersionRequest, H256, U256,
+    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable, Address, Base64,
+    DataLedger, DataTransaction, IrysSignature, Signature, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, VersionedIrysBlockHeader, VersionRequest, H256, U256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -115,7 +115,7 @@ impl IrysSigner {
         transaction.header.version = 1;
 
         // Create the signature hash and sign it
-        let prehash = transaction.signature_hash()?;
+        let prehash = transaction.signature_hash();
 
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
@@ -128,14 +128,14 @@ impl IrysSigner {
 
     pub fn sign_commitment(
         &self,
-        mut commitment: CommitmentTransaction,
-    ) -> Result<CommitmentTransaction> {
+        commitment: &mut VersionedCommitmentTransaction,
+    ) -> Result<()> {
         // Store the signer address
         commitment.signer = Address::from_public_key(self.signer.verifying_key());
         commitment.version = 1;
 
         // Create the signature hash and sign it
-        let prehash = commitment.signature_hash()?;
+        let prehash = commitment.signature_hash();
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
         commitment.signature = IrysSignature::new(signature);
@@ -143,15 +143,15 @@ impl IrysSigner {
         // Derive the txid by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         commitment.id = H256::from(id);
-        Ok(commitment)
+        Ok(())
     }
 
-    pub fn sign_block_header(&self, block_header: &mut IrysBlockHeader) -> Result<()> {
+    pub fn sign_block_header(&self, block_header: &mut VersionedIrysBlockHeader) -> Result<()> {
         // Store the signer address
         block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
-        let prehash = block_header.signature_hash()?;
+        let prehash = block_header.signature_hash();
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
         block_header.signature = IrysSignature::new(signature);
 
@@ -201,15 +201,15 @@ impl IrysSigner {
             return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
+        let mut header = VersionedDataTransactionHeader::default();
+        header.data_size = chunks
+            .last()
+            .expect("Unable to get last chunk")
+            .max_byte_range as u64;
+        header.data_root = data_root;
+
         Ok(DataTransaction {
-            header: DataTransactionHeader {
-                data_size: chunks
-                    .last()
-                    .expect("Unable to get last chunk")
-                    .max_byte_range as u64,
-                data_root,
-                ..Default::default()
-            },
+            header,
             data: data.map(Base64),
             chunks,
             proofs,
@@ -229,6 +229,7 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
+    use crate::versioning::Signable;
     use crate::{hash_sha256, validate_chunk, H256};
     use rand::Rng as _;
     use reth_primitives::transaction::recover_signer;
@@ -298,10 +299,7 @@ mod tests {
         }
 
         // Recover the signer as a way to verify the signature
-        let prehash = tx
-            .header
-            .signature_hash()
-            .expect("unsupported version in test");
+        let prehash = tx.header.signature_hash();
         let sig = tx.header.signature.as_bytes();
 
         let signer = recover_signer(&sig[..].try_into().unwrap(), prehash.into()).unwrap();

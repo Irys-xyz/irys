@@ -4,7 +4,7 @@ use irys_actors::block_validation::{
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
     compute_solution_hash, partition::PartitionAssignment, Address, Base64, BlockIndexItem,
-    ConsensusConfig, DataLedger, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    ConsensusConfig, DataLedger, VersionedIrysBlockHeader, LedgerIndexItem, PoaData, H256,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -12,10 +12,10 @@ use std::sync::{Arc, RwLock};
 #[test_log::test(test)]
 /// test that a parent blocks solution_hash must equal the current blocks previous_solution_hash
 fn invalid_previous_solution_hash_rejected() {
-    let mut parent = IrysBlockHeader::new_mock_header();
+    let mut parent = VersionedIrysBlockHeader::new_mock_header();
     parent.solution_hash = H256::zero();
 
-    let mut block = IrysBlockHeader::new_mock_header();
+    let mut block = VersionedIrysBlockHeader::new_mock_header();
     block.previous_solution_hash = {
         let mut bytes = H256::zero().to_fixed_bytes();
         bytes[1] ^= 0x01; // flip second bit so it will not match in the later test
@@ -118,7 +118,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
 
 #[test_log::test(test)]
 fn solution_hash_link_valid_ok() {
-    let mut block = IrysBlockHeader::new_mock_header();
+    let mut block = VersionedIrysBlockHeader::new_mock_header();
     // choose deterministic inputs
     block.poa.partition_chunk_offset = 7;
     block.vdf_limiter_info.output = H256::from([1_u8; 32]);
@@ -137,7 +137,7 @@ fn solution_hash_link_valid_ok() {
 
 #[test_log::test(test)]
 fn solution_hash_link_invalid_when_inputs_tampered() {
-    let mut block = IrysBlockHeader::new_mock_header();
+    let mut block = VersionedIrysBlockHeader::new_mock_header();
     block.poa.partition_chunk_offset = 7;
     block.vdf_limiter_info.output = H256::from([1_u8; 32]);
 

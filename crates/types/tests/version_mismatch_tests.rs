@@ -1,17 +1,15 @@
-use irys_types::{CommitmentTransaction, ConsensusConfig, DataTransactionHeader};
+use irys_types::{VersionedCommitmentTransaction, ConsensusConfig, VersionedDataTransactionHeader};
 
 #[test]
-fn data_tx_try_into_versioned_returns_err_on_version_mismatch() {
+fn data_tx_version_is_1() {
     let config = ConsensusConfig::testing();
-    let mut header = DataTransactionHeader::new(&config);
-    header.version = 42; // wrong
-    assert!(header.try_into_versioned().is_err());
+    let header = VersionedDataTransactionHeader::new(&config);
+    assert_eq!(header.version, 1, "new() should create V1 with version=1");
 }
 
 #[test]
-fn commitment_tx_try_into_versioned_returns_err_on_version_mismatch() {
+fn commitment_tx_version_is_1() {
     let config = ConsensusConfig::testing();
-    let mut tx = CommitmentTransaction::new(&config);
-    tx.version = 99; // wrong
-    assert!(tx.try_into_versioned().is_err());
+    let tx = VersionedCommitmentTransaction::new_stake(&config, irys_types::H256::zero());
+    assert_eq!(tx.version, 1, "new_stake() should create V1 with version=1");
 }

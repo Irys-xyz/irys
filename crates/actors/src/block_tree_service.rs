@@ -19,8 +19,9 @@ use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DatabaseProvider, H256List, IrysBlockHeader, TokioServiceHandle, H256,
+    Address, BlockHash, Config, DataLedger, DatabaseProvider, H256List, VersionedIrysBlockHeader,
+    TokioServiceHandle, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
+    H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -41,8 +42,8 @@ pub enum BlockTreeServiceMessage {
         response: oneshot::Sender<BlockTreeReadGuard>,
     },
     BlockPreValidated {
-        block: Arc<IrysBlockHeader>,
-        commitment_txs: Arc<Vec<CommitmentTransaction>>,
+        block: Arc<VersionedIrysBlockHeader>,
+        commitment_txs: Arc<Vec<VersionedCommitmentTransaction>>,
         skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
     },
@@ -81,9 +82,9 @@ pub struct BlockTreeServiceInner {
 
 #[derive(Debug, Clone)]
 pub struct ReorgEvent {
-    pub old_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
-    pub new_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
-    pub fork_parent: Arc<IrysBlockHeader>,
+    pub old_fork: Arc<Vec<Arc<VersionedIrysBlockHeader>>>,
+    pub new_fork: Arc<Vec<Arc<VersionedIrysBlockHeader>>>,
+    pub fork_parent: Arc<VersionedIrysBlockHeader>,
     pub new_tip: BlockHash,
     pub timestamp: SystemTime,
     pub db: Option<DatabaseProvider>,
@@ -91,7 +92,7 @@ pub struct ReorgEvent {
 
 #[derive(Debug, Clone)]
 pub struct BlockMigratedEvent {
-    pub block: Arc<IrysBlockHeader>,
+    pub block: Arc<VersionedIrysBlockHeader>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +250,7 @@ impl BlockTreeServiceInner {
     /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
     async fn send_block_migration_message(
         &self,
-        block_header: Arc<IrysBlockHeader>,
+        block_header: Arc<VersionedIrysBlockHeader>,
     ) -> eyre::Result<()> {
         let submit_txs = self
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
@@ -263,7 +264,7 @@ impl BlockTreeServiceInner {
         all_txs.extend(publish_txs.clone());
         all_txs.extend(submit_txs.clone());
 
-        let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
+        let mut all_txs_map: HashMap<DataLedger, Vec<VersionedDataTransactionHeader>> = HashMap::new();
         all_txs_map.insert(DataLedger::Submit, submit_txs);
         all_txs_map.insert(DataLedger::Publish, publish_txs);
 
@@ -339,7 +340,7 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) {
+    async fn migrate_block(&self, block: &Arc<VersionedIrysBlockHeader>) {
         let block_hash = block.block_hash;
         let migration_height = block.height;
 
@@ -390,8 +391,8 @@ impl BlockTreeServiceInner {
     /// Handles pre-validated blocks received from the validation service.
     fn on_block_prevalidated(
         &mut self,
-        block: Arc<IrysBlockHeader>,
-        commitment_txs: Arc<Vec<CommitmentTransaction>>,
+        block: Arc<VersionedIrysBlockHeader>,
+        commitment_txs: Arc<Vec<VersionedCommitmentTransaction>>,
         skip_vdf: bool,
     ) -> eyre::Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
@@ -658,7 +659,7 @@ impl BlockTreeServiceInner {
                     );
 
                     // Prepare lightweight block headers for reorg event (remove heavy chunk data)
-                    let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
+                    let old_fork_blocks: Vec<Arc<VersionedIrysBlockHeader>> = old_fork
                         .iter()
                         .map(|e| {
                             let mut block = cache
@@ -675,7 +676,7 @@ impl BlockTreeServiceInner {
                         })
                         .collect();
 
-                    let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
+                    let new_fork_blocks: Vec<Arc<VersionedIrysBlockHeader>> = new_fork
                         .iter()
                         .map(|e| {
                             let mut block = cache
@@ -807,22 +808,22 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height % self.config.consensus.epoch.num_blocks_in_epoch == 0
+    fn is_epoch_block(&self, block_header: &Arc<VersionedIrysBlockHeader>) -> bool {
+        block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) {
+    fn send_epoch_events(&self, epoch_block: &Arc<VersionedIrysBlockHeader>) {
         // Get the epoch snapshot
         let epoch_snapshot = self
             .cache
             .read()
             .expect("cache read lock poisoned")
-            .get_epoch_snapshot(&epoch_block.block_hash);
+            .get_epoch_snapshot(&epoch_block.block_hash());
 
         let epoch_snapshot = epoch_snapshot.unwrap_or_else(|| {
             panic!(
                 "Epoch block {} should have a snapshot in cache",
-                epoch_block.block_hash
+                epoch_block.block_hash()
             )
         });
 
@@ -866,9 +867,9 @@ impl BlockTreeServiceInner {
     /// Fetches full transaction headers from mempool using the txids from a ledger in a block
     async fn get_data_ledger_tx_headers_from_mempool(
         &self,
-        block_header: &IrysBlockHeader,
+        block_header: &VersionedIrysBlockHeader,
         ledger: DataLedger,
-    ) -> eyre::Result<Vec<DataTransactionHeader>> {
+    ) -> eyre::Result<Vec<VersionedDataTransactionHeader>> {
         // FIXME: when we add multiple term ledgers this will not work as there may be gaps in the index range
         // Explicitly cast enum to index
         let ledger_index = ledger as usize;
@@ -892,7 +893,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
             .into_iter()
             .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
+            .collect::<Vec<VersionedDataTransactionHeader>>();
 
         if received.len() != data_tx_ids.len() {
             return Err(eyre::eyre!(

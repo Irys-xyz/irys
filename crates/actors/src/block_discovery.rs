@@ -16,8 +16,8 @@ use irys_domain::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
+    get_ingress_proofs, BlockHash, VersionedCommitmentTransaction, Config, DataLedger,
+    VersionedDataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, VersionedIrysBlockHeader,
     IrysTransactionId, TokioServiceHandle,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -82,7 +82,7 @@ pub enum BlockDiscoveryInternalError {
 pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
+        block: Arc<VersionedIrysBlockHeader>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError>;
 }
@@ -102,7 +102,7 @@ impl BlockDiscoveryFacadeImpl {
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
+        block: Arc<VersionedIrysBlockHeader>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
@@ -235,7 +235,7 @@ impl BlockDiscoveryService {
 
 pub enum BlockDiscoveryMessage {
     BlockDiscovered(
-        Arc<IrysBlockHeader>,
+        Arc<VersionedIrysBlockHeader>,
         bool,
         Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
     ),
@@ -244,7 +244,7 @@ pub enum BlockDiscoveryMessage {
 impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
-        block: Arc<IrysBlockHeader>,
+        block: Arc<VersionedIrysBlockHeader>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -257,7 +257,6 @@ impl BlockDiscoveryServiceInner {
         let block_tree_guard = self.block_tree_guard.clone();
         let config = self.config.clone();
         let db = self.db.clone();
-        let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
@@ -341,7 +340,7 @@ impl BlockDiscoveryServiceInner {
             })?
             .into_iter()
             .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
+            .collect::<Vec<VersionedDataTransactionHeader>>();
 
         if submit_txs.len() != submit_tx_ids_to_check.len() {
             return Err(BlockDiscoveryError::MissingTransactions(
@@ -393,7 +392,7 @@ impl BlockDiscoveryServiceInner {
             })?
             .into_iter()
             .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
+            .collect::<Vec<VersionedDataTransactionHeader>>();
 
         if publish_txs.len() != publish_tx_ids_to_check.len() {
             let missing_txs = publish_tx_ids_to_check
@@ -434,7 +433,7 @@ impl BlockDiscoveryServiceInner {
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Validate commitments transactions exist (if there are commitment txids in the block)
-        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
+        let mut commitments: Vec<VersionedCommitmentTransaction> = Vec::new();
         if let Some(commitment_ledger) = commitment_ledger {
             debug!(
                 "incoming block commitment txids, height {}\n{:#?}",
@@ -526,8 +525,8 @@ impl BlockDiscoveryServiceInner {
         };
 
         let validation_result = prevalidate_block(
-            block_header,
-            previous_block_header,
+            (*new_block_header).clone(),
+            previous_block_header.clone(),
             parent_epoch_snapshot.clone(),
             config,
             reward_curve,
@@ -574,8 +573,11 @@ impl BlockDiscoveryServiceInner {
                     let expected_commitment_tx = parent_commitment_snapshot.get_epoch_commitments();
 
                     // Validate epoch block has expected commitments in correct order
-                    let commitments_match =
-                        expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
+                    // Compare using Deref - versioned types deref to inner types
+                    let commitments_match = expected_commitment_tx
+                        .iter()
+                        .map(|c| &**c)  // Deref to inner CommitmentTransaction
+                        .eq(arc_commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
@@ -690,7 +692,7 @@ pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<CommitmentTransaction>> {
+) -> eyre::Result<Vec<VersionedCommitmentTransaction>> {
     let tx_ids_clone = commitment_tx_ids;
 
     // Set up a function to query the mempool for commitment transactions
@@ -732,7 +734,7 @@ pub async fn get_commitment_tx_in_parallel(
                     results.insert(*tx_id, header);
                 }
             }
-            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
+            Ok::<HashMap<IrysTransactionId, VersionedCommitmentTransaction>, eyre::Report>(results)
         }
     };
 
@@ -767,7 +769,7 @@ pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<DataTransactionHeader>> {
+) -> eyre::Result<Vec<VersionedDataTransactionHeader>> {
     get_data_tx_in_parallel_inner(
         data_tx_ids,
         |tx_ids| {
@@ -790,11 +792,11 @@ pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<DataTransactionHeader>>
+) -> eyre::Result<Vec<VersionedDataTransactionHeader>>
 where
     F: Fn(
         Vec<IrysTransactionId>,
-    ) -> BoxFuture<'static, eyre::Result<Vec<Option<DataTransactionHeader>>>>,
+    ) -> BoxFuture<'static, eyre::Result<Vec<Option<VersionedDataTransactionHeader>>>>,
 {
     let tx_ids_clone = data_tx_ids.clone();
 
@@ -806,7 +808,7 @@ where
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
 
-            let x: HashMap<IrysTransactionId, DataTransactionHeader> = tx_ids
+            let x: HashMap<IrysTransactionId, VersionedDataTransactionHeader> = tx_ids
                 .into_iter()
                 .zip(results.into_iter())
                 .fold(HashMap::new(), |mut map, (id, opt)| {
@@ -816,7 +818,7 @@ where
                     map
                 });
 
-            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
+            Ok::<HashMap<IrysTransactionId, VersionedDataTransactionHeader>, eyre::Report>(x)
         }
     };
 
@@ -832,7 +834,7 @@ where
                     results.insert(*tx_id, header);
                 }
             }
-            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
+            Ok::<HashMap<IrysTransactionId, VersionedDataTransactionHeader>, eyre::Report>(results)
         }
     };
 

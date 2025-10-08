@@ -1,8 +1,8 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_types::{
-    BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DatabaseProvider,
-    H256List, IrysBlockHeader, H256, U256,
+    BlockHash, Config, ConsensusConfig, DataLedger, DatabaseProvider, H256List,
+    VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256, U256,
 };
 use reth_db::Database as _;
 use std::{
@@ -52,7 +52,7 @@ pub struct BlockTree {
 #[derive(Debug)]
 pub struct BlockMetadata {
     // todo: wrap into Arc to avoid expensive clones
-    pub block: IrysBlockHeader,
+    pub block: VersionedIrysBlockHeader,
     chain_state: ChainState,
     timestamp: SystemTime,
     children: HashSet<H256>,
@@ -100,7 +100,7 @@ impl BlockTree {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
     #[cfg(any(feature = "test-utils", test))]
-    pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
+    pub fn new(genesis_block: &VersionedIrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         use crate::dummy_epoch_snapshot;
 
         let block_hash = genesis_block.block_hash;
@@ -402,7 +402,7 @@ impl BlockTree {
     pub fn add_common(
         &mut self,
         hash: BlockHash,
-        block: &IrysBlockHeader,
+        block: &VersionedIrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         epoch_snapshot: Arc<EpochSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
@@ -465,7 +465,7 @@ impl BlockTree {
     /// 3. **Block Index Migration** - Only then is the block added to the block_index
     pub fn add_block(
         &mut self,
-        block: &IrysBlockHeader,
+        block: &VersionedIrysBlockHeader,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         epoch_snapshot: Arc<EpochSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
@@ -696,7 +696,7 @@ impl BlockTree {
     }
 
     /// Helper to recursively mark blocks on-chain
-    fn mark_on_chain(&mut self, block: &IrysBlockHeader) -> eyre::Result<()> {
+    fn mark_on_chain(&mut self, block: &VersionedIrysBlockHeader) -> eyre::Result<()> {
         let prev_hash = block.previous_block_hash;
 
         match self.blocks.get(&prev_hash) {
@@ -810,7 +810,7 @@ impl BlockTree {
 
     /// Gets block by hash
     #[must_use]
-    pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
+    pub fn get_block(&self, block_hash: &BlockHash) -> Option<&VersionedIrysBlockHeader> {
         self.blocks.get(block_hash).map(|entry| &entry.block)
     }
 
@@ -890,7 +890,7 @@ impl BlockTree {
     pub fn get_block_and_status(
         &self,
         block_hash: &BlockHash,
-    ) -> Option<(&IrysBlockHeader, &ChainState)> {
+    ) -> Option<(&VersionedIrysBlockHeader, &ChainState)> {
         self.blocks
             .get(block_hash)
             .map(|entry| (&entry.block, &entry.chain_state))
@@ -938,7 +938,7 @@ impl BlockTree {
     }
 
     /// Collect previous blocks up to the last on-chain block
-    pub fn get_fork_blocks(&self, block: &IrysBlockHeader) -> Vec<&IrysBlockHeader> {
+    pub fn get_fork_blocks(&self, block: &VersionedIrysBlockHeader) -> Vec<&VersionedIrysBlockHeader> {
         let mut prev_hash = block.previous_block_hash;
         let mut fork_blocks = Vec::new();
 
@@ -965,7 +965,7 @@ impl BlockTree {
     fn get_earliest_not_onchain<'a>(
         &'a self,
         block: &'a BlockMetadata,
-    ) -> Option<(&'a BlockMetadata, Vec<&'a IrysBlockHeader>, SystemTime)> {
+    ) -> Option<(&'a BlockMetadata, Vec<&'a VersionedIrysBlockHeader>, SystemTime)> {
         let mut current_entry = block;
         let mut prev_block = &current_entry.block;
         let mut depth_count = 0;
@@ -1004,7 +1004,7 @@ impl BlockTree {
     #[must_use]
     pub fn get_earliest_not_onchain_in_longest_chain(
         &self,
-    ) -> Option<(&BlockMetadata, Vec<&IrysBlockHeader>, SystemTime)> {
+    ) -> Option<(&BlockMetadata, Vec<&VersionedIrysBlockHeader>, SystemTime)> {
         // Get the block with max cumulative difficulty
         let (_max_cdiff, max_diff_hash) = self.max_cumulative_difficulty;
 
@@ -1072,7 +1072,7 @@ impl BlockTree {
         excluding: &BlockHash,
         cumulative_difficulty: U256,
         previous_cumulative_difficulty: U256,
-    ) -> Option<&IrysBlockHeader> {
+    ) -> Option<&VersionedIrysBlockHeader> {
         // Get set of blocks with this solution hash
         let block_hashes = self.solutions.get(solution_hash)?;
 
@@ -1172,7 +1172,7 @@ impl BlockTree {
 }
 
 fn build_current_ema_snapshot_from_index(
-    latest_block_from_index: &IrysBlockHeader,
+    latest_block_from_index: &VersionedIrysBlockHeader,
     db: DatabaseProvider,
     config: &ConsensusConfig,
 ) -> Arc<EmaSnapshot> {
@@ -1325,8 +1325,8 @@ pub fn build_current_commitment_snapshot_from_index(
 /// # Returns
 /// Arc-wrapped commitment snapshot for the new block
 pub fn create_commitment_snapshot_for_block(
-    block: &IrysBlockHeader,
-    commitment_txs: &[CommitmentTransaction],
+    block: &VersionedIrysBlockHeader,
+    commitment_txs: &[VersionedCommitmentTransaction],
     prev_commitment_snapshot: &Arc<CommitmentSnapshot>,
     epoch_snapshot: Arc<EpochSnapshot>,
     consensus_config: &ConsensusConfig,
@@ -1349,7 +1349,7 @@ pub fn create_commitment_snapshot_for_block(
 }
 
 pub fn create_epoch_snapshot_for_block(
-    block: &IrysBlockHeader,
+    block: &VersionedIrysBlockHeader,
     parent_block_entry: &BlockMetadata,
     consensus_config: &ConsensusConfig,
 ) -> Arc<EpochSnapshot> {
@@ -1372,9 +1372,9 @@ pub fn create_epoch_snapshot_for_block(
 
 /// Loads commitment transactions from the database for the given block's commitment ledger transaction IDs.
 fn load_commitment_transactions(
-    block: &IrysBlockHeader,
+    block: &VersionedIrysBlockHeader,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<CommitmentTransaction>> {
+) -> eyre::Result<Vec<VersionedCommitmentTransaction>> {
     let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
     if commitment_tx_ids.is_empty() {
         return Ok(Vec::new());
@@ -1396,7 +1396,7 @@ fn load_commitment_transactions(
     Ok(txs)
 }
 
-pub fn make_block_tree_entry(block: &IrysBlockHeader) -> BlockTreeEntry {
+pub fn make_block_tree_entry(block: &VersionedIrysBlockHeader) -> BlockTreeEntry {
     // DataLedgers
     let mut data_ledgers = BTreeMap::new();
 
@@ -1451,11 +1451,11 @@ mod tests {
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testing();
-        let genesis_header = IrysBlockHeader {
+        let genesis_header = VersionedIrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             oracle_irys_price: config.genesis.genesis_price,
             ema_irys_price: config.genesis.genesis_price,
             ..Default::default()
-        };
+        });
         EmaSnapshot::genesis(&genesis_header)
     }
 
@@ -2427,8 +2427,8 @@ mod tests {
         );
     }
 
-    fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
-        let mut block = IrysBlockHeader::new_mock_header();
+    fn random_block(cumulative_diff: U256) -> VersionedIrysBlockHeader {
+        let mut block = VersionedIrysBlockHeader::new_mock_header();
         block.block_hash = BlockHash::random();
         block.solution_hash = H256::random(); // Ensure unique solution hash
         block.height = 0; // Default to genesis
@@ -2436,12 +2436,13 @@ mod tests {
         block
     }
 
-    const fn extend_chain(
-        mut new_block: IrysBlockHeader,
-        previous_block: &IrysBlockHeader,
-    ) -> IrysBlockHeader {
-        new_block.previous_block_hash = previous_block.block_hash;
-        new_block.height = previous_block.height + 1;
+    fn extend_chain(
+        new_block: VersionedIrysBlockHeader,
+        previous_block: &VersionedIrysBlockHeader,
+    ) -> VersionedIrysBlockHeader {
+        let mut new_block = new_block.clone();
+        new_block.previous_block_hash = previous_block.block_hash();
+        new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;
         // Don't modify solution_hash - keep the random one from block creation
         new_block
@@ -2476,7 +2477,7 @@ mod tests {
     }
 
     fn check_longest_chain(
-        expected_blocks: &[&IrysBlockHeader],
+        expected_blocks: &[&VersionedIrysBlockHeader],
         expected_not_onchain: usize,
         cache: &BlockTree,
     ) -> eyre::Result<()> {
@@ -2485,7 +2486,7 @@ mod tests {
 
         let expected = expected_blocks
             .iter()
-            .map(|b| b.block_hash)
+            .map(|b| b.block_hash())
             .collect::<Vec<_>>();
 
         println!("actual: {:?}\nexpected: {:?}", actual_blocks, expected);

@@ -11,8 +11,9 @@ use irys_domain::{
 use irys_storage::{ie, ii, InclusiveInterval as _};
 use irys_types::{
     app_state::DatabaseProvider, Base64, BlockHash, Config, DataLedger, DataRoot,
-    DataTransactionHeader, DataTransactionLedger, IrysBlockHeader, LedgerChunkOffset,
-    LedgerChunkRange, Proof, TokioServiceHandle, TxChunkOffset, UnpackedChunk, H256,
+    DataTransactionLedger, VersionedIrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
+    TokioServiceHandle, TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader,
+    H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -64,8 +65,8 @@ pub enum MigrationError {
 
 pub enum ChunkMigrationServiceMessage {
     BlockMigrated(
-        Arc<IrysBlockHeader>,
-        Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
+        Arc<VersionedIrysBlockHeader>,
+        Arc<HashMap<DataLedger, Vec<VersionedDataTransactionHeader>>>,
     ),
     UpdateStorageModuleIndexes {
         block_hash: BlockHash,
@@ -123,7 +124,8 @@ impl ChunkMigrationServiceInner {
         // For each data ledger, retrieve the tx headers and build a map
         let data_ledger_txids = block_header.get_data_ledger_tx_ids();
 
-        let mut block_tx_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
+        let mut block_tx_map: HashMap<DataLedger, Vec<VersionedDataTransactionHeader>> =
+            HashMap::new();
         for (ledger, tx_ids) in data_ledger_txids {
             let mut txs = Vec::new();
             for txid in tx_ids {
@@ -132,6 +134,7 @@ impl ChunkMigrationServiceInner {
                     .view_eyre(|tx| tx_header_by_txid(tx, &txid))
                     .unwrap()
                     .unwrap();
+                // DB already returns versioned type
                 txs.push(tx);
             }
             block_tx_map.insert(ledger, txs);
@@ -150,8 +153,8 @@ impl ChunkMigrationServiceInner {
 
     fn on_block_migrated(
         &mut self,
-        block_header: Arc<IrysBlockHeader>,
-        all_txs: Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
+        block_header: Arc<VersionedIrysBlockHeader>,
+        all_txs: Arc<HashMap<DataLedger, Vec<VersionedDataTransactionHeader>>>,
     ) -> Result<(), MigrationError> {
         // Collect working variables to move into the closure
         let block = block_header;
@@ -202,9 +205,9 @@ impl ChunkMigrationServiceInner {
 }
 
 pub fn process_ledger_transactions(
-    block: &Arc<IrysBlockHeader>,
+    block: &Arc<VersionedIrysBlockHeader>,
     ledger: DataLedger,
-    txs: &[DataTransactionHeader],
+    txs: &[VersionedDataTransactionHeader],
     block_index: &Arc<RwLock<BlockIndex>>,
     chunk_size: usize,
     storage_modules_guard: &StorageModulesReadGuard,
@@ -298,7 +301,7 @@ fn process_transaction_chunks(
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
 fn get_block_offsets_in_ledger(
-    block: &IrysBlockHeader,
+    block: &VersionedIrysBlockHeader,
     ledger: DataLedger,
     block_index: Arc<RwLock<BlockIndex>>,
 ) -> LedgerChunkRange {
@@ -331,9 +334,9 @@ fn get_block_offsets_in_ledger(
 
 #[instrument(skip_all, err, fields(block_hash = %block.block_hash, height = %block.height))]
 fn get_tx_path_pairs(
-    block: &IrysBlockHeader,
+    block: &VersionedIrysBlockHeader,
     ledger: DataLedger,
-    txs: &[DataTransactionHeader],
+    txs: &[VersionedDataTransactionHeader],
 ) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
     let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(txs);
 

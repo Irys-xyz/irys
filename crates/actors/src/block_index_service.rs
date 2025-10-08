@@ -1,8 +1,8 @@
 use eyre::eyre;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
-    BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
-    TokioServiceHandle, H256, U256,
+    BlockHash, BlockIndexItem, ConsensusConfig, VersionedIrysBlockHeader, TokioServiceHandle,
+    VersionedDataTransactionHeader, H256, U256,
 };
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
@@ -19,8 +19,8 @@ pub enum BlockIndexServiceMessage {
     /// Migrate a block into the block index (pushes a new BlockIndexItem)
     /// Uses the same payload as the legacy Actix message
     MigrateBlock {
-        block_header: Arc<IrysBlockHeader>,
-        all_txs: Arc<Vec<DataTransactionHeader>>,
+        block_header: Arc<VersionedIrysBlockHeader>,
+        all_txs: Arc<Vec<VersionedDataTransactionHeader>>,
         response: oneshot::Sender<eyre::Result<()>>,
     },
 
@@ -140,8 +140,8 @@ impl BlockIndexServiceInner {
     #[instrument(skip_all, err, fields(height = %block.height, hash = %block.block_hash))]
     pub fn migrate_block(
         &mut self,
-        block: &Arc<IrysBlockHeader>,
-        all_txs: &Arc<Vec<DataTransactionHeader>>,
+        block: &Arc<VersionedIrysBlockHeader>,
+        all_txs: &Arc<Vec<VersionedDataTransactionHeader>>,
     ) -> eyre::Result<()> {
         let chunk_size = self.chunk_size;
 

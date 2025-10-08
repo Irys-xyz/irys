@@ -974,7 +974,7 @@ mod tests {
     use irys_types::peer_list::PeerScore;
     use irys_types::{
         AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-        CommitmentTransaction, Config, DataTransactionHeader, IrysTransactionResponse, NodeConfig,
+        VersionedCommitmentTransaction, Config, VersionedDataTransactionHeader, IrysTransactionResponse, NodeConfig,
         NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
@@ -1057,7 +1057,7 @@ mod tests {
         async fn post_transaction(
             &self,
             _peer: SocketAddr,
-            _transaction: DataTransactionHeader,
+            _transaction: VersionedDataTransactionHeader,
         ) -> EyreResult<()> {
             Err(eyre!("not implemented"))
         }
@@ -1065,7 +1065,7 @@ mod tests {
         async fn post_commitment_transaction(
             &self,
             _peer: SocketAddr,
-            _transaction: CommitmentTransaction,
+            _transaction: VersionedCommitmentTransaction,
         ) -> EyreResult<()> {
             Err(eyre!("not implemented"))
         }

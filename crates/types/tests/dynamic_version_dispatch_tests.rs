@@ -1,60 +1,49 @@
 use irys_types::{
-    versioning::VersioningError, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+    versioning::VersioningError, VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
+    DataTransactionHeaderV1, IrysBlockHeaderV1, CommitmentTransactionV1,
 };
 
 #[test]
-fn data_tx_try_into_versioned_supported() {
-    let header = DataTransactionHeader {
+fn data_tx_v1_construction() {
+    let header = DataTransactionHeaderV1 {
         version: 1,
         ..Default::default()
     };
-    header.try_into_versioned().expect("v1 must be supported");
+    let _versioned = VersionedDataTransactionHeader::V1(header);
 }
 
 #[test]
-fn data_tx_try_into_versioned_unsupported() {
-    let header = DataTransactionHeader {
-        version: 42,
-        ..Default::default()
-    };
-    let err = header.try_into_versioned().unwrap_err();
-    matches!(err, VersioningError::UnsupportedVersion(42));
+fn data_tx_v1_default() {
+    let _versioned = VersionedDataTransactionHeader::default();
+    // Default should create V1 variant
 }
 
 #[test]
-fn block_header_try_into_versioned_supported() {
-    let header = IrysBlockHeader {
+fn block_header_v1_construction() {
+    let header = IrysBlockHeaderV1 {
         version: 1,
         ..Default::default()
     };
-    header.try_into_versioned().expect("v1 must be supported");
+    let _versioned = VersionedIrysBlockHeader::V1(header);
 }
 
 #[test]
-fn block_header_try_into_versioned_unsupported() {
-    let header = IrysBlockHeader {
-        version: 7,
-        ..Default::default()
-    };
-    let err = header.try_into_versioned().unwrap_err();
-    matches!(err, VersioningError::UnsupportedVersion(7));
+fn block_header_v1_default() {
+    let _versioned = VersionedIrysBlockHeader::default();
+    // Default should create V1 variant
 }
 
 #[test]
-fn commitment_tx_try_into_versioned_supported() {
-    let tx = CommitmentTransaction {
+fn commitment_tx_v1_construction() {
+    let tx = CommitmentTransactionV1 {
         version: 1,
         ..Default::default()
     };
-    tx.try_into_versioned().expect("v1 must be supported");
+    let _versioned = VersionedCommitmentTransaction::V1(tx);
 }
 
 #[test]
-fn commitment_tx_try_into_versioned_unsupported() {
-    let tx = CommitmentTransaction {
-        version: 3,
-        ..Default::default()
-    };
-    let err = tx.try_into_versioned().unwrap_err();
-    matches!(err, VersioningError::UnsupportedVersion(3));
+fn commitment_tx_v1_default() {
+    let _versioned = VersionedCommitmentTransaction::default();
+    // Default should create V1 variant
 }

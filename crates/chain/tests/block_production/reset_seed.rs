@@ -4,7 +4,7 @@ use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, DataTransaction,
-    IrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode, SyncMode,
+    VersionedIrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode, SyncMode,
 };
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -160,7 +160,7 @@ async fn generate_test_transaction_and_add_to_block(
 }
 
 /// Verify reset seeds are applied correctly
-fn verify_reset_seeds(blocks_with_resets: &[IrysBlockHeader], all_blocks: &[IrysBlockHeader]) {
+fn verify_reset_seeds(blocks_with_resets: &[VersionedIrysBlockHeader], all_blocks: &[VersionedIrysBlockHeader]) {
     for block in blocks_with_resets.iter() {
         // Find the previous block
         let previous_block = if block.height == 0 {
@@ -196,7 +196,7 @@ fn verify_reset_seeds(blocks_with_resets: &[IrysBlockHeader], all_blocks: &[Irys
 }
 
 /// Verify seed continuity across all blocks
-fn verify_seed_continuity(blocks: &[IrysBlockHeader], reset_frequency: u64) {
+fn verify_seed_continuity(blocks: &[VersionedIrysBlockHeader], reset_frequency: u64) {
     let mut resets_so_far = 0;
 
     for (index, block) in blocks.iter().enumerate() {

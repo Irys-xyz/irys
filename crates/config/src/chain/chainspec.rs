@@ -1,15 +1,15 @@
 use alloy_primitives::B256;
 use irys_types::{
-    partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List, IrysBlockHeader,
-    IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
+    partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List,
+    IrysBlockHeaderV1, VersionedIrysBlockHeader, IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
 };
 
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
     evm_block_hash: B256,
     number_of_ingress_proofs_total: u64,
-) -> IrysBlockHeader {
-    IrysBlockHeader {
+) -> VersionedIrysBlockHeader {
+    VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
         version: 1,
         block_hash: H256::zero(),
         signature: IrysSignature::default(), // Empty signature to be replaced by actual signing
@@ -71,5 +71,5 @@ pub fn build_unsigned_irys_genesis_block(
         oracle_irys_price: config.genesis_price,
         ema_irys_price: config.genesis_price,
         treasury: U256::zero(), // Treasury will be set when genesis commitments are added
-    }
+    })
 }

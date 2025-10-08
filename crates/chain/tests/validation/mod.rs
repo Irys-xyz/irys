@@ -13,15 +13,15 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
+    VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256List, VersionedIrysBlockHeader, NodeConfig,
     SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
+    block: Arc<VersionedIrysBlockHeader>,
+    commitment_txs: Vec<VersionedCommitmentTransaction>,
     skip_vdf_validation: bool,
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -51,7 +51,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub invalid_stake: CommitmentTransaction,
+        pub invalid_stake: VersionedCommitmentTransaction,
     }
 
     #[async_trait::async_trait]
@@ -61,11 +61,11 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         }
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -103,7 +103,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 
     // Create a pledge commitment with invalid value
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
+    let mut invalid_pledge = VersionedCommitmentTransaction::new(consensus_config);
     invalid_pledge.commitment_type = CommitmentType::Stake;
     invalid_pledge.anchor = H256::zero();
     invalid_pledge.signer = test_signer.address();
@@ -154,7 +154,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub invalid_pledge: CommitmentTransaction,
+        pub invalid_pledge: VersionedCommitmentTransaction,
     }
 
     #[async_trait::async_trait]
@@ -164,11 +164,11 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         }
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -205,7 +205,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     // Create a pledge commitment with invalid value
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let pledge_count = 0;
-    let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
+    let mut invalid_pledge = VersionedCommitmentTransaction::new(consensus_config);
     invalid_pledge.commitment_type = CommitmentType::Pledge {
         pledge_count_before_executing: pledge_count,
     };
@@ -256,7 +256,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub commitments: Vec<CommitmentTransaction>,
+        pub commitments: Vec<VersionedCommitmentTransaction>,
     }
 
     #[async_trait::async_trait]
@@ -267,11 +267,11 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -309,14 +309,14 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     // Create a stake commitment
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut stake =
-        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
+        VersionedCommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     stake.signer = test_signer.address();
     stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
     let stake = test_signer.sign_commitment(stake)?;
 
     // Create a pledge commitment
     let _pledge_count = 0;
-    let pledge = CommitmentTransaction::new_pledge(
+    let pledge = VersionedCommitmentTransaction::new_pledge(
         consensus_config,
         genesis_node.get_anchor().await?,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -371,7 +371,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub wrong_commitment: CommitmentTransaction,
+        pub wrong_commitment: VersionedCommitmentTransaction,
     }
 
     #[async_trait::async_trait]
@@ -382,11 +382,11 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -425,7 +425,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     // Create a different commitment that's NOT in the snapshot
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut wrong_commitment =
-        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
+        VersionedCommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     wrong_commitment.signer = test_signer.address();
     let wrong_commitment = test_signer.sign_commitment(wrong_commitment)?;
     genesis_node.mine_block().await?;
@@ -593,7 +593,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub data_tx: DataTransactionHeader,
+        pub data_tx: VersionedDataTransactionHeader,
         pub duplicate_proofs: Vec<CachedIngressProof>,
     }
 
@@ -605,11 +605,11 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -666,7 +666,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let data_root = H256(root.id);
 
     // Create data transaction header
-    let data_tx = DataTransactionHeader {
+    let data_tx = VersionedDataTransactionHeader {
         id: H256::random(),
         version: 1,
         anchor: H256::zero(),
@@ -801,11 +801,11 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &IrysBlockHeader,
+            _prev_block_header: &VersionedIrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
+            Vec<VersionedCommitmentTransaction>,
+            Vec<VersionedDataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {

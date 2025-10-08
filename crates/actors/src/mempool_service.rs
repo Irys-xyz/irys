@@ -30,7 +30,7 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
+    app_state::DatabaseProvider, Config, VersionedIrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
 };
 use irys_types::{
@@ -39,8 +39,8 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, Base64, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
+    Address, Base64, ChunkPathHash, VersionedCommitmentTransaction, CommitmentValidationError, DataRoot,
+    VersionedDataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
@@ -85,7 +85,7 @@ pub struct Inner {
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
     /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
-    BlockConfirmed(Arc<IrysBlockHeader>),
+    BlockConfirmed(Arc<VersionedIrysBlockHeader>),
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngestChunk(
         UnpackedChunk,
@@ -95,7 +95,7 @@ pub enum MempoolServiceMessage {
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Ingress Pre-validated Block
     IngestBlocks {
-        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
+        prevalidated_blocks: Vec<Arc<VersionedIrysBlockHeader>>,
     },
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
@@ -109,14 +109,14 @@ pub enum MempoolServiceMessage {
     /// - Gossips the transaction to peers if accepted
     /// - Caches the transaction for unstaked signers to be reprocessed later
     IngestCommitmentTx(
-        CommitmentTransaction,
+        VersionedCommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// validate and process an incoming DataTransactionHeader
     IngestDataTx(
-        DataTransactionHeader,
+        VersionedDataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Return filtered list of candidate txns
@@ -126,15 +126,15 @@ pub enum MempoolServiceMessage {
     /// Retrieves a list of CommitmentTransactions based on the provided tx ids
     GetCommitmentTxs {
         commitment_tx_ids: Vec<IrysTransactionId>,
-        response: oneshot::Sender<HashMap<IrysTransactionId, CommitmentTransaction>>,
+        response: oneshot::Sender<HashMap<IrysTransactionId, VersionedCommitmentTransaction>>,
     },
     /// Get DataTransactionHeader from mempool or mdbx
     GetDataTxs(
         Vec<IrysTransactionId>,
-        oneshot::Sender<Vec<Option<DataTransactionHeader>>>,
+        oneshot::Sender<Vec<Option<VersionedDataTransactionHeader>>>,
     ),
     /// Get block header from the mempool cache
-    GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
+    GetBlockHeader(H256, bool, oneshot::Sender<Option<VersionedIrysBlockHeader>>),
     InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
@@ -206,7 +206,7 @@ impl Inner {
                     response,
                 } => {
                     let response_value = self
-                        .handle_get_commitment_tx_message(commitment_tx_ids)
+                        .handle_get_commitment_transactions_message(commitment_tx_ids)
                         .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -770,7 +770,7 @@ impl Inner {
     }
 
     pub async fn get_publish_txs_and_proofs(&self) -> Result<PublishLedgerWithTxs, eyre::Error> {
-        let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
+        let mut publish_txs: Vec<VersionedDataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
         {
@@ -998,7 +998,7 @@ impl Inner {
         &self,
         block_hash: H256,
         include_chunk: bool,
-    ) -> Option<IrysBlockHeader> {
+    ) -> Option<VersionedIrysBlockHeader> {
         let guard = self.mempool_state.read().await;
 
         //read block from mempool
@@ -1086,7 +1086,7 @@ impl Inner {
     }
 
     /// ingest a block into the mempool
-    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<IrysBlockHeader>>) {
+    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<VersionedIrysBlockHeader>>) {
         let mut mempool_state_guard = self.mempool_state.write().await;
         for block in prevalidated_blocks {
             // insert poa into mempool
@@ -1099,7 +1099,7 @@ impl Inner {
             // insert block into mempool without poa
             let mut block_without_chunk = (*block).clone();
             // todo: would there be any harm in leaving the PoA chunk in,
-            // and storing Arc<IrysBlockHeader> in the `prevalidated_blocks`?
+            // and storing Arc<VersionedIrysBlockHeader> in the `prevalidated_blocks`?
             block_without_chunk.poa.chunk = None;
             mempool_state_guard
                 .prevalidated_blocks
@@ -1162,6 +1162,7 @@ impl Inner {
                 .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
+            // commitment_tx is already versioned from DB
             let _ = self
                 .handle_ingress_commitment_tx_message(commitment_tx)
                 .await
@@ -1171,6 +1172,7 @@ impl Inner {
         }
 
         for (_txid, storage_tx) in recovered.storage_txs {
+            // storage_tx is already versioned from DB
             let _ = self
                 .handle_data_tx_ingress_message(storage_tx)
                 .await
@@ -1305,8 +1307,8 @@ pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub struct MempoolState {
     /// valid submit txs
-    pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
-    pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
+    pub valid_submit_ledger_tx: BTreeMap<H256, VersionedDataTransactionHeader>,
+    pub valid_commitment_tx: BTreeMap<Address, Vec<VersionedCommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     pub recent_invalid_tx: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
@@ -1315,9 +1317,9 @@ pub struct MempoolState {
     pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
-    pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, VersionedCommitmentTransaction>>,
     /// pre-validated blocks that have passed pre-validation in discovery service
-    pub prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
+    pub prevalidated_blocks: HashMap<H256, VersionedIrysBlockHeader>,
     pub prevalidated_blocks_poa: HashMap<H256, Base64>,
 }
 
@@ -1413,8 +1415,8 @@ impl TxIngressError {
 
 #[derive(Debug, Clone)]
 pub struct MempoolTxs {
-    pub commitment_tx: Vec<CommitmentTransaction>,
-    pub submit_tx: Vec<DataTransactionHeader>,
+    pub commitment_tx: Vec<VersionedCommitmentTransaction>,
+    pub submit_tx: Vec<VersionedDataTransactionHeader>,
     pub publish_tx: PublishLedgerWithTxs,
 }
 

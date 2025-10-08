@@ -6,7 +6,7 @@ use alloy_genesis::GenesisAccount;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
     fee_distribution::TermFeeCharges, irys::IrysSigner, Address, ConsensusConfig, DataLedger,
-    DataTransaction, IrysBlockHeader, NodeConfig, U256,
+    DataTransaction, VersionedIrysBlockHeader, NodeConfig, U256,
 };
 use reth::providers::TransactionsProvider as _;
 use reth::rpc::types::TransactionTrait as _;
@@ -196,7 +196,7 @@ struct LedgerExpiryTestContext {
 
     // Tracking
     transactions: Vec<DataTransaction>,
-    blocks_mined: Vec<IrysBlockHeader>,
+    blocks_mined: Vec<VersionedIrysBlockHeader>,
 
     // Fee accounting
     total_term_fees: U256,

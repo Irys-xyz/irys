@@ -6,7 +6,7 @@ use irys_actors::packing::wait_for_packing;
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig, H256};
+use irys_types::{irys::IrysSigner, VersionedCommitmentTransaction, NodeConfig, H256};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -312,7 +312,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     info!("Commitment whitelist test: stake tx from a whitelisted account accepted");
 
     let stake_tx2 =
-        CommitmentTransaction::new_stake(&config.consensus_config(), block_1.irys.block_hash);
+        VersionedCommitmentTransaction::new_stake(&config.consensus_config(), block_1.irys.block_hash);
     let stake_tx2 = account2.sign_commitment(stake_tx2)?;
     let response2 = api_client
         .post_commitment_transaction(peer_socket_address, stake_tx2.clone())
@@ -392,7 +392,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?
         .expect("block to be accessible");
 
-    let new_stake_tx2 = CommitmentTransaction::new_stake(
+    let new_stake_tx2 = VersionedCommitmentTransaction::new_stake(
         &config.consensus_config(),
         another_anchor_block.irys.block_hash,
     );
@@ -408,7 +408,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     peer.wait_for_mempool_commitment_txs(vec![new_stake_tx2.id], max_seconds)
         .await?;
 
-    let stake_tx3 = CommitmentTransaction::new_stake(
+    let stake_tx3 = VersionedCommitmentTransaction::new_stake(
         &config.consensus_config(),
         another_anchor_block.irys.block_hash,
     );
@@ -440,7 +440,7 @@ async fn create_stake_tx(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
     anchor: H256,
-) -> CommitmentTransaction {
+) -> VersionedCommitmentTransaction {
     // Get stake price from API
     let price_info = node
         .get_stake_price()
@@ -448,12 +448,12 @@ async fn create_stake_tx(
         .expect("Failed to get stake price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction {
+    let stake_tx = VersionedCommitmentTransaction {
         commitment_type: CommitmentType::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransaction::new(consensus)
+        ..VersionedCommitmentTransaction::new(consensus)
     };
 
     info!("Created stake_tx with value: {:?}", stake_tx.value);

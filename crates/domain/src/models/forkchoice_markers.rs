@@ -7,7 +7,7 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_types::BlockHash;
 use irys_types::DatabaseProvider;
 
-use irys_types::IrysBlockHeader;
+use irys_types::VersionedIrysBlockHeader;
 
 use std::sync::Arc;
 
@@ -20,9 +20,9 @@ use super::block_tree;
 /// `prune_block` marks the prune depth of the block tree.
 #[derive(Debug, Clone)]
 pub struct ForkChoiceMarkers {
-    pub head: Arc<IrysBlockHeader>,
-    pub migration_block: Arc<IrysBlockHeader>,
-    pub prune_block: Arc<IrysBlockHeader>,
+    pub head: Arc<VersionedIrysBlockHeader>,
+    pub migration_block: Arc<VersionedIrysBlockHeader>,
+    pub prune_block: Arc<VersionedIrysBlockHeader>,
 }
 
 impl ForkChoiceMarkers {
@@ -130,7 +130,7 @@ pub(crate) fn block_at_height(
     block_tree: &block_tree::BlockTree,
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
-) -> Result<Arc<IrysBlockHeader>> {
+) -> Result<Arc<VersionedIrysBlockHeader>> {
     if let Some(entry) = canonical_chain.iter().find(|entry| entry.height == height) {
         let header = load_header(block_tree, database, entry.block_hash)?;
         return Ok(header);
@@ -143,7 +143,7 @@ pub(crate) fn marker_from_index_height(
     block_index: &block_index::BlockIndex,
     database: &DatabaseProvider,
     height: u64,
-) -> Result<Arc<IrysBlockHeader>> {
+) -> Result<Arc<VersionedIrysBlockHeader>> {
     let index_item = block_index
         .get_item(height)
         .ok_or_else(|| eyre!("missing block index entry at height {height}"))?;
@@ -155,7 +155,7 @@ pub(crate) fn load_header(
     block_tree: &block_tree::BlockTree,
     database: &DatabaseProvider,
     hash: BlockHash,
-) -> Result<Arc<IrysBlockHeader>> {
+) -> Result<Arc<VersionedIrysBlockHeader>> {
     if let Some(header) = block_tree.get_block(&hash) {
         return Ok(Arc::new(header.clone()));
     }
@@ -166,7 +166,7 @@ pub(crate) fn load_header(
 pub(crate) fn load_header_from_db(
     database: &DatabaseProvider,
     hash: BlockHash,
-) -> Result<Arc<IrysBlockHeader>> {
+) -> Result<Arc<VersionedIrysBlockHeader>> {
     let header = database
         .view_eyre(|tx| database::block_header_by_hash(tx, &hash, false))?
         .ok_or_else(|| eyre!("block {hash} not found in database while loading anchor header"))?;

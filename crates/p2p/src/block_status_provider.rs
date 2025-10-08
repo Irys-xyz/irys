@@ -3,7 +3,7 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_types::{IrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeaderV1, VersionedIrysBlockHeader, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -206,7 +206,7 @@ impl BlockStatusProvider {
 
         Self {
             block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
-                &IrysBlockHeader::new_mock_header(),
+                &VersionedIrysBlockHeader::new_mock_header(),
                 node_config.consensus_config(),
             )))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
@@ -223,7 +223,7 @@ impl BlockStatusProvider {
     }
 
     #[cfg(test)]
-    pub fn get_block_from_tree(&self, block_hash: &BlockHash) -> Option<IrysBlockHeader> {
+    pub fn get_block_from_tree(&self, block_hash: &BlockHash) -> Option<VersionedIrysBlockHeader> {
         self.block_tree_read_guard
             .read()
             .get_block(block_hash)
@@ -255,31 +255,31 @@ impl BlockStatusProvider {
     #[cfg(test)]
     pub fn produce_mock_chain(
         num_blocks: u64,
-        starting_block: Option<&IrysBlockHeader>,
-    ) -> Vec<IrysBlockHeader> {
+        starting_block: Option<&VersionedIrysBlockHeader>,
+    ) -> Vec<VersionedIrysBlockHeader> {
         let first_block = starting_block
-            .map(|parent| IrysBlockHeader {
+            .map(|parent| VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
                 block_hash: BlockHash::random(),
                 height: parent.height + 1,
                 previous_block_hash: parent.block_hash,
-                ..IrysBlockHeader::new_mock_header()
-            })
-            .unwrap_or_else(|| IrysBlockHeader {
+                ..IrysBlockHeaderV1::new_mock_header()
+            }))
+            .unwrap_or_else(|| VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
                 block_hash: BlockHash::random(),
                 height: 1,
-                ..IrysBlockHeader::new_mock_header()
-            });
+                ..IrysBlockHeaderV1::new_mock_header()
+            }));
 
         let mut blocks = vec![first_block];
 
         for _ in 1..num_blocks {
             let prev_block = blocks.last().expect("to have at least one block");
-            let block = IrysBlockHeader {
+            let block = VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
                 block_hash: BlockHash::random(),
                 height: prev_block.height + 1,
                 previous_block_hash: prev_block.block_hash,
-                ..IrysBlockHeader::new_mock_header()
-            };
+                ..IrysBlockHeaderV1::new_mock_header()
+            });
             blocks.push(block);
         }
 
@@ -287,11 +287,11 @@ impl BlockStatusProvider {
     }
 
     #[cfg(test)]
-    pub fn add_block_to_index_and_tree_for_testing(&self, block: &IrysBlockHeader) {
+    pub fn add_block_to_index_and_tree_for_testing(&self, block: &VersionedIrysBlockHeader) {
         let mut binding = self.block_index_read_guard.write();
 
         if binding.items.is_empty() {
-            let genesis = IrysBlockHeader::default();
+            let genesis = VersionedIrysBlockHeader::default();
             binding
                 .push_item(&BlockIndexItem {
                     block_hash: genesis.block_hash,
@@ -321,7 +321,7 @@ impl BlockStatusProvider {
     }
 
     #[cfg(test)]
-    pub fn add_block_mock_to_the_tree(&self, block: &IrysBlockHeader) {
+    pub fn add_block_mock_to_the_tree(&self, block: &VersionedIrysBlockHeader) {
         use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
 
         self.block_tree_read_guard

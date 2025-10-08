@@ -51,8 +51,8 @@ use irys_types::{
     H256List, SyncMode, H256, U256,
 };
 use irys_types::{
-    Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
-    DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
+    Base64, ChunkBytes, VersionedCommitmentTransaction, Config, ConsensusConfig, DataTransaction,
+    VersionedDataTransactionHeader, DatabaseProvider, VersionedIrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
@@ -844,7 +844,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     /// mine blocks until the txs are found in the block index, i.e. mdbx
     pub async fn wait_for_migrated_txs(
         &self,
-        mut unconfirmed_txs: Vec<DataTransactionHeader>,
+        mut unconfirmed_txs: Vec<VersionedDataTransactionHeader>,
         seconds: usize,
     ) -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
@@ -1003,7 +1003,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .height
     }
 
-    pub fn get_max_difficulty_block(&self) -> IrysBlockHeader {
+    pub fn get_max_difficulty_block(&self) -> VersionedIrysBlockHeader {
         let block = self
             .node_ctx
             .block_tree_guard
@@ -1064,7 +1064,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn mine_block(&self) -> eyre::Result<IrysBlockHeader> {
+    pub async fn mine_block(&self) -> eyre::Result<VersionedIrysBlockHeader> {
         let height = self.get_max_difficulty_block().height;
         self.mine_blocks(1).await?;
         let hash = self.wait_until_height(height + 1, 10).await?;
@@ -1099,7 +1099,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_without_gossip(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+    ) -> eyre::Result<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)> {
         self.with_gossip_disabled(mine_block(&self.node_ctx))
             .await?
             .ok_or_eyre("block not returned")
@@ -1131,7 +1131,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub fn get_commitment_snapshot_status(
         &self,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: &VersionedCommitmentTransaction,
     ) -> CommitmentSnapshotStatus {
         let commitment_snapshot = self
             .node_ctx
@@ -1155,7 +1155,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         hash: &H256,
         seconds_to_wait: usize,
-    ) -> eyre::Result<IrysBlockHeader> {
+    ) -> eyre::Result<VersionedIrysBlockHeader> {
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
         let mut retries = 0;
@@ -1397,9 +1397,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_txs: usize,
         seconds_to_wait: u32,
     ) -> eyre::Result<(
-        Vec<DataTransactionHeader>,
+        Vec<VersionedDataTransactionHeader>,
         PublishLedgerWithTxs,
-        Vec<CommitmentTransaction>,
+        Vec<VersionedCommitmentTransaction>,
     )> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
@@ -1513,7 +1513,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .service_senders
                 .mempool
                 .send(MempoolServiceMessage::IngestDataTx(
-                    tx.header.clone(),
+                    (*tx.header).clone(),
                     oneshot_tx,
                 ));
         if let Err(e) = response {
@@ -1555,7 +1555,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// read storage tx from mbdx i.e. block index
-    pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<DataTransactionHeader> {
+    pub fn get_tx_header(&self, tx_id: &H256) -> eyre::Result<VersionedDataTransactionHeader> {
         match self
             .node_ctx
             .db
@@ -1605,7 +1605,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn get_storage_tx_header_from_mempool(
         &self,
         tx_id: &H256,
-    ) -> eyre::Result<DataTransactionHeader> {
+    ) -> eyre::Result<VersionedDataTransactionHeader> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx);
         if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
@@ -1628,7 +1628,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn get_commitment_tx_from_mempool(
         &self,
         tx_id: &H256,
-    ) -> eyre::Result<CommitmentTransaction> {
+    ) -> eyre::Result<VersionedCommitmentTransaction> {
         // try to get commitment tx from mempool
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetCommitmentTxs {
@@ -1655,7 +1655,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         height: u64,
         include_chunk: bool,
-    ) -> eyre::Result<IrysBlockHeader> {
+    ) -> eyre::Result<VersionedIrysBlockHeader> {
         self.node_ctx
             .block_index_guard
             .read()
@@ -1671,7 +1671,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             })
     }
 
-    pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<IrysBlockHeader> {
+    pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<VersionedIrysBlockHeader> {
         get_canonical_chain(self.node_ctx.block_tree_guard.clone())
             .await
             .unwrap()
@@ -1692,7 +1692,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         start_height: u64,
         end_height: u64,
-    ) -> eyre::Result<Vec<IrysBlockHeader>> {
+    ) -> eyre::Result<Vec<VersionedIrysBlockHeader>> {
         let mut blocks = Vec::new();
         for height in start_height..=end_height {
             blocks.push(self.get_block_by_height(height).await?);
@@ -1700,7 +1700,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(blocks)
     }
 
-    pub fn gossip_block_to_peers(&self, block_header: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+    pub fn gossip_block_to_peers(&self, block_header: &Arc<VersionedIrysBlockHeader>) -> eyre::Result<()> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
@@ -1726,7 +1726,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         hash: &H256,
         include_chunk: bool,
-    ) -> eyre::Result<IrysBlockHeader> {
+    ) -> eyre::Result<VersionedIrysBlockHeader> {
         match &self
             .node_ctx
             .db
@@ -1738,7 +1738,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// get block from block tree guard
-    pub fn get_block_by_hash(&self, hash: &H256) -> eyre::Result<IrysBlockHeader> {
+    pub fn get_block_by_hash(&self, hash: &H256) -> eyre::Result<VersionedIrysBlockHeader> {
         self.node_ctx
             .block_tree_guard
             .read()
@@ -1763,7 +1763,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
-        irys_block_header: &IrysBlockHeader,
+        irys_block_header: &VersionedIrysBlockHeader,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
             .handle_block(Arc::new(irys_block_header.clone()), false)
@@ -1795,7 +1795,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn send_full_block(
         &self,
         peer: &Self,
-        irys_block_header: &IrysBlockHeader,
+        irys_block_header: &VersionedIrysBlockHeader,
     ) -> eyre::Result<()> {
         // Send data txs
         for tx_id in irys_block_header
@@ -1939,7 +1939,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         tx
     }
 
-    pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
+    pub async fn post_data_tx_raw(&self, tx: &VersionedDataTransactionHeader) {
         let client = awc::Client::default();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
@@ -2081,7 +2081,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_commitment_tx(
         &self,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: &VersionedCommitmentTransaction,
     ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
@@ -2131,14 +2131,14 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn post_commitment_tx_raw_without_gossip(
         &self,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: &VersionedCommitmentTransaction,
     ) -> eyre::Result<()> {
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.with_gossip_disabled(self.post_commitment_tx_request(&api_uri, commitment_tx))
             .await
     }
 
-    pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
+    pub async fn ingest_data_tx(&self, data_tx: VersionedDataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result = self
             .node_ctx
@@ -2158,7 +2158,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_commitment_tx(
         &self,
-        commitment_tx: CommitmentTransaction,
+        commitment_tx: VersionedCommitmentTransaction,
     ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result =
@@ -2183,14 +2183,14 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment(
         &self,
         anchor: Option<H256>,
-    ) -> eyre::Result<CommitmentTransaction> {
+    ) -> eyre::Result<VersionedCommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let signer = self.cfg.signer();
         let anchor = match anchor {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let pledge_tx = VersionedCommitmentTransaction::new_pledge(
             config,
             anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2212,10 +2212,10 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment_with_signer(
         &self,
         signer: &IrysSigner,
-    ) -> CommitmentTransaction {
+    ) -> VersionedCommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
 
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let pledge_tx = VersionedCommitmentTransaction::new_pledge(
             consensus,
             self.get_anchor().await.expect("anchor should be provided"),
             self.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2236,7 +2236,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_pledge_commitment_without_gossip(
         &self,
         anchor: Option<H256>,
-    ) -> eyre::Result<CommitmentTransaction> {
+    ) -> eyre::Result<VersionedCommitmentTransaction> {
         self.with_gossip_disabled(self.post_pledge_commitment(anchor))
             .await
     }
@@ -2248,13 +2248,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_stake_commitment(
         &self,
         anchor: Option<H256>,
-    ) -> eyre::Result<CommitmentTransaction> {
+    ) -> eyre::Result<VersionedCommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = match anchor {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        let stake_tx = VersionedCommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
@@ -2271,10 +2271,10 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_stake_commitment_with_signer(
         &self,
         signer: &IrysSigner,
-    ) -> eyre::Result<CommitmentTransaction> {
+    ) -> eyre::Result<VersionedCommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = self.get_anchor().await?;
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        let stake_tx = VersionedCommitmentTransaction::new_stake(config, anchor);
         let stake_tx = signer.sign_commitment(stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
@@ -2290,7 +2290,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn post_stake_commitment_without_gossip(
         &self,
         anchor: Option<H256>,
-    ) -> eyre::Result<CommitmentTransaction> {
+    ) -> eyre::Result<VersionedCommitmentTransaction> {
         self.with_gossip_disabled(self.post_stake_commitment(anchor))
             .await
     }
@@ -2308,7 +2308,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     async fn post_commitment_tx_request(
         &self,
         api_uri: &str,
-        commitment_tx: &CommitmentTransaction,
+        commitment_tx: &VersionedCommitmentTransaction,
     ) -> eyre::Result<()> {
         info!("Posting Commitment TX: {}", commitment_tx.id);
 
@@ -2465,7 +2465,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         max_seconds: usize,
     ) -> eyre::Result<usize>
     where
-        F: FnMut(&[IrysBlockHeader]) -> bool,
+        F: FnMut(&[VersionedIrysBlockHeader]) -> bool,
     {
         let mut total_blocks_mined = 0;
 
@@ -2498,7 +2498,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         start_height: u64,
         end_height: u64,
-    ) -> eyre::Result<Vec<IrysBlockHeader>> {
+    ) -> eyre::Result<Vec<VersionedIrysBlockHeader>> {
         let blocks = self.get_blocks(start_height, end_height).await?;
         let reset_frequency = self.node_ctx.config.vdf.reset_frequency;
 
@@ -2628,7 +2628,7 @@ pub async fn solution_context_with_poa_chunk(
 pub async fn mine_blocks(
     node_ctx: &IrysNodeCtx,
     blocks: usize,
-) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+) -> eyre::Result<Vec<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>> {
     let mut results = Vec::with_capacity(blocks);
     for _ in 0..blocks {
         results.push(mine_block(node_ctx).await?.unwrap());
@@ -2638,7 +2638,7 @@ pub async fn mine_blocks(
 
 pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
-) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>> {
     let poa_solution = solution_context(node_ctx).await?;
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -2687,7 +2687,7 @@ pub enum BlockValidationOutcome {
 pub async fn mine_block_and_wait_for_validation(
     node_ctx: &IrysNodeCtx,
 ) -> eyre::Result<(
-    Arc<IrysBlockHeader>,
+    Arc<VersionedIrysBlockHeader>,
     EthBuiltPayload,
     BlockValidationOutcome,
 )> {
@@ -2822,7 +2822,7 @@ where
 }
 
 #[deprecated]
-pub async fn post_commitment_tx<T, B>(app: &T, tx: &CommitmentTransaction)
+pub async fn post_commitment_tx<T, B>(app: &T, tx: &VersionedCommitmentTransaction)
 where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody + Unpin,
@@ -2843,8 +2843,8 @@ pub fn new_stake_tx(
     anchor: &H256,
     signer: &IrysSigner,
     config: &ConsensusConfig,
-) -> CommitmentTransaction {
-    let stake_tx = CommitmentTransaction::new_stake(config, *anchor);
+) -> VersionedCommitmentTransaction {
+    let stake_tx = VersionedCommitmentTransaction::new_stake(config, *anchor);
     signer.sign_commitment(stake_tx).unwrap()
 }
 
@@ -2853,9 +2853,9 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     signer: &IrysSigner,
     config: &ConsensusConfig,
     pledge_provider: &P,
-) -> CommitmentTransaction {
+) -> VersionedCommitmentTransaction {
     let pledge_tx =
-        CommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
+        VersionedCommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
     signer.sign_commitment(pledge_tx).unwrap()
 }
 
@@ -2900,7 +2900,7 @@ pub fn get_block_parent(
     txid: H256,
     ledger: DataLedger,
     db: &DatabaseProvider,
-) -> Option<IrysBlockHeader> {
+) -> Option<VersionedIrysBlockHeader> {
     let read_tx = db
         .tx()
         .map_err(|e| {

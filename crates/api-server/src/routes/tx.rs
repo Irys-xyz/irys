@@ -11,7 +11,7 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
+    option_u64_stringify, u64_stringify, VersionedCommitmentTransaction, DataLedger, VersionedDataTransactionHeader,
     IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use tracing::info;
 /// delivery and transaction validation.
 pub async fn post_tx(
     state: web::Data<ApiState>,
-    body: Json<DataTransactionHeader>,
+    body: Json<VersionedDataTransactionHeader>,
 ) -> actix_web::Result<HttpResponse> {
     let tx = body.into_inner();
 
@@ -104,13 +104,14 @@ pub async fn get_transaction_api(
 pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<DataTransactionHeader, ApiError> {
+) -> Result<VersionedDataTransactionHeader, ApiError> {
     let opt = state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
         .map_err(|_| ApiError::Internal {
             err: String::from("db error while looking up Irys transaction"),
         })?;
+    // DB returns versioned type
     opt.ok_or(ApiError::ErrNoId {
         id: tx_id.to_string(),
         err: String::from("storage tx not found"),
@@ -121,13 +122,14 @@ pub fn get_storage_transaction(
 pub fn get_commitment_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<CommitmentTransaction, ApiError> {
+) -> Result<VersionedCommitmentTransaction, ApiError> {
     let opt = state
         .db
         .view_eyre(|tx| database::commitment_tx_by_txid(tx, &tx_id))
         .map_err(|_| ApiError::Internal {
             err: String::from("db error while looking up commitment transaction"),
         })?;
+    // DB returns versioned type
     opt.ok_or(ApiError::ErrNoId {
         id: tx_id.to_string(),
         err: String::from("commitment tx not found"),
@@ -146,7 +148,8 @@ pub async fn get_transaction(
         get_commitment_tx_in_parallel(&vec, &state.mempool_service, &state.db).await
     {
         if let Some(tx) = result.pop() {
-            return Ok(IrysTransactionResponse::Commitment(tx));
+            // Extract inner type for API response
+            return Ok(IrysTransactionResponse::Commitment((*tx).clone()));
         }
     };
 
@@ -154,7 +157,8 @@ pub async fn get_transaction(
         get_data_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
     {
         if let Some(tx) = result.pop() {
-            return Ok(IrysTransactionResponse::Storage(tx));
+            // Extract inner type for API response
+            return Ok(IrysTransactionResponse::Storage((*tx).clone()));
         }
     };
 

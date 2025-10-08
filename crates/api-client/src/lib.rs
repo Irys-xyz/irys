@@ -1,7 +1,7 @@
 use eyre::Result;
 use irys_types::{
-    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, CommitmentTransaction,
-    DataTransactionHeader, IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
+    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, VersionedCommitmentTransaction,
+    VersionedDataTransactionHeader, IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
 };
 pub use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -33,14 +33,14 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
     async fn post_transaction(
         &self,
         peer: SocketAddr,
-        transaction: DataTransactionHeader,
+        transaction: VersionedDataTransactionHeader,
     ) -> Result<()>;
 
     /// Post a commitment transaction to a node
     async fn post_commitment_transaction(
         &self,
         peer: SocketAddr,
-        transaction: CommitmentTransaction,
+        transaction: VersionedCommitmentTransaction,
     ) -> Result<()>;
 
     /// Fetch multiple transaction headers by their IDs from a peer
@@ -162,7 +162,7 @@ impl ApiClient for IrysApiClient {
     async fn post_transaction(
         &self,
         peer: SocketAddr,
-        transaction: DataTransactionHeader,
+        transaction: VersionedDataTransactionHeader,
     ) -> Result<()> {
         let path = "/tx";
         let response = self
@@ -178,7 +178,7 @@ impl ApiClient for IrysApiClient {
     async fn post_commitment_transaction(
         &self,
         peer: SocketAddr,
-        transaction: CommitmentTransaction,
+        transaction: VersionedCommitmentTransaction,
     ) -> Result<()> {
         let path = "/commitment_tx";
         let response = self
@@ -327,7 +327,7 @@ pub mod test_utils {
         async fn post_transaction(
             &self,
             _peer: std::net::SocketAddr,
-            _transaction: DataTransactionHeader,
+            _transaction: VersionedDataTransactionHeader,
         ) -> eyre::Result<()> {
             Ok(())
         }
@@ -355,7 +355,7 @@ pub mod test_utils {
         async fn post_commitment_transaction(
             &self,
             _peer: SocketAddr,
-            _transaction: CommitmentTransaction,
+            _transaction: VersionedCommitmentTransaction,
         ) -> Result<()> {
             Ok(())
         }
@@ -421,7 +421,7 @@ mod tests {
         async fn post_transaction(
             &self,
             _peer: SocketAddr,
-            _tx: DataTransactionHeader,
+            _tx: VersionedDataTransactionHeader,
         ) -> Result<()> {
             Ok(())
         }
@@ -449,7 +449,7 @@ mod tests {
         async fn post_commitment_transaction(
             &self,
             _peer: SocketAddr,
-            _transaction: CommitmentTransaction,
+            _transaction: VersionedCommitmentTransaction,
         ) -> Result<()> {
             Ok(())
         }
@@ -467,14 +467,17 @@ mod tests {
     async fn test_mock_client() {
         let mut mock = MockApiClient::default();
         let tx_id = H256::random();
-        let tx_header = DataTransactionHeader::default();
+        let tx_header = VersionedDataTransactionHeader::default();
+        let inner_header = match &tx_header {
+            VersionedDataTransactionHeader::V1(v1) => v1.clone(),
+        };
         mock.expected_transactions
-            .insert(tx_id, IrysTransactionResponse::Storage(tx_header.clone()));
+            .insert(tx_id, IrysTransactionResponse::Storage(inner_header.clone()));
 
         let result = mock
             .get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id)
             .await
             .unwrap();
-        assert_eq!(result, IrysTransactionResponse::Storage(tx_header));
+        assert_eq!(result, IrysTransactionResponse::Storage(inner_header));
     }
 }

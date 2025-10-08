@@ -63,8 +63,8 @@ impl RethBlockProvider {
     /// Fetches the execution payload for a given EVM block hash. You can get the EVM block hash
     /// from the Irys block header like this:
     /// ```rust
-    /// use irys_types::IrysBlockHeader;
-    /// let irys_block: IrysBlockHeader = IrysBlockHeader::new_mock_header(); // Obtain the Irys block header
+    /// use irys_types::VersionedIrysBlockHeader;
+    /// let irys_block: VersionedIrysBlockHeader = VersionedIrysBlockHeader::new_mock_header(); // Obtain the Irys block header
     /// let evm_block_hash = irys_block.evm_block_hash; // Get the EVM block hash
     /// ```
     pub fn evm_block(&self, evm_block_hash: B256) -> Option<Block> {
@@ -209,8 +209,8 @@ impl ExecutionPayloadCache {
     ///
     /// You can get the EVM block hash from the Irys block header like this:
     /// ```rust
-    /// use irys_types::IrysBlockHeader;
-    /// let irys_block = IrysBlockHeader::new_mock_header();
+    /// use irys_types::VersionedIrysBlockHeader;
+    /// let irys_block = VersionedIrysBlockHeader::new_mock_header();
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
     pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
