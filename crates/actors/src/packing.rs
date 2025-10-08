@@ -261,6 +261,7 @@ impl PackingService {
                     (self.config.consensus.chunk_size * 2).try_into().unwrap(),
                 );
 
+                let notify = self.notify.clone();
                 let mut process_chunk = |chunk_bytes: Bytes| {
                     // TODO: move our use of Vec for bytes to, well, Bytes, so we get much cheaper copies etc
 
@@ -269,6 +270,8 @@ impl PackingService {
                         chunk_bytes.to_vec(),
                         ChunkType::Entropy,
                     );
+                    // notify after each chunk write to allow idle detection to observe permit/state changes
+                    notify.notify_waiters();
 
                     if range_start % LOG_PER_CHUNKS == 0 {
                         debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &range_start, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
@@ -279,6 +282,7 @@ impl PackingService {
                         let _ = storage_module.sync_pending_chunks();
                         // don't need this as stream.next() uses await, so it naturally yields
                         // yield_now().await // so the shutdown can stop us
+                        notify.notify_waiters();
                     }
 
                     range_start += 1;
@@ -347,6 +351,7 @@ impl PackingService {
                         let config = self.config.clone();
                         let storage_module_clone = storage_module.clone();
                         let chain_id = self.packing_config.chain_id;
+                        let notify = self.notify.clone();
                         runtime_handle.clone().spawn_blocking(move || {
                             let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
                             compute_entropy_chunk(
@@ -364,6 +369,8 @@ impl PackingService {
                             // write the chunk
                             storage_module_clone.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
+                            // notify waiters so idle detection can re-check available permits/state
+                            notify.notify_waiters();
                         });
 
                         if i % LOG_PER_CHUNKS == 0 {
