@@ -106,7 +106,6 @@ impl DerefMut for DataTransactionHeader {
     }
 }
 
-// TODO: write tests for this
 impl Compact for DataTransactionHeader {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
