@@ -206,7 +206,7 @@ impl Inner {
                     response,
                 } => {
                     let response_value = self
-                        .handle_get_commitment_transactions_message(commitment_tx_ids)
+                        .handle_get_commitment_tx_message(commitment_tx_ids)
                         .await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);

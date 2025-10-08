@@ -633,7 +633,7 @@ impl Inner {
         // stage 1: move commitment transactions from tree to index
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
         let commitments = self
-            .handle_get_commitment_transactions_message(commitment_tx_ids)
+            .handle_get_commitment_tx_message(commitment_tx_ids)
             .await;
 
         let tx = self

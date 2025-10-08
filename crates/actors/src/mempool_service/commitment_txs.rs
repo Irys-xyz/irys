@@ -239,7 +239,7 @@ impl Inner {
 
     /// read specified commitment txs from mempool
     #[instrument(skip_all, name = "get_commitment_tx")]
-    pub async fn handle_get_commitment_transactions_message(
+    pub async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
