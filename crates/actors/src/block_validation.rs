@@ -1432,9 +1432,8 @@ pub async fn commitment_txs_are_valid(
         {
             match pair {
                 EitherOrBoth::Both(actual, expected) => {
-                    // Compare the inner types (Deref gives us &CommitmentTransaction)
                     ensure!(
-                        **actual == **expected,
+                        actual == expected,
                         "Epoch block commitment mismatch at position {}. Expected: {:?}, Got: {:?}",
                         idx,
                         expected,
@@ -1465,12 +1464,11 @@ pub async fn commitment_txs_are_valid(
     // Regular block validation: check priority ordering for stake and pledge commitments
     let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
         .iter()
-        .filter(|tx| match tx {
-            CommitmentTransaction::V1(inner) => matches!(
-                inner.commitment_type,
+        .filter(|tx| matches!(
+                tx.commitment_type,
                 CommitmentType::Stake | CommitmentType::Pledge { .. }
             ),
-        })
+        )
         .collect();
 
     if stake_and_pledge_txs.is_empty() {
