@@ -945,12 +945,20 @@ impl IrysNode {
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
-        // initialize packing service early (dynamic registration)
+        // initialize packing service early
         let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
-        let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
-
-        // start service senders/receivers with packing handle
-        let (service_senders, receivers) = ServiceSenders::new(packing_handle.clone());
+        // channel-first: create sender/receiver before attaching the service loop
+        let (packing_tx, packing_rx) = irys_actors::packing::PackingService::channel(5_000);
+        // start service senders/receivers with packing sender
+        let (service_senders, receivers) =
+            ServiceSenders::new_with_packing_sender(packing_tx.clone());
+        // attach the receiver loop and obtain a handle for waiters/tests
+        let packing_handle = packing_service.attach_receiver_loop(
+            runtime_handle.clone(),
+            packing_rx,
+            packing_tx.clone(),
+        );
+        service_senders.set_packing_handle(packing_handle.clone());
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1556,8 +1564,8 @@ impl IrysNode {
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
-                let handle = service_senders.packing_handle();
-                let _ = handle.send(PackingRequest {
+                let sender = service_senders.packing_sender();
+                let _ = sender.try_send(PackingRequest {
                     storage_module: sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });

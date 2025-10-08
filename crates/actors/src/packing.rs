@@ -539,6 +539,11 @@ impl PackingHandle {
         self.internals.clone()
     }
 
+    /// Access a clone of the underlying sender for enqueueing packing requests.
+    pub fn sender(&self) -> tokio::sync::mpsc::Sender<PackingRequest> {
+        self.sender.clone()
+    }
+
     /// Construct a PackingHandle from its parts.
     /// Useful for tests or custom wiring where the receiver loop is managed externally.
     pub fn from_parts(
@@ -553,7 +558,74 @@ impl PackingHandle {
     }
 }
 
+pub type PackingSender = tokio::sync::mpsc::Sender<PackingRequest>;
+pub type PackingReceiver = tokio::sync::mpsc::Receiver<PackingRequest>;
+
 impl PackingService {
+    /// Create a detached channel for packing requests (channel-first).
+    pub fn channel(bound: usize) -> (PackingSender, PackingReceiver) {
+        tokio::sync::mpsc::channel::<PackingRequest>(bound)
+    }
+
+    /// Attach a previously created receiver and start the enqueue loop.
+    /// Returns a `PackingHandle` for interacting with the service.
+    pub fn attach_receiver_loop(
+        &self,
+        runtime_handle: tokio::runtime::Handle,
+        mut rx: PackingReceiver,
+        sender: PackingSender,
+    ) -> PackingHandle {
+        // Clone references to the shared internals so both the service and observers see the same state
+        let job_queues = self.pending_jobs.clone();
+
+        // Build an Internals snapshot that shares the same underlying Arcs as the service
+        let internals = Internals {
+            pending_jobs: self.pending_jobs.clone(),
+            semaphore: self.semaphore.clone(),
+            config: self.packing_config.clone(),
+            active_workers: self.active_workers.clone(),
+        };
+
+        // Spawn the receiver loop
+        let notify = self.notify.clone();
+        runtime_handle.spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                // Enqueue into the SM-specific pending queue; create queue if missing
+                let sm_id = msg.storage_module.id;
+
+                // HOT path: try read-lock first to avoid write contention when the queue already exists
+                let queue_arc = if let Some(q) = {
+                    let map_guard = job_queues
+                        .read()
+                        .expect("Unable to acquire pending jobs map read lock");
+                    map_guard.get(&sm_id).cloned()
+                } {
+                    q
+                } else {
+                    // COLD path: create the queue under a write lock
+                    let mut map_guard = job_queues
+                        .write()
+                        .expect("Unable to acquire pending jobs map write lock");
+                    map_guard
+                        .entry(sm_id)
+                        .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
+                        .clone()
+                };
+
+                // Ignore poisoned lock errors by propagating panic (consistent with existing code)
+                queue_arc.as_ref().write().unwrap().push_back(msg);
+                // signal new activity for waiters
+                notify.notify_waiters();
+            }
+        });
+
+        PackingHandle {
+            sender,
+            internals,
+            notify: self.notify.clone(),
+        }
+    }
+
     /// Spawn a Tokio task that receives PackingRequest messages and pushes them into the internal queues.
     /// Returns a `PackingHandle` for interacting with the service.
     pub fn spawn_tokio_service(&self, runtime_handle: tokio::runtime::Handle) -> PackingHandle {

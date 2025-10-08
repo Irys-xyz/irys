@@ -219,8 +219,8 @@ impl StorageModuleServiceInner {
             // Reset packing params and indexes on the storage module
             if let Ok(interval) = packing_sm.reset() {
                 // Message packing service to fill up fresh entropy chunks on the drive
-                let handle = self.service_senders.packing_handle();
-                let _ = handle.send(PackingRequest {
+                let sender = self.service_senders.packing_sender();
+                let _ = sender.try_send(PackingRequest {
                     storage_module: packing_sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
