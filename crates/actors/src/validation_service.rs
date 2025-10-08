@@ -18,9 +18,7 @@ use crate::{
 use eyre::{bail, ensure};
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{
-    app_state::DatabaseProvider, Config, TokioServiceHandle, VersionedIrysBlockHeader,
-};
+use irys_types::{app_state::DatabaseProvider, Config, IrysBlockHeader, TokioServiceHandle};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
@@ -50,7 +48,7 @@ pub enum VdfValidationResult {
 pub enum ValidationServiceMessage {
     /// Validate a block
     ValidateBlock {
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
         skip_vdf_validation: bool,
     },
 }
@@ -334,7 +332,7 @@ impl ValidationServiceInner {
     #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
     pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
-        block: &VersionedIrysBlockHeader,
+        block: &IrysBlockHeader,
         cancel: Arc<AtomicU8>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {

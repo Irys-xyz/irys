@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_types::{NodeConfig, VersionedCommitmentTransaction};
+use irys_types::{CommitmentTransaction, NodeConfig};
 use rstest::rstest;
 use tokio::task::yield_now;
 use tracing::debug;
@@ -64,7 +64,7 @@ async fn test_auto_stake_pledge(
 
     if stake {
         let mut stake_tx =
-            VersionedCommitmentTransaction::new_stake(&config, genesis_node.get_anchor().await?);
+            CommitmentTransaction::new_stake(&config, genesis_node.get_anchor().await?);
         peer_signer.sign_commitment(&mut stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await?;

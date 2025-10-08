@@ -7,7 +7,7 @@ use base58::FromBase58 as _;
 use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
-    transaction::{PledgeDataProvider as _, VersionedCommitmentTransaction},
+    transaction::{CommitmentTransaction, PledgeDataProvider as _},
     Address, DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};
@@ -162,7 +162,7 @@ pub async fn get_pledge_price(
         .await;
 
     // Calculate the pledge value using the same logic as CommitmentTransaction
-    let pledge_value = VersionedCommitmentTransaction::calculate_pledge_value_at_count(
+    let pledge_value = CommitmentTransaction::calculate_pledge_value_at_count(
         &state.config.consensus,
         pledge_count,
     );
@@ -194,7 +194,7 @@ pub async fn get_unpledge_price(
     let refund_amount = if pledge_count == 0 {
         U256::zero()
     } else {
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(
+        CommitmentTransaction::calculate_pledge_value_at_count(
             &state.config.consensus,
             pledge_count.saturating_sub(1),
         )

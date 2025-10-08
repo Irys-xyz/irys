@@ -19,7 +19,7 @@ use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
-use irys_types::{partition::PartitionAssignment, DataLedger, VersionedIrysBlockHeader, H256};
+use irys_types::{partition::PartitionAssignment, DataLedger, IrysBlockHeader, H256};
 use irys_types::{
     partition_chunk_offset_ie, ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset,
 };
@@ -42,7 +42,7 @@ async fn genesis_test() {
     let config: Config = config.into();
 
     // genesis block
-    let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let (commitments, initial_treasury) =
         add_genesis_commitments(&mut genesis_block, &config).await;
@@ -173,7 +173,7 @@ async fn genesis_test() {
 async fn add_slots_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
-    let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
         chunk_size: 32,
         num_chunks_in_partition: 10,
@@ -210,7 +210,7 @@ async fn add_slots_test() {
         &config,
     );
 
-    let mut mock_header = VersionedIrysBlockHeader::new_mock_header();
+    let mut mock_header = IrysBlockHeader::new_mock_header();
     mock_header.data_ledgers[DataLedger::Submit].total_chunks = 0;
 
     // Now create a new epoch block & give the Submit ledger enough size to add one slot
@@ -238,7 +238,7 @@ async fn add_slots_test() {
     let previous_epoch_block = Some(new_epoch_block.clone());
 
     // Simulate a subsequent epoch block that adds multiple ledger slots
-    let mut new_epoch_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut new_epoch_block = IrysBlockHeader::new_mock_header();
     new_epoch_block.height = num_blocks_in_epoch * 2;
 
     // Increase the Submit ledger by 3 slots  and the Publish ledger by 2 slots
@@ -265,7 +265,7 @@ async fn unique_addresses_per_slot_test() {
 
     let tmp_dir = setup_tracing_and_temp_dir(Some("unique_addresses_per_slot_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
-    let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
     let consensus_config = ConsensusConfig {
         chunk_size: 32,
         num_chunks_in_partition: 10,
@@ -404,7 +404,7 @@ async fn partition_expiration_and_repacking_test() {
     config.consensus = ConsensusOptions::Custom(consensus_config);
     let config = Config::new(config);
 
-    let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let (commitments, initial_treasury) =
         add_test_commitments(&mut genesis_block, 5, &config).await;
@@ -542,7 +542,7 @@ async fn partition_expiration_and_repacking_test() {
     };
 
     // Simulate enough epoch blocks to compete a Submit ledger storage term, expiring a slot
-    let mut new_epoch_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut new_epoch_block = IrysBlockHeader::new_mock_header();
     let mut previous_epoch_block = Some(genesis_block.clone());
     for i in 0..config.consensus.epoch.submit_ledger_epoch_length + 4 {
         new_epoch_block.height = num_blocks_in_epoch + num_blocks_in_epoch * i;
@@ -770,7 +770,7 @@ async fn epoch_blocks_reinitialization_test() {
     );
 
     // Initialize genesis block at height 0
-    let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let pledge_count = config.consensus.epoch.num_capacity_partitions.unwrap_or(31) as u8;
     let (commitments, initial_treasury) =
@@ -834,7 +834,7 @@ async fn epoch_blocks_reinitialization_test() {
     //          +-+-+
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
-    let mut new_epoch_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut new_epoch_block = IrysBlockHeader::new_mock_header();
     new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = 0;
 
     let mut epoch_block_data: Vec<EpochBlockData> = Vec::new();
@@ -969,7 +969,7 @@ async fn partitions_assignment_determinism_test() {
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
     // Initialize genesis block at height 0
-    let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.last_epoch_hash = H256::zero(); // for partitions hash determinism
     genesis_block.height = 0;
     let pledge_count = 20;
@@ -1001,7 +1001,7 @@ async fn partitions_assignment_determinism_test() {
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let total_epoch_messages = 6;
     let mut epoch_num = 1;
-    let mut new_epoch_block = VersionedIrysBlockHeader::new_mock_header();
+    let mut new_epoch_block = IrysBlockHeader::new_mock_header();
     new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = num_chunks_in_partition;
     new_epoch_block.data_ledgers[DataLedger::Publish].total_chunks = num_chunks_in_partition;
 

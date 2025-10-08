@@ -1,6 +1,5 @@
 use irys_types::{
-    DataTransactionHeaderV1, Signable as _, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader,
+    CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, Signable as _,
 };
 
 #[test]
@@ -9,7 +8,7 @@ fn data_tx_preimage_starts_with_discriminant() {
         version: 1,
         ..Default::default()
     };
-    let versioned = VersionedDataTransactionHeader::V1(tx);
+    let versioned = DataTransactionHeader::V1(tx);
     let mut buf = Vec::new();
     versioned.encode_for_signing(&mut buf);
     assert_eq!(buf.first().copied(), Some(1));
@@ -19,7 +18,7 @@ fn data_tx_preimage_starts_with_discriminant() {
 fn commitment_tx_preimage_starts_with_discriminant() {
     use irys_types::ConsensusConfig;
     let config = ConsensusConfig::testing();
-    let tx = VersionedCommitmentTransaction::new_stake(&config, irys_types::H256::zero());
+    let tx = CommitmentTransaction::new_stake(&config, irys_types::H256::zero());
     let mut buf = Vec::new();
     tx.encode_for_signing(&mut buf);
     assert_eq!(buf.first().copied(), Some(1));

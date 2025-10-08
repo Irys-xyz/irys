@@ -11,8 +11,8 @@ use irys_actors::{
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    option_u64_stringify, u64_stringify, DataLedger, IrysTransactionResponse,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256,
+    option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
+    IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -24,7 +24,7 @@ use tracing::info;
 /// delivery and transaction validation.
 pub async fn post_tx(
     state: web::Data<ApiState>,
-    body: Json<VersionedDataTransactionHeader>,
+    body: Json<DataTransactionHeader>,
 ) -> actix_web::Result<HttpResponse> {
     let tx = body.into_inner();
 
@@ -104,7 +104,7 @@ pub async fn get_transaction_api(
 pub fn get_storage_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<VersionedDataTransactionHeader, ApiError> {
+) -> Result<DataTransactionHeader, ApiError> {
     let opt = state
         .db
         .view_eyre(|tx| database::tx_header_by_txid(tx, &tx_id))
@@ -122,7 +122,7 @@ pub fn get_storage_transaction(
 pub fn get_commitment_transaction(
     state: &web::Data<ApiState>,
     tx_id: H256,
-) -> Result<VersionedCommitmentTransaction, ApiError> {
+) -> Result<CommitmentTransaction, ApiError> {
     let opt = state
         .db
         .view_eyre(|tx| database::commitment_tx_by_txid(tx, &tx_id))

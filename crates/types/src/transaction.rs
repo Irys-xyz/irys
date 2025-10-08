@@ -54,11 +54,11 @@ pub enum CommitmentValidationError {
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 #[repr(u8)]
 #[serde(untagged)]
-pub enum VersionedDataTransactionHeader {
+pub enum DataTransactionHeader {
     V1(DataTransactionHeaderV1) = 1,
 }
 
-impl VersionDiscriminant for VersionedDataTransactionHeader {
+impl VersionDiscriminant for DataTransactionHeader {
     fn discriminant(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
@@ -66,13 +66,13 @@ impl VersionDiscriminant for VersionedDataTransactionHeader {
     }
 }
 
-impl Default for VersionedDataTransactionHeader {
+impl Default for DataTransactionHeader {
     fn default() -> Self {
         Self::V1(DataTransactionHeaderV1::default())
     }
 }
 
-impl Ord for VersionedDataTransactionHeader {
+impl Ord for DataTransactionHeader {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::V1(a), Self::V1(b)) => a.cmp(b),
@@ -80,7 +80,7 @@ impl Ord for VersionedDataTransactionHeader {
     }
 }
 
-impl PartialOrd for VersionedDataTransactionHeader {
+impl PartialOrd for DataTransactionHeader {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -88,7 +88,7 @@ impl PartialOrd for VersionedDataTransactionHeader {
 
 // deref & derefmut will only work while we have a single version
 // this is what allows us to "hide" the complexity for the rest of the codebase.
-impl Deref for VersionedDataTransactionHeader {
+impl Deref for DataTransactionHeader {
     type Target = DataTransactionHeaderV1;
 
     fn deref(&self) -> &Self::Target {
@@ -98,7 +98,7 @@ impl Deref for VersionedDataTransactionHeader {
     }
 }
 
-impl DerefMut for VersionedDataTransactionHeader {
+impl DerefMut for DataTransactionHeader {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             Self::V1(v1) => v1,
@@ -107,7 +107,7 @@ impl DerefMut for VersionedDataTransactionHeader {
 }
 
 // TODO: write tests for this
-impl Compact for VersionedDataTransactionHeader {
+impl Compact for DataTransactionHeader {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -128,7 +128,7 @@ impl Compact for VersionedDataTransactionHeader {
     }
 }
 
-impl Signable for VersionedDataTransactionHeader {
+impl Signable for DataTransactionHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
         match self {
@@ -141,7 +141,7 @@ impl Signable for VersionedDataTransactionHeader {
     }
 }
 
-impl VersionedDataTransactionHeader {
+impl DataTransactionHeader {
     /// Create a new DataTransactionHeader wrapped in the versioned wrapper
     pub fn new(config: &ConsensusConfig) -> Self {
         Self::V1(DataTransactionHeaderV1::new(config))
@@ -181,17 +181,17 @@ impl HasInnerVersion for DataTransactionHeaderV1 {
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
 #[serde(untagged)]
-pub enum VersionedCommitmentTransaction {
+pub enum CommitmentTransaction {
     V1(CommitmentTransactionV1) = 1,
 }
 
-impl Default for VersionedCommitmentTransaction {
+impl Default for CommitmentTransaction {
     fn default() -> Self {
         Self::V1(CommitmentTransactionV1::default())
     }
 }
 
-impl Ord for VersionedCommitmentTransaction {
+impl Ord for CommitmentTransaction {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::V1(a), Self::V1(b)) => a.cmp(b),
@@ -199,13 +199,13 @@ impl Ord for VersionedCommitmentTransaction {
     }
 }
 
-impl PartialOrd for VersionedCommitmentTransaction {
+impl PartialOrd for CommitmentTransaction {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl VersionDiscriminant for VersionedCommitmentTransaction {
+impl VersionDiscriminant for CommitmentTransaction {
     fn discriminant(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
@@ -213,7 +213,7 @@ impl VersionDiscriminant for VersionedCommitmentTransaction {
     }
 }
 
-impl Deref for VersionedCommitmentTransaction {
+impl Deref for CommitmentTransaction {
     type Target = CommitmentTransactionV1;
     fn deref(&self) -> &Self::Target {
         match self {
@@ -221,7 +221,7 @@ impl Deref for VersionedCommitmentTransaction {
         }
     }
 }
-impl DerefMut for VersionedCommitmentTransaction {
+impl DerefMut for CommitmentTransaction {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             Self::V1(v) => v,
@@ -229,7 +229,7 @@ impl DerefMut for VersionedCommitmentTransaction {
     }
 }
 
-impl VersionedCommitmentTransaction {
+impl CommitmentTransaction {
     /// Calculate the value for a pledge at the given count
     /// Delegates to the inner type's implementation
     pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
@@ -237,7 +237,7 @@ impl VersionedCommitmentTransaction {
     }
 }
 
-impl Compact for VersionedCommitmentTransaction {
+impl Compact for CommitmentTransaction {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -258,7 +258,7 @@ impl Compact for VersionedCommitmentTransaction {
     }
 }
 
-impl Signable for VersionedCommitmentTransaction {
+impl Signable for CommitmentTransaction {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
         match self {
@@ -271,7 +271,7 @@ impl Signable for VersionedCommitmentTransaction {
     }
 }
 
-impl VersionedCommitmentTransaction {
+impl CommitmentTransaction {
     /// Create a new CommitmentTransaction wrapped in the versioned wrapper
     pub fn new(config: &ConsensusConfig) -> Self {
         Self::V1(CommitmentTransactionV1::new(config))
@@ -457,7 +457,7 @@ impl DataTransactionHeaderV1 {
 /// a transactions data to the network.
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DataTransaction {
-    pub header: VersionedDataTransactionHeader,
+    pub header: DataTransactionHeader,
     // TODO: make this compatible with stream/iterator data sources
     pub data: Option<Base64>,
     #[serde(skip)]
@@ -863,7 +863,7 @@ pub trait IrysTransactionCommon {
         Self: Sized;
 }
 
-impl VersionedDataTransactionHeader {
+impl DataTransactionHeader {
     pub fn user_fee(&self) -> U256 {
         // Return term_fee as the user fee for prioritization
         // todo: use TermFeeCharges to get the fee that will go to the miner
@@ -875,7 +875,7 @@ impl VersionedDataTransactionHeader {
     }
 }
 
-impl IrysTransactionCommon for VersionedDataTransactionHeader {
+impl IrysTransactionCommon for DataTransactionHeader {
     fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
@@ -928,7 +928,7 @@ impl IrysTransactionCommon for VersionedDataTransactionHeader {
     }
 }
 
-impl VersionedCommitmentTransaction {
+impl CommitmentTransaction {
     pub fn user_fee(&self) -> U256 {
         U256::from(self.fee)
     }
@@ -944,7 +944,7 @@ impl VersionedCommitmentTransaction {
     }
 }
 
-impl IrysTransactionCommon for VersionedCommitmentTransaction {
+impl IrysTransactionCommon for CommitmentTransaction {
     fn is_signature_valid(&self) -> bool {
         self.signature
             .validate_signature(self.signature_hash(), self.signer)
@@ -997,13 +997,13 @@ impl IrysTransactionCommon for VersionedCommitmentTransaction {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub enum IrysTransaction {
-    Data(VersionedDataTransactionHeader),
-    Commitment(VersionedCommitmentTransaction),
+    Data(DataTransactionHeader),
+    Commitment(CommitmentTransaction),
 }
 
-impl TryInto<VersionedDataTransactionHeader> for IrysTransaction {
+impl TryInto<DataTransactionHeader> for IrysTransaction {
     type Error = eyre::Report;
-    fn try_into(self) -> Result<VersionedDataTransactionHeader, Self::Error> {
+    fn try_into(self) -> Result<DataTransactionHeader, Self::Error> {
         match self {
             Self::Data(tx) => Ok(tx),
             Self::Commitment(_) => Err(eyre::eyre!("This is a commitment tx")),
@@ -1011,10 +1011,10 @@ impl TryInto<VersionedDataTransactionHeader> for IrysTransaction {
     }
 }
 
-impl TryInto<VersionedCommitmentTransaction> for IrysTransaction {
+impl TryInto<CommitmentTransaction> for IrysTransaction {
     type Error = eyre::Report;
 
-    fn try_into(self) -> Result<VersionedCommitmentTransaction, Self::Error> {
+    fn try_into(self) -> Result<CommitmentTransaction, Self::Error> {
         match self {
             Self::Data(_) => Err(eyre::eyre!("This is a data tx")),
             Self::Commitment(tx) => Ok(tx),
@@ -1085,14 +1085,14 @@ impl IrysTransactionCommon for IrysTransaction {
     }
 }
 
-impl From<VersionedDataTransactionHeader> for IrysTransaction {
-    fn from(tx: VersionedDataTransactionHeader) -> Self {
+impl From<DataTransactionHeader> for IrysTransaction {
+    fn from(tx: DataTransactionHeader) -> Self {
         Self::Data(tx)
     }
 }
 
-impl From<VersionedCommitmentTransaction> for IrysTransaction {
-    fn from(tx: VersionedCommitmentTransaction) -> Self {
+impl From<CommitmentTransaction> for IrysTransaction {
+    fn from(tx: CommitmentTransaction) -> Self {
         Self::Commitment(tx)
     }
 }
@@ -1102,20 +1102,20 @@ impl From<VersionedCommitmentTransaction> for IrysTransaction {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum IrysTransactionResponse {
     #[serde(rename = "commitment")]
-    Commitment(VersionedCommitmentTransaction),
+    Commitment(CommitmentTransaction),
 
     #[serde(rename = "storage")]
-    Storage(VersionedDataTransactionHeader),
+    Storage(DataTransactionHeader),
 }
 
-impl From<VersionedCommitmentTransaction> for IrysTransactionResponse {
-    fn from(tx: VersionedCommitmentTransaction) -> Self {
+impl From<CommitmentTransaction> for IrysTransactionResponse {
+    fn from(tx: CommitmentTransaction) -> Self {
         Self::Commitment(tx)
     }
 }
 
-impl From<VersionedDataTransactionHeader> for IrysTransactionResponse {
-    fn from(tx: VersionedDataTransactionHeader) -> Self {
+impl From<DataTransactionHeader> for IrysTransactionResponse {
+    fn from(tx: DataTransactionHeader) -> Self {
         Self::Storage(tx)
     }
 }
@@ -1180,7 +1180,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let header_versioned = mock_header(&config);
         // Extract inner type for RLP round-trip testing
-        let VersionedDataTransactionHeader::V1(mut header) = header_versioned;
+        let DataTransactionHeader::V1(mut header) = header_versioned;
 
         // action
         let mut buffer = vec![];
@@ -1200,7 +1200,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let header_versioned = mock_commitment_tx(&config);
         // Extract inner type for RLP round-trip testing
-        let VersionedCommitmentTransaction::V1(mut header) = header_versioned;
+        let CommitmentTransaction::V1(mut header) = header_versioned;
 
         // action
         let mut buffer = vec![];
@@ -1226,7 +1226,7 @@ mod tests {
 
         println!("{}", &serialized);
         // Deserialize the JSON back to VersionedDataTransactionHeader
-        let deserialized: VersionedDataTransactionHeader =
+        let deserialized: DataTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
         // Ensure the deserialized struct matches the original
@@ -1244,7 +1244,7 @@ mod tests {
 
         println!("{}", &serialized);
         // Deserialize the JSON back to a VersionedCommitmentTransaction
-        let deserialized: VersionedCommitmentTransaction =
+        let deserialized: CommitmentTransaction =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
         // Ensure the deserialized tx matches the original
@@ -1259,12 +1259,12 @@ mod tests {
         // For RLP encoding without discriminant, extract inner type
         let mut sig_data = Vec::new();
         match &original_header {
-            VersionedDataTransactionHeader::V1(inner) => inner.encode(&mut sig_data),
+            DataTransactionHeader::V1(inner) => inner.encode(&mut sig_data),
         }
         // Decode back to inner type
         let decoded_inner = DataTransactionHeaderV1::decode(&mut sig_data.as_slice()).unwrap();
         // Wrap it back to versioned
-        let versioned = VersionedDataTransactionHeader::V1(decoded_inner);
+        let versioned = DataTransactionHeader::V1(decoded_inner);
 
         // action
         let signer = IrysSigner {
@@ -1295,11 +1295,11 @@ mod tests {
         // For RLP encoding without discriminant, extract inner type
         let mut sig_data = Vec::new();
         match &original_tx {
-            VersionedCommitmentTransaction::V1(inner) => inner.encode(&mut sig_data),
+            CommitmentTransaction::V1(inner) => inner.encode(&mut sig_data),
         }
         // Decode back to inner type and wrap
         let decoded_inner = CommitmentTransactionV1::decode(&mut sig_data.as_slice()).unwrap();
-        let _dec = VersionedCommitmentTransaction::V1(decoded_inner);
+        let _dec = CommitmentTransaction::V1(decoded_inner);
 
         // action
         let signer = IrysSigner {
@@ -1374,8 +1374,8 @@ mod tests {
         );
     }
 
-    fn mock_header(config: &ConsensusConfig) -> VersionedDataTransactionHeader {
-        VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
+    fn mock_header(config: &ConsensusConfig) -> DataTransactionHeader {
+        DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::from([255_u8; 32]),
             anchor: H256::from([1_u8; 32]),
             signer: Address::default(),
@@ -1393,8 +1393,8 @@ mod tests {
         })
     }
 
-    fn mock_commitment_tx(config: &ConsensusConfig) -> VersionedCommitmentTransaction {
-        let mut tx = VersionedCommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
+    fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
+        let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
         tx.id = H256::from([255_u8; 32]);
         tx.signer = Address::default();
         tx.signature = Signature::test_signature().into();

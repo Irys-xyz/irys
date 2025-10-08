@@ -13,8 +13,8 @@ use irys_reth_node_bridge::{
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, ConsensusConfig, DataLedger, DataTransaction, IngressProofsList, NodeConfig,
-    VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256,
+    irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
+    IngressProofsList, IrysBlockHeader, NodeConfig, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -588,11 +588,11 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // Validate the peer blocks create forks with different transactions
-    let peer1_block: Arc<VersionedIrysBlockHeader> = peer1_node
+    let peer1_block: Arc<IrysBlockHeader> = peer1_node
         .get_block_by_height(expected_height)
         .await?
         .into();
-    let peer2_block: Arc<VersionedIrysBlockHeader> = peer2_node
+    let peer2_block: Arc<IrysBlockHeader> = peer2_node
         .get_block_by_height(expected_height)
         .await?
         .into();
@@ -1511,22 +1511,20 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(recipient2_init_balance, U256::from(0));
 
     // need to stake & pledge peers before they can mine
-    let post_wait_stake_commitment = async |peer: &IrysNodeTest<IrysNodeCtx>,
-                                            genesis: &IrysNodeTest<IrysNodeCtx>|
-           -> eyre::Result<(
-        VersionedCommitmentTransaction,
-        VersionedCommitmentTransaction,
-    )> {
-        let stake_tx = peer.post_stake_commitment(None).await?;
-        genesis
-            .wait_for_mempool(stake_tx.id, seconds_to_wait)
-            .await?;
-        let pledge_tx = peer.post_pledge_commitment(None).await?;
-        genesis
-            .wait_for_mempool(pledge_tx.id, seconds_to_wait)
-            .await?;
-        Ok((stake_tx, pledge_tx))
-    };
+    let post_wait_stake_commitment =
+        async |peer: &IrysNodeTest<IrysNodeCtx>,
+               genesis: &IrysNodeTest<IrysNodeCtx>|
+               -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
+            let stake_tx = peer.post_stake_commitment(None).await?;
+            genesis
+                .wait_for_mempool(stake_tx.id, seconds_to_wait)
+                .await?;
+            let pledge_tx = peer.post_pledge_commitment(None).await?;
+            genesis
+                .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+                .await?;
+            Ok((stake_tx, pledge_tx))
+        };
 
     post_wait_stake_commitment(&peer1, &genesis).await?;
     post_wait_stake_commitment(&peer2, &genesis).await?;
@@ -1867,22 +1865,20 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     assert_eq!(recipient2_init_balance, U256::from(0));
 
     // need to stake & pledge peers before they can mine
-    let post_wait_stake_commitment = async |peer: &IrysNodeTest<IrysNodeCtx>,
-                                            genesis: &IrysNodeTest<IrysNodeCtx>|
-           -> eyre::Result<(
-        VersionedCommitmentTransaction,
-        VersionedCommitmentTransaction,
-    )> {
-        let stake_tx = peer.post_stake_commitment(None).await?;
-        genesis
-            .wait_for_mempool(stake_tx.id, seconds_to_wait)
-            .await?;
-        let pledge_tx = peer.post_pledge_commitment(None).await?;
-        genesis
-            .wait_for_mempool(pledge_tx.id, seconds_to_wait)
-            .await?;
-        Ok((stake_tx, pledge_tx))
-    };
+    let post_wait_stake_commitment =
+        async |peer: &IrysNodeTest<IrysNodeCtx>,
+               genesis: &IrysNodeTest<IrysNodeCtx>|
+               -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
+            let stake_tx = peer.post_stake_commitment(None).await?;
+            genesis
+                .wait_for_mempool(stake_tx.id, seconds_to_wait)
+                .await?;
+            let pledge_tx = peer.post_pledge_commitment(None).await?;
+            genesis
+                .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+                .await?;
+            Ok((stake_tx, pledge_tx))
+        };
 
     post_wait_stake_commitment(&peer1, &genesis).await?;
     post_wait_stake_commitment(&peer2, &genesis).await?;
@@ -2162,28 +2158,28 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 /// Test mempool rejects stake transactions with invalid fee or value
 #[rstest::rstest]
 #[case::invalid_fee_less_than_required(
-    |tx: &mut VersionedCommitmentTransaction, required_fee: u64, _required_value: irys_types::U256| {
+    |tx: &mut CommitmentTransaction, required_fee: u64, _required_value: irys_types::U256| {
         tx.fee = required_fee / 2; // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
-    |tx: &mut VersionedCommitmentTransaction, _required_fee: u64, _required_value: irys_types::U256| {
+    |tx: &mut CommitmentTransaction, _required_fee: u64, _required_value: irys_types::U256| {
         tx.fee = 0;
     },
 )]
 #[case::invalid_value_less_than_required(
-    |tx: &mut VersionedCommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
+    |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
         tx.value = required_value / irys_types::U256::from(2); // 10000 instead of 20000
     },
 )]
 #[case::invalid_value_more_than_required(
-    |tx: &mut VersionedCommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
+    |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
         tx.value = required_value + irys_types::U256::from(10000); // 30000 instead of 20000
     },
 )]
 #[test_log::test(actix_web::test)]
 async fn stake_tx_fee_and_value_validation_test(
-    #[case] tx_modifier: fn(&mut VersionedCommitmentTransaction, u64, irys_types::U256),
+    #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
@@ -2198,8 +2194,7 @@ async fn stake_tx_fee_and_value_validation_test(
     let required_value = config.stake_value.amount;
 
     // Create stake transaction and apply the modifier
-    let mut stake_tx =
-        VersionedCommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
+    let mut stake_tx = CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
     signer.sign_commitment(&mut stake_tx)?;
 
@@ -2222,41 +2217,41 @@ async fn stake_tx_fee_and_value_validation_test(
 #[rstest::rstest]
 #[case::invalid_fee_less_than_required(
     0_u64, // pledge count
-    |tx: &mut VersionedCommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
+    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
         tx.fee = required_fee / 2; // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
     0_u64, // pledge count
-    |tx: &mut VersionedCommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
+    |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         tx.fee = 0;
     },
 )]
 #[case::invalid_value_too_low(
     0_u64, // pledge count
-    |tx: &mut VersionedCommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
-        let expected = VersionedCommitmentTransaction::calculate_pledge_value_at_count(config, count);
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
+        let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected / irys_types::U256::from(2); // Half the expected value
     },
 )]
 #[case::invalid_value_too_high(
     1_u64, // pledge count
-    |tx: &mut VersionedCommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
-        let expected = VersionedCommitmentTransaction::calculate_pledge_value_at_count(config, count);
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
+        let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
         tx.value = expected * irys_types::U256::from(2); // Double the expected value
     },
 )]
 #[case::invalid_value_wrong_count(
     2_u64, // pledge count
-    |tx: &mut VersionedCommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
+    |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         // Set value that would be correct for pledge count 0, but we're using count 2
-        tx.value = VersionedCommitmentTransaction::calculate_pledge_value_at_count(config, 0);
+        tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
     },
 )]
 #[test_log::test(actix_web::test)]
 async fn pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
-    #[case] tx_modifier: fn(&mut VersionedCommitmentTransaction, &ConsensusConfig, u64, u64),
+    #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
     let signer = genesis_config.new_random_signer();
@@ -2270,7 +2265,7 @@ async fn pledge_tx_fee_validation_test(
     let required_fee = config.mempool.commitment_fee;
 
     // Create pledge transaction with modifications
-    let mut pledge_tx = VersionedCommitmentTransaction::new_pledge(
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
         config,
         genesis_node.get_anchor().await?,
         &pledge_count,
@@ -2323,12 +2318,12 @@ async fn commitment_tx_valid_higher_fee_test(
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
         CommitmentType::Stake => {
-            VersionedCommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
+            CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
         }
         CommitmentType::Pledge {
             pledge_count_before_executing: count,
         } => {
-            VersionedCommitmentTransaction::new_pledge(
+            CommitmentTransaction::new_pledge(
                 config,
                 genesis_node.get_anchor().await?,
                 &{ count },

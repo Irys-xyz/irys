@@ -7,7 +7,7 @@ use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransactionV1, NodeConfig, VersionedCommitmentTransaction, H256,
+    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, NodeConfig, H256,
 };
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
@@ -313,10 +313,8 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?;
     info!("Commitment whitelist test: stake tx from a whitelisted account accepted");
 
-    let mut stake_tx2 = VersionedCommitmentTransaction::new_stake(
-        &config.consensus_config(),
-        block_1.irys.block_hash,
-    );
+    let mut stake_tx2 =
+        CommitmentTransaction::new_stake(&config.consensus_config(), block_1.irys.block_hash);
     account2.sign_commitment(&mut stake_tx2)?;
     let response2 = api_client
         .post_commitment_transaction(peer_socket_address, stake_tx2.clone())
@@ -396,7 +394,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?
         .expect("block to be accessible");
 
-    let mut new_stake_tx2 = VersionedCommitmentTransaction::new_stake(
+    let mut new_stake_tx2 = CommitmentTransaction::new_stake(
         &config.consensus_config(),
         another_anchor_block.irys.block_hash,
     );
@@ -412,7 +410,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     peer.wait_for_mempool_commitment_txs(vec![new_stake_tx2.id], max_seconds)
         .await?;
 
-    let mut stake_tx3 = VersionedCommitmentTransaction::new_stake(
+    let mut stake_tx3 = CommitmentTransaction::new_stake(
         &config.consensus_config(),
         another_anchor_block.irys.block_hash,
     );
@@ -444,7 +442,7 @@ async fn create_stake_tx(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
     anchor: H256,
-) -> VersionedCommitmentTransaction {
+) -> CommitmentTransaction {
     // Get stake price from API
     let price_info = node
         .get_stake_price()
@@ -452,7 +450,7 @@ async fn create_stake_tx(
         .expect("Failed to get stake price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut stake_tx = VersionedCommitmentTransaction::V1(CommitmentTransactionV1 {
+    let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),

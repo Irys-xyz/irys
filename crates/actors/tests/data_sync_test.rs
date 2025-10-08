@@ -13,9 +13,9 @@ use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
     partition_chunk_offset_ie, Address, Base64, Config, ConsensusConfig, DataLedger,
-    DataSyncServiceConfig, DataTransaction, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
-    PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig, TxChunkOffset,
-    UnpackedChunk, VersionedIrysBlockHeader, H256,
+    DataSyncServiceConfig, DataTransaction, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
+    NodeConfig, PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig,
+    TxChunkOffset, UnpackedChunk, H256,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -512,7 +512,7 @@ impl TestSetup {
         let signer = IrysSigner::random_signer(&config.consensus);
 
         // Make sure the genesis block track the ledger size
-        let mut fake_genesis = VersionedIrysBlockHeader::new_mock_header();
+        let mut fake_genesis = IrysBlockHeader::new_mock_header();
         fake_genesis.data_ledgers[DataLedger::Publish].total_chunks = num_chunks;
 
         let data_tx = signer
@@ -630,7 +630,7 @@ impl TestSetup {
 
     fn initialize_block_tree(
         partition_assignments: &[PartitionAssignment; 4],
-        fake_genesis: &VersionedIrysBlockHeader,
+        fake_genesis: &IrysBlockHeader,
         config: &Config,
     ) -> BlockTreeReadGuard {
         // Set up block tree with partition assignments

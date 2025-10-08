@@ -5,8 +5,8 @@ use irys_reth::shadow_tx::{
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    Address, ConsensusConfig, IngressProofsList, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
+    Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
+    IrysBlockHeader, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 /// Structure holding publish ledger transactions with their proofs
 #[derive(Debug, Clone)]
 pub struct PublishLedgerWithTxs {
-    pub txs: Vec<VersionedDataTransactionHeader>,
+    pub txs: Vec<DataTransactionHeader>,
     pub proofs: Option<IngressProofsList>,
 }
 
@@ -30,13 +30,13 @@ pub struct ShadowTxGenerator<'a> {
     pub block_height: &'a u64,
     pub reward_address: &'a Address,
     pub reward_amount: &'a U256,
-    pub parent_block: &'a VersionedIrysBlockHeader,
+    pub parent_block: &'a IrysBlockHeader,
     pub solution_hash: &'a H256,
     pub config: &'a ConsensusConfig,
 
     // Transaction slices
-    commitment_txs: &'a [VersionedCommitmentTransaction],
-    submit_txs: &'a [VersionedDataTransactionHeader],
+    commitment_txs: &'a [CommitmentTransaction],
+    submit_txs: &'a [DataTransactionHeader],
 
     // Iterator state
     treasury_balance: U256,
@@ -122,11 +122,11 @@ impl<'a> ShadowTxGenerator<'a> {
         block_height: &'a u64,
         reward_address: &'a Address,
         reward_amount: &'a U256,
-        parent_block: &'a VersionedIrysBlockHeader,
+        parent_block: &'a IrysBlockHeader,
         solution_hash: &'a H256,
         config: &'a ConsensusConfig,
-        commitment_txs: &'a [VersionedCommitmentTransaction],
-        submit_txs: &'a [VersionedDataTransactionHeader],
+        commitment_txs: &'a [CommitmentTransaction],
+        submit_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a mut PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
@@ -333,10 +333,7 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(())
     }
 
-    fn process_commitment_transaction(
-        &self,
-        tx: &VersionedCommitmentTransaction,
-    ) -> Result<ShadowMetadata> {
+    fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         // Keep existing commitment transaction logic unchanged
         let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
         let fee = Uint::from(tx.fee);
@@ -458,7 +455,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Creates a shadow transaction for a submit ledger transaction
     fn create_submit_shadow_tx(
         &self,
-        tx: &VersionedDataTransactionHeader,
+        tx: &DataTransactionHeader,
         term_charges: &TermFeeCharges,
     ) -> Result<ShadowMetadata> {
         // Calculate the amount to be deducted and sent to treasury
@@ -675,7 +672,7 @@ mod tests {
     use irys_primitives::CommitmentType;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
-        IrysSignature, Signature, VersionedIrysBlockHeader, H256,
+        IrysBlockHeader, IrysSignature, Signature, H256,
     };
     use itertools::Itertools as _;
     use openssl::sha;
@@ -684,10 +681,10 @@ mod tests {
         commitment_type: CommitmentType,
         value: U256,
         fee: u64,
-    ) -> VersionedCommitmentTransaction {
+    ) -> CommitmentTransaction {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
-        VersionedCommitmentTransaction::V1(CommitmentTransactionV1 {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
             id: H256::from([7_u8; 32]),
             commitment_type,
             anchor: H256::from([8_u8; 32]),
@@ -704,7 +701,7 @@ mod tests {
         signer: &IrysSigner,
         term_fee: U256,
         perm_fee: Option<U256>,
-    ) -> VersionedDataTransactionHeader {
+    ) -> DataTransactionHeader {
         let data = vec![0_u8; 1024];
         let anchor = H256::from([9_u8; 32]);
 
@@ -728,7 +725,7 @@ mod tests {
         // Modify the header to reflect the original perm_fee intent
         let mut header = (*tx.header).clone();
         header.perm_fee = perm_fee;
-        VersionedDataTransactionHeader::V1(header)
+        DataTransactionHeader::V1(header)
     }
 
     fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
@@ -762,7 +759,7 @@ mod tests {
     #[test]
     fn test_header_only() {
         let config = ConsensusConfig::testing();
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -817,7 +814,7 @@ mod tests {
     #[test]
     fn test_three_commitments() {
         let config = ConsensusConfig::testing();
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -945,7 +942,7 @@ mod tests {
     #[test]
     fn test_one_submit_tx() {
         let config = ConsensusConfig::testing();
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
         let signer = IrysSigner::random_signer(&config);
 
         let term_fee = U256::from(20000);
@@ -1052,7 +1049,7 @@ mod tests {
     fn test_one_publish_tx_with_aggregated_proofs() {
         let mut config = ConsensusConfig::testing();
         config.number_of_ingress_proofs_total = 4;
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
 
         // Calculate proper fees for publish transaction
         let term_fee = U256::from(30000);
@@ -1210,7 +1207,7 @@ mod tests {
     #[test]
     fn test_expired_ledger_miner_rewards() {
         let config = ConsensusConfig::testing();
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -1308,7 +1305,7 @@ mod tests {
     #[test]
     fn test_user_perm_fee_refunds() {
         let config = ConsensusConfig::testing();
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -1407,7 +1404,7 @@ mod tests {
     #[test]
     fn test_empty_expired_ledger_fees() {
         let config = ConsensusConfig::testing();
-        let parent_block = VersionedIrysBlockHeader::new_mock_header();
+        let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
         let reward_address = Address::from([20_u8; 20]);
         let reward_amount = U256::from(5000);

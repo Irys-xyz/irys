@@ -7,8 +7,8 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, NodeConfig, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
+    storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+    NodeConfig, H256, U256,
 };
 use reth::payload::EthBuiltPayload;
 
@@ -29,10 +29,10 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 
         async fn create_evm_block(
             &self,
-            prev_block_header: &VersionedIrysBlockHeader,
+            prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[VersionedCommitmentTransaction],
-            submit_txs: &[VersionedDataTransactionHeader],
+            commitment_txs_to_bill: &[CommitmentTransaction],
+            submit_txs: &[DataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
@@ -173,7 +173,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
 async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub extra_tx: VersionedDataTransactionHeader,
+        pub extra_tx: DataTransactionHeader,
     }
 
     #[async_trait::async_trait]
@@ -184,10 +184,10 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 
         async fn create_evm_block(
             &self,
-            prev_block_header: &VersionedIrysBlockHeader,
+            prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[VersionedCommitmentTransaction],
-            submit_txs: &[VersionedDataTransactionHeader],
+            commitment_txs_to_bill: &[CommitmentTransaction],
+            submit_txs: &[DataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
@@ -277,10 +277,10 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
 
         async fn create_evm_block(
             &self,
-            prev_block_header: &VersionedIrysBlockHeader,
+            prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[VersionedCommitmentTransaction],
-            submit_txs: &[VersionedDataTransactionHeader],
+            commitment_txs_to_bill: &[CommitmentTransaction],
+            submit_txs: &[DataTransactionHeader],
             data_txs_with_proofs: &mut PublishLedgerWithTxs,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,

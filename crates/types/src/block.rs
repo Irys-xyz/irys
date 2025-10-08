@@ -14,7 +14,7 @@ use crate::{
     resolve_proofs,
     serialization::{optional_string_u64, string_u64},
     string_u128,
-    transaction::VersionedDataTransactionHeader,
+    transaction::DataTransactionHeader,
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
@@ -82,7 +82,7 @@ pub struct VDFLimiterInfo {
 impl VDFLimiterInfo {
     pub fn new(
         solution: &SolutionContext,
-        prev_block_header: &VersionedIrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
         steps: H256List,
         config: &Config,
     ) -> Self {
@@ -119,7 +119,7 @@ impl VDFLimiterInfo {
             .find(|step_number| step_number % reset_frequency == 0)
     }
 
-    pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &VersionedIrysBlockHeader) {
+    pub fn set_seeds(&mut self, reset_frequency: u64, parent_header: &IrysBlockHeader) {
         let (next_seed, seed) = self.calculate_seeds(reset_frequency, parent_header);
         debug!(
             "Setting VDF seeds: next_seed: {}, seed: {}",
@@ -134,7 +134,7 @@ impl VDFLimiterInfo {
     pub fn calculate_seeds(
         &self,
         reset_frequency: u64,
-        parent_header: &VersionedIrysBlockHeader,
+        parent_header: &IrysBlockHeader,
     ) -> (H256, H256) {
         if let Some(step) = self.reset_step(reset_frequency) {
             debug!(
@@ -161,17 +161,17 @@ impl VDFLimiterInfo {
 }
 
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
-pub enum VersionedIrysBlockHeader {
+pub enum IrysBlockHeader {
     V1(IrysBlockHeaderV1),
 }
 
-impl Default for VersionedIrysBlockHeader {
+impl Default for IrysBlockHeader {
     fn default() -> Self {
         Self::V1(IrysBlockHeaderV1::default())
     }
 }
 
-impl VersionDiscriminant for VersionedIrysBlockHeader {
+impl VersionDiscriminant for IrysBlockHeader {
     fn discriminant(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
@@ -179,7 +179,7 @@ impl VersionDiscriminant for VersionedIrysBlockHeader {
     }
 }
 
-impl Deref for VersionedIrysBlockHeader {
+impl Deref for IrysBlockHeader {
     type Target = IrysBlockHeaderV1;
 
     fn deref(&self) -> &Self::Target {
@@ -189,7 +189,7 @@ impl Deref for VersionedIrysBlockHeader {
     }
 }
 
-impl DerefMut for VersionedIrysBlockHeader {
+impl DerefMut for IrysBlockHeader {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
             Self::V1(v1) => v1,
@@ -197,7 +197,7 @@ impl DerefMut for VersionedIrysBlockHeader {
     }
 }
 
-impl Compact for VersionedIrysBlockHeader {
+impl Compact for IrysBlockHeader {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -219,7 +219,7 @@ impl Compact for VersionedIrysBlockHeader {
     }
 }
 
-impl Signable for VersionedIrysBlockHeader {
+impl Signable for IrysBlockHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
         out.put_u8(self.discriminant());
         match self {
@@ -232,7 +232,7 @@ impl Signable for VersionedIrysBlockHeader {
     }
 }
 
-impl VersionedIrysBlockHeader {
+impl IrysBlockHeader {
     /// Create a new mock header wrapped in the versioned wrapper
     pub fn new_mock_header() -> Self {
         Self::V1(IrysBlockHeaderV1::new_mock_header())
@@ -625,7 +625,7 @@ pub struct DataTransactionLedger {
 impl DataTransactionLedger {
     /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
     /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
-    pub fn merklize_tx_root(data_txs: &[VersionedDataTransactionHeader]) -> (H256, Vec<Proof>) {
+    pub fn merklize_tx_root(data_txs: &[DataTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
@@ -845,7 +845,7 @@ pub struct ExecutionHeader {
 #[serde(rename_all = "camelCase", default)]
 pub struct CombinedBlockHeader {
     #[serde(flatten)]
-    pub irys: VersionedIrysBlockHeader,
+    pub irys: IrysBlockHeader,
     pub execution: ExecutionHeader,
 }
 
@@ -1294,8 +1294,7 @@ mod tests {
 
     #[test]
     fn test_validate_tx_path() {
-        let mut txs: Vec<VersionedDataTransactionHeader> =
-            vec![VersionedDataTransactionHeader::default(); 10];
+        let mut txs: Vec<DataTransactionHeader> = vec![DataTransactionHeader::default(); 10];
         for tx in txs.iter_mut() {
             tx.data_root = H256::from([3_u8; 32]);
             tx.data_size = 64
@@ -1312,7 +1311,7 @@ mod tests {
     #[test]
     fn test_irys_block_header_signing() {
         // setup
-        let mut header = VersionedIrysBlockHeader::V1(mock_header());
+        let mut header = IrysBlockHeader::V1(mock_header());
         let testing_config = NodeConfig::testing();
         let config = Config::new(testing_config);
         let signer = config.irys_signer();
@@ -1328,21 +1327,21 @@ mod tests {
         let mut rng = StdRng::from_seed([42_u8; 32]);
 
         // assert that updating values changes the hash
-        let fields: &[fn(&mut VersionedIrysBlockHeader) -> &mut [u8]] = &[
-            |h: &mut VersionedIrysBlockHeader| h.height.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.last_diff_timestamp.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.solution_hash.as_bytes_mut(),
-            |h: &mut VersionedIrysBlockHeader| h.previous_solution_hash.as_bytes_mut(),
-            |h: &mut VersionedIrysBlockHeader| h.last_epoch_hash.as_bytes_mut(),
-            |h: &mut VersionedIrysBlockHeader| h.chunk_hash.as_bytes_mut(),
-            |h: &mut VersionedIrysBlockHeader| h.previous_block_hash.as_bytes_mut(),
-            |h: &mut VersionedIrysBlockHeader| h.reward_address.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.miner_address.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.timestamp.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.data_ledgers[0].ledger_id.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.data_ledgers[0].total_chunks.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
-            |h: &mut VersionedIrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
+        let fields: &[fn(&mut IrysBlockHeader) -> &mut [u8]] = &[
+            |h: &mut IrysBlockHeader| h.height.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.last_diff_timestamp.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.solution_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.previous_solution_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.last_epoch_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.chunk_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.previous_block_hash.as_bytes_mut(),
+            |h: &mut IrysBlockHeader| h.reward_address.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.miner_address.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.timestamp.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].ledger_id.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.data_ledgers[0].total_chunks.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.evm_block_hash.as_mut_bytes(),
+            |h: &mut IrysBlockHeader| h.vdf_limiter_info.global_step_number.as_mut_bytes(),
         ];
         for get_field in fields {
             let mut header_clone = header.clone();

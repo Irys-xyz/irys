@@ -19,8 +19,8 @@ use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, Config, DataLedger, DatabaseProvider, H256List, TokioServiceHandle,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DatabaseProvider, H256List, IrysBlockHeader, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -41,8 +41,8 @@ pub enum BlockTreeServiceMessage {
         response: oneshot::Sender<BlockTreeReadGuard>,
     },
     BlockPreValidated {
-        block: Arc<VersionedIrysBlockHeader>,
-        commitment_txs: Arc<Vec<VersionedCommitmentTransaction>>,
+        block: Arc<IrysBlockHeader>,
+        commitment_txs: Arc<Vec<CommitmentTransaction>>,
         skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
     },
@@ -81,9 +81,9 @@ pub struct BlockTreeServiceInner {
 
 #[derive(Debug, Clone)]
 pub struct ReorgEvent {
-    pub old_fork: Arc<Vec<Arc<VersionedIrysBlockHeader>>>,
-    pub new_fork: Arc<Vec<Arc<VersionedIrysBlockHeader>>>,
-    pub fork_parent: Arc<VersionedIrysBlockHeader>,
+    pub old_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
+    pub new_fork: Arc<Vec<Arc<IrysBlockHeader>>>,
+    pub fork_parent: Arc<IrysBlockHeader>,
     pub new_tip: BlockHash,
     pub timestamp: SystemTime,
     pub db: Option<DatabaseProvider>,
@@ -91,7 +91,7 @@ pub struct ReorgEvent {
 
 #[derive(Debug, Clone)]
 pub struct BlockMigratedEvent {
-    pub block: Arc<VersionedIrysBlockHeader>,
+    pub block: Arc<IrysBlockHeader>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +249,7 @@ impl BlockTreeServiceInner {
     /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
     async fn send_block_migration_message(
         &self,
-        block_header: Arc<VersionedIrysBlockHeader>,
+        block_header: Arc<IrysBlockHeader>,
     ) -> eyre::Result<()> {
         let submit_txs = self
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
@@ -263,8 +263,7 @@ impl BlockTreeServiceInner {
         all_txs.extend(publish_txs.clone());
         all_txs.extend(submit_txs.clone());
 
-        let mut all_txs_map: HashMap<DataLedger, Vec<VersionedDataTransactionHeader>> =
-            HashMap::new();
+        let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
         all_txs_map.insert(DataLedger::Submit, submit_txs);
         all_txs_map.insert(DataLedger::Publish, publish_txs);
 
@@ -340,7 +339,7 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn migrate_block(&self, block: &Arc<VersionedIrysBlockHeader>) {
+    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) {
         let block_hash = block.block_hash;
         let migration_height = block.height;
 
@@ -391,8 +390,8 @@ impl BlockTreeServiceInner {
     /// Handles pre-validated blocks received from the validation service.
     fn on_block_prevalidated(
         &mut self,
-        block: Arc<VersionedIrysBlockHeader>,
-        commitment_txs: Arc<Vec<VersionedCommitmentTransaction>>,
+        block: Arc<IrysBlockHeader>,
+        commitment_txs: Arc<Vec<CommitmentTransaction>>,
         skip_vdf: bool,
     ) -> eyre::Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
@@ -659,7 +658,7 @@ impl BlockTreeServiceInner {
                     );
 
                     // Prepare lightweight block headers for reorg event (remove heavy chunk data)
-                    let old_fork_blocks: Vec<Arc<VersionedIrysBlockHeader>> = old_fork
+                    let old_fork_blocks: Vec<Arc<IrysBlockHeader>> = old_fork
                         .iter()
                         .map(|e| {
                             let mut block = cache
@@ -676,7 +675,7 @@ impl BlockTreeServiceInner {
                         })
                         .collect();
 
-                    let new_fork_blocks: Vec<Arc<VersionedIrysBlockHeader>> = new_fork
+                    let new_fork_blocks: Vec<Arc<IrysBlockHeader>> = new_fork
                         .iter()
                         .map(|e| {
                             let mut block = cache
@@ -808,11 +807,11 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    fn is_epoch_block(&self, block_header: &Arc<VersionedIrysBlockHeader>) -> bool {
+    fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
         block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    fn send_epoch_events(&self, epoch_block: &Arc<VersionedIrysBlockHeader>) {
+    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) {
         // Get the epoch snapshot
         let epoch_snapshot = self
             .cache
@@ -867,9 +866,9 @@ impl BlockTreeServiceInner {
     /// Fetches full transaction headers from mempool using the txids from a ledger in a block
     async fn get_data_ledger_tx_headers_from_mempool(
         &self,
-        block_header: &VersionedIrysBlockHeader,
+        block_header: &IrysBlockHeader,
         ledger: DataLedger,
-    ) -> eyre::Result<Vec<VersionedDataTransactionHeader>> {
+    ) -> eyre::Result<Vec<DataTransactionHeader>> {
         // FIXME: when we add multiple term ledgers this will not work as there may be gaps in the index range
         // Explicitly cast enum to index
         let ledger_index = ledger as usize;
@@ -893,7 +892,7 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
             .into_iter()
             .flatten()
-            .collect::<Vec<VersionedDataTransactionHeader>>();
+            .collect::<Vec<DataTransactionHeader>>();
 
         if received.len() != data_tx_ids.len() {
             return Err(eyre::eyre!(

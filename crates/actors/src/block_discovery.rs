@@ -16,9 +16,9 @@ use irys_domain::{
 };
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    get_ingress_proofs, BlockHash, Config, DataLedger, DatabaseProvider, GossipBroadcastMessage,
-    IrysTransactionId, TokioServiceHandle, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader,
+    get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
+    IrysTransactionId, TokioServiceHandle,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -82,7 +82,7 @@ pub enum BlockDiscoveryInternalError {
 pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
     async fn handle_block(
         &self,
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError>;
 }
@@ -102,7 +102,7 @@ impl BlockDiscoveryFacadeImpl {
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(
         &self,
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
@@ -235,7 +235,7 @@ impl BlockDiscoveryService {
 
 pub enum BlockDiscoveryMessage {
     BlockDiscovered(
-        Arc<VersionedIrysBlockHeader>,
+        Arc<IrysBlockHeader>,
         bool,
         Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
     ),
@@ -244,7 +244,7 @@ pub enum BlockDiscoveryMessage {
 impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -340,7 +340,7 @@ impl BlockDiscoveryServiceInner {
             })?
             .into_iter()
             .flatten()
-            .collect::<Vec<VersionedDataTransactionHeader>>();
+            .collect::<Vec<DataTransactionHeader>>();
 
         if submit_txs.len() != submit_tx_ids_to_check.len() {
             return Err(BlockDiscoveryError::MissingTransactions(
@@ -392,7 +392,7 @@ impl BlockDiscoveryServiceInner {
             })?
             .into_iter()
             .flatten()
-            .collect::<Vec<VersionedDataTransactionHeader>>();
+            .collect::<Vec<DataTransactionHeader>>();
 
         if publish_txs.len() != publish_tx_ids_to_check.len() {
             let missing_txs = publish_tx_ids_to_check
@@ -433,7 +433,7 @@ impl BlockDiscoveryServiceInner {
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Validate commitments transactions exist (if there are commitment txids in the block)
-        let mut commitments: Vec<VersionedCommitmentTransaction> = Vec::new();
+        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
         if let Some(commitment_ledger) = commitment_ledger {
             debug!(
                 "incoming block commitment txids, height {}\n{:#?}",
@@ -692,7 +692,7 @@ pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<VersionedCommitmentTransaction>> {
+) -> eyre::Result<Vec<CommitmentTransaction>> {
     let tx_ids_clone = commitment_tx_ids;
 
     // Set up a function to query the mempool for commitment transactions
@@ -734,7 +734,7 @@ pub async fn get_commitment_tx_in_parallel(
                     results.insert(*tx_id, header);
                 }
             }
-            Ok::<HashMap<IrysTransactionId, VersionedCommitmentTransaction>, eyre::Report>(results)
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
         }
     };
 
@@ -769,7 +769,7 @@ pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<VersionedDataTransactionHeader>> {
+) -> eyre::Result<Vec<DataTransactionHeader>> {
     get_data_tx_in_parallel_inner(
         data_tx_ids,
         |tx_ids| {
@@ -792,11 +792,11 @@ pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<VersionedDataTransactionHeader>>
+) -> eyre::Result<Vec<DataTransactionHeader>>
 where
     F: Fn(
         Vec<IrysTransactionId>,
-    ) -> BoxFuture<'static, eyre::Result<Vec<Option<VersionedDataTransactionHeader>>>>,
+    ) -> BoxFuture<'static, eyre::Result<Vec<Option<DataTransactionHeader>>>>,
 {
     let tx_ids_clone = data_tx_ids.clone();
 
@@ -808,7 +808,7 @@ where
                 .await
                 .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?;
 
-            let x: HashMap<IrysTransactionId, VersionedDataTransactionHeader> = tx_ids
+            let x: HashMap<IrysTransactionId, DataTransactionHeader> = tx_ids
                 .into_iter()
                 .zip(results.into_iter())
                 .fold(HashMap::new(), |mut map, (id, opt)| {
@@ -818,7 +818,7 @@ where
                     map
                 });
 
-            Ok::<HashMap<IrysTransactionId, VersionedDataTransactionHeader>, eyre::Report>(x)
+            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(x)
         }
     };
 
@@ -834,7 +834,7 @@ where
                     results.insert(*tx_id, header);
                 }
             }
-            Ok::<HashMap<IrysTransactionId, VersionedDataTransactionHeader>, eyre::Report>(results)
+            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
         }
     };
 

@@ -31,10 +31,10 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, Config, DataLedger,
-    DataTransactionLedger, GossipBroadcastMessage, H256List, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
+    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
+    H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -90,8 +90,7 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response:
-            oneshot::Sender<eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>>>,
+        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>>>,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
@@ -296,7 +295,7 @@ impl BlockProducerService {
     async fn produce_block_inner(
         inner: Arc<BlockProducerInner>,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>> {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
             partition_hash = %solution.partition_hash,
             chunk_offset = solution.chunk_offset,
@@ -334,7 +333,7 @@ pub trait BlockProdStrategy {
     }
 
     /// Fetches a block header from mempool or database
-    async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<VersionedIrysBlockHeader> {
+    async fn fetch_block_header(&self, block_hash: H256) -> eyre::Result<IrysBlockHeader> {
         // Try mempool first
         let (tx, rx) = oneshot::channel();
         self.inner()
@@ -403,11 +402,11 @@ pub trait BlockProdStrategy {
     async fn produce_block_with_parent(
         &self,
         solution: &SolutionContext,
-        prev_block_header: VersionedIrysBlockHeader,
+        prev_block_header: IrysBlockHeader,
         prev_block_ema_snapshot: Arc<EmaSnapshot>,
     ) -> eyre::Result<
         Option<(
-            Arc<VersionedIrysBlockHeader>,
+            Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
@@ -469,9 +468,7 @@ pub trait BlockProdStrategy {
     ///
     /// Returns the selected parent block header and its EMA snapshot.
     #[tracing::instrument(skip(self), level = "debug")]
-    async fn parent_irys_block(
-        &self,
-    ) -> eyre::Result<(VersionedIrysBlockHeader, Arc<EmaSnapshot>)> {
+    async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
         // Use BlockValidationTracker to select the parent block
@@ -497,7 +494,7 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
     ) -> eyre::Result<
         Option<(
-            Arc<VersionedIrysBlockHeader>,
+            Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
@@ -524,7 +521,7 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, EthBuiltPayload)>> {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         let mut rebuild_attempts = 0;
 
         // Initial block production
@@ -620,10 +617,10 @@ pub trait BlockProdStrategy {
     /// Returns the EthBuiltPayload and the final treasury balance
     async fn create_evm_block(
         &self,
-        prev_block_header: &VersionedIrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
-        commitment_txs_to_bill: &[VersionedCommitmentTransaction],
-        submit_txs: &[VersionedDataTransactionHeader],
+        commitment_txs_to_bill: &[CommitmentTransaction],
+        submit_txs: &[DataTransactionHeader],
         publish_txs: &mut PublishLedgerWithTxs,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
@@ -691,7 +688,7 @@ pub trait BlockProdStrategy {
     ))]
     async fn build_and_submit_reth_payload(
         &self,
-        prev_block_header: &VersionedIrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
         timestamp_ms: u128,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
@@ -783,8 +780,8 @@ pub trait BlockProdStrategy {
     async fn produce_block_without_broadcasting(
         &self,
         solution: &SolutionContext,
-        prev_block_header: &VersionedIrysBlockHeader,
-        submit_txs: Vec<VersionedDataTransactionHeader>,
+        prev_block_header: &IrysBlockHeader,
+        submit_txs: Vec<DataTransactionHeader>,
         publish_txs: PublishLedgerWithTxs,
         system_transaction_ledger: Vec<SystemTransactionLedger>,
         current_timestamp: u128,
@@ -792,7 +789,7 @@ pub trait BlockProdStrategy {
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
         final_treasury: U256,
-    ) -> eyre::Result<Option<(Arc<VersionedIrysBlockHeader>, Option<AdjustmentStats>)>> {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
@@ -884,7 +881,7 @@ pub trait BlockProdStrategy {
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
         // build a new block header
-        let irys_block = VersionedIrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
+        let irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             version: 1,
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
@@ -961,9 +958,9 @@ pub trait BlockProdStrategy {
 
     async fn broadcast_block(
         &self,
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
         stats: Option<AdjustmentStats>,
-    ) -> eyre::Result<Option<Arc<VersionedIrysBlockHeader>>> {
+    ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {
             if stats.is_adjusted {
@@ -1042,7 +1039,7 @@ pub trait BlockProdStrategy {
 
     fn block_reward(
         &self,
-        prev_block_header: &VersionedIrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
         current_timestamp: u128,
     ) -> Result<Amount<irys_types::storage_pricing::phantoms::Irys>, eyre::Error> {
         let reward_amount = self.inner().reward_curve.reward_between(
@@ -1055,7 +1052,7 @@ pub trait BlockProdStrategy {
 
     async fn get_ema_price(
         &self,
-        parent_block: &VersionedIrysBlockHeader,
+        parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
         let oracle_irys_price = self.inner().price_oracle.current_price().await?;
@@ -1071,11 +1068,11 @@ pub trait BlockProdStrategy {
 
     async fn get_mempool_txs(
         &self,
-        prev_block_header: &VersionedIrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<(
         Vec<SystemTransactionLedger>,
-        Vec<VersionedCommitmentTransaction>,
-        Vec<VersionedDataTransactionHeader>,
+        Vec<CommitmentTransaction>,
+        Vec<DataTransactionHeader>,
         PublishLedgerWithTxs,
         LedgerExpiryBalanceDelta,
     )> {
@@ -1190,7 +1187,7 @@ pub trait BlockProdStrategy {
 
     async fn get_evm_block(
         &self,
-        prev_block_header: &VersionedIrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
     ) -> eyre::Result<reth_ethereum_primitives::Block> {
         use reth::providers::BlockReader as _;
 
@@ -1276,7 +1273,7 @@ impl BlockProdStrategy for ProductionStrategy {
     }
 }
 
-pub async fn current_timestamp(prev_block_header: &VersionedIrysBlockHeader) -> u128 {
+pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
     // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
@@ -1308,7 +1305,7 @@ pub async fn current_timestamp(prev_block_header: &VersionedIrysBlockHeader) -> 
 ///
 /// # Returns
 /// Total number of chunks needed, including padding for partial chunks
-pub fn calculate_chunks_added(txs: &[VersionedDataTransactionHeader], chunk_size: u64) -> u64 {
+pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
     let bytes_added = txs.iter().fold(0, |acc, tx| {
         acc + tx.data_size.div_ceil(chunk_size) * chunk_size
     });
@@ -1325,7 +1322,7 @@ pub fn calculate_chunks_added(txs: &[VersionedDataTransactionHeader], chunk_size
 #[rtype(result = "eyre::Result<()>")]
 pub struct BlockMigrationMessage {
     /// Block being migrated
-    pub block_header: Arc<VersionedIrysBlockHeader>,
+    pub block_header: Arc<IrysBlockHeader>,
     /// Include all the blocks transaction headers [Submit, Publish]
-    pub all_txs: Arc<Vec<VersionedDataTransactionHeader>>,
+    pub all_txs: Arc<Vec<DataTransactionHeader>>,
 }

@@ -1,6 +1,6 @@
 use irys_types::{
-    CommitmentTransactionV1, DataTransactionHeaderV1, IrysBlockHeaderV1,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
+    CommitmentTransaction, CommitmentTransactionV1, DataTransactionHeader, DataTransactionHeaderV1,
+    IrysBlockHeader, IrysBlockHeaderV1,
 };
 
 #[test]
@@ -9,12 +9,12 @@ fn data_tx_v1_construction() {
         version: 1,
         ..Default::default()
     };
-    let _versioned = VersionedDataTransactionHeader::V1(header);
+    let _versioned = DataTransactionHeader::V1(header);
 }
 
 #[test]
 fn data_tx_v1_default() {
-    let _versioned = VersionedDataTransactionHeader::default();
+    let _versioned = DataTransactionHeader::default();
     // Default should create V1 variant
 }
 
@@ -24,12 +24,12 @@ fn block_header_v1_construction() {
         version: 1,
         ..Default::default()
     };
-    let _versioned = VersionedIrysBlockHeader::V1(header);
+    let _versioned = IrysBlockHeader::V1(header);
 }
 
 #[test]
 fn block_header_v1_default() {
-    let _versioned = VersionedIrysBlockHeader::default();
+    let _versioned = IrysBlockHeader::default();
     // Default should create V1 variant
 }
 
@@ -39,11 +39,11 @@ fn commitment_tx_v1_construction() {
         version: 1,
         ..Default::default()
     };
-    let _versioned = VersionedCommitmentTransaction::V1(tx);
+    let _versioned = CommitmentTransaction::V1(tx);
 }
 
 #[test]
 fn commitment_tx_v1_default() {
-    let _versioned = VersionedCommitmentTransaction::default();
+    let _versioned = CommitmentTransaction::default();
     // Default should create V1 variant
 }

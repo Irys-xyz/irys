@@ -1,11 +1,11 @@
 use irys_types::{
-    Compact as _, ConsensusConfig, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
-    VersionedIrysBlockHeader, H256,
+    CommitmentTransaction, Compact as _, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
+    H256,
 };
 
 #[test]
 fn test_versioned_block_header_compact_roundtrip() {
-    let versioned = VersionedIrysBlockHeader::new_mock_header();
+    let versioned = IrysBlockHeader::new_mock_header();
 
     // Encode to compact format
     let mut buf = Vec::new();
@@ -17,7 +17,7 @@ fn test_versioned_block_header_compact_roundtrip() {
     assert_eq!(buf[0], 1, "first byte should be the discriminant");
 
     // Decode from compact format
-    let (decoded_versioned, rest) = VersionedIrysBlockHeader::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = IrysBlockHeader::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty(), "entire buffer should be consumed");
 
@@ -29,7 +29,7 @@ fn test_versioned_block_header_compact_roundtrip() {
 #[test]
 fn test_versioned_data_transaction_header_compact_roundtrip() {
     let config = ConsensusConfig::testing();
-    let mut versioned = VersionedDataTransactionHeader::new(&config);
+    let mut versioned = DataTransactionHeader::new(&config);
     versioned.id = H256::random();
 
     // Encode to compact format
@@ -42,7 +42,7 @@ fn test_versioned_data_transaction_header_compact_roundtrip() {
     assert_eq!(buf[0], 1, "first byte should be the discriminant");
 
     // Decode from compact format
-    let (decoded_versioned, rest) = VersionedDataTransactionHeader::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = DataTransactionHeader::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty(), "entire buffer should be consumed");
 
@@ -54,7 +54,7 @@ fn test_versioned_data_transaction_header_compact_roundtrip() {
 #[test]
 fn test_versioned_commitment_transaction_compact_roundtrip() {
     let config = ConsensusConfig::testing();
-    let mut versioned = VersionedCommitmentTransaction::new_stake(&config, H256::random());
+    let mut versioned = CommitmentTransaction::new_stake(&config, H256::random());
     versioned.id = H256::random();
 
     // Encode to compact format
@@ -67,7 +67,7 @@ fn test_versioned_commitment_transaction_compact_roundtrip() {
     assert_eq!(buf[0], 1, "first byte should be the discriminant");
 
     // Decode from compact format
-    let (decoded_versioned, rest) = VersionedCommitmentTransaction::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = CommitmentTransaction::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty(), "entire buffer should be consumed");
 
@@ -79,13 +79,13 @@ fn test_versioned_commitment_transaction_compact_roundtrip() {
 #[test]
 fn test_versioned_block_header_compact_with_default() {
     // Test with Default implementation which sets version = 1
-    let versioned = VersionedIrysBlockHeader::default();
+    let versioned = IrysBlockHeader::default();
     assert_eq!(versioned.version, 1, "default should set version to 1");
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);
 
-    let (decoded_versioned, rest) = VersionedIrysBlockHeader::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = IrysBlockHeader::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty());
     assert_eq!(decoded_versioned, versioned);
@@ -94,13 +94,13 @@ fn test_versioned_block_header_compact_with_default() {
 #[test]
 fn test_versioned_data_transaction_header_compact_with_default() {
     // Test with Default implementation which sets version = 1
-    let versioned = VersionedDataTransactionHeader::default();
+    let versioned = DataTransactionHeader::default();
     assert_eq!(versioned.version, 1, "default should set version to 1");
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);
 
-    let (decoded_versioned, rest) = VersionedDataTransactionHeader::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = DataTransactionHeader::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty());
     assert_eq!(decoded_versioned, versioned);
@@ -109,13 +109,13 @@ fn test_versioned_data_transaction_header_compact_with_default() {
 #[test]
 fn test_versioned_commitment_transaction_compact_with_default() {
     // Test with Default implementation which sets version = 1
-    let versioned = VersionedCommitmentTransaction::default();
+    let versioned = CommitmentTransaction::default();
     assert_eq!(versioned.version, 1, "default should set version to 1");
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);
 
-    let (decoded_versioned, rest) = VersionedCommitmentTransaction::from_compact(&buf, buf.len());
+    let (decoded_versioned, rest) = CommitmentTransaction::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty());
     assert_eq!(decoded_versioned, versioned);
@@ -130,7 +130,7 @@ fn test_versioned_block_header_from_compact_panics_on_unsupported_version() {
     buf.extend_from_slice(&[0_u8; 100]);
 
     // This should panic with UnsupportedVersion error
-    let _ = VersionedIrysBlockHeader::from_compact(&buf, buf.len());
+    let _ = IrysBlockHeader::from_compact(&buf, buf.len());
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_versioned_data_transaction_header_from_compact_panics_on_unsupported_ver
     buf.extend_from_slice(&[0_u8; 100]);
 
     // This should panic with UnsupportedVersion error
-    let _ = VersionedDataTransactionHeader::from_compact(&buf, buf.len());
+    let _ = DataTransactionHeader::from_compact(&buf, buf.len());
 }
 
 #[test]
@@ -152,5 +152,5 @@ fn test_versioned_commitment_transaction_from_compact_panics_on_unsupported_vers
     buf.extend_from_slice(&[0_u8; 100]);
 
     // This should panic with UnsupportedVersion error
-    let _ = VersionedCommitmentTransaction::from_compact(&buf, buf.len());
+    let _ = CommitmentTransaction::from_compact(&buf, buf.len());
 }

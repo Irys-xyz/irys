@@ -8,11 +8,11 @@ use irys_storage::ie;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    NodeConfig, SimpleRNG, VersionedIrysBlockHeader, H256,
+    IrysBlockHeader, NodeConfig, SimpleRNG, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, Address, ConsensusConfig, DataLedger, PartitionChunkOffset,
-    VersionedCommitmentTransaction,
+    partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig, DataLedger,
+    PartitionChunkOffset,
 };
 use openssl::sha;
 use std::collections::{HashSet, VecDeque};
@@ -37,9 +37,9 @@ pub struct EpochSnapshot {
     /// Commitment state (all stakes and pledges) as computed at this epoch's start
     pub commitment_state: CommitmentState,
     /// The epoch block that was used to compute this snapshot
-    pub epoch_block: VersionedIrysBlockHeader,
+    pub epoch_block: IrysBlockHeader,
     /// The prior epoch block
-    pub previous_epoch_block: Option<VersionedIrysBlockHeader>,
+    pub previous_epoch_block: Option<IrysBlockHeader>,
     /// Partition that expired with this snapshot (only happens at epoch boundaries)
     pub expired_partition_infos: Option<Vec<ExpiringPartitionInfo>>,
     /// Epoch block height this snapshot was computed for
@@ -58,10 +58,10 @@ impl Default for EpochSnapshot {
             storage_submodules_config: None, // This is only ever valid for test scenarios where epochs don't matter
             config: config.clone(),
             commitment_state: CommitmentState::default(),
-            epoch_block: VersionedIrysBlockHeader::default(),
+            epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
             expired_partition_infos: None,
-            epoch_height: VersionedIrysBlockHeader::default().height,
+            epoch_height: IrysBlockHeader::default().height,
         }
     }
 }
@@ -83,8 +83,8 @@ impl EpochSnapshot {
     /// Create a new instance of the epoch service actor
     pub fn new(
         storage_submodules_config: &StorageSubmodulesConfig,
-        genesis_block: VersionedIrysBlockHeader,
-        commitments: Vec<VersionedCommitmentTransaction>,
+        genesis_block: IrysBlockHeader,
+        commitments: Vec<CommitmentTransaction>,
         config: &Config,
     ) -> Self {
         let mut new_self = Self {
@@ -119,8 +119,7 @@ impl EpochSnapshot {
         epoch_replay_data: Vec<EpochBlockData>,
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         // Initialize as None for the first iteration
-        let mut previous_epoch_block: Option<VersionedIrysBlockHeader> =
-            self.previous_epoch_block.clone();
+        let mut previous_epoch_block: Option<IrysBlockHeader> = self.previous_epoch_block.clone();
 
         for replay_data in epoch_replay_data {
             let block_header = replay_data.epoch_block;
@@ -143,8 +142,8 @@ impl EpochSnapshot {
     }
 
     fn validate_commitments(
-        block_header: &VersionedIrysBlockHeader,
-        commitments: &[VersionedCommitmentTransaction],
+        block_header: &IrysBlockHeader,
+        commitments: &[CommitmentTransaction],
     ) -> eyre::Result<()> {
         // Extract the commitments ledger from the system ledgers in the epoch block
         let commitment_ledger = block_header
@@ -201,10 +200,7 @@ impl EpochSnapshot {
         Ok(())
     }
 
-    fn is_epoch_block(
-        &self,
-        block_header: &VersionedIrysBlockHeader,
-    ) -> Result<(), EpochSnapshotError> {
+    fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochSnapshotError> {
         if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
@@ -218,9 +214,9 @@ impl EpochSnapshot {
     /// Main worker function
     pub fn perform_epoch_tasks(
         &mut self,
-        previous_epoch_block: &Option<VersionedIrysBlockHeader>,
-        new_epoch_block: &VersionedIrysBlockHeader,
-        new_epoch_commitments: Vec<VersionedCommitmentTransaction>,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
+        new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochSnapshotError> {
         // Validate the epoch blocks
         self.is_epoch_block(new_epoch_block)?;
@@ -288,7 +284,7 @@ impl EpochSnapshot {
     ///
     /// # Arguments
     /// * `new_epoch_block` - The genesis block to initialize from
-    fn try_genesis_init(&mut self, new_epoch_block: &VersionedIrysBlockHeader) {
+    fn try_genesis_init(&mut self, new_epoch_block: &IrysBlockHeader) {
         if self.all_active_partitions.is_empty() && new_epoch_block.is_genesis() {
             debug!("Performing genesis init");
             // Allocate 1 slot to each ledger and calculate the number of partitions
@@ -337,7 +333,7 @@ impl EpochSnapshot {
     /// Loops though all of the term ledgers and looks for slots that are older
     /// than the `epoch_length` (term length) of the ledger.
     /// Stores a vec of expired partition hashes in the epoch snapshot
-    fn expire_term_ledger_slots(&mut self, new_epoch_block: &VersionedIrysBlockHeader) {
+    fn expire_term_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
         let epoch_height = new_epoch_block.height;
         let expired_partitions: Vec<ExpiringPartitionInfo> =
             self.ledgers.expire_term_partitions(epoch_height);
@@ -366,8 +362,8 @@ impl EpochSnapshot {
     /// require additional ledger slots added to accommodate data ingress.
     fn allocate_additional_ledger_slots(
         &mut self,
-        previous_epoch_block: &Option<VersionedIrysBlockHeader>,
-        new_epoch_block: &VersionedIrysBlockHeader,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
     ) {
         for ledger in DataLedger::iter() {
             let part_slots =
@@ -616,8 +612,8 @@ impl EpochSnapshot {
     /// @return Number of partition slots to add
     fn calculate_additional_slots(
         &self,
-        previous_epoch_block: &Option<VersionedIrysBlockHeader>,
-        new_epoch_block: &VersionedIrysBlockHeader,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
         ledger: DataLedger,
     ) -> u64 {
         // Get current ledger state
@@ -674,13 +670,13 @@ impl EpochSnapshot {
     /// in the ledger have corresponding transaction data.
     ///
     /// TODO: Support unpledging and unstaking
-    pub fn compute_commitment_state(&mut self, commitments: Vec<VersionedCommitmentTransaction>) {
+    pub fn compute_commitment_state(&mut self, commitments: Vec<CommitmentTransaction>) {
         // Categorize commitments by their type for separate processing
-        let mut stake_commitments: Vec<VersionedCommitmentTransaction> = Vec::new();
-        let mut pledge_commitments: Vec<VersionedCommitmentTransaction> = Vec::new();
+        let mut stake_commitments: Vec<CommitmentTransaction> = Vec::new();
+        let mut pledge_commitments: Vec<CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments {
             match commitment_tx {
-                VersionedCommitmentTransaction::V1(ref inner) => match inner.commitment_type {
+                CommitmentTransaction::V1(ref inner) => match inner.commitment_type {
                     irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
                     irys_primitives::CommitmentType::Pledge { .. } => {
                         pledge_commitments.push(commitment_tx)
@@ -1157,7 +1153,7 @@ mod tests {
     use irys_database::data_ledger::Ledgers;
 
     use irys_types::{
-        Config, ConsensusConfig, ConsensusOptions, DataLedger, NodeConfig, VersionedIrysBlockHeader,
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, IrysBlockHeader, NodeConfig,
     };
 
     /// Validate that `calculate_additional_slots` allocates new slots when the
@@ -1180,7 +1176,7 @@ mod tests {
             storage_submodules_config: None,
             config: config.clone(),
             commitment_state: CommitmentState::default(),
-            epoch_block: VersionedIrysBlockHeader::default(),
+            epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
             expired_partition_infos: None,
             epoch_height: 0,
@@ -1190,7 +1186,7 @@ mod tests {
         snapshot.ledgers[DataLedger::Submit].allocate_slots(4, 0);
 
         // mock header
-        let mut header = VersionedIrysBlockHeader::new_mock_header();
+        let mut header = IrysBlockHeader::new_mock_header();
         header.height = 0;
         // Modify mock block so the submit ledger has an offset up to 34 chunks. With the
         // correct capacity formula (4 slots * 10 chunks), this is below the
@@ -1230,10 +1226,10 @@ mod tests {
         #[test]
         fn should_check_that_all_commitments_are_included() {
             let config = ConsensusConfig::testing();
-            let mut mocked_block = irys_types::VersionedIrysBlockHeader::new_mock_header();
-            let mut comm_tx_1 = irys_types::VersionedCommitmentTransaction::new(&config);
-            let mut comm_tx_2 = irys_types::VersionedCommitmentTransaction::new(&config);
-            let mut unrelated_tx = irys_types::VersionedCommitmentTransaction::new(&config);
+            let mut mocked_block = irys_types::IrysBlockHeader::new_mock_header();
+            let mut comm_tx_1 = irys_types::CommitmentTransaction::new(&config);
+            let mut comm_tx_2 = irys_types::CommitmentTransaction::new(&config);
+            let mut unrelated_tx = irys_types::CommitmentTransaction::new(&config);
 
             comm_tx_1.id = [1; 32].into();
             comm_tx_2.id = [2; 32].into();

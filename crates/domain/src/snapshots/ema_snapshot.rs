@@ -51,7 +51,7 @@
 use eyre::{ensure, Result};
 use irys_types::{
     storage_pricing::{phantoms::Percentage, Amount},
-    ConsensusConfig, IrysTokenPrice, VersionedIrysBlockHeader,
+    ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
 };
 use std::sync::Arc;
 
@@ -107,7 +107,7 @@ impl EmaSnapshot {
     /// The genesis block is special: all price fields are initialized with the same value
     /// from the genesis configuration. This provides the starting point for all future
     /// EMA calculations.
-    pub fn genesis(genesis_header: &VersionedIrysBlockHeader) -> Arc<Self> {
+    pub fn genesis(genesis_header: &IrysBlockHeader) -> Arc<Self> {
         Arc::new(Self {
             ema_price_2_intervals_ago: genesis_header.ema_irys_price,
             oracle_price_for_current_ema_predecessor: genesis_header.oracle_irys_price,
@@ -119,8 +119,8 @@ impl EmaSnapshot {
     /// Create the next EMA snapshot for a new block based on the current snapshot.
     pub fn next_snapshot(
         &self,
-        new_block: &VersionedIrysBlockHeader,
-        parent_block: &VersionedIrysBlockHeader,
+        new_block: &IrysBlockHeader,
+        parent_block: &IrysBlockHeader,
         consensus_config: &ConsensusConfig,
     ) -> eyre::Result<Arc<Self>> {
         let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
@@ -189,7 +189,7 @@ impl EmaSnapshot {
     /// An `EmaBlock` containing the calculated EMA and the range-adjusted oracle price used
     pub fn calculate_ema_for_new_block(
         &self,
-        parent_block: &VersionedIrysBlockHeader,
+        parent_block: &IrysBlockHeader,
         oracle_price: IrysTokenPrice,
         safe_range: Amount<Percentage>,
         blocks_in_interval: u64,
@@ -314,7 +314,7 @@ pub fn bound_in_min_max_range(
 /// - Current EMA is from block 29 (last recalculation in this interval)
 /// - 1 interval ago EMA from block 19 (end of previous interval)
 pub fn create_ema_snapshot_from_chain_history(
-    blocks: &[VersionedIrysBlockHeader],
+    blocks: &[IrysBlockHeader],
     consensus_config: &ConsensusConfig,
 ) -> Result<Arc<EmaSnapshot>> {
     let latest_block = blocks.last().ok_or_else(|| {
@@ -409,11 +409,11 @@ mod test {
     fn build_blocks_with_snapshots(
         max_height: u64,
         config: &ConsensusConfig,
-    ) -> Vec<(VersionedIrysBlockHeader, Arc<EmaSnapshot>)> {
-        let mut results: Vec<(VersionedIrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
+    ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        let mut results: Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
 
         for height in 0..=max_height {
-            let mut block = VersionedIrysBlockHeader::new_mock_header();
+            let mut block = IrysBlockHeader::new_mock_header();
             block.height = height;
 
             // Set oracle price for all blocks
@@ -501,7 +501,7 @@ mod test {
         let blocks_and_snapshots = build_blocks_with_snapshots(height_latest_block, &config);
 
         // Extract blocks for chain history approach
-        let blocks: Vec<VersionedIrysBlockHeader> = blocks_and_snapshots
+        let blocks: Vec<IrysBlockHeader> = blocks_and_snapshots
             .iter()
             .map(|(block, _)| block.clone())
             .collect();
@@ -587,7 +587,7 @@ mod test {
         };
 
         // Create genesis block
-        let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         genesis_block.oracle_irys_price = config.genesis.genesis_price;
         genesis_block.ema_irys_price = config.genesis.genesis_price;
@@ -826,7 +826,7 @@ mod test {
         let blocks_and_snapshots = build_blocks_with_snapshots(max_block_height, &config);
 
         // Extract blocks and snapshots into separate vectors for testing
-        let blocks: Vec<VersionedIrysBlockHeader> = blocks_and_snapshots
+        let blocks: Vec<IrysBlockHeader> = blocks_and_snapshots
             .iter()
             .map(|(block, _)| block.clone())
             .collect();

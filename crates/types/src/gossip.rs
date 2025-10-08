@@ -1,6 +1,6 @@
 use crate::{
-    BlockHash, ChunkPathHash, IngressProof, IrysTransactionId, UnpackedChunk,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
+    IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::{Address, B256};
 use reth::core::primitives::SealedBlock;
@@ -41,16 +41,16 @@ impl From<UnpackedChunk> for GossipBroadcastMessage {
     }
 }
 
-impl From<VersionedDataTransactionHeader> for GossipBroadcastMessage {
-    fn from(transaction: VersionedDataTransactionHeader) -> Self {
+impl From<DataTransactionHeader> for GossipBroadcastMessage {
+    fn from(transaction: DataTransactionHeader) -> Self {
         let key = GossipCacheKey::transaction(&transaction);
         let value = GossipData::Transaction(transaction);
         Self::new(key, value)
     }
 }
 
-impl From<VersionedCommitmentTransaction> for GossipBroadcastMessage {
-    fn from(commitment_tx: VersionedCommitmentTransaction) -> Self {
+impl From<CommitmentTransaction> for GossipBroadcastMessage {
+    fn from(commitment_tx: CommitmentTransaction) -> Self {
         let key = GossipCacheKey::commitment_transaction(&commitment_tx);
         let value = GossipData::CommitmentTransaction(commitment_tx);
         Self::new(key, value)
@@ -65,8 +65,8 @@ impl From<IngressProof> for GossipBroadcastMessage {
     }
 }
 
-impl From<Arc<VersionedIrysBlockHeader>> for GossipBroadcastMessage {
-    fn from(block: Arc<VersionedIrysBlockHeader>) -> Self {
+impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessage {
+    fn from(block: Arc<IrysBlockHeader>) -> Self {
         let key = GossipCacheKey::irys_block(&block);
         let value = GossipData::Block(block);
         Self::new(key, value)
@@ -87,15 +87,15 @@ impl GossipCacheKey {
         Self::Chunk(chunk.chunk_path_hash())
     }
 
-    pub fn transaction(transaction: &VersionedDataTransactionHeader) -> Self {
+    pub fn transaction(transaction: &DataTransactionHeader) -> Self {
         Self::Transaction(transaction.id)
     }
 
-    pub fn commitment_transaction(commitment_tx: &VersionedCommitmentTransaction) -> Self {
+    pub fn commitment_transaction(commitment_tx: &CommitmentTransaction) -> Self {
         Self::Transaction(commitment_tx.id)
     }
 
-    pub fn irys_block(block: &VersionedIrysBlockHeader) -> Self {
+    pub fn irys_block(block: &IrysBlockHeader) -> Self {
         Self::Block(block.block_hash)
     }
 
@@ -111,9 +111,9 @@ impl GossipCacheKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipData {
     Chunk(UnpackedChunk),
-    Transaction(VersionedDataTransactionHeader),
-    CommitmentTransaction(VersionedCommitmentTransaction),
-    Block(Arc<VersionedIrysBlockHeader>),
+    Transaction(DataTransactionHeader),
+    CommitmentTransaction(CommitmentTransaction),
+    Block(Arc<IrysBlockHeader>),
     ExecutionPayload(Block),
     IngressProof(IngressProof),
 }

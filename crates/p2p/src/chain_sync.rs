@@ -1364,8 +1364,8 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, NodeConfig,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, VersionedIrysBlockHeader,
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
@@ -1400,7 +1400,7 @@ mod tests {
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
                             GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
-                                VersionedIrysBlockHeader::new_mock_header(),
+                                IrysBlockHeader::new_mock_header(),
                             ))))
                         }
                     }
@@ -1635,9 +1635,9 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, NodeConfig, NodeInfo,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
-            VersionedIrysBlockHeader,
+            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1669,7 +1669,7 @@ mod tests {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
                     GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
-                        VersionedIrysBlockHeader::new_mock_header(),
+                        IrysBlockHeader::new_mock_header(),
                     ))))
                 }
                 _ => GossipResponse::Accepted(None),

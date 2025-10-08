@@ -1,15 +1,15 @@
 use alloy_primitives::B256;
 use irys_types::{
-    partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List, IrysBlockHeaderV1,
-    IrysSignature, PoaData, VDFLimiterInfo, VersionedIrysBlockHeader, H256, U256,
+    partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List, IrysBlockHeader,
+    IrysBlockHeaderV1, IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
 };
 
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
     evm_block_hash: B256,
     number_of_ingress_proofs_total: u64,
-) -> VersionedIrysBlockHeader {
-    VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+) -> IrysBlockHeader {
+    IrysBlockHeader::V1(IrysBlockHeaderV1 {
         version: 1,
         block_hash: H256::zero(),
         signature: IrysSignature::default(), // Empty signature to be replaced by actual signing

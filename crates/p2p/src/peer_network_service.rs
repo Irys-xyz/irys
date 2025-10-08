@@ -973,9 +973,9 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, Config,
-        IrysTransactionResponse, NodeConfig, NodeInfo, PeerNetworkServiceMessage, RethPeerInfo,
-        VersionedCommitmentTransaction, VersionedDataTransactionHeader, H256,
+        AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+        CommitmentTransaction, Config, DataTransactionHeader, IrysTransactionResponse, NodeConfig,
+        NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::net::{IpAddr, SocketAddr};
@@ -1057,7 +1057,7 @@ mod tests {
         async fn post_transaction(
             &self,
             _peer: SocketAddr,
-            _transaction: VersionedDataTransactionHeader,
+            _transaction: DataTransactionHeader,
         ) -> EyreResult<()> {
             Err(eyre!("not implemented"))
         }
@@ -1065,7 +1065,7 @@ mod tests {
         async fn post_commitment_transaction(
             &self,
             _peer: SocketAddr,
-            _transaction: VersionedCommitmentTransaction,
+            _transaction: CommitmentTransaction,
         ) -> EyreResult<()> {
             Err(eyre!("not implemented"))
         }

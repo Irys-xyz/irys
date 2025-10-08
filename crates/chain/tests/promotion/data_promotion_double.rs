@@ -6,9 +6,7 @@ use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
 use irys_actors::packing::wait_for_packing;
 use irys_database::{tables::IngressProofs, walk_all};
-use irys_types::{
-    irys::IrysSigner, DataTransaction, LedgerChunkOffset, VersionedDataTransactionHeader,
-};
+use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use reth_db::Database as _;
 use std::time::Duration;
@@ -100,7 +98,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     // upload their chunks, make sure 1 is promoted (and 2 is not, due to a missing chunk)
 
     // Post the 2 transactions & initialize some state to track their confirmation
-    let mut unconfirmed_tx: Vec<VersionedDataTransactionHeader> = Vec::new();
+    let mut unconfirmed_tx: Vec<DataTransactionHeader> = Vec::new();
     for tx in txs.iter() {
         let header = &tx.header;
         unconfirmed_tx.push(header.clone());
@@ -269,7 +267,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     // upload their chunks, make sure 3 is promoted
 
     // Post the tx & initialize some state to track their confirmation
-    let mut unconfirmed_tx: Vec<VersionedDataTransactionHeader> = Vec::new();
+    let mut unconfirmed_tx: Vec<DataTransactionHeader> = Vec::new();
     for tx in txs.iter() {
         let header = &tx.header;
         unconfirmed_tx.push(header.clone());

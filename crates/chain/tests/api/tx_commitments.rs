@@ -6,8 +6,8 @@ use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransactionV1, CommitmentType, NodeConfig,
-    VersionedCommitmentTransaction, H256, U256,
+    irys::IrysSigner, Address, CommitmentTransaction, CommitmentTransactionV1, CommitmentType,
+    NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -469,7 +469,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Create a pledge for the unstaked address manually
     let consensus = &node.node_ctx.config.consensus;
-    let mut pledge_tx = VersionedCommitmentTransaction::new_pledge(
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         node.get_anchor().await?,
         node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -502,7 +502,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 async fn post_stake_commitment(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
-) -> VersionedCommitmentTransaction {
+) -> CommitmentTransaction {
     // Get stake price from API
     let price_info = node
         .get_stake_price()
@@ -514,7 +514,7 @@ async fn post_stake_commitment(
         .get_anchor()
         .await
         .expect("anchor should be available for stake commitment");
-    let mut stake_tx = VersionedCommitmentTransaction::V1(CommitmentTransactionV1 {
+    let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
@@ -537,7 +537,7 @@ async fn post_pledge_commitment(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
     anchor: H256,
-) -> VersionedCommitmentTransaction {
+) -> CommitmentTransaction {
     // Get pledge price from API
     let price_info = node
         .get_pledge_price(signer.address())
@@ -545,7 +545,7 @@ async fn post_pledge_commitment(
         .expect("Failed to get pledge price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut pledge_tx = VersionedCommitmentTransaction::V1(CommitmentTransactionV1 {
+    let mut pledge_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Pledge {
             pledge_count_before_executing: 0, // First pledge
         },

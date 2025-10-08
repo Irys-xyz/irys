@@ -65,8 +65,8 @@ use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
     app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
-    BlockIndexItem, Config, DataLedger, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
+    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, IrysTransactionId,
+    LedgerChunkOffset, LedgerChunkRange, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
@@ -251,7 +251,7 @@ async fn get_block_by_hash(
     block_hash: H256,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-) -> eyre::Result<VersionedIrysBlockHeader> {
+) -> eyre::Result<IrysBlockHeader> {
     let (tx, rx) = oneshot::channel();
     mempool_sender.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
 
@@ -517,7 +517,7 @@ async fn process_boundary_block(
 ///
 /// mapping of tx ID to miners who stored it
 fn filter_transactions_by_chunk_range(
-    transactions: Vec<VersionedDataTransactionHeader>,
+    transactions: Vec<DataTransactionHeader>,
     prev_max_offset: LedgerChunkOffset,
     partition_range: LedgerChunkRange,
     is_earliest: bool,
@@ -621,7 +621,7 @@ pub struct LedgerExpiryBalanceDelta {
 
 /// Calculates and aggregates fees for each miner
 fn aggregate_balance_deltas(
-    mut transactions: Vec<VersionedDataTransactionHeader>,
+    mut transactions: Vec<DataTransactionHeader>,
     tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<Address>>>,
     config: &Config,
     expect_txs_to_be_promoted: bool,
@@ -740,14 +740,14 @@ mod tests {
         let config = Config::new(node_config);
 
         // Create test transactions
-        let tx1 = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
+        let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             term_fee: U256::from(1000),
             data_size: 100,
             ..Default::default()
         });
 
-        let tx2 = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
+        let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             term_fee: U256::from(2000),
             data_size: 200,

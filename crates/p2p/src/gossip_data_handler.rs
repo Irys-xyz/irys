@@ -12,9 +12,9 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_primitives::Address;
 use irys_types::{
-    BlockHash, EvmBlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
-    IngressProof, IrysTransactionResponse, PeerListItem, UnpackedChunk,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
+    IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -133,7 +133,7 @@ where
 
     pub(crate) async fn handle_transaction(
         &self,
-        transaction_request: GossipRequest<VersionedDataTransactionHeader>,
+        transaction_request: GossipRequest<DataTransactionHeader>,
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",
@@ -244,7 +244,7 @@ where
 
     pub(crate) async fn handle_commitment_tx(
         &self,
-        transaction_request: GossipRequest<VersionedCommitmentTransaction>,
+        transaction_request: GossipRequest<CommitmentTransaction>,
     ) -> GossipResult<()> {
         debug!(
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
@@ -375,7 +375,7 @@ where
 
     pub(crate) async fn handle_block_header(
         &self,
-        block_header_request: GossipRequest<VersionedIrysBlockHeader>,
+        block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {

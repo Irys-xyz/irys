@@ -5,8 +5,8 @@ use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
 use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
 use irys_types::{
-    get_ingress_proofs, DataLedger, IrysTransactionCommon, IrysTransactionId,
-    VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256,
+    get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
+    IrysTransactionId, H256,
 };
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
@@ -18,7 +18,7 @@ impl Inner {
     #[instrument(skip_all, fields(hash= %block.block_hash(), height = %block.height()), err)]
     pub async fn handle_block_confirmed_message(
         &mut self,
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
@@ -289,8 +289,8 @@ impl Inner {
 
     fn get_confirmed_range(
         &self,
-        fork: &[Arc<VersionedIrysBlockHeader>],
-    ) -> eyre::Result<Vec<Arc<VersionedIrysBlockHeader>>> {
+        fork: &[Arc<IrysBlockHeader>],
+    ) -> eyre::Result<Vec<Arc<IrysBlockHeader>>> {
         let migration_depth = self.config.consensus.block_migration_depth;
         let fork_len: u32 = fork.len().try_into()?;
         let end_index: usize = migration_depth.min(fork_len).try_into()?;
@@ -319,7 +319,7 @@ impl Inner {
 
         // reduce down the system tx ledgers (or well, ledger)
 
-        let reduce_system_ledgers = |fork: &Arc<Vec<Arc<VersionedIrysBlockHeader>>>| -> eyre::Result<
+        let reduce_system_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<
             HashMap<SystemLedger, HashSet<IrysTransactionId>>,
         > {
             let mut ledger_txs_map = HashMap::<SystemLedger, HashSet<IrysTransactionId>>::new();
@@ -365,7 +365,7 @@ impl Inner {
         // since these are orphaned from our ""old"" fork, they should be accessible
         // extract orphaned from commitment snapshot
         let mut orphaned_full_commitment_txs =
-            HashMap::<IrysTransactionId, VersionedCommitmentTransaction>::new();
+            HashMap::<IrysTransactionId, CommitmentTransaction>::new();
         let orphaned_commitment_tx_ids = orphaned_system_txs
             .get(&SystemLedger::Commitment)
             .ok_or_eyre("Should be populated")?
@@ -448,9 +448,9 @@ impl Inner {
         let new_fork_confirmed = self.get_confirmed_range(new_fork)?;
 
         // reduce the old fork and new fork into a list of ledger-specific txids
-        let reduce_data_ledgers = |fork: &Arc<Vec<Arc<VersionedIrysBlockHeader>>>| -> eyre::Result<(
+        let reduce_data_ledgers = |fork: &Arc<Vec<Arc<IrysBlockHeader>>>| -> eyre::Result<(
             HashMap<DataLedger, HashSet<IrysTransactionId>>,
-            HashMap<DataLedger, HashMap<IrysTransactionId, Arc<VersionedIrysBlockHeader>>>,
+            HashMap<DataLedger, HashMap<IrysTransactionId, Arc<IrysBlockHeader>>>,
         )> {
             let mut ledger_txs_map = HashMap::new();
             let mut tx_block_map = HashMap::new();

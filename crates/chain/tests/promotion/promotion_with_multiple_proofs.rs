@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use assert_matches::assert_matches;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, NodeConfig, VersionedCommitmentTransaction};
+use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig};
 
 #[actix_web::test]
 async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
@@ -171,7 +171,7 @@ async fn stake_and_pledge_signer(
     node: &IrysNodeTest<IrysNodeCtx>,
     signer: &IrysSigner,
     pledge_count: usize,
-) -> eyre::Result<VersionedCommitmentTransaction> {
+) -> eyre::Result<CommitmentTransaction> {
     let commitment_tx = node.post_stake_commitment_with_signer(signer).await?;
     post_multiple_pledges(node, signer, pledge_count).await;
     Ok(commitment_tx)

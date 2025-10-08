@@ -101,8 +101,8 @@ mod tests {
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
     use irys_types::{
-        Address, Base64, ChunkPathHash, DataRoot, TxChunkOffset, VersionedDataTransactionHeader,
-        VersionedIrysBlockHeader, H256,
+        Address, Base64, ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader,
+        TxChunkOffset, H256,
     };
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
     use reth_db_api::Database as _;
@@ -133,7 +133,7 @@ mod tests {
             let write_tx = old_db.tx_mut()?;
 
             // IrysBlockHeaders (non-dupsort)
-            let header = VersionedIrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
+            let header = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
                 block_hash,
                 height: 1,
                 version: 1, // Set valid version
@@ -142,11 +142,10 @@ mod tests {
             write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
 
             // IrysDataTxHeaders (non-dupsort)
-            let tx_header =
-                VersionedDataTransactionHeader::V1(irys_types::DataTransactionHeaderV1 {
-                    version: 1,
-                    ..Default::default()
-                });
+            let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1 {
+                version: 1,
+                ..Default::default()
+            });
             write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.into())?;
 
             // CachedDataRoots (non-dupsort)

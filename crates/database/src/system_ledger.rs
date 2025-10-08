@@ -1,8 +1,8 @@
 use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    irys::IrysSigner, transaction::PledgeDataProvider, Compact, Config, H256List,
-    SystemTransactionLedger, VersionedCommitmentTransaction, VersionedIrysBlockHeader, H256, U256,
+    irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Compact, Config,
+    H256List, IrysBlockHeader, SystemTransactionLedger, H256, U256,
 };
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
@@ -105,14 +105,10 @@ async fn create_pledge_commitment_transaction(
     anchor: H256,
     config: &Config,
     provider: &impl PledgeDataProvider,
-) -> VersionedCommitmentTransaction {
-    let mut pledge_commitment = VersionedCommitmentTransaction::new_pledge(
-        &config.consensus,
-        anchor,
-        provider,
-        signer.address(),
-    )
-    .await;
+) -> CommitmentTransaction {
+    let mut pledge_commitment =
+        CommitmentTransaction::new_pledge(&config.consensus, anchor, provider, signer.address())
+            .await;
 
     signer
         .sign_commitment(&mut pledge_commitment)
@@ -140,7 +136,7 @@ async fn create_pledge_commitment_transaction(
 /// # Panics
 /// Panics if fewer than 3 storage submodules are configured, as this is below
 /// the minimum required for network operation
-pub async fn get_genesis_commitments(config: &Config) -> Vec<VersionedCommitmentTransaction> {
+pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransaction> {
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
@@ -154,8 +150,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<VersionedCommitment
     let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
-    let mut stake_commitment =
-        VersionedCommitmentTransaction::new_stake(&config.consensus, H256::default());
+    let mut stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
     signer
         .sign_commitment(&mut stake_commitment)
@@ -186,7 +181,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<VersionedCommitment
 }
 
 fn get_or_create_commitment_ledger(
-    genesis_block: &mut VersionedIrysBlockHeader,
+    genesis_block: &mut IrysBlockHeader,
 ) -> &mut SystemTransactionLedger {
     // Find the commitment ledger or create it if it doesn't exist
     let commitment_ledger_index = genesis_block
@@ -219,9 +214,9 @@ fn get_or_create_commitment_ledger(
 ///
 /// Returns the list of commitment transactions and the total value locked in commitments.
 pub async fn add_genesis_commitments(
-    genesis_block: &mut VersionedIrysBlockHeader,
+    genesis_block: &mut IrysBlockHeader,
     config: &Config,
-) -> (Vec<VersionedCommitmentTransaction>, U256) {
+) -> (Vec<CommitmentTransaction>, U256) {
     let commitments = get_genesis_commitments(config).await;
     let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
 
@@ -262,27 +257,27 @@ pub async fn add_genesis_commitments(
 /// This function is only available when compiled with test or test-utils features
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn add_test_commitments(
-    block_header: &mut VersionedIrysBlockHeader,
+    block_header: &mut IrysBlockHeader,
     pledge_count: u8,
     config: &Config,
-) -> (Vec<VersionedCommitmentTransaction>, U256) {
+) -> (Vec<CommitmentTransaction>, U256) {
     let signer = config.irys_signer();
     add_test_commitments_for_signer(block_header, &signer, pledge_count, config).await
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn add_test_commitments_for_signer(
-    block_header: &mut VersionedIrysBlockHeader,
+    block_header: &mut IrysBlockHeader,
     signer: &IrysSigner,
     pledge_count: u8,
     config: &Config,
-) -> (Vec<VersionedCommitmentTransaction>, U256) {
-    let mut commitments: Vec<VersionedCommitmentTransaction> = Vec::new();
+) -> (Vec<CommitmentTransaction>, U256) {
+    let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
         let mut stake_commitment =
-            VersionedCommitmentTransaction::new_stake(&config.consensus, H256::default());
+            CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
         signer
             .sign_commitment(&mut stake_commitment)

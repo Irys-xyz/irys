@@ -9,9 +9,8 @@ use irys_actors::{
 };
 use irys_primitives::Address;
 use irys_types::{
-    DataLedger, DataTransactionHeaderV1, H256List, NodeConfig, SystemTransactionLedger,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
-    U256,
+    CommitmentTransaction, DataLedger, DataTransactionHeader, DataTransactionHeaderV1, H256List,
+    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
 use std::collections::BTreeMap;
 
@@ -21,7 +20,7 @@ use std::collections::BTreeMap;
 pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub data_tx: VersionedDataTransactionHeader,
+        pub data_tx: DataTransactionHeader,
         pub invalid_refund: (H256, U256, Address),
     }
 
@@ -33,11 +32,11 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &VersionedIrysBlockHeader,
+            _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<VersionedCommitmentTransaction>,
-            Vec<VersionedDataTransactionHeader>,
+            Vec<CommitmentTransaction>,
+            Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {
@@ -84,7 +83,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a data transaction that appears promoted
-    let data_tx = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
+    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         version: 1,
         anchor: H256::zero(),
@@ -174,11 +173,11 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &VersionedIrysBlockHeader,
+            _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<VersionedCommitmentTransaction>,
-            Vec<VersionedDataTransactionHeader>,
+            Vec<CommitmentTransaction>,
+            Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {

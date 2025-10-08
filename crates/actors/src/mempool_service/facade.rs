@@ -5,8 +5,8 @@ use crate::mempool_service::{
 use crate::services::ServiceSenders;
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, Base64, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
-    VersionedIrysBlockHeader, H256,
+    chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
+    H256,
 };
 use irys_types::{Address, IngressProof};
 use std::collections::HashSet;
@@ -18,11 +18,11 @@ use tokio::sync::mpsc::UnboundedSender;
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: VersionedDataTransactionHeader,
+        tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError>;
     async fn handle_commitment_transaction_ingress(
         &self,
-        tx_header: VersionedCommitmentTransaction,
+        tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
     async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
@@ -34,10 +34,10 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         block_hash: H256,
         include_chunk: bool,
-    ) -> Result<Option<VersionedIrysBlockHeader>, TxReadError>;
+    ) -> Result<Option<IrysBlockHeader>, TxReadError>;
     async fn migrate_block(
         &self,
-        irys_block_header: Arc<VersionedIrysBlockHeader>,
+        irys_block_header: Arc<IrysBlockHeader>,
     ) -> Result<usize, TxIngressError>;
 
     async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()>;
@@ -83,7 +83,7 @@ impl From<&ServiceSenders> for MempoolServiceFacadeImpl {
 impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: VersionedDataTransactionHeader,
+        tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
@@ -95,7 +95,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn handle_commitment_transaction_ingress(
         &self,
-        commitment_tx: VersionedCommitmentTransaction,
+        commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
@@ -155,7 +155,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         &self,
         block_hash: H256,
         include_chunk: bool,
-    ) -> Result<Option<VersionedIrysBlockHeader>, TxReadError> {
+    ) -> Result<Option<IrysBlockHeader>, TxReadError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::GetBlockHeader(
@@ -171,7 +171,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn migrate_block(
         &self,
-        irys_block_header: Arc<VersionedIrysBlockHeader>,
+        irys_block_header: Arc<IrysBlockHeader>,
     ) -> Result<usize, TxIngressError> {
         self.migration_sender
             .send(BlockMigratedEvent {

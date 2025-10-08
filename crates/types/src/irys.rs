@@ -1,8 +1,7 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Address,
-    Base64, DataLedger, DataTransaction, IrysSignature, Signature, VersionRequest,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
-    U256,
+    Base64, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
+    IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256, U256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -127,7 +126,7 @@ impl IrysSigner {
         Ok(transaction)
     }
 
-    pub fn sign_commitment(&self, commitment: &mut VersionedCommitmentTransaction) -> Result<()> {
+    pub fn sign_commitment(&self, commitment: &mut CommitmentTransaction) -> Result<()> {
         // Store the signer address
         commitment.signer = Address::from_public_key(self.signer.verifying_key());
         commitment.version = 1;
@@ -144,7 +143,7 @@ impl IrysSigner {
         Ok(())
     }
 
-    pub fn sign_block_header(&self, block_header: &mut VersionedIrysBlockHeader) -> Result<()> {
+    pub fn sign_block_header(&self, block_header: &mut IrysBlockHeader) -> Result<()> {
         // Store the signer address
         block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
 
@@ -199,7 +198,7 @@ impl IrysSigner {
             return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
-        let mut header = VersionedDataTransactionHeader::default();
+        let mut header = DataTransactionHeader::default();
         header.data_size = chunks
             .last()
             .expect("Unable to get last chunk")

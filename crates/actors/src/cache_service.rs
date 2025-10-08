@@ -279,8 +279,8 @@ mod tests {
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
-        app_state::DatabaseProvider, Base64, Config, DataTransactionHeaderV1, NodeConfig,
-        TxChunkOffset, UnpackedChunk, VersionedDataTransactionHeader, VersionedIrysBlockHeader,
+        app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
+        DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use std::sync::{Arc, RwLock};
 
@@ -299,7 +299,7 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             data_size: 64,
             ..Default::default()
         });
@@ -329,7 +329,7 @@ mod tests {
         })??;
 
         // Build minimal guards (not used by prune_data_root_cache)
-        let genesis_block = VersionedIrysBlockHeader::new_mock_header();
+        let genesis_block = IrysBlockHeader::new_mock_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -380,7 +380,7 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = VersionedDataTransactionHeader::V1(DataTransactionHeaderV1 {
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             data_size: 64,
             ..Default::default()
         });
@@ -407,7 +407,7 @@ mod tests {
         })??;
 
         // Build minimal guards (not used by prune_data_root_cache)
-        let genesis_block = VersionedIrysBlockHeader::new_mock_header();
+        let genesis_block = IrysBlockHeader::new_mock_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));

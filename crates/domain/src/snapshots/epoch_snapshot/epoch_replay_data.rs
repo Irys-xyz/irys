@@ -1,9 +1,7 @@
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
 use irys_storage::RecoveredMempoolState;
-use irys_types::{
-    Config, DatabaseProvider, VersionedCommitmentTransaction, VersionedIrysBlockHeader,
-};
+use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
 use reth_db::Database as _;
 use std::collections::VecDeque;
 
@@ -12,16 +10,16 @@ use crate::block_index_guard::BlockIndexReadGuard;
 #[derive(Debug, Clone)]
 /// Represents an epoch block and its associated commitment transactions
 pub struct EpochBlockData {
-    pub epoch_block: VersionedIrysBlockHeader,
-    pub commitments: Vec<VersionedCommitmentTransaction>,
+    pub epoch_block: IrysBlockHeader,
+    pub commitments: Vec<CommitmentTransaction>,
 }
 
 #[derive(Debug, Clone)]
 /// Represents the complete historical epoch data needed for replay
 /// Contains the genesis block, genesis commitments, and all subsequent epoch blocks
 pub struct EpochReplayData {
-    pub genesis_block_header: VersionedIrysBlockHeader,
-    pub genesis_commitments: Vec<VersionedCommitmentTransaction>,
+    pub genesis_block_header: IrysBlockHeader,
+    pub genesis_commitments: Vec<CommitmentTransaction>,
     pub epoch_blocks: Vec<EpochBlockData>,
 }
 

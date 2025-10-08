@@ -3,7 +3,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    NodeConfig, VersionedCommitmentTransaction,
+    CommitmentTransaction, NodeConfig,
 };
 use tracing::info;
 
@@ -36,7 +36,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     // Block 1: Stake commitment
     let stake_tx = {
         let mut commitment =
-            VersionedCommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
+            CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
         user1_signer.sign_commitment(&mut commitment)?;
         commitment
     };
@@ -62,7 +62,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     // Block 4: Multiple transactions (stake + 2KB data tx)
     let stake_tx2 = {
         let mut commitment =
-            VersionedCommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
+            CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
         user2_signer.sign_commitment(&mut commitment)?;
         commitment
     };
@@ -89,11 +89,11 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     // Genesis has 1 stake + 3 pledges (with decay)
     let genesis_stake = consensus_config.stake_value.amount;
     let genesis_pledge_0 =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
     let genesis_pledge_1 =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 1);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 1);
     let genesis_pledge_2 =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 2);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 2);
     let expected_genesis_treasury =
         genesis_stake + genesis_pledge_0 + genesis_pledge_1 + genesis_pledge_2;
 
@@ -114,7 +114,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     // Block 2: Previous treasury + pledge commitment
     // User1 has 1 stake, so this is pledge at index 0
     let pledge1_value =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
     let expected_block2_treasury = expected_block1_treasury + pledge1_value;
 
     assert_eq!(
@@ -200,11 +200,11 @@ async fn test_genesis_treasury_calculation() -> eyre::Result<()> {
     // Calculate pledge values using the same function as production code
     // Pledge indices are 0, 1, 2 for the 3 pledges
     let pledge_0_value =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
     let pledge_1_value =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 1);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 1);
     let pledge_2_value =
-        VersionedCommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 2);
+        CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 2);
 
     let expected_treasury = stake_value + pledge_0_value + pledge_1_value + pledge_2_value;
 

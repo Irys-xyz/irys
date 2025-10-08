@@ -30,9 +30,9 @@ use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, Address, Config, ConsensusConfig, DataLedger, DataTransactionLedger,
-    DifficultyAdjustmentConfig, PoaData, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256, U256,
+    validate_path, Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
+    PoaData, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{BlockHash, LedgerChunkRange};
@@ -221,8 +221,8 @@ pub enum PreValidationError {
 
 /// Full pre-validation steps for a block
 pub async fn prevalidate_block(
-    block: VersionedIrysBlockHeader,
-    previous_block: VersionedIrysBlockHeader,
+    block: IrysBlockHeader,
+    previous_block: IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
@@ -429,8 +429,8 @@ pub async fn prevalidate_block(
 }
 
 pub fn prev_output_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
         Ok(())
@@ -477,8 +477,8 @@ pub fn timestamp_is_valid(
 /// from previous block data.
 /// Returns Ok if valid, Err if the difficulty doesn't match the calculated value.
 pub fn difficulty_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> Result<(), PreValidationError> {
     let block_height = block.height;
@@ -510,8 +510,8 @@ pub fn difficulty_is_valid(
 /// current block triggers a difficulty adjustment, in which case it must be set
 /// to the block's own timestamp.
 pub fn last_diff_timestamp_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> Result<(), PreValidationError> {
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
@@ -559,8 +559,8 @@ pub fn check_poa_data_expiration(
 ///
 /// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
 pub fn cumulative_difficulty_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     let previous_cumulative_diff = previous_block.cumulative_diff;
     let new_diff = block.diff;
@@ -578,8 +578,8 @@ pub fn cumulative_difficulty_is_valid(
 
 /// Validates that the block's previous_cumulative_diff equals the parent's cumulative_diff
 pub fn previous_cumulative_difficulty_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     if block.previous_cumulative_diff == previous_block.cumulative_diff {
         Ok(())
@@ -596,8 +596,8 @@ pub fn previous_cumulative_difficulty_is_valid(
 ///
 /// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
 pub fn solution_hash_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     let solution_hash = block.solution_hash;
     let solution_diff = hash_to_number(&solution_hash.0);
@@ -615,7 +615,7 @@ pub fn solution_hash_is_valid(
 /// Validates the cryptographic link between solution_hash and its inputs:
 /// PoA chunk bytes, partition_chunk_offset (little-endian), and the VDF seed (vdf_limiter_info.output)
 pub fn solution_hash_link_is_valid(
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     poa_chunk: &[u8],
 ) -> Result<(), PreValidationError> {
     let expected = irys_types::compute_solution_hash(
@@ -636,8 +636,8 @@ pub fn solution_hash_link_is_valid(
 
 /// Checks if the `previous_solution_hash` equals the previous block's `solution_hash`
 pub fn previous_solution_hash_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     if block.previous_solution_hash == previous_block.solution_hash {
         Ok(())
@@ -651,8 +651,8 @@ pub fn previous_solution_hash_is_valid(
 
 /// Validates the `last_epoch_hash` field against the previous block and epoch rules.
 pub fn last_epoch_hash_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
     blocks_in_epoch: u64,
 ) -> Result<(), PreValidationError> {
     // if First block after an epoch boundary
@@ -674,8 +674,8 @@ pub fn last_epoch_hash_is_valid(
 
 // Validates block height against previous block height + 1
 pub fn height_is_valid(
-    block: &VersionedIrysBlockHeader,
-    previous_block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     let expected = previous_block.height + 1;
     if block.height == expected {
@@ -694,18 +694,18 @@ mod height_tests {
 
     #[test]
     fn height_is_valid_ok() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 10;
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.height = 11;
         assert!(height_is_valid(&block, &prev).is_ok());
     }
 
     #[test]
     fn height_is_invalid_fails() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 10;
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.height = 12;
         assert!(height_is_valid(&block, &prev).is_err());
     }
@@ -713,7 +713,7 @@ mod height_tests {
 
 /// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,
 ) -> eyre::Result<()> {
@@ -908,7 +908,7 @@ pub fn poa_is_valid(
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
@@ -1092,7 +1092,7 @@ fn extract_leading_shadow_txs(
     evm_block_hash = %block.evm_block_hash
 ))]
 pub async fn submit_payload_to_reth(
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     execution_data: ExecutionData,
 ) -> eyre::Result<()> {
@@ -1149,7 +1149,7 @@ pub async fn submit_payload_to_reth(
 async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &'a VersionedIrysBlockHeader,
+    block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
@@ -1243,9 +1243,9 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 async fn extract_commitment_txs(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
-) -> Result<Vec<VersionedCommitmentTransaction>, eyre::Error> {
+) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
     let commitment_txs = if is_epoch_block {
         // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
@@ -1274,9 +1274,9 @@ async fn extract_commitment_txs(
 
 async fn extract_submit_ledger_txs(
     service_senders: &ServiceSenders,
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
-) -> Result<Vec<VersionedDataTransactionHeader>, eyre::Error> {
+) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
     let (_publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
     // we only access the submit ledger data. Publish ledger does not require billing the user extra
     let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
@@ -1287,7 +1287,7 @@ async fn extract_submit_ledger_txs(
 /// Extracts publish ledger with transactions and ingress proofs for term fee reward distribution
 async fn extract_publish_ledger_with_txs(
     service_senders: &ServiceSenders,
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<PublishLedgerWithTxs, eyre::Error> {
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
@@ -1310,7 +1310,7 @@ async fn extract_publish_ledger_with_txs(
 fn validate_shadow_transactions_match(
     actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
     expected: impl Iterator<Item = ShadowTransaction>,
-    block_header: &VersionedIrysBlockHeader,
+    block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
     // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
@@ -1353,8 +1353,8 @@ fn validate_shadow_transactions_match(
 }
 
 pub fn is_seed_data_valid(
-    block_header: &VersionedIrysBlockHeader,
-    previous_block_header: &VersionedIrysBlockHeader,
+    block_header: &IrysBlockHeader,
+    previous_block_header: &IrysBlockHeader,
     reset_frequency: u64,
 ) -> ValidationResult {
     let vdf_info = &block_header.vdf_limiter_info;
@@ -1383,7 +1383,7 @@ pub fn is_seed_data_valid(
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> eyre::Result<()> {
@@ -1463,10 +1463,10 @@ pub async fn commitment_txs_are_valid(
     }
 
     // Regular block validation: check priority ordering for stake and pledge commitments
-    let stake_and_pledge_txs: Vec<&VersionedCommitmentTransaction> = actual_commitments
+    let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
         .iter()
         .filter(|tx| match tx {
-            VersionedCommitmentTransaction::V1(inner) => matches!(
+            CommitmentTransaction::V1(inner) => matches!(
                 inner.commitment_type,
                 CommitmentType::Stake | CommitmentType::Pledge { .. }
             ),
@@ -1552,7 +1552,7 @@ pub fn calculate_term_storage_base_network_fee(
 pub async fn data_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> Result<(), PreValidationError> {
@@ -1875,7 +1875,7 @@ pub async fn data_txs_are_valid(
 }
 
 fn extract_data_ledgers(
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
 ) -> eyre::Result<(&DataTransactionLedger, &DataTransactionLedger)> {
     let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
         [publish_ledger, submit_ledger] => {
@@ -1896,7 +1896,7 @@ fn extract_data_ledgers(
 
 /// Validates that all ingress proof signers are unique for each transaction in the Publish ledger
 fn validate_unique_ingress_proof_signers(
-    block: &VersionedIrysBlockHeader,
+    block: &IrysBlockHeader,
 ) -> Result<(), PreValidationError> {
     // Extract publish ledger
     let publish_ledger = block
@@ -1977,8 +1977,8 @@ enum TxInclusionState {
 
 #[tracing::instrument(skip_all, fields(block_under_validation = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
-    tx_ids: &mut HashMap<H256, (&VersionedDataTransactionHeader, TxInclusionState)>,
-    block_under_validation: &VersionedIrysBlockHeader,
+    tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
+    block_under_validation: &IrysBlockHeader,
     anchor_expiry_depth: u64,
     service_senders: &ServiceSenders,
     db: &DatabaseProvider,
@@ -2010,7 +2010,7 @@ async fn get_previous_tx_inclusions(
             break;
         }
 
-        let mut update_states = |header: &VersionedIrysBlockHeader| {
+        let mut update_states = |header: &IrysBlockHeader| {
             if header.block_hash == block_under_validation.block_hash {
                 // don't process the states for a block we're putting under full validation
                 return Ok(());
@@ -2058,7 +2058,7 @@ async fn get_previous_tx_inclusions(
 fn process_block_ledgers_with_states(
     ledgers: &[DataTransactionLedger],
     block_hash: BlockHash,
-    tx_states: &mut HashMap<H256, (&VersionedDataTransactionHeader, TxInclusionState)>,
+    tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
 ) -> eyre::Result<()> {
     for ledger in ledgers {
         let ledger_type = DataLedger::try_from(ledger.ledger_id)?;
@@ -2094,7 +2094,7 @@ fn process_block_ledgers_with_states(
 async fn mempool_block_retriever(
     hash: H256,
     service_senders: &ServiceSenders,
-) -> Option<VersionedIrysBlockHeader> {
+) -> Option<IrysBlockHeader> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
@@ -2105,7 +2105,7 @@ async fn mempool_block_retriever(
 
 pub async fn get_assigned_ingress_proofs<F, Fut>(
     tx_proofs: &[IngressProof],
-    tx_header: &VersionedDataTransactionHeader,
+    tx_header: &DataTransactionHeader,
     mempool_block_retriever: F,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -2113,7 +2113,7 @@ pub async fn get_assigned_ingress_proofs<F, Fut>(
 ) -> Result<(Vec<IngressProof>, usize), PreValidationError>
 where
     F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
-    Fut: Future<Output = Option<VersionedIrysBlockHeader>>,
+    Fut: Future<Output = Option<IrysBlockHeader>>,
 {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
@@ -2195,7 +2195,7 @@ async fn get_ledger_range<F, Fut>(
 ) -> LedgerChunkRange
 where
     F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
-    Fut: Future<Output = Option<VersionedIrysBlockHeader>>,
+    Fut: Future<Output = Option<IrysBlockHeader>>,
 {
     let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await;
     let prev_block_hash = block.previous_block_hash;
@@ -2218,10 +2218,10 @@ async fn get_block_by_hash<F, Fut>(
     hash: &H256,
     mempool_block_retriever: F,
     db: &DatabaseProvider,
-) -> VersionedIrysBlockHeader
+) -> IrysBlockHeader
 where
     F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
-    Fut: Future<Output = Option<VersionedIrysBlockHeader>>,
+    Fut: Future<Output = Option<IrysBlockHeader>>,
 {
     let block = mempool_block_retriever(*hash).await;
 
@@ -2286,8 +2286,8 @@ mod tests {
     use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionLedger, H256List, IrysBlockHeaderV1, NodeConfig, Signature,
-        VersionedDataTransactionHeader, H256, U256,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
+        NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2320,7 +2320,7 @@ mod tests {
         };
         let config = Config::new(node_config);
 
-        let mut genesis_block = VersionedIrysBlockHeader::new_mock_header();
+        let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         let chunk_size = 32;
         let mut node_config = NodeConfig::testing();
@@ -2495,14 +2495,14 @@ mod tests {
     async fn is_seed_data_valid_should_validate_seeds() {
         let reset_frequency = 2;
 
-        let mut parent_header = VersionedIrysBlockHeader::new_mock_header();
+        let mut parent_header = IrysBlockHeader::new_mock_header();
         let parent_seed = BlockHash::from_slice(&[2; 32]);
         let parent_next_seed = BlockHash::from_slice(&[3; 32]);
         parent_header.block_hash = BlockHash::from_slice(&[4; 32]);
         parent_header.vdf_limiter_info.seed = parent_seed;
         parent_header.vdf_limiter_info.next_seed = parent_next_seed;
 
-        let mut header_2 = VersionedIrysBlockHeader::new_mock_header();
+        let mut header_2 = IrysBlockHeader::new_mock_header();
         // Reset frequency is 2, so setting global_step_number to 3 and adding 2 steps
         //  should result in the seeds being rotated
         header_2.vdf_limiter_info.global_step_number = 3;
@@ -2579,7 +2579,7 @@ mod tests {
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
 
         // Create vectors of tx headers and txids
-        let tx_headers: Vec<VersionedDataTransactionHeader> =
+        let tx_headers: Vec<DataTransactionHeader> =
             txs.iter().map(|tx| tx.header.clone()).collect();
 
         let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
@@ -2599,7 +2599,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2784,7 +2784,7 @@ mod tests {
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
 
         // Create vectors of tx headers and txids
-        let tx_headers: Vec<VersionedDataTransactionHeader> =
+        let tx_headers: Vec<DataTransactionHeader> =
             txs.iter().map(|tx| tx.header.clone()).collect();
 
         let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
@@ -2859,7 +2859,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -3080,11 +3080,11 @@ mod tests {
 
     #[test]
     fn last_diff_timestamp_no_adjustment_ok() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 1;
         prev.last_diff_timestamp = 1000;
 
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.height = 2;
         block.timestamp = 1500;
         block.last_diff_timestamp = prev.last_diff_timestamp;
@@ -3099,11 +3099,11 @@ mod tests {
 
     #[test]
     fn last_diff_timestamp_adjustment_ok() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 9;
         prev.last_diff_timestamp = 1000;
 
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.height = 10;
         block.timestamp = 2000;
         block.last_diff_timestamp = block.timestamp;
@@ -3118,11 +3118,11 @@ mod tests {
 
     #[test]
     fn last_diff_timestamp_incorrect_fails() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 1;
         prev.last_diff_timestamp = 1000;
 
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.height = 2;
         block.timestamp = 1500;
         block.last_diff_timestamp = 999;
@@ -3137,10 +3137,10 @@ mod tests {
 
     #[test]
     fn previous_cumulative_difficulty_validates_match() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.cumulative_diff = U256::from(12345);
 
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.previous_cumulative_diff = prev.cumulative_diff;
 
         assert!(
@@ -3151,10 +3151,10 @@ mod tests {
 
     #[test]
     fn previous_cumulative_difficulty_detects_mismatch() {
-        let mut prev = VersionedIrysBlockHeader::new_mock_header();
+        let mut prev = IrysBlockHeader::new_mock_header();
         prev.cumulative_diff = U256::from(12345);
 
-        let mut block = VersionedIrysBlockHeader::new_mock_header();
+        let mut block = IrysBlockHeader::new_mock_header();
         block.previous_cumulative_diff = U256::from(9999);
 
         if let Err(PreValidationError::PreviousCumulativeDifficultyMismatch { expected, got }) =

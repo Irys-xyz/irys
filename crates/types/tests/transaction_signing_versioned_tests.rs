@@ -1,15 +1,12 @@
 use irys_types::irys::IrysSigner;
 use irys_types::versioning::Signable as _;
-use irys_types::{
-    ConsensusConfig, DataTransaction, VersionedCommitmentTransaction,
-    VersionedDataTransactionHeader,
-};
+use irys_types::{CommitmentTransaction, ConsensusConfig, DataTransaction, DataTransactionHeader};
 
 #[test]
 fn data_tx_signing_uses_discriminant() {
     let config = ConsensusConfig::testing();
     let signer = IrysSigner::random_signer(&config);
-    let header = VersionedDataTransactionHeader::new(&config);
+    let header = DataTransactionHeader::new(&config);
 
     // Test that the preimage used for signing starts with the version discriminant
     let preimage = {
@@ -38,7 +35,7 @@ fn data_tx_signing_uses_discriminant() {
 fn commitment_tx_signing_uses_discriminant() {
     let config = ConsensusConfig::testing();
     let signer = IrysSigner::random_signer(&config);
-    let mut tx = VersionedCommitmentTransaction::new_stake(&config, irys_types::H256::zero());
+    let mut tx = CommitmentTransaction::new_stake(&config, irys_types::H256::zero());
 
     // Test that the preimage used for signing starts with the version discriminant
     let preimage = {

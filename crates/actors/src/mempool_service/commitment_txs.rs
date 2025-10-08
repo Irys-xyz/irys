@@ -4,8 +4,8 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
-    Address, CommitmentValidationError, GossipBroadcastMessage, IrysTransactionId,
-    VersionedCommitmentTransaction, H256,
+    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
+    IrysTransactionId, H256,
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
@@ -15,7 +15,7 @@ impl Inner {
     #[instrument(skip_all)]
     pub async fn handle_ingress_commitment_tx_message(
         &mut self,
-        commitment_tx: VersionedCommitmentTransaction,
+        commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!("received commitment tx {:?}", &commitment_tx.id);
 
@@ -243,7 +243,7 @@ impl Inner {
     pub async fn handle_get_commitment_transactions_message(
         &self,
         commitment_tx_ids: Vec<H256>,
-    ) -> HashMap<IrysTransactionId, VersionedCommitmentTransaction> {
+    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
@@ -288,9 +288,7 @@ impl Inner {
 
     /// should really only be called by persist_mempool_to_disk, all other scenarios need a more
     /// subtle filtering of commitment state, recently confirmed? pending? valid? etc.
-    pub async fn get_all_commitment_tx(
-        &self,
-    ) -> HashMap<IrysTransactionId, VersionedCommitmentTransaction> {
+    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, CommitmentTransaction> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
@@ -361,7 +359,7 @@ impl Inner {
 
     fn validate_funding(
         &self,
-        commitment_tx: &VersionedCommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         // Get the current balance of the transaction signer
         let balance: irys_types::U256 = self
@@ -408,7 +406,7 @@ impl Inner {
 
     pub async fn get_commitment_status(
         &self,
-        commitment_tx: &VersionedCommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
     ) -> CommitmentSnapshotStatus {
         // Get the commitment snapshot for the current canonical chain
         let (commitment_snapshot, epoch_snapshot) = {

@@ -1,6 +1,6 @@
 use crate::mining::PartitionMiningActor;
 use actix::prelude::*;
-use irys_types::{block_production::Seed, H256List, VersionedIrysBlockHeader};
+use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
 use irys_vdf::MiningBroadcaster;
 use std::sync::Arc;
 use tracing::{debug, info, Span};
@@ -28,7 +28,7 @@ pub struct BroadcastMiningSeed {
 /// Send the latest difficulty update to all the `PartitionMiningActors`
 #[derive(Message, Debug, Clone)]
 #[rtype(result = "()")]
-pub struct BroadcastDifficultyUpdate(pub Arc<VersionedIrysBlockHeader>);
+pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
 
 /// Send Partition expiration list to miners
 #[derive(Message, Debug, Clone)]

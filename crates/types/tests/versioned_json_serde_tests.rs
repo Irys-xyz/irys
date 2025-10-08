@@ -1,12 +1,11 @@
 use irys_types::{
-    ConsensusConfig, VersionedCommitmentTransaction, VersionedDataTransactionHeader,
-    VersionedIrysBlockHeader, H256,
+    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256,
 };
 
 #[test]
 fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
     let config = ConsensusConfig::testing();
-    let mut commitment_tx = VersionedCommitmentTransaction::new_stake(&config, H256::zero());
+    let mut commitment_tx = CommitmentTransaction::new_stake(&config, H256::zero());
     commitment_tx.id = H256::from([1_u8; 32]);
 
     // Serialize to JSON
@@ -22,7 +21,7 @@ fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
     );
 
     // Verify it deserializes correctly
-    let deserialized: VersionedCommitmentTransaction =
+    let deserialized: CommitmentTransaction =
         serde_json::from_str(&json).expect("Failed to deserialize commitment transaction");
     assert_eq!(commitment_tx.id, deserialized.id);
     assert_eq!(commitment_tx.version, deserialized.version);
@@ -31,7 +30,7 @@ fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
 #[test]
 fn test_versioned_data_transaction_header_json_no_duplicate_type_field() {
     let config = ConsensusConfig::testing();
-    let mut data_tx_header = VersionedDataTransactionHeader::new(&config);
+    let mut data_tx_header = DataTransactionHeader::new(&config);
     data_tx_header.id = H256::from([2_u8; 32]);
 
     // Serialize to JSON
@@ -46,7 +45,7 @@ fn test_versioned_data_transaction_header_json_no_duplicate_type_field() {
     );
 
     // Verify it deserializes correctly
-    let deserialized: VersionedDataTransactionHeader =
+    let deserialized: DataTransactionHeader =
         serde_json::from_str(&json).expect("Failed to deserialize data transaction header");
     assert_eq!(data_tx_header.id, deserialized.id);
     assert_eq!(data_tx_header.version, deserialized.version);
@@ -54,13 +53,13 @@ fn test_versioned_data_transaction_header_json_no_duplicate_type_field() {
 
 #[test]
 fn test_versioned_block_header_json_roundtrip() {
-    let versioned = VersionedIrysBlockHeader::new_mock_header();
+    let versioned = IrysBlockHeader::new_mock_header();
 
     // Serialize to JSON
     let json = serde_json::to_string(&versioned).unwrap();
 
     // Verify it deserializes correctly
-    let deserialized: VersionedIrysBlockHeader =
+    let deserialized: IrysBlockHeader =
         serde_json::from_str(&json).expect("Failed to deserialize block header");
     assert_eq!(versioned.version, deserialized.version);
     assert_eq!(versioned.block_hash, deserialized.block_hash);
@@ -69,7 +68,7 @@ fn test_versioned_block_header_json_roundtrip() {
 #[test]
 fn test_commitment_transaction_json_structure() {
     let config = ConsensusConfig::testing();
-    let mut commitment_tx = VersionedCommitmentTransaction::new_stake(&config, H256::zero());
+    let mut commitment_tx = CommitmentTransaction::new_stake(&config, H256::zero());
     commitment_tx.id = H256::from([1_u8; 32]);
 
     // Serialize to pretty JSON for inspection

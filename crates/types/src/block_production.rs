@@ -1,6 +1,4 @@
-use crate::{
-    partition::PartitionHash, ChunkDataPath, H256List, TxPath, VersionedIrysBlockHeader, H256,
-};
+use crate::{partition::PartitionHash, ChunkDataPath, H256List, IrysBlockHeader, TxPath, H256};
 use actix::Message;
 use alloy_primitives::Address;
 use reth::payload::EthBuiltPayload;
@@ -17,7 +15,7 @@ impl Seed {
 }
 
 #[derive(Message, Debug, Clone, PartialEq, Default)]
-#[rtype(result = "Option<(Arc<VersionedIrysBlockHeader>,EthBuiltPayload)>")]
+#[rtype(result = "Option<(Arc<IrysBlockHeader>,EthBuiltPayload)>")]
 pub struct SolutionContext {
     pub partition_hash: PartitionHash,
     pub chunk_offset: u32,

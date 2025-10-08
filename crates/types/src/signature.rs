@@ -168,8 +168,7 @@ mod tests {
     use super::*;
 
     use crate::{
-        irys::IrysSigner, ConsensusConfig, DataTransaction, VersionedDataTransactionHeader, H256,
-        U256,
+        irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256, U256,
     };
     use alloy_core::hex;
     use alloy_primitives::Address;
@@ -200,7 +199,7 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = VersionedDataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
+        let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,

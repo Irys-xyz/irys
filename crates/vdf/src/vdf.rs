@@ -2,7 +2,7 @@ use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
 use irys_types::block_provider::BlockProvider;
 use irys_types::{
-    block_production::Seed, AtomicVdfStepNumber, H256List, VersionedIrysBlockHeader, H256, U256,
+    block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
 };
 use sha2::{Digest as _, Sha256};
 use std::sync::atomic::AtomicBool;
@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tracing::{debug, info, warn};
 
 pub fn run_vdf_for_genesis_block(
-    genesis_block: &mut VersionedIrysBlockHeader,
+    genesis_block: &mut IrysBlockHeader,
     config: &irys_types::VdfConfig,
 ) {
     let reset_seed = genesis_block.vdf_limiter_info.seed;
@@ -249,11 +249,11 @@ mod tests {
         fn broadcast(&self, _seed: Seed, _checkpoints: H256List, _global_step: u64) {}
     }
 
-    struct MockBlockProvider(pub VersionedIrysBlockHeader);
+    struct MockBlockProvider(pub IrysBlockHeader);
 
     impl MockBlockProvider {
         fn new() -> Self {
-            Self(VersionedIrysBlockHeader::new_mock_header())
+            Self(IrysBlockHeader::new_mock_header())
         }
     }
 
@@ -333,7 +333,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
-        let mut mock_header = VersionedIrysBlockHeader::new_mock_header();
+        let mut mock_header = IrysBlockHeader::new_mock_header();
         // Set global step number to 2 to simulate a scenario where canonical chain progresses
         mock_header.vdf_limiter_info.global_step_number = 2;
 

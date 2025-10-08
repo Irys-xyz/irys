@@ -27,11 +27,11 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    Config, DataTransaction, DatabaseProvider, GossipBroadcastMessage, GossipData,
-    GossipDataRequest, GossipRequest, IngressProof, IrysTransactionResponse, NodeConfig, NodeInfo,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo,
-    TokioServiceHandle, TxChunkOffset, UnpackedChunk, VersionRequest,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
+    CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
+    GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
+    IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
+    UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -46,10 +46,10 @@ use tracing::{debug, warn, Span};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
-    pub txs: Arc<RwLock<Vec<VersionedDataTransactionHeader>>>,
+    pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
-    pub migrated_blocks: Arc<RwLock<Vec<Arc<VersionedIrysBlockHeader>>>>,
+    pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
 }
 
 impl MempoolStub {
@@ -68,7 +68,7 @@ impl MempoolStub {
 impl MempoolFacade for MempoolStub {
     async fn handle_data_transaction_ingress(
         &self,
-        tx_header: VersionedDataTransactionHeader,
+        tx_header: DataTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
         let already_exists = self
             .txs
@@ -98,7 +98,7 @@ impl MempoolFacade for MempoolStub {
 
     async fn handle_commitment_transaction_ingress(
         &self,
-        _tx_header: VersionedCommitmentTransaction,
+        _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
@@ -144,13 +144,13 @@ impl MempoolFacade for MempoolStub {
         &self,
         _block_hash: H256,
         _include_chunk: bool,
-    ) -> std::result::Result<Option<VersionedIrysBlockHeader>, TxReadError> {
+    ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
         Ok(None)
     }
 
     async fn migrate_block(
         &self,
-        irys_block_header: Arc<VersionedIrysBlockHeader>,
+        irys_block_header: Arc<IrysBlockHeader>,
     ) -> std::result::Result<usize, TxIngressError> {
         self.migrated_blocks
             .write()
@@ -181,13 +181,13 @@ impl MempoolFacade for MempoolStub {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
-    pub blocks: Arc<RwLock<Vec<Arc<VersionedIrysBlockHeader>>>>,
+    pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessage>>,
     pub block_status_provider: BlockStatusProvider,
 }
 
 impl BlockDiscoveryStub {
-    pub(crate) fn get_blocks(&self) -> Vec<Arc<VersionedIrysBlockHeader>> {
+    pub(crate) fn get_blocks(&self) -> Vec<Arc<IrysBlockHeader>> {
         self.blocks.read().unwrap().clone()
     }
 }
@@ -196,7 +196,7 @@ impl BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: Arc<VersionedIrysBlockHeader>,
+        block: Arc<IrysBlockHeader>,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.block_status_provider
@@ -223,7 +223,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 
 #[derive(Clone)]
 pub(crate) struct ApiClientStub {
-    pub txs: HashMap<H256, VersionedDataTransactionHeader>,
+    pub txs: HashMap<H256, DataTransactionHeader>,
     pub block_index_handler: Arc<
         RwLock<Box<dyn Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static>>,
     >,
@@ -280,7 +280,7 @@ impl ApiClient for ApiClientStub {
     async fn post_transaction(
         &self,
         _api_address: SocketAddr,
-        _transaction: VersionedDataTransactionHeader,
+        _transaction: DataTransactionHeader,
     ) -> Result<()> {
         Ok(())
     }
@@ -288,7 +288,7 @@ impl ApiClient for ApiClientStub {
     async fn post_commitment_transaction(
         &self,
         _peer: SocketAddr,
-        _transaction: VersionedCommitmentTransaction,
+        _transaction: CommitmentTransaction,
     ) -> Result<()> {
         Ok(())
     }
@@ -371,9 +371,9 @@ pub(crate) struct GossipServiceTestFixture {
     #[expect(dead_code)]
     pub peer_network_handle: TokioServiceHandle,
     pub peer_list: PeerList,
-    pub mempool_txs: Arc<RwLock<Vec<VersionedDataTransactionHeader>>>,
+    pub mempool_txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub discovery_blocks: Arc<RwLock<Vec<Arc<VersionedIrysBlockHeader>>>>,
+    pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub api_client_stub: ApiClientStub,
     // Tets need the task manager to be stored somewhere
     #[expect(dead_code)]
@@ -836,7 +836,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     api_client_stub: T,
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
-    let genesis_block = VersionedIrysBlockHeader::new_mock_header();
+    let genesis_block = IrysBlockHeader::new_mock_header();
     let block_index = BlockIndex::new(&config.node_config)
         .await
         .expect("expected to create a block index");

@@ -7,7 +7,7 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, GossipBroadcastMessage, IrysTransactionId, VersionedDataTransactionHeader, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
@@ -20,7 +20,7 @@ impl Inner {
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
-    ) -> Vec<Option<VersionedDataTransactionHeader>> {
+    ) -> Vec<Option<DataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
         let mempool_state_guard = self.mempool_state.read().await;
 
@@ -51,7 +51,7 @@ impl Inner {
 
     pub async fn handle_data_tx_ingress_message(
         &mut self,
-        mut tx: VersionedDataTransactionHeader,
+        mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!("received tx {:?} (data_root {:?})", &tx.id, &tx.data_root);
 
@@ -207,9 +207,7 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn get_all_storage_tx(
-        &self,
-    ) -> HashMap<IrysTransactionId, VersionedDataTransactionHeader> {
+    pub async fn get_all_storage_tx(&self) -> HashMap<IrysTransactionId, DataTransactionHeader> {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the storage transactions
@@ -278,7 +276,7 @@ impl Inner {
     /// # Notes
     /// - Only considers Submit ledger transactions (filters out Publish, etc.)
     /// - Only examines blocks within the configured `anchor_expiry_depth`
-    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<VersionedDataTransactionHeader> {
+    pub async fn get_pending_submit_ledger_txs(&self) -> Vec<DataTransactionHeader> {
         // Get the current canonical chain head to establish our starting point for block traversal
         // TODO: `get_optimistic_chain` and `get_canonical_chain` can be 2 different entries!
         let optimistic = get_optimistic_chain(self.block_tree_read_guard.clone())

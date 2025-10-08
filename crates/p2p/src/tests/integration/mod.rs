@@ -4,8 +4,8 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeaderV1,
-    VersionedIrysBlockHeader,
+    BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader,
+    IrysBlockHeaderV1,
 };
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
@@ -244,7 +244,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture2.add_peer(&fixture1);
 
     // Create a test block with transactions
-    let mut block = VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+    let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: BlockHash::random(),
         ..IrysBlockHeaderV1::new_mock_header()
     });
@@ -308,7 +308,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // Create a test block with transactions
-    let mut block = VersionedIrysBlockHeader::new_mock_header();
+    let mut block = IrysBlockHeader::new_mock_header();
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
@@ -372,7 +372,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     let sealed_block = evm_block.clone().seal_slow();
 
     // Create a test block with transactions
-    let mut block = VersionedIrysBlockHeader::V1(IrysBlockHeaderV1 {
+    let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: BlockHash::random(),
         evm_block_hash: sealed_block.hash(),
         ..IrysBlockHeaderV1::new_mock_header()

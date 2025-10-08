@@ -1,5 +1,5 @@
 use irys_primitives::CommitmentType;
-use irys_types::{Address, VersionedCommitmentTransaction};
+use irys_types::{Address, CommitmentTransaction};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
@@ -24,14 +24,12 @@ pub struct CommitmentSnapshot {
 
 #[derive(Default, Debug, Clone, Hash)]
 pub struct MinerCommitments {
-    pub stake: Option<VersionedCommitmentTransaction>,
-    pub pledges: Vec<VersionedCommitmentTransaction>,
+    pub stake: Option<CommitmentTransaction>,
+    pub pledges: Vec<CommitmentTransaction>,
 }
 
 impl CommitmentSnapshot {
-    pub fn new_from_commitments(
-        commitment_txs: Option<Vec<VersionedCommitmentTransaction>>,
-    ) -> Self {
+    pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
         let mut snapshot = Self::default();
 
         if let Some(commitment_txs) = commitment_txs {
@@ -46,7 +44,7 @@ impl CommitmentSnapshot {
     /// Checks and returns the status of a commitment transaction
     pub fn get_commitment_status(
         &self,
-        commitment_tx: &VersionedCommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
         is_staked_in_current_epoch: bool,
     ) -> CommitmentSnapshotStatus {
         debug!("GetCommitmentStatus message received");
@@ -130,7 +128,7 @@ impl CommitmentSnapshot {
     /// Adds a new commitment transaction to the snapshot and validates its acceptance
     pub fn add_commitment(
         &mut self,
-        commitment_tx: &VersionedCommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
         epoch_snapshot: &EpochSnapshot,
     ) -> CommitmentSnapshotStatus {
         let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
@@ -236,8 +234,8 @@ impl CommitmentSnapshot {
     }
 
     /// Collects all commitment transactions from the snapshot for epoch processing
-    pub fn get_epoch_commitments(&self) -> Vec<VersionedCommitmentTransaction> {
-        let mut all_commitments: Vec<VersionedCommitmentTransaction> = Vec::new();
+    pub fn get_epoch_commitments(&self) -> Vec<CommitmentTransaction> {
+        let mut all_commitments: Vec<CommitmentTransaction> = Vec::new();
 
         // Collect all commitments from all miners
         for miner_commitments in self.commitments.values() {
@@ -289,8 +287,8 @@ mod tests {
         signer: Address,
         commitment_type: CommitmentType,
         value: U256,
-    ) -> VersionedCommitmentTransaction {
-        let mut tx = VersionedCommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
+    ) -> CommitmentTransaction {
+        let mut tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             id: H256::zero(),
             anchor: H256::zero(),
             signer,

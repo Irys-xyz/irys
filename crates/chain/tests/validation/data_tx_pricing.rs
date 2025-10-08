@@ -7,17 +7,16 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
-    Config, DataLedger, DataTransactionLedger, H256List, NodeConfig, SystemTransactionLedger,
-    VersionedCommitmentTransaction, VersionedDataTransactionHeader, VersionedIrysBlockHeader, H256,
-    U256,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
+    H256List, IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
 };
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
 async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
-    block: Arc<VersionedIrysBlockHeader>,
-    commitment_txs: Vec<VersionedCommitmentTransaction>,
+    block: Arc<IrysBlockHeader>,
+    commitment_txs: Vec<CommitmentTransaction>,
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -40,7 +39,7 @@ async fn send_block_to_block_tree(
 async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub malicious_tx: VersionedDataTransactionHeader,
+        pub malicious_tx: DataTransactionHeader,
     }
 
     #[async_trait::async_trait]
@@ -51,11 +50,11 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
 
         async fn get_mempool_txs(
             &self,
-            _prev_block_header: &VersionedIrysBlockHeader,
+            _prev_block_header: &IrysBlockHeader,
         ) -> eyre::Result<(
             Vec<SystemTransactionLedger>,
-            Vec<VersionedCommitmentTransaction>,
-            Vec<VersionedDataTransactionHeader>,
+            Vec<CommitmentTransaction>,
+            Vec<DataTransactionHeader>,
             PublishLedgerWithTxs,
             LedgerExpiryBalanceDelta,
         )> {

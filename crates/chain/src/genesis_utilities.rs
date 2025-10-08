@@ -1,4 +1,4 @@
-use irys_types::{IrysBlockHeaderV1, VersionedIrysBlockHeader};
+use irys_types::{IrysBlockHeader, IrysBlockHeaderV1};
 use std::{
     fs::{create_dir_all, File},
     io::Write as _,
@@ -10,7 +10,7 @@ const GENESIS_BLOCK_FILENAME: &str = ".irys_genesis.json";
 
 /// Write genesis block to disk
 pub fn save_genesis_block_to_disk(
-    genesis_block: Arc<VersionedIrysBlockHeader>,
+    genesis_block: Arc<IrysBlockHeader>,
     base_directory: &PathBuf,
 ) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(&genesis_block)
@@ -39,11 +39,11 @@ pub fn genesis_block_exists_on_disk(base_directory: &PathBuf) -> bool {
 /// Read genesis block from disk
 pub fn load_genesis_block_from_disk(
     base_directory: &PathBuf,
-) -> std::io::Result<Arc<VersionedIrysBlockHeader>> {
+) -> std::io::Result<Arc<IrysBlockHeader>> {
     let file = File::open(Path::new(&base_directory).join(GENESIS_BLOCK_FILENAME))?;
     let reader = std::io::BufReader::new(file);
     let genesis: IrysBlockHeaderV1 = serde_json::from_reader(reader)
         .expect("genesis.json should be valid JSON and match IrysBlockHeaderV1");
 
-    Ok(Arc::new(VersionedIrysBlockHeader::V1(genesis)))
+    Ok(Arc::new(IrysBlockHeader::V1(genesis)))
 }
