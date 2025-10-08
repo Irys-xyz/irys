@@ -253,7 +253,6 @@ impl EpochSnapshot {
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
-        // Build stake/pledge state for this epoch
         self.compute_commitment_state(&new_epoch_commitments);
 
         self.try_genesis_init(new_epoch_block);
@@ -736,18 +735,13 @@ impl EpochSnapshot {
                 .or_default()
                 .push(value);
         }
-
-        // Refund events for unpledges are generated in the block producer.
     }
 
     /// Applies unpledge operations found in a set of epoch commitments.
     ///
     /// Extracts `Unpledge` commitments and removes the referenced partition hash
-    /// from both `capacity_partitions` and `data_partitions` if present, and
-    /// removes the corresponding pledge entry from `commitment_state`.
-    ///
-    /// Note: We also remove the partition hash from `all_active_partitions` to
-    /// keep the active set consistent. This mirrors prior behavior.
+    /// from both `capacity_partitions` and `data_partitions`, and `all_active_partitions` if present,
+    /// and removes the corresponding pledge entry from `commitment_state`.
     pub fn apply_unpledges(&mut self, commitments: &[CommitmentTransaction]) {
         for unpledge in commitments.iter().filter(|c| {
             matches!(
@@ -766,7 +760,7 @@ impl EpochSnapshot {
             // Remove from capacity assignments, if present
             let cap_removed = self.partition_assignments.capacity_partitions.remove(&ph);
 
-            // Remove from data assignments, if present (minor change requested)
+            // Remove from data assignments, if present
             let data_removed = self.partition_assignments.data_partitions.remove(&ph);
 
             if cap_removed.is_none() && data_removed.is_none() {

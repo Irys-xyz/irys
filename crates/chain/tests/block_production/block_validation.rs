@@ -12,14 +12,13 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     use crate::utils::solution_context;
     use irys_actors::{
-        async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-        reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy,
-        BlockProducerInner, ProductionStrategy,
+        async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
+        ProductionStrategy,
     };
     use irys_domain::EmaSnapshot;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
-        DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
+        IrysBlockHeader,
     };
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;
@@ -48,11 +47,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            mempool: irys_actors::block_producer::MempoolTxsBundle,
+            mempool: &mut irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
             solution_hash: H256,
-            expired_ledger_fees: LedgerExpiryBalanceDelta,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(
@@ -62,7 +60,6 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     reward_amount,
                     self.invalid_timestamp,
                     solution_hash,
-                    expired_ledger_fees,
                 )
                 .await
         }
@@ -71,9 +68,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             &self,
             solution: &SolutionContext,
             prev_block_header: &IrysBlockHeader,
-            submit_txs: Vec<DataTransactionHeader>,
-            publish_txs: PublishLedgerWithTxs,
-            system_transaction_ledger: Vec<SystemTransactionLedger>,
+            mempool_bundle: irys_actors::block_producer::MempoolTxsBundle,
             _current_timestamp: u128,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
@@ -84,9 +79,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                 .produce_block_without_broadcasting(
                     solution,
                     prev_block_header,
-                    submit_txs,
-                    publish_txs,
-                    system_transaction_ledger,
+                    mempool_bundle,
                     self.invalid_timestamp,
                     block_reward,
                     eth_built_payload,

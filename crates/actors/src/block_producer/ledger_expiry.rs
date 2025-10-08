@@ -608,7 +608,7 @@ async fn process_middle_blocks(
 /// This struct tracks two types of balance adjustments:
 /// - Miner rewards for storing expired data (term fees distributed to storage providers)
 /// - User refunds for permanent fees when transactions were not promoted to permanent storage
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct LedgerExpiryBalanceDelta {
     /// Rewards for miners who stored the expired data, mapped by miner address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).

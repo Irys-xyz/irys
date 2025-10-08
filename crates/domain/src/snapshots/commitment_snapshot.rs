@@ -12,7 +12,7 @@ use super::EpochSnapshot;
 pub enum CommitmentSnapshotStatus {
     Accepted,                        // The commitment is valid and was added to the snapshot
     Unknown,                         // The commitment has no status in the snapshot
-    Unsupported,                     // The commitment is an unsupported type (unstake/unpledge)
+    Unsupported,                     // The commitment is an unsupported type (unstake)
     Unstaked,                        // The pledge commitment doesn't have a corresponding stake
     InvalidPledgeCount,              // The pledge count doesn't match the actual number of pledges
     PartitionNotOwned,               // Target capacity partition is not owned by signer
@@ -30,9 +30,6 @@ pub struct MinerCommitments {
     pub pledges: Vec<CommitmentTransaction>,
     pub unpledges: Vec<CommitmentTransaction>,
 }
-
-// NOTE: We intentionally store full unpledge transactions instead of a
-// reduced struct so epoch processing can consume them directly.
 
 impl CommitmentSnapshot {
     pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
@@ -319,8 +316,6 @@ impl CommitmentSnapshot {
         res.to_le_bytes().to_base58()
     }
 }
-
-impl CommitmentSnapshot {}
 
 #[cfg(test)]
 mod tests {

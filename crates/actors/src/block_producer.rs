@@ -437,25 +437,17 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let inputs = self.get_mempool_txs(&prev_block_header).await?;
-        let system_tx_ledger = inputs.system_ledgers.clone();
-        let expired_ledger_fees = inputs.aggregated_miner_fees.clone();
-        let submit_txs = inputs.submit_txs.clone();
-        let publish_txs = inputs.publish_txs.clone();
-        let mempool_bundle = inputs;
-
+        let mut mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
-        let _commitment_refund_events = mempool_bundle.commitment_refund_events.clone();
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
-                mempool_bundle,
+                &mut mempool_bundle,
                 block_reward,
                 current_timestamp,
                 solution.solution_hash,
-                expired_ledger_fees,
             )
             .await?;
         let evm_block = eth_built_payload.block();
@@ -464,9 +456,7 @@ pub trait BlockProdStrategy {
             .produce_block_without_broadcasting(
                 solution,
                 &prev_block_header,
-                submit_txs,
-                publish_txs,
-                system_tx_ledger,
+                mempool_bundle,
                 current_timestamp,
                 block_reward,
                 evm_block,
@@ -641,11 +631,10 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
-        mut mempool: MempoolTxsBundle,
+        mempool: &mut MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
         solution_hash: H256,
-        _ledger_expiry_balance_delta: LedgerExpiryBalanceDelta,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -802,9 +791,7 @@ pub trait BlockProdStrategy {
         &self,
         solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
-        submit_txs: Vec<DataTransactionHeader>,
-        publish_txs: PublishLedgerWithTxs,
-        system_transaction_ledger: Vec<SystemTransactionLedger>,
+        mempool_bundle: MempoolTxsBundle,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
@@ -826,11 +813,13 @@ pub trait BlockProdStrategy {
         }
 
         // Publish Ledger Transactions
-        let publish_chunks_added =
-            calculate_chunks_added(&publish_txs.txs, self.inner().config.consensus.chunk_size);
+        let publish_chunks_added = calculate_chunks_added(
+            &mempool_bundle.publish_txs.txs,
+            self.inner().config.consensus.chunk_size,
+        );
         let publish_total_chunks =
             prev_block_header.data_ledgers[DataLedger::Publish].total_chunks + publish_chunks_added;
-        let opt_proofs = publish_txs.proofs.clone();
+        let opt_proofs = mempool_bundle.publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
         let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
@@ -896,8 +885,10 @@ pub trait BlockProdStrategy {
             // Record the hash of the epoch block (previous block) as our epoch reference
             last_epoch_hash = prev_block_hash;
         }
-        let submit_chunks_added =
-            calculate_chunks_added(&submit_txs, self.inner().config.consensus.chunk_size);
+        let submit_chunks_added = calculate_chunks_added(
+            &mempool_bundle.submit_txs,
+            self.inner().config.consensus.chunk_size,
+        );
         let submit_total_chunks =
             prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
 
@@ -920,13 +911,23 @@ pub trait BlockProdStrategy {
             miner_address: solution.mining_address,
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
             timestamp: current_timestamp,
-            system_ledgers: system_transaction_ledger,
+            system_ledgers: mempool_bundle.system_ledgers,
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
                     ledger_id: DataLedger::Publish.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs.txs).0,
-                    tx_ids: H256List(publish_txs.txs.iter().map(|t| t.id).collect::<Vec<_>>()),
+                    tx_root: DataTransactionLedger::merklize_tx_root(
+                        &mempool_bundle.publish_txs.txs,
+                    )
+                    .0,
+                    tx_ids: H256List(
+                        mempool_bundle
+                            .publish_txs
+                            .txs
+                            .iter()
+                            .map(|t| t.id)
+                            .collect::<Vec<_>>(),
+                    ),
                     total_chunks: publish_total_chunks,
                     expires: None,
                     proofs: opt_proofs,
@@ -941,8 +942,14 @@ pub trait BlockProdStrategy {
                 // Term Submit Ledger
                 DataTransactionLedger {
                     ledger_id: DataLedger::Submit.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
-                    tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
+                    tx_root: DataTransactionLedger::merklize_tx_root(&mempool_bundle.submit_txs).0,
+                    tx_ids: H256List(
+                        mempool_bundle
+                            .submit_txs
+                            .iter()
+                            .map(|t| t.id)
+                            .collect::<Vec<_>>(),
+                    ),
                     total_chunks: submit_total_chunks,
                     expires: Some(
                         self.inner()
