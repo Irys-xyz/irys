@@ -10,7 +10,6 @@ use irys_types::{
 };
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
 
@@ -429,53 +428,6 @@ impl Inner {
         drop(mempool_state_guard);
 
         found
-    }
-
-    fn validate_funding(
-        &self,
-        commitment_tx: &CommitmentTransaction,
-    ) -> Result<(), TxIngressError> {
-        // Get the current balance of the transaction signer
-        let balance: irys_types::U256 = self
-            .reth_node_adapter
-            .rpc
-            .get_balance(commitment_tx.signer, None)
-            .map(From::from)
-            .map_err(|e| {
-                tracing::error!(
-                    tx_id = %commitment_tx.id,
-                    signer = %commitment_tx.signer,
-                    error = %e,
-                    "Failed to fetch balance for commitment tx"
-                );
-                TxIngressError::BalanceFetchError {
-                    address: commitment_tx.signer.to_string(),
-                    reason: e.to_string(),
-                }
-            })?;
-
-        // Calculate total cost (value + fee)
-        let total_cost = commitment_tx.total_cost();
-
-        // Ensure balance is sufficient
-        if balance < total_cost {
-            tracing::warn!(
-                tx_id = %commitment_tx.id,
-                balance = %balance,
-                required = %total_cost,
-                "Insufficient balance for commitment tx"
-            );
-            return Err(TxIngressError::Unfunded);
-        }
-
-        tracing::debug!(
-            tx_id = %commitment_tx.id,
-            balance = %balance,
-            required = %total_cost,
-            "Funding validated for commitment tx"
-        );
-
-        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(tx_id = ?commitment_tx.id))]

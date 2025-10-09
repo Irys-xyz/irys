@@ -20,13 +20,9 @@ async fn gossip_commitment_to_node(
     commitment: &CommitmentTransaction,
 ) -> eyre::Result<()> {
     let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
-            commitment.clone(),
-            resp_tx,
-        ))?;
+    node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
+    )?;
 
     match resp_rx.await {
         Ok(Ok(())) => {}
