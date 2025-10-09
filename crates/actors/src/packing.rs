@@ -1,4 +1,3 @@
-use actix::{Actor, Addr, Context, Handler, Message, MessageResponse};
 use eyre::eyre;
 use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
@@ -12,18 +11,23 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
-use tokio::{sync::Semaphore, task::yield_now, time::sleep};
-use tracing::{debug, error, span, warn, Level};
+use tokio::{
+    sync::{
+        mpsc::error::{SendError, TrySendError},
+        oneshot, Notify, Semaphore,
+    },
+    task::yield_now,
+};
+use tracing::{debug, error, span, trace, warn, Level};
 
 #[cfg(feature = "nvidia")]
 use {irys_packing::capacity_pack_range_cuda_c, irys_types::split_interval};
 
-#[derive(Debug, Message, Clone)]
-#[rtype("()")]
+#[derive(Debug, Clone)]
 pub struct PackingRequest {
     pub storage_module: Arc<StorageModule>,
     pub chunk_range: PartitionChunkRange,
@@ -31,18 +35,21 @@ pub struct PackingRequest {
 
 pub type AtomicPackingJobQueue = Arc<RwLock<VecDeque<PackingRequest>>>;
 pub type PackingJobsBySM = HashMap<usize, AtomicPackingJobQueue>;
+pub type PackingQueues = Arc<RwLock<PackingJobsBySM>>;
 
 pub type PackingSemaphore = Arc<Semaphore>;
 
 #[derive(Debug, Clone)]
-/// Packing actor state
-pub struct PackingActor {
+/// Packing service state
+pub struct PackingService {
     /// list of all the pending packing jobs
-    pending_jobs: PackingJobsBySM,
+    pending_jobs: PackingQueues,
     /// semaphore to control concurrency -- sm_id => semaphore
     semaphore: PackingSemaphore,
     /// Atomic counter of the number of active workers - used primarily to determine when packing has finished
     active_workers: Arc<AtomicUsize>,
+    /// Notifier for activity/idle transitions
+    notify: Arc<Notify>,
     /// packing process configuration
     packing_config: PackingConfig,
     /// Top level config
@@ -50,7 +57,7 @@ pub struct PackingActor {
 }
 
 #[derive(Debug, Clone)]
-/// configuration for the packing actor
+/// configuration for the packing service
 pub struct PackingConfig {
     pub poll_duration: Duration,
     /// Max. number of packing threads for CPU packing
@@ -80,54 +87,70 @@ impl PackingConfig {
 // log every 1000 chunks
 const LOG_PER_CHUNKS: u32 = 1000;
 
-impl PackingActor {
-    /// creates a new packing actor
-    pub fn new(storage_module_ids: Vec<usize>, config: Arc<Config>) -> Self {
+impl PackingService {
+    /// creates a new packing service
+    pub fn new(config: Arc<Config>) -> Self {
         let packing_config = PackingConfig::new(&config);
         let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
-        let pending_jobs = storage_module_ids
-            .iter()
-            .map(|s| (*s, Arc::new(RwLock::new(VecDeque::with_capacity(32)))))
-            .collect();
+        // Dynamic registration: start with an empty map of queues; queues are created on first use
+        let pending_jobs: PackingQueues = Arc::new(RwLock::new(HashMap::new()));
         Self {
             pending_jobs,
             semaphore,
             packing_config,
             config,
             active_workers: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::new(Notify::new()),
         }
     }
 
-    async fn process_jobs(
-        self,
-        pending_jobs: AtomicPackingJobQueue,
-        runtime_handle: tokio::runtime::Handle,
-    ) {
+    async fn process_jobs(self, runtime_handle: tokio::runtime::Handle) {
         let mut was_active = false;
         'main: loop {
             if was_active {
                 // basic atomic counter so we can keep track of the number of active workers
                 self.active_workers.fetch_sub(1, Ordering::Relaxed);
+                // signal potential idle transition
+                self.notify.notify_waiters();
                 was_active = false
             }
-            // block as the compiler can't reason about explicit read guard drops with Send bounds apparently
+            // Try to pop from any non-empty queue across all storage modules
+            // Capture the Notified future before re-checking work to avoid missed notifications
+            let notified = self.notify.notified();
             let front = {
-                let mut pending_write_guard = pending_jobs
-                    .write()
-                    .expect("Unable to acquire pending jobs write lock");
-                pending_write_guard.pop_front()
+                let map_guard = self
+                    .pending_jobs
+                    .read()
+                    .expect("Unable to acquire pending jobs map read lock");
+                let mut popped = None;
+                for queue in map_guard.values() {
+                    let mut q = queue
+                        .as_ref()
+                        .write()
+                        .expect("Unable to acquire pending queue write lock");
+                    if let Some(req) = q.pop_front() {
+                        popped = Some(req);
+                        break;
+                    }
+                }
+                popped
             };
 
             let next_range = match front {
                 Some(v) => v,
                 None => {
-                    // debug!("no packing requests in queue, sleeping...");
-                    tokio::time::sleep(self.packing_config.poll_duration).await;
+                    // No work available; wait for a notification or fall back to a short sleep
+                    tokio::select! {
+                        _ = notified => {},
+                        _ = tokio::time::sleep(self.packing_config.poll_duration) => {},
+                    }
                     continue;
                 }
             };
 
             self.active_workers.fetch_add(1, Ordering::Relaxed);
+            // signal activity observed
+            self.notify.notify_waiters();
             was_active = true;
 
             // TODO: should we be validating if the requested range is valid?
@@ -238,6 +261,7 @@ impl PackingActor {
                     (self.config.consensus.chunk_size * 2).try_into().unwrap(),
                 );
 
+                let notify = self.notify.clone();
                 let mut process_chunk = |chunk_bytes: Bytes| {
                     // TODO: move our use of Vec for bytes to, well, Bytes, so we get much cheaper copies etc
 
@@ -246,6 +270,8 @@ impl PackingActor {
                         chunk_bytes.to_vec(),
                         ChunkType::Entropy,
                     );
+                    // notify after each chunk write to allow idle detection to observe permit/state changes
+                    notify.notify_waiters();
 
                     if range_start % LOG_PER_CHUNKS == 0 {
                         debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &range_start, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
@@ -256,6 +282,7 @@ impl PackingActor {
                         let _ = storage_module.sync_pending_chunks();
                         // don't need this as stream.next() uses await, so it naturally yields
                         // yield_now().await // so the shutdown can stop us
+                        notify.notify_waiters();
                     }
 
                     range_start += 1;
@@ -324,6 +351,7 @@ impl PackingActor {
                         let config = self.config.clone();
                         let storage_module_clone = storage_module.clone();
                         let chain_id = self.packing_config.chain_id;
+                        let notify = self.notify.clone();
                         runtime_handle.clone().spawn_blocking(move || {
                             let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
                             compute_entropy_chunk(
@@ -341,13 +369,15 @@ impl PackingActor {
                             // write the chunk
                             storage_module_clone.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
                             drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
+                            // notify waiters so idle detection can re-check available permits/state
+                            notify.notify_waiters();
                         });
 
                         if i % LOG_PER_CHUNKS == 0 {
                             debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &i, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
                         }
                     }
-                    debug!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}", job_chunk_range.0.start(), job_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+                    trace!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}", job_chunk_range.0.start(), job_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
@@ -445,32 +475,32 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     unsafe { Vec::from_raw_parts(ptr as *mut [u8; N], length, length) }
 }
 
-impl PackingActor {
-    /// Spawn packing controllers and return TokioServiceHandles for them
+impl PackingService {
+    /// Spawn multiple packing controllers (based on configured concurrency) that scan all queues.
+    /// Returns TokioServiceHandles for each controller.
     pub fn spawn_packing_controllers(
         &self,
         runtime_handle: tokio::runtime::Handle,
     ) -> Vec<irys_types::TokioServiceHandle> {
         let mut handles = Vec::new();
-        let keys = self.pending_jobs.keys().copied().collect::<Vec<usize>>();
+        let controller_count = std::cmp::max(1_usize, self.packing_config.concurrency as usize);
 
-        for key in keys {
+        for i in 0..controller_count {
             let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
             let self_clone = self.clone();
-            let pending_jobs = self.pending_jobs.get(&key).unwrap().clone();
-
             let runtime_handle_clone = runtime_handle.clone();
+
             let handle = runtime_handle.spawn(async move {
                 tokio::select! {
-                    _ = Self::process_jobs(self_clone, pending_jobs, runtime_handle_clone) => {},
+                    _ = Self::process_jobs(self_clone, runtime_handle_clone) => {},
                     _ = shutdown_rx => {
-                        tracing::info!("Packing controller for SM {} received shutdown signal", key);
+                        tracing::info!("Packing controller {} received shutdown signal", i);
                     }
                 }
             });
 
             handles.push(irys_types::TokioServiceHandle {
-                name: format!("packing_controller_sm_{}", key),
+                name: format!("packing_controller_{}", i),
                 handle,
                 shutdown_signal: shutdown_tx,
             });
@@ -480,98 +510,269 @@ impl PackingActor {
     }
 }
 
-impl Actor for PackingActor {
-    type Context = Context<Self>;
-
-    fn start(self) -> actix::Addr<Self> {
-        // Controllers are now spawned separately via spawn_packing_controllers
-        Context::new().run(self)
-    }
-
-    fn started(&mut self, ctx: &mut Self::Context) {
-        ctx.set_mailbox_capacity(5_000);
-    }
-}
-
-impl Handler<PackingRequest> for PackingActor {
-    type Result = ();
-
-    fn handle(&mut self, msg: PackingRequest, _ctx: &mut Self::Context) -> Self::Result {
-        debug!(target: "irys::packing", "Received packing request for range {}-{} for SM {}", &msg.chunk_range.0.start(), &msg.chunk_range.0.end(), &msg.storage_module.id);
-        self.pending_jobs
-            .get(&msg.storage_module.id)
-            .unwrap()
-            .as_ref()
-            .write()
-            .unwrap()
-            .push_back(msg);
-    }
-}
-
-#[derive(Debug, Message, Clone)]
-#[rtype("Internals")]
-pub struct GetInternals();
-
-#[derive(Debug, MessageResponse, Clone)]
+#[derive(Debug, Clone)]
 pub struct Internals {
-    pub pending_jobs: PackingJobsBySM,
+    pub pending_jobs: PackingQueues,
     pub semaphore: PackingSemaphore,
     pub active_workers: Arc<AtomicUsize>,
     pub config: PackingConfig,
 }
 
-impl Handler<GetInternals> for PackingActor {
-    type Result = Internals;
+#[derive(Debug)]
+pub enum PackingServiceMessage {
+    Drain { respond_to: oneshot::Sender<()> },
+}
 
-    fn handle(&mut self, _msg: GetInternals, _ctx: &mut Self::Context) -> Self::Result {
-        Internals {
-            pending_jobs: self.pending_jobs.clone(),
-            semaphore: self.semaphore.clone(),
-            config: self.packing_config.clone(),
-            active_workers: self.active_workers.clone(),
-        }
+#[derive(Debug, Clone)]
+pub struct PackingIdleWaiter {
+    packing_service_sender: tokio::sync::mpsc::Sender<PackingServiceMessage>,
+}
+
+impl PackingIdleWaiter {
+    pub async fn wait_for_idle(&self, timeout: Option<Duration>) -> eyre::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.packing_service_sender
+            .send(PackingServiceMessage::Drain { respond_to: tx })
+            .await
+            .map_err(|e| eyre!("control channel closed: {}", e))?;
+        tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async move {
+            rx.await
+                .map_err(|e| eyre!("waiter dropped: {}", e))
+                .map(|_| ())
+        })
+        .await
+        .map_err(|_| eyre!("timed out waiting for packing to become idle"))??;
+        Ok(())
     }
 }
 
 /// waits for any pending & active packing tasks to complete
-pub async fn wait_for_packing(
-    packing_addr: Addr<PackingActor>,
-    timeout: Option<Duration>,
-) -> eyre::Result<()> {
-    let internals = packing_addr.send(GetInternals()).await?;
-    tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(10)), async {
-        let mut i = 0;
-        loop {
-            // Counts all jobs in all job queues
-            if internals
-                .pending_jobs
-                .values()
-                .fold(0, |acc, x| acc + x.as_ref().read().unwrap().len())
-                == 0
-                && internals.semaphore.available_permits() == internals.config.concurrency as usize
-            {
-                match internals.active_workers.load(Ordering::Relaxed) {
-                    0 => break Some(()),
-                    n => {
-                        i += 1;
-                        if i % 10 == 0 {
-                            debug!("{} active packing workers, waiting...", &n)
-                        }
+/// A lightweight, Tokio-native handle for enqueueing packing requests and introspecting service state.
+#[derive(Debug, Clone)]
+pub struct PackingHandle {
+    sender: tokio::sync::mpsc::Sender<PackingRequest>,
+    internals: Internals,
+
+    packing_service_sender: tokio::sync::mpsc::Sender<PackingServiceMessage>,
+}
+
+impl PackingHandle {
+    /// Enqueue a packing request. If the bounded channel is full, drop immediately with a warning.
+    /// Returns Err only if the channel is closed.
+    pub fn send(&self, req: PackingRequest) -> Result<(), SendError<PackingRequest>> {
+        match self.sender.try_send(req) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(target: "irys::packing", "Dropping packing request due to saturated channel");
+                Ok(())
+            }
+            Err(TrySendError::Closed(req)) => Err(SendError(req)),
+        }
+    }
+
+    /// Access a clone of the internals snapshot used by wait_for_packing.
+    pub fn internals(&self) -> Internals {
+        self.internals.clone()
+    }
+
+    /// Access a clone of the underlying sender for enqueueing packing requests.
+    pub fn sender(&self) -> tokio::sync::mpsc::Sender<PackingRequest> {
+        self.sender.clone()
+    }
+
+    /// Create a PackingIdleWaiter that can wait for the service to become idle.
+    pub fn waiter(&self) -> PackingIdleWaiter {
+        PackingIdleWaiter {
+            packing_service_sender: self.packing_service_sender.clone(),
+        }
+    }
+
+    /// Construct a PackingHandle from its parts.
+    /// Useful for tests or custom wiring where the receiver loop is managed externally.
+    pub fn from_parts(
+        sender: tokio::sync::mpsc::Sender<PackingRequest>,
+        internals: Internals,
+    ) -> Self {
+        let (packing_service_sender, _ctrl_rx) =
+            tokio::sync::mpsc::channel::<PackingServiceMessage>(1);
+        Self {
+            sender,
+            internals,
+
+            packing_service_sender,
+        }
+    }
+}
+
+pub type PackingSender = tokio::sync::mpsc::Sender<PackingRequest>;
+pub type PackingReceiver = tokio::sync::mpsc::Receiver<PackingRequest>;
+
+impl PackingService {
+    /// Create a detached channel for packing requests (channel-first).
+    pub fn channel(bound: usize) -> (PackingSender, PackingReceiver) {
+        tokio::sync::mpsc::channel::<PackingRequest>(bound)
+    }
+
+    /// Attach a previously created receiver and start the enqueue loop.
+    /// Returns a `PackingHandle` for interacting with the service.
+    pub fn attach_receiver_loop(
+        &self,
+        runtime_handle: tokio::runtime::Handle,
+        mut rx: PackingReceiver,
+        sender: PackingSender,
+    ) -> PackingHandle {
+        // Clone references to the shared internals so both the service and observers see the same state
+        let job_queues = self.pending_jobs.clone();
+
+        // Build an Internals snapshot that shares the same underlying Arcs as the service
+        let internals = Internals {
+            pending_jobs: self.pending_jobs.clone(),
+            semaphore: self.semaphore.clone(),
+            config: self.packing_config.clone(),
+            active_workers: self.active_workers.clone(),
+        };
+
+        // Control channel for waiter/introspection
+        let (packing_service_sender, mut ctrl_rx) =
+            tokio::sync::mpsc::channel::<PackingServiceMessage>(64);
+
+        // Shared list of pending drain responders
+        let pending_waiters: Arc<Mutex<Vec<oneshot::Sender<()>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        // Helper to flush pending waiters if the system is idle
+        let flush_if_idle = {
+            let internals = internals.clone();
+            let pending = pending_waiters.clone();
+            move || {
+                let queued_jobs = {
+                    let map = internals.pending_jobs.read().unwrap();
+                    map.values()
+                        .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+                };
+                let available_permits = internals.semaphore.available_permits();
+                let target_permits = internals.config.concurrency as usize;
+                let active = internals.active_workers.load(Ordering::Relaxed);
+                if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                    let mut guard = pending.lock().unwrap();
+                    for tx in guard.drain(..) {
+                        let _ = tx.send(());
                     }
                 }
             }
-            sleep(Duration::from_millis(100)).await
+        };
+
+        // Spawn a watcher that listens to state-change notifications and flushes pending waiters when idle
+        {
+            let notify = self.notify.clone();
+            let internals = internals.clone();
+            let pending = pending_waiters.clone();
+            runtime_handle.spawn(async move {
+                loop {
+                    notify.notified().await;
+                    let queued_jobs = {
+                        let map = internals.pending_jobs.read().unwrap();
+                        map.values()
+                            .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+                    };
+                    let available_permits = internals.semaphore.available_permits();
+                    let target_permits = internals.config.concurrency as usize;
+                    let active = internals.active_workers.load(Ordering::Relaxed);
+                    if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                        let mut guard = pending.lock().unwrap();
+                        for tx in guard.drain(..) {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            });
         }
-    })
-    .await?
-    .ok_or_else(|| eyre!("timed out waiting for packing to complete"))
+
+        // Spawn the receiver loop handling both job and control channels
+        {
+            let notify = self.notify.clone();
+            let internals_ctrl = internals.clone();
+            runtime_handle.spawn(async move {
+                loop {
+                    tokio::select! {
+                        Some(msg) = rx.recv() => {
+                            // Enqueue into the SM-specific pending queue; create queue if missing
+                            let sm_id = msg.storage_module.id;
+
+                            // HOT path: try read-lock first to avoid write contention when the queue already exists
+                            let queue_arc = if let Some(q) = {
+                                let map_guard = job_queues
+                                    .read()
+                                    .expect("Unable to acquire pending jobs map read lock");
+                                map_guard.get(&sm_id).cloned()
+                            } {
+                                q
+                            } else {
+                                // COLD path: create the queue under a write lock
+                                let mut map_guard = job_queues
+                                    .write()
+                                    .expect("Unable to acquire pending jobs map write lock");
+                                map_guard
+                                    .entry(sm_id)
+                                    .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
+                                    .clone()
+                            };
+
+                            // Ignore poisoned lock errors by propagating panic (consistent with existing code)
+                            queue_arc.as_ref().write().unwrap().push_back(msg);
+                            // signal new activity for waiters
+                            notify.notify_waiters();
+                            // best-effort flush
+                            flush_if_idle();
+                        },
+                        Some(ctrl) = ctrl_rx.recv() => {
+                            match ctrl {
+                                PackingServiceMessage::Drain { respond_to } => {
+                                    // fast-path if already idle
+                                    let queued_jobs = {
+                                        let map = internals_ctrl.pending_jobs.read().unwrap();
+                                        map.values()
+                                            .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+                                    };
+                                    let available_permits = internals_ctrl.semaphore.available_permits();
+                                    let target_permits = internals_ctrl.config.concurrency as usize;
+                                    let active = internals_ctrl.active_workers.load(Ordering::Relaxed);
+                                    if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                                        let _ = respond_to.send(());
+                                    } else {
+                                        // store waiter and wait for state-change watcher to flush
+                                        pending_waiters.lock().unwrap().push(respond_to);
+                                    }
+                                }
+                            }
+                        },
+                        else => break,
+                    }
+                }
+            });
+        }
+
+        PackingHandle {
+            sender,
+            internals,
+
+            packing_service_sender,
+        }
+    }
+
+    /// Spawn a Tokio task that receives PackingRequest messages and pushes them into the internal queues.
+    /// Returns a `PackingHandle` for interacting with the service.
+    pub fn spawn_tokio_service(&self, runtime_handle: tokio::runtime::Handle) -> PackingHandle {
+        let (tx, rx) = tokio::sync::mpsc::channel::<PackingRequest>(5_000);
+        self.attach_receiver_loop(runtime_handle, rx, tx)
+    }
 }
 
+/// waits for any pending & active packing tasks to complete
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use actix::Actor as _;
     use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_packing::capacity_single::compute_entropy_chunk;
     use irys_storage::ie;
@@ -582,9 +783,7 @@ mod tests {
         StorageSyncConfig,
     };
 
-    use crate::packing::{
-        cast_vec_u8_to_vec_u8_array, wait_for_packing, PackingActor, PackingRequest,
-    };
+    use crate::packing::{cast_vec_u8_to_vec_u8_array, PackingRequest, PackingService};
 
     #[test_log::test(actix::test)]
     async fn test_packing_actor() -> eyre::Result<()> {
@@ -642,21 +841,37 @@ mod tests {
                 packing_end
             )),
         };
-        // Create an instance of the packing actor
-        let sm_ids = vec![storage_module.id];
-        let packing = PackingActor::new(sm_ids, Arc::new(config.clone()));
+        // Create an instance of the packing service
+        let packing = PackingService::new(Arc::new(config.clone()));
 
         // Spawn packing controllers with runtime handle
-        // In actix test context, we need to get the tokio runtime this way
+        // In this test context, get the Tokio runtime handle
         let runtime_handle =
             tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime");
         let _packing_handles = packing.spawn_packing_controllers(runtime_handle);
-
-        let packing_addr = packing.start();
+        let handle = packing.spawn_tokio_service(
+            tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime"),
+        );
 
         // action
-        packing_addr.send(request).await?;
-        wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
+        handle.send(request)?;
+
+        // Wait until packing starts to avoid racing the idle waiter
+        let wait_start = std::time::Instant::now();
+        loop {
+            if !storage_module.get_intervals(ChunkType::Entropy).is_empty() {
+                break;
+            }
+            if wait_start.elapsed() > Duration::from_secs(5) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        handle
+            .waiter()
+            .wait_for_idle(Some(Duration::from_secs(99999)))
+            .await?;
         storage_module.force_sync_pending_chunks()?;
 
         // assert

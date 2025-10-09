@@ -406,7 +406,8 @@ impl GossipServiceTestFixture {
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let (service_senders, service_receivers) = ServiceSenders::new();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
         let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
         let gossip_broadcast_rx = service_receivers.gossip_broadcast;
         let block_tree_rx = service_receivers.block_tree;
@@ -844,7 +845,8 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
-    let (service_senders, _service_receivers) = ServiceSenders::new();
+    let (service_senders, _service_receivers) =
+        irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
     let mempool_stub = MempoolStub::new(gossip_tx);

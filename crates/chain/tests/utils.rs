@@ -19,7 +19,6 @@ use irys_actors::{
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
-    packing::wait_for_packing,
 };
 use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
@@ -553,12 +552,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
-        wait_for_packing(
-            self.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(seconds_to_wait as u64)),
-        )
-        .await
-        .expect("for packing to complete in the wait period");
+        self.node_ctx
+            .packing_waiter
+            .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
+            .await
+            .expect("for packing to complete in the wait period");
     }
 
     pub fn start_mining(&self) {
