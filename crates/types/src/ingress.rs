@@ -3,6 +3,7 @@ use alloy_signer::Signature;
 use arbitrary::Arbitrary;
 use bytes::BufMut;
 use eyre::OptionExt as _;
+use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
@@ -12,14 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
 use crate::irys::IrysSigner;
-
 use crate::{generate_data_root, generate_ingress_leaves, DataRoot, IrysSignature, Node, H256};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
-#[serde(tag = "version")]
+#[derive(Debug, Clone, PartialEq, IntegerTagged, Eq, Compact, Arbitrary)]
+#[repr(u8)]
+#[integer_tagged(tag = "version")]
 pub enum IngressProof {
-    #[serde(rename = "1")]
-    V1(IngressProofV1),
+    #[integer_tagged(version = 1)]
+    V1(IngressProofV1) = 1,
 }
 
 impl Default for IngressProof {

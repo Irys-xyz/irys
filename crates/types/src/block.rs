@@ -162,16 +162,7 @@ impl VDFLimiterInfo {
     }
 }
 
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    /* Serialize, Deserialize, */ IntegerTagged,
-    PartialEq,
-    Arbitrary,
-    Display,
-)]
-// #[serde(tag = "version")]
+#[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary, Display)]
 #[integer_tagged(tag = "version")]
 pub enum IrysBlockHeader {
     #[integer_tagged(version = 1)]

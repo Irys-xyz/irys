@@ -52,21 +52,12 @@ pub enum CommitmentValidationError {
     ForbiddenSigner,
 }
 
-#[derive(Clone, Debug, Eq, /*  Serialize, Deserialize, */ IntegerTagged, PartialEq, Arbitrary)]
+#[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]
 #[repr(u8)]
-// #[serde(tag = "version")]
 #[integer_tagged(tag = "version")]
 pub enum DataTransactionHeader {
-    // #[serde(rename = "1")]
     #[integer_tagged(version = 1)]
     V1(DataTransactionHeaderV1) = 1,
-}
-
-#[test]
-fn d2() {
-    let tx = CommitmentTransaction::default();
-
-    println!("{}", &serde_json::to_string_pretty(&tx).unwrap(),)
 }
 
 impl VersionDiscriminant for DataTransactionHeader {
@@ -198,23 +189,12 @@ impl Versioned for DataTransactionHeaderV1 {
 // }
 
 // Commitment Transaction versioned wrapper
-#[derive(
-    Clone, Debug, Eq, /* Serialize, Deserialize, */ IntegerTagged, PartialEq, Arbitrary, Hash,
-)]
+#[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
-// #[serde(tag = "version")]
 #[integer_tagged(tag = "version")]
 pub enum CommitmentTransaction {
-    // #[serde(rename = "1")]
     #[integer_tagged(version = 1)]
     V1(CommitmentTransactionV1) = 1,
-}
-
-#[test]
-fn d() {
-    let tx = CommitmentTransaction::default();
-
-    println!("{}", &serde_json::to_string_pretty(&tx).unwrap(),)
 }
 
 impl Default for CommitmentTransaction {
