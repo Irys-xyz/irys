@@ -39,8 +39,7 @@ async fn send_block_to_block_tree(
         })
         .unwrap();
 
-    let res = response_rx.await.unwrap();
-    res
+    response_rx.await.unwrap()
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
