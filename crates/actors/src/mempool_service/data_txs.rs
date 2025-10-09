@@ -155,12 +155,6 @@ impl Inner {
         match ledger {
             DataLedger::Publish => {
                 // Publish ledger - permanent storage
-                //
-                // IMPORTANT: We do NOT recompute exact fee amounts here because the EMA
-                // (Exponential Moving Average) can change between creation and ingestion,
-                // and can differ across forks. Instead, we verify the fee structure is
-                // internally consistent (charge objects can be constructed) so it can be
-                // distributed properly by protocol rules if included.
                 self.validate_fee_structure_api_only(&tx)?;
             }
             DataLedger::Submit => {

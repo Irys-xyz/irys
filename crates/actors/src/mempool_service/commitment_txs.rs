@@ -11,7 +11,7 @@ use irys_types::{
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use std::{collections::HashMap, num::NonZeroUsize};
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, instrument, warn};
 
 impl Inner {
     // Shared pre-checks for both API and Gossip commitment ingress paths.
@@ -65,8 +65,7 @@ impl Inner {
         let commitment_status = self.get_commitment_status(commitment_tx).await;
         debug!(
             "commitment tx {} status {:?}",
-            &commitment_tx.id,
-            &commitment_status
+            &commitment_tx.id, &commitment_status
         );
 
         match commitment_status {
