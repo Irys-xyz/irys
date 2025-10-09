@@ -130,7 +130,7 @@ pub fn derive_integer_tagged(input: TokenStream) -> TokenStream {
                     where
                         A: MapAccess<'de>,
                     {
-                        let mut __version: Option<u32> = None;
+                        let mut __version: Option<u8> = None; // version is a u8
                         let mut __fields = ::serde_json::Map::new();
 
                         // Collect all fields
@@ -162,7 +162,7 @@ pub fn derive_integer_tagged(input: TokenStream) -> TokenStream {
                     where
                         A: SeqAccess<'de>,
                     {
-                        let version: u32 = seq.next_element()?
+                        let version: u8 = seq.next_element()?
                             .ok_or_else(|| ::serde::de::Error::invalid_length(0, &self))?;
 
                         match version {
@@ -182,9 +182,6 @@ pub fn derive_integer_tagged(input: TokenStream) -> TokenStream {
             }
         }
     };
-
-    #[cfg(debug_assertions)]
-    eprintln!("Generated code:\n{}", expanded);
 
     TokenStream::from(expanded)
 }
@@ -220,7 +217,7 @@ fn extract_tag_name(attrs: &[syn::Attribute]) -> Option<String> {
     None
 }
 
-fn extract_version(attrs: &[syn::Attribute]) -> Option<u32> {
+fn extract_version(attrs: &[syn::Attribute]) -> Option<u8> {
     for attr in attrs {
         if attr.path.is_ident("integer_tagged") {
             let result = attr.parse_args_with(|input: syn::parse::ParseStream| {
@@ -231,7 +228,7 @@ fn extract_version(attrs: &[syn::Attribute]) -> Option<u32> {
 
                     if key == "version" {
                         let value: syn::LitInt = input.parse()?;
-                        version = Some(value.base10_parse::<u32>()?);
+                        version = Some(value.base10_parse::<u8>()?);
                     } else {
                         let _: syn::Lit = input.parse()?;
                     }
