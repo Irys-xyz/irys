@@ -12,9 +12,51 @@ use irys_types::{
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 impl Inner {
+    // Shared pre-checks for both API and Gossip data tx ingress paths.
+    // Performs duplicate detection, signature validation, anchor validation, expiry computation,
+    // and ledger parsing. Returns the resolved ledger and the computed expiry height.
+    #[inline]
+    async fn precheck_data_ingress_common(
+        &mut self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Early exit if already known in mempool or DB
+        {
+            if self.is_known_data_tx(&tx.id).await? {
+                return Err(TxIngressError::Skipped);
+            }
+        }
+
+        // Validate signature
+        self.validate_signature(tx).await?;
+
+        // Validate anchor and compute expiry
+        let anchor_height = self.validate_anchor(tx).await?;
+        let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
+
+        // Validate and parse ledger type
+        let ledger = self.parse_ledger(tx)?;
+
+        Ok((ledger, expiry_height))
+    }
+
+    // Shared post-processing: insert into mempool, cache data_root with expiry,
+    // process any pending chunks, and gossip the transaction.
+    #[inline]
+    async fn postprocess_data_ingress(
+        &mut self,
+        tx: &DataTransactionHeader,
+        expiry_height: u64,
+    ) -> Result<(), TxIngressError> {
+        self.insert_tx_and_mark_valid(tx).await;
+        self.cache_data_root_with_expiry(tx, expiry_height);
+        self.process_pending_chunks_for_root(tx.data_root).await?;
+        self.broadcast_tx_gossip(tx);
+        Ok(())
+    }
     /// check the mempool and mdbx for data transaction
     /// TODO: align the logic with handle_get_commitment_tx_message (specifically HashMap output)
     pub async fn handle_get_data_tx_message(
@@ -60,27 +102,8 @@ impl Inner {
 
         tx.promoted_height = None;
 
-        {
-            // Early out if we already know about this transaction in
-            // the mempool or the index
-            if self.is_known_data_tx(&tx.id).await? {
-                warn!("duplicate tx: {:?}", TxIngressError::Skipped);
-                return Err(TxIngressError::Skipped);
-            }
-        }
-
-        // Validate the transaction signature
-        // check the result and error handle
-        self.validate_signature(&tx).await?;
-
-        // Validate anchor and compute pre-confirmation expiry horizon
-        let anchor_height = self.validate_anchor(&tx).await?;
-        let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
-
-        // Validate ledger type for ALL sources (API and Gossip)
-        // We only accept Publish ledger transactions in the mempool.
-        // Submit ledger entries are constructed by block producers when promoting txs.
-        let ledger = self.parse_ledger(&tx)?;
+        // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
+        let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;
 
         // Protocol fee structure checks (Gossip: skip)
         //
@@ -101,19 +124,8 @@ impl Inner {
 
         // we don't check account balance here - we check it when we build & validate blocks
 
-        self.insert_tx_and_mark_valid(&tx).await;
-
-        // Cache the data_root in the database and set pre-confirmation expiry
-        self.cache_data_root_with_expiry(&tx, expiry_height);
-
-        // Process any chunks that arrived before their parent transaction
-        // These were temporarily stored in the pending_chunks cache
-        self.process_pending_chunks_for_root(tx.data_root).await?;
-
-        // Gossip transaction
-        self.broadcast_tx_gossip(&tx);
-
-        Ok(())
+        // Shared post-processing
+        self.postprocess_data_ingress(&tx, expiry_height).await
     }
 
     pub async fn handle_data_tx_ingress_message_api(
@@ -128,27 +140,8 @@ impl Inner {
 
         tx.promoted_height = None;
 
-        {
-            // Early out if we already know about this transaction in
-            // the mempool or the index
-            if self.is_known_data_tx(&tx.id).await? {
-                warn!("duplicate tx: {:?}", TxIngressError::Skipped);
-                return Err(TxIngressError::Skipped);
-            }
-        }
-
-        // Validate the transaction signature
-        // check the result and error handle
-        self.validate_signature(&tx).await?;
-
-        // Validate anchor and compute pre-confirmation expiry horizon
-        let anchor_height = self.validate_anchor(&tx).await?;
-        let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
-
-        // Validate ledger type for ALL sources (API and Gossip)
-        // We only accept Publish ledger transactions in the mempool.
-        // Submit ledger entries are constructed by block producers when promoting txs.
-        let ledger = self.parse_ledger(&tx)?;
+        // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
+        let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;
 
         // Protocol fee structure checks (API only)
         //
@@ -178,19 +171,8 @@ impl Inner {
 
         // we don't check account balance here - we check it when we build & validate blocks
 
-        self.insert_tx_and_mark_valid(&tx).await;
-
-        // Cache the data_root in the database and set pre-confirmation expiry
-        self.cache_data_root_with_expiry(&tx, expiry_height);
-
-        // Process any chunks that arrived before their parent transaction
-        // These were temporarily stored in the pending_chunks cache
-        self.process_pending_chunks_for_root(tx.data_root).await?;
-
-        // Gossip transaction
-        self.broadcast_tx_gossip(&tx);
-
-        Ok(())
+        // Shared post-processing
+        self.postprocess_data_ingress(&tx, expiry_height).await
     }
 
     // --- Small shared helpers (kept private to this module) ---

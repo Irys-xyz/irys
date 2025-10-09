@@ -14,20 +14,15 @@ use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, trace, warn};
 
 impl Inner {
-    #[instrument(skip_all)]
-    pub async fn handle_ingress_commitment_tx_message_gossip(
+    // Shared pre-checks for both API and Gossip commitment ingress paths.
+    // Performs signature validation, whitelist check, mempool/db duplicate detection, and anchor validation.
+    #[inline]
+    async fn precheck_commitment_ingress_common(
         &mut self,
-        commitment_tx: CommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        debug!(
-            tx_id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
-            "Received commitment tx from Gossip"
-        );
-
-        // Validate tx signature
-        // we MUST do this before using the ID to prevent poisoning, as this validates the ID is correct
-        if let Err(e) = self.validate_signature(&commitment_tx).await {
+        // Validate tx signature first to prevent ID poisoning
+        if let Err(e) = self.validate_signature(commitment_tx).await {
             tracing::error!(
                 "Signature validation for commitment_tx {:?} failed with error: {:?}",
                 &commitment_tx,
@@ -37,7 +32,7 @@ impl Inner {
         }
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted
-        self.check_commitment_whitelist(&commitment_tx)?;
+        self.check_commitment_whitelist(commitment_tx)?;
 
         // Early out if we already know about this transaction (invalid/recent valid/valid_commitment_tx)
         if self
@@ -52,20 +47,38 @@ impl Inner {
             return Err(TxIngressError::Skipped);
         }
 
-        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
+        // Validate anchor (height is unused at this stage)
+        let _ = self.validate_anchor(commitment_tx).await?;
+        Ok(())
+    }
 
-        // Validate economic constraints only for API-submitted transactions
-        // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
-        // while still being able to process them when building blocks.
-        // Gossip path: skip fee/value/funding checks
-
+    // Shared post-validation processing for commitment transactions.
+    // Computes commitment status and handles insert/cache/gossip accordingly.
+    // The log_status_debug flag controls whether the status log is at debug (API) or trace (Gossip) level.
+    // The warn_on_unstaked flag controls whether we emit a warning on Unstaked status (true for API only).
+    #[inline]
+    async fn process_commitment_after_prechecks(
+        &mut self,
+        commitment_tx: &CommitmentTransaction,
+        log_status_debug: bool,
+        warn_on_unstaked: bool,
+    ) -> Result<(), TxIngressError> {
         // Check pending commitments and cached commitments and active commitments of the canonical chain
-        let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        trace!(
-            "commitment tx {} status {:?}",
-            &commitment_tx.id,
-            &commitment_status
-        );
+        let commitment_status = self.get_commitment_status(commitment_tx).await;
+        if log_status_debug {
+            tracing::debug!(
+                "commitment tx {} status {:?}",
+                &commitment_tx.id,
+                &commitment_status
+            );
+        } else {
+            trace!(
+                "commitment tx {} status {:?}",
+                &commitment_tx.id,
+                &commitment_status
+            );
+        }
+
         match commitment_status {
             CommitmentSnapshotStatus::Unknown
             | CommitmentSnapshotStatus::Accepted
@@ -73,18 +86,25 @@ impl Inner {
             | CommitmentSnapshotStatus::PartitionNotOwned
             | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
                 // Add to valid set and mark recent
-                self.insert_commitment_and_mark_valid(&commitment_tx).await;
+                self.insert_commitment_and_mark_valid(commitment_tx).await;
 
                 // Process any pending pledges for this newly staked address
                 self.process_pending_pledges_for_new_stake(commitment_tx.signer)
                     .await;
 
                 // Gossip transaction
-                self.broadcast_commitment_gossip(&commitment_tx);
+                self.broadcast_commitment_gossip(commitment_tx);
             }
             CommitmentSnapshotStatus::Unstaked => {
+                if warn_on_unstaked {
+                    tracing::warn!(
+                        tx = ?commitment_tx.id,
+                        status = ?commitment_status,
+                        "commitment tx cached while address is unstaked"
+                    );
+                }
                 // Cache pledge while address is unstaked
-                self.cache_unstaked_pledge(&commitment_tx).await;
+                self.cache_unstaked_pledge(commitment_tx).await;
             }
             CommitmentSnapshotStatus::Unsupported => {
                 return Err(TxIngressError::Other("unsupported tx type".to_string()));
@@ -92,6 +112,31 @@ impl Inner {
         }
 
         Ok(())
+    }
+
+    #[instrument(skip_all)]
+    pub async fn handle_ingress_commitment_tx_message_gossip(
+        &mut self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        debug!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            "Received commitment tx from Gossip"
+        );
+
+        // Common pre-checks shared with API path
+        self.precheck_commitment_ingress_common(&commitment_tx)
+            .await?;
+
+        // Validate economic constraints only for API-submitted transactions
+        // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
+        // while still being able to process them when building blocks.
+        // Gossip path: skip fee/value/funding checks
+
+        // Post-processing shared with API path (trace-level status, no warn on unstaked)
+        self.process_commitment_after_prechecks(&commitment_tx, false, false)
+            .await
     }
 
     #[instrument(skip_all)]
@@ -105,34 +150,9 @@ impl Inner {
             "Received commitment tx from API"
         );
 
-        // Validate tx signature
-        // we MUST do this before using the ID to prevent poisoning, as this validates the ID is correct
-        if let Err(e) = self.validate_signature(&commitment_tx).await {
-            tracing::error!(
-                "Signature validation for commitment_tx {:?} failed with error: {:?}",
-                &commitment_tx,
-                e
-            );
-            return Err(TxIngressError::InvalidSignature);
-        }
-
-        // Check stake/pledge whitelist early - reject if address is not whitelisted
-        self.check_commitment_whitelist(&commitment_tx)?;
-
-        // Early out if we already know about this transaction (invalid/recent valid/valid_commitment_tx)
-        if self
-            .is_known_commitment_in_mempool(&commitment_tx.id, commitment_tx.signer)
-            .await
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        // Early out if we already know about this transaction in index / database
-        if self.is_known_commitment_in_db(&commitment_tx.id)? {
-            return Err(TxIngressError::Skipped);
-        }
-
-        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
+        // Common pre-checks shared with Gossip path
+        self.precheck_commitment_ingress_common(&commitment_tx)
+            .await?;
 
         // API-only: fee/value/funding validations
         if let Err(e) = validate_commitment_transaction(
@@ -148,43 +168,9 @@ impl Inner {
             return Err(e);
         }
 
-        // Check pending commitments and cached commitments and active commitments of the canonical chain
-        let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        tracing::debug!(
-            "commitment tx {} status {:?}",
-            &commitment_tx.id,
-            &commitment_status
-        );
-        match commitment_status {
-            CommitmentSnapshotStatus::Unknown
-            | CommitmentSnapshotStatus::Accepted
-            | CommitmentSnapshotStatus::InvalidPledgeCount
-            | CommitmentSnapshotStatus::PartitionNotOwned
-            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
-                // Add to valid set and mark recent
-                self.insert_commitment_and_mark_valid(&commitment_tx).await;
-
-                // Process any pending pledges for this newly staked address
-                self.process_pending_pledges_for_new_stake(commitment_tx.signer)
-                    .await;
-
-                // Gossip transaction
-                self.broadcast_commitment_gossip(&commitment_tx);
-            }
-            CommitmentSnapshotStatus::Unstaked => {
-                tracing::warn!(
-                    tx = ?commitment_tx.id,
-                    status = ?commitment_status,
-                    "commitment tx cached while address is unstaked"
-                );
-                self.cache_unstaked_pledge(&commitment_tx).await;
-            }
-            CommitmentSnapshotStatus::Unsupported => {
-                return Err(TxIngressError::Other("unsupported tx type".to_string()));
-            }
-        }
-
-        Ok(())
+        // Post-processing shared with Gossip path (debug-level status, warn on unstaked)
+        self.process_commitment_after_prechecks(&commitment_tx, true, true)
+            .await
     }
 
     /// Check stake/pledge whitelist; reject if address is not whitelisted.
