@@ -609,7 +609,9 @@ impl Inner {
                     .filter(|tx| {
                         matches!(
                             tx.commitment_type,
-                            CommitmentType::Stake | CommitmentType::Pledge { .. }
+                            CommitmentType::Stake
+                                | CommitmentType::Pledge { .. }
+                                | CommitmentType::Unpledge { .. }
                         )
                     })
                     .cloned()
@@ -1211,7 +1213,7 @@ impl Inner {
 
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
-    // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
+    // if the anchor is valid, returns anchor block height
     #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
         &self,
