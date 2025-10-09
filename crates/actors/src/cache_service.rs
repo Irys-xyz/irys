@@ -191,7 +191,9 @@ impl ChunkCacheService {
                     chunk_offset
                 )
             })?;
-            prune_height = Some(block_height - 1);
+            // Genesis block (height 0) never enters canonical chain with submit ledger data,
+            // but use saturating_sub (defensive) for consistency
+            prune_height = Some(block_height.saturating_sub(1));
         }
 
         // Prune the data root cache at the start of the submit ledger
@@ -336,9 +338,13 @@ impl ChunkCacheService {
     /// Returns entries sorted by cached_at timestamp (oldest first)
     fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
         let tx = self.db.tx()?;
+
+        // Pre-allocate capacity to reduce reallocations during collection
+        let estimated_count = tx.entries::<CachedDataRoots>()?;
+        let mut entries = Vec::with_capacity(estimated_count);
+
         let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
-        let mut entries = Vec::new();
 
         while let Some((data_root, cached)) = walker.next().transpose()? {
             entries.push((data_root, cached));
