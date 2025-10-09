@@ -228,15 +228,28 @@ impl Inner {
             for pledge_tx in pledges {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 // todo switch _ to actually handle the result
-                let _ = self
+                if let Err(e) = self
                     .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                         pledge_tx, oneshot_tx,
                     ))
-                    .await;
-
-                let _ = oneshot_rx
                     .await
-                    .expect("to process pending pledge for newly staked address");
+                {
+                    warn!(
+                        tx = ?pledge_tx.id,
+                        error = ?e,
+                        "Failed to process pending pledge for newly staked address"
+                    );
+                }
+
+                if let Err(e) = oneshot_rx
+                    .await
+                    .expect("to process pending pledge for newly staked address")
+                {
+                    warn!(
+                        "Failed to process pending pledge for newly staked address: {:?}",
+                        e
+                    );
+                }
             }
         }
     }
