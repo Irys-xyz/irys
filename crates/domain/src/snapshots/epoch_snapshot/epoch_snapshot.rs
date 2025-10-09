@@ -1246,9 +1246,6 @@ mod tests {
             let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
             assert!(res.is_ok());
 
-            let res = EpochSnapshot::validate_commitments(&mocked_block, &valid_commitments);
-            assert!(res.is_ok());
-
             let err_str = EpochSnapshot::validate_commitments(&mocked_block, &too_few_commitments)
                 .expect_err("Expected error for too many commitments")
                 .to_string();
