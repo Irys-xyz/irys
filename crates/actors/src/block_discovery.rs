@@ -591,9 +591,8 @@ impl BlockDiscoveryServiceInner {
                 } else {
                     // Validate and add each commitment transaction for non-epoch blocks
                     for commitment_tx in arc_commitment_txs.iter() {
-                        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
                         let status = parent_commitment_snapshot
-                            .get_commitment_status(commitment_tx, is_staked);
+                            .get_commitment_status(commitment_tx, &epoch_snapshot);
 
                         // Ensure commitment is unknown (new) and from staked address
                         match status {
@@ -621,6 +620,17 @@ impl BlockDiscoveryServiceInner {
                             CommitmentSnapshotStatus::InvalidPledgeCount => {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     "Invalid pledge count in commitment transaction".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::PartitionNotOwned => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unpledge target capacity partition not owned by signer"
+                                        .to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Duplicate unpledge for the same capacity partition in snapshot".to_string(),
                                 ));
                             }
                             CommitmentSnapshotStatus::Unknown => {} // Success case

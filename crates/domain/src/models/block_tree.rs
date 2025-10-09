@@ -336,7 +336,7 @@ impl BlockTree {
             let epoch_snapshot = if is_epoch_block {
                 // Epoch boundary reached: create a fresh epoch snapshot that incorporates
                 // all commitments from the commitment cache and computes the epoch state for the new epoch
-                create_epoch_snapshot_for_block(&block, parent_block_entry, consensus_config)
+                create_epoch_snapshot_for_block(&block, parent_block_entry, consensus_config)?
             } else {
                 // Just copy the previous blocks epoch_snapshot reference
                 let epoch_snapshot = parent_block_entry.epoch_snapshot.clone();
@@ -1352,7 +1352,7 @@ pub fn create_epoch_snapshot_for_block(
     block: &IrysBlockHeader,
     parent_block_entry: &BlockMetadata,
     consensus_config: &ConsensusConfig,
-) -> Arc<EpochSnapshot> {
+) -> eyre::Result<Arc<EpochSnapshot>> {
     let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
@@ -1360,13 +1360,12 @@ pub fn create_epoch_snapshot_for_block(
         let commitments = parent_block_entry
             .commitment_snapshot
             .get_epoch_commitments();
-
         let mut new_snapshot = (*prev_epoch_snapshot).clone();
         let prev_epoch_block = new_snapshot.epoch_block.clone();
-        let _ = new_snapshot.perform_epoch_tasks(&Some(prev_epoch_block), block, commitments);
-        Arc::new(new_snapshot)
+        new_snapshot.perform_epoch_tasks(&Some(prev_epoch_block), block, commitments)?;
+        Ok(Arc::new(new_snapshot))
     } else {
-        parent_block_entry.epoch_snapshot.clone()
+        Ok(parent_block_entry.epoch_snapshot.clone())
     }
 }
 

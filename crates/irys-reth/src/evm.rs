@@ -1021,8 +1021,7 @@ where
 
         match shadow_tx {
             shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
-                shadow_tx::TransactionPacket::Unstake(either_inc_dec)
-                | shadow_tx::TransactionPacket::Unpledge(either_inc_dec) => match either_inc_dec {
+                shadow_tx::TransactionPacket::Unstake(either_inc_dec) => match either_inc_dec {
                     shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(balance_increment) => {
                         let log = Self::create_shadow_log(
                             balance_increment.target,
@@ -1063,6 +1062,17 @@ where
                         ))
                     }
                 },
+                shadow_tx::TransactionPacket::Unpledge(unpledge_debit) => {
+                    // Fee-only via priority fee (already processed). Emit a log only.
+                    let log = Self::create_shadow_log(
+                        unpledge_debit.target,
+                        vec![topic],
+                        vec![DynSolValue::Address(unpledge_debit.target)],
+                    );
+                    let target = unpledge_debit.target;
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Err(execution_result), target))
+                }
                 shadow_tx::TransactionPacket::BlockReward(block_reward_increment) => {
                     let log = Self::create_shadow_log(
                         beneficiary,
@@ -1107,7 +1117,8 @@ where
                 }
                 shadow_tx::TransactionPacket::TermFeeReward(balance_increment)
                 | shadow_tx::TransactionPacket::IngressProofReward(balance_increment)
-                | shadow_tx::TransactionPacket::PermFeeRefund(balance_increment) => {
+                | shadow_tx::TransactionPacket::PermFeeRefund(balance_increment)
+                | shadow_tx::TransactionPacket::UnpledgeRefund(balance_increment) => {
                     let log = Self::create_shadow_log(
                         balance_increment.target,
                         vec![topic],

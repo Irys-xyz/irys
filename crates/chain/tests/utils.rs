@@ -1137,13 +1137,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .read()
             .canonical_commitment_snapshot();
 
-        let is_staked = self
+        let epoch_snapshot = self
             .node_ctx
             .block_tree_guard
             .read()
-            .canonical_epoch_snapshot()
-            .is_staked(commitment_tx.signer);
-        commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
+            .canonical_epoch_snapshot();
+        commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot)
     }
 
     /// wait for specific block to be available via block tree guard
@@ -1313,6 +1312,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
+    #[tracing::instrument(skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -1340,6 +1340,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         if retries == max_retries {
+            tracing::error!("failed to locate tx");
             Err(eyre::eyre!(
                 "Failed to locate tx in mempool after {} retries",
                 retries

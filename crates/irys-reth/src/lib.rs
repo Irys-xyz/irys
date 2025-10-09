@@ -458,8 +458,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::shadow_tx::{
-        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
-        TransactionPacket, BLOCK_REWARD_ID, UNSTAKE_ID,
+        BalanceDecrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
+        BLOCK_REWARD_ID, UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
@@ -1838,9 +1838,9 @@ mod tests {
         Ok(())
     }
 
-    /// Test unpledge transaction (balance increment)
+    /// Test unpledge transaction (priority-fee-only at inclusion)
     #[test_log::test(tokio::test)]
-    async fn test_unpledge_balance_increment() -> eyre::Result<()> {
+    async fn test_unpledge_fee_only() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -1853,18 +1853,8 @@ mod tests {
             "Target account should have initial balance"
         );
 
-        // Now create unpledge transaction
-        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
-        let unpledge_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                BalanceIncrement {
-                    amount: unpledge_amount,
-                    target: target_address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
-            alloy_primitives::FixedBytes::ZERO,
-        );
+        // Create unpledge transaction: fee-only via priority fee
+        let unpledge_tx = unpledge(target_address);
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
@@ -1875,14 +1865,14 @@ mod tests {
         // Verify transaction is included in block
         assert_txs_in_block(&block_payload, &[unpledge_tx_hash], "Unpledge transaction");
 
-        // Verify balance increased
+        // Verify balance decreased by exactly the priority fee
         assert_balance_change(
             &node,
             target_address,
             balance_after_initial_funding,
-            unpledge_amount - U256::from(DEFAULT_PRIORITY_FEE),
-            true,
-            "Target balance should increase after unpledge",
+            U256::from(DEFAULT_PRIORITY_FEE),
+            false,
+            "Target balance should decrease by priority fee only on unpledge",
         );
 
         Ok(())
@@ -1952,16 +1942,69 @@ mod tests {
 
         // Calculate expected final balance accounting for priority fees
         // Each transaction costs DEFAULT_PRIORITY_FEE
-        // Net operation: 2 pledge decrements (-2 wei) + 1 unpledge increment (+1 wei) = -1 wei
+        // Net operation: 2 pledge decrements (-2 wei) + 1 unpledge no-op (0 wei) = -2 wei
         // Total priority fees: 3 * DEFAULT_PRIORITY_FEE
         let total_priority_fees = U256::from(DEFAULT_PRIORITY_FEE) * U256::from(3);
-        let net_operation_change = U256::ONE; // Net decrease of 1 wei from operations
+        let net_operation_change = U256::from(2_u64); // Net decrease of 2 wei from operations
         let expected_final_balance = initial_balance - net_operation_change - total_priority_fees;
 
         let final_balance = get_balance(&node.inner, target_address);
         assert_eq!(
             final_balance, expected_final_balance,
             "Final balance should reflect net effect of pledge/unpledge operations plus priority fees"
+        );
+
+        Ok(())
+    }
+
+    /// Test pledge + unpledge_refund balances with zero-priority-fee refund
+    #[test_log::test(tokio::test)]
+    async fn test_pledge_unpledge_refund_balances() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
+        let initial_balance = get_balance(&node.inner, target_address);
+
+        // Create transactions: pledge, pledge, unpledge_refund(1 wei)
+        let pledge_tx1 = pledge(target_address);
+        let pledge_tx1 =
+            sign_shadow_tx(pledge_tx1, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let pledge_tx2 = pledge(target_address);
+        let pledge_tx2 =
+            sign_shadow_tx(pledge_tx2, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let refund_tx = unpledge_refund(target_address, U256::ONE);
+        let refund_tx = sign_shadow_tx(refund_tx, &ctx.block_producer_a, 0).await?; // zero-priority fee on refunds
+
+        let expected_tx_hashes = vec![*pledge_tx1.hash(), *pledge_tx2.hash(), *refund_tx.hash()];
+
+        // Mine block with all transactions
+        let block_payload = mine_block(
+            &mut node,
+            &shadow_tx_store,
+            vec![pledge_tx1, pledge_tx2, refund_tx],
+        )
+        .await?;
+
+        // Verify all transactions are included in block in correct order
+        assert_txs_in_block(
+            &block_payload,
+            &expected_tx_hashes,
+            "Pledge/UnpledgeRefund transactions",
+        );
+
+        // Calculate expected final balance
+        // Operation effect: -1 (pledge) -1 (pledge) +1 (refund) = -1 wei
+        // Priority fees: 2 * DEFAULT_PRIORITY_FEE (refund has zero priority fee)
+        let total_priority_fees = U256::from(DEFAULT_PRIORITY_FEE) * U256::from(2);
+        let net_operation_change = U256::ONE; // net -1 wei
+        let expected_final_balance = initial_balance - net_operation_change - total_priority_fees;
+
+        let final_balance = get_balance(&node.inner, target_address);
+        assert_eq!(
+            final_balance, expected_final_balance,
+            "Final balance should reflect pledge/refund operations plus priority fees"
         );
 
         Ok(())
@@ -1986,18 +2029,8 @@ mod tests {
             .unwrap();
         assert!(account.is_none(), "Test account should not exist");
 
-        // Create unpledge transaction for non-existent account
-        let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 IRYS
-        let unpledge_tx = ShadowTransaction::new_v1(
-            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                BalanceIncrement {
-                    amount: unpledge_amount,
-                    target: nonexistent_address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
-            alloy_primitives::FixedBytes::ZERO,
-        );
+        // Create unpledge transaction for non-existent account (priority-fee debit should fail)
+        let unpledge_tx = unpledge(nonexistent_address);
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
 
@@ -2496,9 +2529,9 @@ mod tests {
         );
 
         // Verify target balance changed correctly
-        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +1 (unpledge) -1 (storage) = -1 wei
+        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +0 (unpledge) -1 (storage) = -2 wei
         // Plus paying all the priority fees: -15 Gwei
-        let net_operations = U256::from(1); // Net decrease of 1 wei from operations
+        let net_operations = U256::from(2); // Net decrease of 2 wei from operations
         let total_decrease = net_operations + total_expected_fee;
         assert_balance_change(
             &node,
@@ -3071,16 +3104,25 @@ pub mod test_utils {
         )
     }
 
-    /// Compose a shadow tx for unpledge.
+    /// Compose a shadow tx for unpledge (fee-only via priority fee).
     pub fn unpledge(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(
-            TransactionPacket::Unpledge(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                shadow_tx::BalanceIncrement {
-                    amount: U256::ONE,
-                    target: address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
+            TransactionPacket::Unpledge(shadow_tx::UnpledgeDebit {
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unpledge refund (epoch-only; zero priority fee expected).
+    pub fn unpledge_refund(address: Address, amount: U256) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::UnpledgeRefund(shadow_tx::BalanceIncrement {
+                amount,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
             alloy_primitives::FixedBytes::ZERO,
         )
     }

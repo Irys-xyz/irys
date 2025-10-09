@@ -128,94 +128,89 @@ impl Inner {
 
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        trace!(
+        tracing::debug!(
             "commitment tx {} status {:?}",
             &commitment_tx.id,
             &commitment_status
         );
-
-        if commitment_status == CommitmentSnapshotStatus::Accepted {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            // Add the commitment tx to the valid tx list to be included in the next block
-            trace!(
-                "pushing commitment {} to valid_commitment_tx",
-                &commitment_tx.id
-            );
-            mempool_state_guard
-                .valid_commitment_tx
-                .entry(commitment_tx.signer)
-                .or_default()
-                .push(commitment_tx.clone());
-
-            mempool_state_guard
-                .recent_valid_tx
-                .put(commitment_tx.id, ());
-
-            // Process any pending pledges for this newly staked address
-            // ------------------------------------------------------
-            // When a stake transaction is accepted, we can now process any pledge
-            // transactions from the same address that arrived earlier but were
-            // waiting for the stake. This effectively resolves the dependency
-            // order for address-based validation.
-            let pop = mempool_state_guard
-                .pending_pledges
-                .pop(&commitment_tx.signer);
-            drop(mempool_state_guard);
-            if let Some(pledges_lru) = pop {
-                // Extract all pending pledges as a vector of owned transactions
-                let pledges: Vec<_> = pledges_lru
-                    .into_iter()
-                    .map(|(_, pledge_tx)| pledge_tx)
-                    .collect();
-
-                for pledge_tx in pledges {
-                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    // todo switch _ to actually handle the result
-                    let _ = self
-                        .handle_message(MempoolServiceMessage::IngestCommitmentTx(
-                            pledge_tx, oneshot_tx,
-                        ))
-                        .await;
-
-                    let _ = oneshot_rx
-                        .await
-                        .expect("to process pending pledge for newly staked address");
-                }
-            }
-
-            self.service_senders
-                .gossip_broadcast
-                .send(GossipBroadcastMessage::from(commitment_tx.clone()))
-                .expect("Failed to send gossip data");
-        } else if commitment_status == CommitmentSnapshotStatus::Unstaked {
-            // For unstaked pledges, we cache them in a 2-level LRU structure:
-            // Level 1: Keyed by signer address (allows tracking multiple addresses)
-            // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
-
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            if let Some(pledges_cache) = mempool_state_guard
-                .pending_pledges
-                .get_mut(&commitment_tx.signer)
-            {
-                // Address already exists in cache - add this pledge transaction to its lru cache
-                pledges_cache.put(commitment_tx.id, commitment_tx.clone());
-            } else {
-                // First pledge from this address - create a new nested lru cache
-                let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
-                let mut new_address_cache =
-                    LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-                // Add the pledge transaction to the new lru cache for the address
-                new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                // Add the address cache to the primary lru cache
+        match commitment_status {
+            CommitmentSnapshotStatus::Unknown
+            | CommitmentSnapshotStatus::Accepted
+            | CommitmentSnapshotStatus::InvalidPledgeCount
+            | CommitmentSnapshotStatus::PartitionNotOwned
+            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                let mut mempool_state_guard = self.mempool_state.write().await;
+                trace!(
+                    tx = ?commitment_tx.id,
+                    "pushing commitment to valid_commitment_tx"
+                );
                 mempool_state_guard
+                    .valid_commitment_tx
+                    .entry(commitment_tx.signer)
+                    .or_default()
+                    .push(commitment_tx.clone());
+
+                mempool_state_guard
+                    .recent_valid_tx
+                    .put(commitment_tx.id, ());
+
+                // Process any pending pledges for this newly staked address
+                let pop = mempool_state_guard
                     .pending_pledges
-                    .put(commitment_tx.signer, new_address_cache);
+                    .pop(&commitment_tx.signer);
+                drop(mempool_state_guard);
+                if let Some(pledges_lru) = pop {
+                    let pledges: Vec<_> = pledges_lru
+                        .into_iter()
+                        .map(|(_, pledge_tx)| pledge_tx)
+                        .collect();
+
+                    for pledge_tx in pledges {
+                        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                        let _ = self
+                            .handle_message(MempoolServiceMessage::IngestCommitmentTx(
+                                pledge_tx, oneshot_tx,
+                            ))
+                            .await;
+
+                        let _ = oneshot_rx
+                            .await
+                            .expect("to process pending pledge for newly staked address");
+                    }
+                }
+
+                self.service_senders
+                    .gossip_broadcast
+                    .send(GossipBroadcastMessage::from(commitment_tx.clone()))
+                    .expect("Failed to send gossip data");
             }
-            drop(mempool_state_guard)
-        } else {
-            return Err(TxIngressError::Skipped);
+            CommitmentSnapshotStatus::Unstaked => {
+                tracing::warn!(
+                    tx = ?commitment_tx.id,
+                    status = ?commitment_status,
+                    "commitment tx cached while address is unstaked"
+                );
+
+                let mut mempool_state_guard = self.mempool_state.write().await;
+                if let Some(pledges_cache) = mempool_state_guard
+                    .pending_pledges
+                    .get_mut(&commitment_tx.signer)
+                {
+                    pledges_cache.put(commitment_tx.id, commitment_tx.clone());
+                } else {
+                    let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
+                    let mut new_address_cache =
+                        LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+                    new_address_cache.put(commitment_tx.id, commitment_tx.clone());
+                    mempool_state_guard
+                        .pending_pledges
+                        .put(commitment_tx.signer, new_address_cache);
+                }
+                drop(mempool_state_guard);
+            }
+            CommitmentSnapshotStatus::Unsupported => {
+                return Err(TxIngressError::Other("unsupported tx type".to_string()));
+            }
         }
 
         Ok(())
@@ -402,6 +397,7 @@ impl Inner {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(tx_id = ?commitment_tx.id))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -415,39 +411,46 @@ impl Inner {
             )
         };
 
-        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
+        let cache_status =
+            commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot);
 
-        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, is_staked);
-
-        // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentSnapshotStatus::Unsupported) {
-            warn!("Commitment is unsupported: {}", commitment_tx.id);
-            return CommitmentSnapshotStatus::Unsupported;
-        }
-
-        // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentSnapshotStatus::Unstaked) {
-            let mempool_state_guard = self.mempool_state.read().await;
-            // Get pending transactions for this address
-            if let Some(pending) = mempool_state_guard
-                .valid_commitment_tx
-                .get(&commitment_tx.signer)
-            {
-                // Check if there's at least one pending stake transaction
-                if pending
-                    .iter()
-                    .any(|c| c.commitment_type == CommitmentType::Stake)
-                {
-                    return CommitmentSnapshotStatus::Accepted;
-                }
+        // Reject unsupported or invalid commitment types/targets
+        match cache_status {
+            CommitmentSnapshotStatus::Unknown | CommitmentSnapshotStatus::Accepted => {
+                return cache_status
             }
+            CommitmentSnapshotStatus::Unsupported
+            | CommitmentSnapshotStatus::InvalidPledgeCount
+            | CommitmentSnapshotStatus::PartitionNotOwned
+            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                warn!(
+                    "Commitment rejected: {:?} id={} ",
+                    cache_status, commitment_tx.id
+                );
+                return cache_status;
+            }
+            CommitmentSnapshotStatus::Unstaked => {
+                // For unstaked addresses, check for pending stake transactions
+                let mempool_state_guard = self.mempool_state.read().await;
+                // Get pending transactions for this address
+                if let Some(pending) = mempool_state_guard
+                    .valid_commitment_tx
+                    .get(&commitment_tx.signer)
+                {
+                    // Check if there's at least one pending stake transaction
+                    if pending
+                        .iter()
+                        .any(|c| c.commitment_type == CommitmentType::Stake)
+                    {
+                        // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
+                        return CommitmentSnapshotStatus::Unknown;
+                    }
+                }
 
-            // No pending stakes found
-            warn!("Pledge Commitment is unstaked: {}", commitment_tx.id);
-            return CommitmentSnapshotStatus::Unstaked;
+                // No pending stakes found
+                warn!("Commitment is unstaked: {}", commitment_tx.id);
+                return CommitmentSnapshotStatus::Unstaked;
+            }
         }
-
-        // All other cases are valid
-        CommitmentSnapshotStatus::Accepted
     }
 }
