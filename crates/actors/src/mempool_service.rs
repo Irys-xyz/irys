@@ -376,9 +376,12 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::GetState(response) => {
-                    let _ = response
+                    if let Err(e) = response
                         .send(Arc::clone(&self.mempool_state))
-                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
+                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
+                    {
+                        tracing::error!("response.send() error: {:?}", e);
+                    }
                 }
                 MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
                     let response_value = self.handle_ingest_ingress_proof(ingress_proof);
@@ -1326,21 +1329,33 @@ impl Inner {
                 .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            let _ = self
+            if let Err(e) = self
                 .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Commitment tx ingress error during mempool restore from disk")
-                });
+                })
+            {
+                tracing::warn!(
+                    "Commitment tx ingress error during mempool restore from disk: {:?}",
+                    e
+                );
+            }
         }
 
         for (_txid, storage_tx) in recovered.storage_txs {
-            let _ = self
+            if let Err(e) = self
                 .handle_data_tx_ingress_message_gossip(storage_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")
-                });
+                })
+            {
+                tracing::warn!(
+                    "Storage tx ingress error during mempool restore from disk: {:?}",
+                    e
+                );
+            }
         }
 
         self.wipe_blacklists().await;

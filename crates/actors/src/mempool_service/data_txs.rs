@@ -12,7 +12,7 @@ use irys_types::{
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 impl Inner {
     // Shared pre-checks for both API and Gossip data tx ingress paths.
@@ -244,9 +244,12 @@ impl Inner {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
             for chunk in chunks {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                let _ = self
+                if let Err(e) = self
                     .handle_message(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
-                    .await;
+                    .await
+                {
+                    warn!("Failed to send chunk to mempool: {:?}", e);
+                }
 
                 let msg_result = oneshot_rx
                     .await

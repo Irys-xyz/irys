@@ -48,7 +48,8 @@ impl Inner {
         }
 
         // Validate anchor (height is unused at this stage)
-        let _ = self.validate_anchor(commitment_tx).await?;
+        self.validate_anchor(commitment_tx).await?;
+
         Ok(())
     }
 
@@ -226,8 +227,8 @@ impl Inner {
                 .collect();
 
             for pledge_tx in pledges {
+                let tx_id = pledge_tx.id;
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                // todo switch _ to actually handle the result
                 if let Err(e) = self
                     .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                         pledge_tx, oneshot_tx,
@@ -235,7 +236,7 @@ impl Inner {
                     .await
                 {
                     warn!(
-                        tx = ?pledge_tx.id,
+                        tx = ?tx_id,
                         error = ?e,
                         "Failed to process pending pledge for newly staked address"
                     );
