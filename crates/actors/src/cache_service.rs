@@ -21,6 +21,10 @@ use tokio::sync::{
 };
 use tracing::{debug, info, warn, Instrument as _};
 
+/// Maximum evictions per invocation to prevent blocking the service.
+/// If this limit is reached, eviction will continue in the next cycle.
+const MAX_EVICTIONS_PER_RUN: usize = 10_000;
+
 #[derive(Debug)]
 pub enum CacheServiceAction {
     OnBlockMigrated(u64, Option<oneshot::Sender<eyre::Result<()>>>),
@@ -260,10 +264,18 @@ impl ChunkCacheService {
 
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
         let mut chunks_pruned: u64 = 0;
+        let mut eviction_count: usize = 0;
         let write_tx = self.db.tx_mut()?;
         let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
         while let Some((data_root, cached)) = walker.next().transpose()? {
+            if eviction_count >= MAX_EVICTIONS_PER_RUN {
+                warn!(
+                    evictions_performed = eviction_count,
+                    "Hit max eviction limit in prune_data_root_cache, will continue next cycle"
+                );
+                break;
+            }
             // Pruning horizon priority: block inclusion > expiry height > skip
             // Rationale: Confirmed blocks provide the most reliable pruning point.
             // Unconfirmed mempool entries use expiry_height as a conservative fallback.
@@ -311,6 +323,7 @@ impl ChunkCacheService {
                 chunks_pruned = chunks_pruned
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
+                eviction_count += 1;
             }
         }
         debug!(?chunks_pruned, "Pruned chunks");
@@ -356,8 +369,18 @@ impl ChunkCacheService {
 
         let mut evicted_count = 0_u64;
         let mut evicted_size = 0_u64;
+        let mut eviction_count: usize = 0;
 
         for (data_root, cached) in entries {
+            if eviction_count >= MAX_EVICTIONS_PER_RUN {
+                warn!(
+                    evictions_performed = eviction_count,
+                    evicted_count,
+                    "Hit max eviction limit in prune_cache_by_time, will continue next cycle"
+                );
+                break;
+            }
+
             // Stop when we reach entries that are still fresh
             if cached.cached_at >= expiry_threshold {
                 break;
@@ -385,6 +408,7 @@ impl ChunkCacheService {
 
             evicted_count += chunks_removed;
             evicted_size += approx_size;
+            eviction_count += 1;
         }
 
         info!(
@@ -424,6 +448,7 @@ impl ChunkCacheService {
         let mut evicted_size = 0_u64;
         let mut running_chunk_count = current_chunk_count;
         let mut running_chunk_size = current_chunk_size;
+        let mut eviction_count: usize = 0;
 
         // Get current timestamp once for age calculations
         let now = irys_types::UnixTimestamp::now()
@@ -431,6 +456,16 @@ impl ChunkCacheService {
 
         // Evict oldest entries until we're under the limit (with margin)
         for (data_root, cached) in entries {
+            if eviction_count >= MAX_EVICTIONS_PER_RUN {
+                warn!(
+                    evictions_performed = eviction_count,
+                    evicted_count,
+                    remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
+                    "Hit max eviction limit in prune_cache_by_size, will continue next cycle"
+                );
+                break;
+            }
+
             if running_chunk_size <= target_size_with_margin {
                 break;
             }
@@ -461,6 +496,7 @@ impl ChunkCacheService {
             evicted_size += approx_size;
             running_chunk_count = running_chunk_count.saturating_sub(chunks_removed);
             running_chunk_size = running_chunk_size.saturating_sub(approx_size);
+            eviction_count += 1;
         }
 
         info!(
