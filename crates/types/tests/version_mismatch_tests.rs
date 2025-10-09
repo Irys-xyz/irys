@@ -6,11 +6,7 @@ use irys_types::{
 fn data_tx_version_is_1() {
     let config = ConsensusConfig::testing();
     let header = DataTransactionHeader::new(&config);
-    assert_eq!(
-        header.version(),
-        1,
-        "new() should create V1 with version=1"
-    );
+    assert_eq!(header.version(), 1, "new() should create V1 with version=1");
 }
 
 #[test]
