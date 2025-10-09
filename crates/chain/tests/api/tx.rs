@@ -3,7 +3,7 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IrysTransactionResponse,
@@ -25,11 +25,10 @@ async fn test_get_tx() -> eyre::Result<()> {
         },
     )]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     node.node_ctx.start_mining().unwrap();
     let db = node.node_ctx.db.clone();

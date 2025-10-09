@@ -180,6 +180,11 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     info!("Restarting peer to replay epoch changes...");
     let restarted_node = stopped_peer.start().await;
     restarted_node.wait_for_packing(10).await;
+    // Ensure the restarted peer has fully synced to the current chain height
+    let target_height = genesis_node.get_canonical_chain_height().await;
+    restarted_node
+        .wait_until_height(target_height, seconds_to_wait)
+        .await?;
 
     // Ensure the peer has synced to the epoch that performs the publish-slot assignment.
     restarted_node
