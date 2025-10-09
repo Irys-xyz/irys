@@ -859,6 +859,7 @@ mod tests {
             initial_treasury,
             &empty_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -983,6 +984,7 @@ mod tests {
             initial_treasury,
             &empty_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -1063,6 +1065,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &empty_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");
@@ -1250,6 +1253,7 @@ mod tests {
             initial_treasury,
             &empty_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -1343,6 +1347,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &expired_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");
@@ -1444,6 +1449,7 @@ mod tests {
             initial_treasury,
             &expired_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -1505,6 +1511,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &expired_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");

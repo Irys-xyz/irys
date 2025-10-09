@@ -12,7 +12,7 @@ use super::EpochSnapshot;
 pub enum CommitmentSnapshotStatus {
     Accepted,                        // The commitment is valid and was added to the snapshot
     Unknown,                         // The commitment has no status in the snapshot
-    Unsupported,                     // The commitment is an unsupported type (unstake)
+    Unsupported,                     // The commitment type is unknown to the snapshot
     Unstaked,                        // The pledge commitment doesn't have a corresponding stake
     InvalidPledgeCount,              // The pledge count doesn't match the actual number of pledges
     PartitionNotOwned,               // Target capacity partition is not owned by signer
@@ -722,14 +722,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_commitment_types() {
+    fn test_unstake_without_existing_stake_is_rejected() {
         let mut snapshot = CommitmentSnapshot::default();
         let signer = Address::random();
 
         // Try to add unstake
         let unstake = create_test_commitment(signer, CommitmentType::Unstake, U256::from(1000));
         let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
-        assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
+        assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
 
     #[test]

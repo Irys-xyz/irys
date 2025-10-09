@@ -1226,6 +1226,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
