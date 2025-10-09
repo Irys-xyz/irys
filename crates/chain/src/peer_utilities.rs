@@ -133,7 +133,7 @@ pub async fn fetch_block(
                     Ok(block) => {
                         info!("Got block from {}", &url);
                         let irys_block_header = block.irys;
-                        Some(irys_block_header.into_inner())
+                        Some(irys_block_header)
                     }
                     Err(e) => {
                         let msg = format!("Error reading body from {}: {}", &url, e);

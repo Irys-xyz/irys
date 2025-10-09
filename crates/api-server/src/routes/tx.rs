@@ -12,7 +12,7 @@ use irys_actors::{
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     option_u64_stringify, u64_stringify, CommitmentTransaction, DataLedger, DataTransactionHeader,
-    IrysTransactionResponse, NumericVersionWrapper, H256,
+    IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -24,9 +24,9 @@ use tracing::info;
 /// delivery and transaction validation.
 pub async fn post_tx(
     state: web::Data<ApiState>,
-    body: Json<NumericVersionWrapper<DataTransactionHeader>>,
+    body: Json<DataTransactionHeader>,
 ) -> actix_web::Result<HttpResponse> {
-    let tx = body.into_inner().into_inner();
+    let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();

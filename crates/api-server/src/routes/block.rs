@@ -123,7 +123,7 @@ async fn get_block_by_hash(
         .collect::<Vec<TxHash>>();
 
     let cbh = CombinedBlockHeader {
-        irys: NumericVersionWrapper::new(irys_header),
+        irys: irys_header,
         execution: ExecutionHeader {
             header: reth_block.header,
             transactions: exec_txs,
