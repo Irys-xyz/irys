@@ -25,7 +25,7 @@ fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
     let deserialized: CommitmentTransaction =
         serde_json::from_str(&json).expect("Failed to deserialize commitment transaction");
     assert_eq!(commitment_tx.id, deserialized.id);
-    assert_eq!(commitment_tx.discriminant(), deserialized.discriminant());
+    assert_eq!(commitment_tx.version(), deserialized.version());
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn test_versioned_data_transaction_header_json_no_duplicate_type_field() {
     let deserialized: DataTransactionHeader =
         serde_json::from_str(&json).expect("Failed to deserialize data transaction header");
     assert_eq!(data_tx_header.id, deserialized.id);
-    assert_eq!(data_tx_header.discriminant(), deserialized.discriminant());
+    assert_eq!(data_tx_header.version(), deserialized.version());
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn test_versioned_block_header_json_roundtrip() {
     // Verify it deserializes correctly
     let deserialized: IrysBlockHeader =
         serde_json::from_str(&json).expect("Failed to deserialize block header");
-    assert_eq!(versioned.discriminant(), deserialized.discriminant());
+    assert_eq!(versioned.version(), deserialized.version());
     assert_eq!(versioned.block_hash, deserialized.block_hash);
 }
 

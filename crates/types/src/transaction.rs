@@ -61,7 +61,7 @@ pub enum DataTransactionHeader {
 }
 
 impl VersionDiscriminant for DataTransactionHeader {
-    fn discriminant(&self) -> u8 {
+    fn version(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
         }
@@ -131,7 +131,7 @@ impl Compact for DataTransactionHeader {
 
 impl Signable for DataTransactionHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        out.put_u8(self.discriminant());
+        out.put_u8(self.version());
         match self {
             Self::V1(inner) => {
                 let mut tmp = Vec::new();
@@ -145,7 +145,7 @@ impl Signable for DataTransactionHeader {
 impl alloy_rlp::Encodable for DataTransactionHeader {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         // Encode discriminant followed by inner struct
-        out.put_u8(self.discriminant());
+        out.put_u8(self.version());
         match self {
             Self::V1(inner) => inner.encode(out),
         }
@@ -218,7 +218,7 @@ impl PartialOrd for CommitmentTransaction {
 }
 
 impl VersionDiscriminant for CommitmentTransaction {
-    fn discriminant(&self) -> u8 {
+    fn version(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
         }
@@ -272,7 +272,7 @@ impl Compact for CommitmentTransaction {
 
 impl Signable for CommitmentTransaction {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        out.put_u8(self.discriminant());
+        out.put_u8(self.version());
         match self {
             Self::V1(inner) => {
                 let mut tmp = Vec::new();
@@ -286,7 +286,7 @@ impl Signable for CommitmentTransaction {
 impl alloy_rlp::Encodable for CommitmentTransaction {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         // Encode discriminant followed by inner struct
-        out.put_u8(self.discriminant());
+        out.put_u8(self.version());
         match self {
             Self::V1(inner) => inner.encode(out),
         }
@@ -1204,7 +1204,7 @@ mod tests {
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded.discriminant(), 1);
+        assert_eq!(decoded.version(), 1);
     }
 
     #[test]
@@ -1224,7 +1224,7 @@ mod tests {
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded.discriminant(), 1);
+        assert_eq!(decoded.version(), 1);
     }
 
     #[test]
@@ -1241,7 +1241,7 @@ mod tests {
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_header, decoded_header);
         // Verify version discriminant is preserved in Compact encoding
-        assert_eq!(decoded_header.discriminant(), 1);
+        assert_eq!(decoded_header.version(), 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
         assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
@@ -1260,7 +1260,7 @@ mod tests {
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in Compact encoding
-        assert_eq!(decoded_tx.discriminant(), 1);
+        assert_eq!(decoded_tx.version(), 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
         assert!(rest.is_empty(), "the whole buffer should be consumed");
     }

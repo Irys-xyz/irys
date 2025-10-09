@@ -16,7 +16,7 @@ pub enum VersioningError {
 /// Marker for root objects that have a semantic version fixed by an enum discriminant.
 pub trait VersionDiscriminant {
     /// Returns the u8 discriminant (stable across encoding formats and hashing preimage).
-    fn discriminant(&self) -> u8;
+    fn version(&self) -> u8;
 }
 
 /// Implemented by inner versions (e.g., V1 struct) to declare their static version constant.

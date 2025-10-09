@@ -176,7 +176,7 @@ impl Default for IrysBlockHeader {
 }
 
 impl VersionDiscriminant for IrysBlockHeader {
-    fn discriminant(&self) -> u8 {
+    fn version(&self) -> u8 {
         match self {
             Self::V1(_) => 1,
         }
@@ -225,7 +225,7 @@ impl Compact for IrysBlockHeader {
 
 impl Signable for IrysBlockHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        out.put_u8(self.discriminant());
+        out.put_u8(self.version());
         match self {
             Self::V1(inner) => {
                 let mut tmp = Vec::new();
