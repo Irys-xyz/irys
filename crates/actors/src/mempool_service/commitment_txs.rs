@@ -5,7 +5,7 @@ use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionCommon as _, IrysTransactionId, H256,
+    IrysTransactionId, H256,
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
@@ -133,6 +133,7 @@ impl Inner {
             &commitment_tx.id,
             &commitment_status
         );
+
         if commitment_status == CommitmentSnapshotStatus::Accepted {
             let mut mempool_state_guard = self.mempool_state.write().await;
             // Add the commitment tx to the valid tx list to be included in the next block
@@ -182,7 +183,6 @@ impl Inner {
                 }
             }
 
-            // Gossip transaction
             self.service_senders
                 .gossip_broadcast
                 .send(GossipBroadcastMessage::from(commitment_tx.clone()))

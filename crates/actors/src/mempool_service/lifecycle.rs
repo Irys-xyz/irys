@@ -15,7 +15,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
-    #[instrument(skip_all, fields(hash= %block.block_hash, height = %block.height), err)]
+    #[instrument(skip_all, fields(hash= %block.block_hash(), height = %block.height()), err)]
     pub async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
@@ -645,7 +645,7 @@ impl Inner {
             // Insert the commitment transaction in to the db, perform migration
             insert_commitment_tx(&tx, commitment_tx)?;
             // Remove the commitment tx from the mempool cache, completing the migration
-            self.remove_commitment_tx(&commitment_tx.id).await;
+            self.remove_commitment_tx(&commitment_tx.id()).await;
         }
         tx.inner.commit()?;
 
