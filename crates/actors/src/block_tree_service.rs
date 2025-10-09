@@ -416,7 +416,10 @@ impl BlockTreeServiceInner {
 
         // Create epoch snapshot for this block
         let arc_epoch_snapshot =
-            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus);
+            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus)
+                .map_err(|x| PreValidationError::InvalidEpochSnapshot {
+                    error: x.to_string(),
+                })?;
 
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(

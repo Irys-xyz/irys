@@ -217,6 +217,8 @@ pub enum PreValidationError {
     DuplicateIngressProofSigner { tx_id: H256, signer: Address },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
+    #[error("Invalid Epoch snapshot {error}")]
+    InvalidEpochSnapshot { error: String },
 }
 
 /// Full pre-validation steps for a block

@@ -3,13 +3,15 @@ use std::sync::Arc;
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
+use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     mempool_service::MempoolServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
+use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
-use irys_types::{CommitmentTransaction, NodeConfig, U256};
+use irys_types::{CommitmentTransaction, IrysBlockHeader, NodeConfig, U256};
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -44,6 +46,21 @@ async fn gossip_commitment_to_node(
         }
     }
     Ok(())
+}
+
+fn send_block_to_validation_service(
+    node_ctx: &IrysNodeCtx,
+    block: Arc<IrysBlockHeader>,
+    skip_vdf_validation: bool,
+) {
+    node_ctx
+        .service_senders
+        .validation_service
+        .send(ValidationServiceMessage::ValidateBlock {
+            block,
+            skip_vdf_validation,
+        })
+        .unwrap();
 }
 
 #[test_log::test(actix_web::test)]
@@ -518,13 +535,7 @@ async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<(
         "Malicious block must be at epoch boundary"
     );
 
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        commitments,
-        false,
-    )
-    .await?;
+    send_block_to_validation_service(&genesis_node.node_ctx, Arc::clone(&block), false);
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_eq!(

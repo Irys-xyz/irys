@@ -8,8 +8,9 @@ use std::sync::Arc;
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    block_tree_service::BlockTreeServiceMessage, block_validation::PreValidationError,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
@@ -24,7 +25,7 @@ async fn send_block_to_block_tree(
     block: Arc<IrysBlockHeader>,
     commitment_txs: Vec<CommitmentTransaction>,
     skip_vdf_validation: bool,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     node_ctx
@@ -35,10 +36,11 @@ async fn send_block_to_block_tree(
             commitment_txs: Arc::new(commitment_txs),
             skip_vdf_validation,
             response: response_tx,
-        })?;
+        })
+        .unwrap();
 
-    response_rx.await??;
-    Ok(())
+    let res = response_rx.await.unwrap();
+    res
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
@@ -418,16 +420,19 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     );
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(
+    let err = send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
         vec![wrong_commitment],
         false,
     )
-    .await?;
+    .await
+    .unwrap_err();
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert!(matches!(
+        err,
+        PreValidationError::InvalidEpochSnapshot { .. }
+    ));
 
     genesis_node.stop().await;
 
@@ -820,11 +825,13 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     );
     dbg!(&block);
 
-    // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    let err = send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        PreValidationError::InvalidEpochSnapshot { .. }
+    ));
 
     genesis_node.stop().await;
 
