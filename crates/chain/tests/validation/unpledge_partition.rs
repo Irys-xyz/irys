@@ -140,7 +140,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let anchor = genesis_node.get_anchor().await?;
 
-    let invalid_unpledge = CommitmentTransaction::new_unpledge(
+    let mut invalid_unpledge = CommitmentTransaction::new_unpledge(
         consensus_config,
         anchor,
         evil_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -148,7 +148,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         stolen_partition_hash,
     )
     .await;
-    let invalid_unpledge = evil_signer.sign_commitment(invalid_unpledge)?;
+    evil_signer.sign_commitment(&mut invalid_unpledge)?;
 
     let block_prod_strategy = EvilBlockProdStrategy {
         invalid_unpledge: invalid_unpledge.clone(),
@@ -292,8 +292,8 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
                 .ok_or_else(|| eyre::eyre!("pledge count must be greater than zero"))?,
         );
 
-        let signed = genesis_signer.sign_commitment(tx)?;
-        unpledge_txs.push(signed);
+        genesis_signer.sign_commitment(&mut tx)?;
+        unpledge_txs.push(tx);
     }
 
     for tx in &unpledge_txs {
@@ -396,7 +396,8 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
     // Corrupt the refund amount
     unpledge_tx.value = unpledge_tx.value.saturating_add(U256::from(1_u64));
 
-    let invalid_unpledge = genesis_signer.sign_commitment(unpledge_tx)?;
+    genesis_signer.sign_commitment(&mut unpledge_tx)?;
+    let invalid_unpledge = unpledge_tx;
 
     gossip_commitment_to_node(&genesis_node, &invalid_unpledge).await?;
 
@@ -486,7 +487,7 @@ async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<(
     let anchor = genesis_node.get_anchor().await?;
 
     // Legitimate unpledge that will be included before the epoch boundary
-    let legitimate_unpledge = CommitmentTransaction::new_unpledge(
+    let mut legitimate_unpledge = CommitmentTransaction::new_unpledge(
         consensus,
         anchor,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -494,7 +495,7 @@ async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<(
         assignments[0].partition_hash,
     )
     .await;
-    let legitimate_unpledge = genesis_signer.sign_commitment(legitimate_unpledge)?;
+    genesis_signer.sign_commitment(&mut legitimate_unpledge)?;
 
     gossip_commitment_to_node(&genesis_node, &legitimate_unpledge).await?;
     let inclusion_block = genesis_node.mine_block().await?;
@@ -505,7 +506,7 @@ async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<(
     );
 
     // Craft an extra unpledge that never appeared on-chain
-    let extra_unpledge = CommitmentTransaction::new_unpledge(
+    let mut extra_unpledge = CommitmentTransaction::new_unpledge(
         consensus,
         genesis_node.get_anchor().await?,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -513,7 +514,7 @@ async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<(
         assignments[1].partition_hash,
     )
     .await;
-    let extra_unpledge = genesis_signer.sign_commitment(extra_unpledge)?;
+    genesis_signer.sign_commitment(&mut extra_unpledge)?;
     gossip_commitment_to_node(&genesis_node, &extra_unpledge).await?;
 
     let commitments = vec![legitimate_unpledge.clone(), extra_unpledge.clone()];

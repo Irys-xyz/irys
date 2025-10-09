@@ -46,7 +46,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let anchor = peer_node.get_anchor().await?;
 
     // Use the peer's pledge provider view; refunds use LIFO and value is set by builder
-    let unpledge_tx = CommitmentTransaction::new_unpledge(
+    let mut unpledge_tx = CommitmentTransaction::new_unpledge(
         &consensus,
         anchor,
         peer_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -55,8 +55,8 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     )
     .await;
     let signer = peer_node.cfg.signer();
-    let unpledge_tx = signer
-        .sign_commitment(unpledge_tx)
+    signer
+        .sign_commitment(&mut unpledge_tx)
         .expect("sign unpledge tx");
     let expected_refund_amount: U256 = unpledge_tx.value; // refund amount at epoch
 
@@ -356,7 +356,7 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         .await;
     for (idx, target) in partitions_to_unpledge.iter().enumerate() {
         let anchor = genesis_node.get_anchor().await?;
-        let unsigned = CommitmentTransaction::new_unpledge(
+        let mut unsigned = CommitmentTransaction::new_unpledge(
             &consensus,
             anchor,
             &(initial_pledge_count - (idx as u64)),
@@ -365,16 +365,16 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         )
         .await;
         let signer = genesis_node.cfg.signer();
-        let signed = signer
-            .sign_commitment(unsigned)
+        signer
+            .sign_commitment(&mut unsigned)
             .expect("sign genesis unpledge tx");
 
-        total_refund += signed.value;
-        genesis_node.post_commitment_tx(&signed).await?;
+        total_refund += unsigned.value;
+        genesis_node.post_commitment_tx(&unsigned).await?;
         genesis_node
-            .wait_for_mempool_commitment_txs(vec![signed.id], seconds_to_wait)
+            .wait_for_mempool_commitment_txs(vec![unsigned.id], seconds_to_wait)
             .await?;
-        unpledge_txs.push((signed, *target));
+        unpledge_txs.push((unsigned, *target));
     }
 
     let inclusion_block = genesis_node.mine_block().await?;
@@ -621,7 +621,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         .await;
     for (idx, target) in assigned_partitions.iter().enumerate() {
         let anchor = peer_node.get_anchor().await?;
-        let unsigned = CommitmentTransaction::new_unpledge(
+        let mut unsigned = CommitmentTransaction::new_unpledge(
             &consensus,
             anchor,
             &(initial_pledge_count - (idx as u64)),
@@ -629,17 +629,17 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
             target.partition_hash().unwrap(),
         )
         .await;
-        let signed = genesis_signer
-            .sign_commitment(unsigned)
+        genesis_signer
+            .sign_commitment(&mut unsigned)
             .expect("sign multi-unpledge tx");
-        total_fee += U256::from(signed.fee);
-        total_refund += signed.value;
+        total_fee += U256::from(unsigned.fee);
+        total_refund += unsigned.value;
 
-        peer_node.post_commitment_tx(&signed).await?;
+        peer_node.post_commitment_tx(&unsigned).await?;
         genesis_node
-            .wait_for_mempool(signed.id, seconds_to_wait)
+            .wait_for_mempool(unsigned.id, seconds_to_wait)
             .await?;
-        unpledge_txs.push((signed, Arc::clone(target)));
+        unpledge_txs.push((unsigned, Arc::clone(target)));
     }
 
     let inclusion_block = peer_node.mine_block().await?;
