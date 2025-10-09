@@ -562,7 +562,7 @@ impl DataTransactionHeaderV1 {
     }
 
     pub fn total_cost(&self) -> U256 {
-        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
+        self.perm_fee.unwrap_or_default() + self.term_fee
     }
 }
 
@@ -931,7 +931,7 @@ impl DataTransactionHeader {
     }
 
     pub fn total_cost(&self) -> U256 {
-        self.perm_fee.unwrap_or(U256::zero()) + self.term_fee
+        self.perm_fee.unwrap_or_default() + self.term_fee
     }
 }
 
@@ -947,7 +947,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        DataTransactionHeader::total_cost(self)
+        Self::total_cost(self)
     }
 
     fn signer(&self) -> Address {
@@ -963,7 +963,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        DataTransactionHeader::user_fee(self)
+        Self::user_fee(self)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -1015,7 +1015,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn total_cost(&self) -> U256 {
-        CommitmentTransaction::total_cost(self)
+        Self::total_cost(self)
     }
 
     fn signer(&self) -> Address {
@@ -1031,7 +1031,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn user_fee(&self) -> U256 {
-        CommitmentTransaction::user_fee(self)
+        Self::user_fee(self)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
