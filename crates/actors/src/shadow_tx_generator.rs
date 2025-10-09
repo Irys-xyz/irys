@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
-    ShadowTransaction, TransactionPacket,
+    ShadowTransaction, TransactionPacket, UnstakeDebit,
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -356,47 +356,10 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(())
     }
 
+    /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         // Keep existing commitment transaction logic unchanged
-        let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
-        let fee = Uint::from(tx.fee);
         let total_cost = Uint::from_le_bytes(tx.total_cost().to_le_bytes());
-
-        let create_increment_or_decrement =
-            |operation_type: &str| -> Result<EitherIncrementOrDecrement> {
-                if fee > commitment_value {
-                    let amount = fee.checked_sub(commitment_value).ok_or_else(|| {
-                        eyre::eyre!(
-                            "Underflow when calculating {} decrement amount for {}",
-                            operation_type,
-                            tx.id
-                        )
-                    })?;
-                    Ok(EitherIncrementOrDecrement::BalanceDecrement(
-                        BalanceDecrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    ))
-                } else {
-                    let amount = commitment_value.checked_sub(fee).ok_or_else(|| {
-                        eyre::eyre!(
-                            "Underflow when calculating {} amount for {}",
-                            operation_type,
-                            tx.id
-                        )
-                    })?;
-                    Ok(EitherIncrementOrDecrement::BalanceIncrement(
-                        BalanceIncrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    ))
-                }
-            };
-
         let transaction_fee = tx.fee as u128;
 
         match tx.commitment_type {
@@ -433,14 +396,16 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee,
             }),
-            irys_primitives::CommitmentType::Unstake => create_increment_or_decrement("unstake")
-                .map(|result| ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(
-                        TransactionPacket::Unstake(result),
-                        (*self.solution_hash).into(),
-                    ),
-                    transaction_fee,
-                }),
+            irys_primitives::CommitmentType::Unstake => Ok(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::UnstakeDebit(UnstakeDebit {
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
+                transaction_fee,
+            }),
         }
     }
 
@@ -957,16 +922,13 @@ mod tests {
                 ),
                 transaction_fee: 2000,
             },
-            // Unstake (150000 - 500 fee = 149500 increment)
+            // Unstake inclusion: fee-only via priority fee (log-only)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::Unstake(EitherIncrementOrDecrement::BalanceIncrement(
-                        BalanceIncrement {
-                            amount: U256::from(149500).into(), // 150000 - 500 fee
-                            target: commitments[2].signer,
-                            irys_ref: commitments[2].id.into(),
-                        },
-                    )),
+                    TransactionPacket::UnstakeDebit(UnstakeDebit {
+                        target: commitments[2].signer,
+                        irys_ref: commitments[2].id.into(),
+                    }),
                     H256::zero().into(),
                 ),
                 transaction_fee: 500,

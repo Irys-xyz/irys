@@ -1062,6 +1062,17 @@ where
                         ))
                     }
                 },
+                shadow_tx::TransactionPacket::UnstakeDebit(unstake_debit) => {
+                    // Fee-only via priority fee (already processed). Emit a log only.
+                    let log = Self::create_shadow_log(
+                        unstake_debit.target,
+                        vec![topic],
+                        vec![DynSolValue::Address(unstake_debit.target)],
+                    );
+                    let target = unstake_debit.target;
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Err(execution_result), target))
+                }
                 shadow_tx::TransactionPacket::Unpledge(unpledge_debit) => {
                     // Fee-only via priority fee (already processed). Emit a log only.
                     let log = Self::create_shadow_log(
