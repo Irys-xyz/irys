@@ -60,24 +60,14 @@ impl Inner {
     async fn process_commitment_after_prechecks(
         &mut self,
         commitment_tx: &CommitmentTransaction,
-        log_status_debug: bool,
-        warn_on_unstaked: bool,
     ) -> Result<(), TxIngressError> {
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(commitment_tx).await;
-        if log_status_debug {
-            tracing::debug!(
-                "commitment tx {} status {:?}",
-                &commitment_tx.id,
-                &commitment_status
-            );
-        } else {
-            trace!(
-                "commitment tx {} status {:?}",
-                &commitment_tx.id,
-                &commitment_status
-            );
-        }
+        debug!(
+            "commitment tx {} status {:?}",
+            &commitment_tx.id,
+            &commitment_status
+        );
 
         match commitment_status {
             CommitmentSnapshotStatus::Unknown
@@ -96,13 +86,11 @@ impl Inner {
                 self.broadcast_commitment_gossip(commitment_tx);
             }
             CommitmentSnapshotStatus::Unstaked => {
-                if warn_on_unstaked {
-                    tracing::warn!(
-                        tx = ?commitment_tx.id,
-                        status = ?commitment_status,
-                        "commitment tx cached while address is unstaked"
-                    );
-                }
+                warn!(
+                    tx = ?commitment_tx.id,
+                    status = ?commitment_status,
+                    "commitment tx cached while address is unstaked"
+                );
                 // Cache pledge while address is unstaked
                 self.cache_unstaked_pledge(commitment_tx).await;
             }
@@ -135,7 +123,7 @@ impl Inner {
         // Gossip path: skip fee/value/funding checks
 
         // Post-processing shared with API path (trace-level status, no warn on unstaked)
-        self.process_commitment_after_prechecks(&commitment_tx, false, false)
+        self.process_commitment_after_prechecks(&commitment_tx)
             .await
     }
 
@@ -169,7 +157,7 @@ impl Inner {
         }
 
         // Post-processing shared with Gossip path (debug-level status, warn on unstaked)
-        self.process_commitment_after_prechecks(&commitment_tx, true, true)
+        self.process_commitment_after_prechecks(&commitment_tx)
             .await
     }
 
