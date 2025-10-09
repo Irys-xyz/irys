@@ -2189,7 +2189,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2197,7 +2197,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2214,14 +2214,14 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
 
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
             self.get_anchor().await.expect("anchor should be provided"),
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
         .await;
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2253,9 +2253,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2273,8 +2273,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = self.get_anchor().await?;
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2843,8 +2843,9 @@ pub fn new_stake_tx(
     signer: &IrysSigner,
     config: &ConsensusConfig,
 ) -> CommitmentTransaction {
-    let stake_tx = CommitmentTransaction::new_stake(config, *anchor);
-    signer.sign_commitment(stake_tx).unwrap()
+    let mut stake_tx = CommitmentTransaction::new_stake(config, *anchor);
+    signer.sign_commitment(&mut stake_tx).unwrap();
+    stake_tx
 }
 
 pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
@@ -2853,9 +2854,10 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     config: &ConsensusConfig,
     pledge_provider: &P,
 ) -> CommitmentTransaction {
-    let pledge_tx =
+    let mut pledge_tx =
         CommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
-    signer.sign_commitment(pledge_tx).unwrap()
+    signer.sign_commitment(&mut pledge_tx).unwrap();
+    pledge_tx
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

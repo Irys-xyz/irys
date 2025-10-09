@@ -5286,6 +5286,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-macros-integer-tagged"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "irys-p2p"
 version = "0.1.0"
 dependencies = [
@@ -5560,6 +5568,7 @@ dependencies = [
  "fixed-hash",
  "futures",
  "hex",
+ "irys-macros-integer-tagged",
  "irys-primitives",
  "irys-reth",
  "k256",

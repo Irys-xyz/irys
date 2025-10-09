@@ -5,7 +5,7 @@ use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionCommon as _, IrysTransactionId, H256,
+    IrysTransactionId, H256,
 };
 use lru::LruCache;
 use std::{collections::HashMap, num::NonZeroUsize};
@@ -136,17 +136,13 @@ impl Inner {
         match commitment_status {
             CommitmentSnapshotStatus::Unknown
             | CommitmentSnapshotStatus::Accepted
-            // The transaction should be ingerssed anyway, as it may be used on a fork.
-            // All of these txs are valid in them by themselves, it's just that the current state of the mempool and
-            // snapshots does not accept them in their current form. Yet we still should cache them in case of reorg.
             | CommitmentSnapshotStatus::InvalidPledgeCount
             | CommitmentSnapshotStatus::PartitionNotOwned
             | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
                 let mut mempool_state_guard = self.mempool_state.write().await;
-                // Add the commitment tx to the valid tx list to be included in the next block
                 trace!(
-                    "pushing commitment {} to valid_commitment_tx",
-                    &commitment_tx.id
+                    tx = ?commitment_tx.id,
+                    "pushing commitment to valid_commitment_tx"
                 );
                 mempool_state_guard
                     .valid_commitment_tx
@@ -159,17 +155,11 @@ impl Inner {
                     .put(commitment_tx.id, ());
 
                 // Process any pending pledges for this newly staked address
-                // ------------------------------------------------------
-                // When a stake transaction is accepted, we can now process any pledge
-                // transactions from the same address that arrived earlier but were
-                // waiting for the stake. This effectively resolves the dependency
-                // order for address-based validation.
                 let pop = mempool_state_guard
                     .pending_pledges
                     .pop(&commitment_tx.signer);
                 drop(mempool_state_guard);
                 if let Some(pledges_lru) = pop {
-                    // Extract all pending pledges as a vector of owned transactions
                     let pledges: Vec<_> = pledges_lru
                         .into_iter()
                         .map(|(_, pledge_tx)| pledge_tx)
@@ -177,7 +167,6 @@ impl Inner {
 
                     for pledge_tx in pledges {
                         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                        // todo switch _ to actually handle the result
                         let _ = self
                             .handle_message(MempoolServiceMessage::IngestCommitmentTx(
                                 pledge_tx, oneshot_tx,
@@ -190,7 +179,6 @@ impl Inner {
                     }
                 }
 
-                // Gossip transaction
                 self.service_senders
                     .gossip_broadcast
                     .send(GossipBroadcastMessage::from(commitment_tx.clone()))
@@ -198,41 +186,30 @@ impl Inner {
             }
             CommitmentSnapshotStatus::Unstaked => {
                 tracing::warn!(
-                    "commitment tx {} status {:?}",
-                    &commitment_tx.id,
-                    &commitment_status
+                    tx = ?commitment_tx.id,
+                    status = ?commitment_status,
+                    "commitment tx cached while address is unstaked"
                 );
-                // For unstaked pledges, we cache them in a 2-level LRU structure:
-                // Level 1: Keyed by signer address (allows tracking multiple addresses)
-                // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
 
                 let mut mempool_state_guard = self.mempool_state.write().await;
                 if let Some(pledges_cache) = mempool_state_guard
                     .pending_pledges
                     .get_mut(&commitment_tx.signer)
                 {
-                    // Address already exists in cache - add this pledge transaction to its lru cache
                     pledges_cache.put(commitment_tx.id, commitment_tx.clone());
                 } else {
-                    // First pledge from this address - create a new nested lru cache
                     let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
                     let mut new_address_cache =
                         LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-                    // Add the pledge transaction to the new lru cache for the address
                     new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                    // Add the address cache to the primary lru cache
                     mempool_state_guard
                         .pending_pledges
                         .put(commitment_tx.signer, new_address_cache);
                 }
-                drop(mempool_state_guard)
+                drop(mempool_state_guard);
             }
-
-            // tx cannot be accepted in any form
             CommitmentSnapshotStatus::Unsupported => {
-                return Err(TxIngressError::Other("unsupported tx type".to_string()))
+                return Err(TxIngressError::Other("unsupported tx type".to_string()));
             }
         }
 

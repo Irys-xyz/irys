@@ -8,7 +8,10 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_primitives::Address;
-use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256};
+use irys_types::{
+    DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
+    U256,
+};
 use std::collections::BTreeMap;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
@@ -70,9 +73,8 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a data transaction that appears promoted
-    let data_tx = DataTransactionHeader {
+    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
-        version: 1,
         anchor: H256::zero(),
         signer: test_signer.address(),
         data_root: H256::random(),
@@ -85,7 +87,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         chain_id: 1,
         promoted_height: Some(2), // Mark as promoted!
         signature: Default::default(),
-    };
+    });
 
     // Create an invalid refund for this promoted transaction
     let invalid_refund = (

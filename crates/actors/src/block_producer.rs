@@ -927,7 +927,7 @@ pub trait BlockProdStrategy {
         };
 
         // build a new block header
-        let mut irys_block = IrysBlockHeader {
+        let mut irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
             diff,
@@ -1006,7 +1006,7 @@ pub trait BlockProdStrategy {
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
-        };
+        });
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();

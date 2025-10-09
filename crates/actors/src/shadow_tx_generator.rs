@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, IrysTransactionCommon as _, H256, U256,
+    IrysBlockHeader, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -745,12 +745,12 @@ impl RollingHash {
 mod tests {
     use super::*;
     use irys_primitives::CommitmentType;
+    use irys_types::ingress::IngressProofV1;
     use irys_types::{
-        ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
-        Signature, H256,
+        ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
+        IrysBlockHeader, IrysSignature, Signature, H256,
     };
     use itertools::Itertools as _;
-    use openssl::sha;
 
     fn create_test_commitment(
         commitment_type: CommitmentType,
@@ -759,7 +759,7 @@ mod tests {
     ) -> CommitmentTransaction {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
-        CommitmentTransaction {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
             id: H256::from([7_u8; 32]),
             commitment_type,
             anchor: H256::from([8_u8; 32]),
@@ -767,9 +767,8 @@ mod tests {
             value,
             fee,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
-            version: 1,
             chain_id: config.chain_id,
-        }
+        })
     }
 
     fn create_data_tx_header(
@@ -808,12 +807,13 @@ mod tests {
         let proof = H256::from([12_u8; 32]);
         let chain_id = 1_u64;
 
-        // Create the message that would be signed
-        let mut hasher = sha::Sha256::new();
-        hasher.update(&proof.0);
-        hasher.update(&data_root.0);
-        hasher.update(&chain_id.to_be_bytes());
-        let prehash = hasher.finish();
+        // Create the message that would be signed using the official prehash generation
+        let prehash = IngressProof::generate_prehash(
+            &proof,
+            &data_root,
+            chain_id,
+            IngressProof::CURRENT_VERSION,
+        );
 
         // Sign the message with the signer's internal signing key
         // Note: sign_prehash_recoverable is a method on k256::ecdsa::SigningKey
@@ -823,12 +823,12 @@ mod tests {
             .unwrap()
             .into();
 
-        IngressProof {
+        IngressProof::V1(IngressProofV1 {
             signature: IrysSignature::new(signature),
             data_root,
             proof,
             chain_id,
-        }
+        })
     }
 
     #[test]

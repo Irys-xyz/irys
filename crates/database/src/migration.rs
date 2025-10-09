@@ -133,15 +133,15 @@ mod tests {
             let write_tx = old_db.tx_mut()?;
 
             // IrysBlockHeaders (non-dupsort)
-            let header = IrysBlockHeader {
+            let header = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
                 block_hash,
                 height: 1,
                 ..Default::default()
-            };
+            });
             write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
 
             // IrysDataTxHeaders (non-dupsort)
-            let tx_header = DataTransactionHeader::default();
+            let tx_header = DataTransactionHeader::V1(Default::default());
             write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.into())?;
 
             let cached_at = UnixTimestamp::now()?;

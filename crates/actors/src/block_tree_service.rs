@@ -811,20 +811,21 @@ impl BlockTreeServiceInner {
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height % self.config.consensus.epoch.num_blocks_in_epoch == 0
+        block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
     fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Get the epoch snapshot
+        let block_hash = epoch_block.block_hash();
         let epoch_snapshot = self
             .cache
             .read()
             .expect("cache read lock poisoned")
-            .get_epoch_snapshot(&epoch_block.block_hash)
+            .get_epoch_snapshot(&block_hash)
             .ok_or_else(|| {
                 eyre::eyre!(
-                    "epoch block should have a snapshot in cache {}",
-                    epoch_block.block_hash
+                    "epoch block should have a snapshot in cache {:?}",
+                    block_hash
                 )
             })?;
 

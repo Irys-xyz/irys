@@ -182,10 +182,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x09ce0a2661221ff591aca987dcebb5ec141d91df64e14dc6ca47c5e0a8be81660a105294723d0201e4989f58cdd51b164ba7bdfc2355c69c4ce6b3c5b0c7a5221c";
-    // BS58 (JSON, hence the escaped quotes) encoded signature
+    const SIG_HEX: &str = "0x3219accff2a40786e9387ab861649e6b3830e4650bcbb70345d57153a129608b4b585c1a827c2f0ef9cc8355d89c810e0abeb9e781c0e68f8b043c756e70c7311b";
+    // Base58 encoding of the signature (for version=1 signing preimage)
     const SIG_BS58: &str =
-        "\"sBf5Lkht1uvPSbkTc5UcWtcEf58Tw6xpVhBJnDEe4xYns4EV3hVKC5Mn2tY7R8VF9LKm1L5JARSMQhUqSaFzGGCT\"";
+        "5RRj9zESnU7c488x1zP34KhoTY3K9xnEaKDHEMkaYtk3AB5xXZ9JV7jT87jpny1SVXXPBqMpXpBdZnL8D8Pq31RML";
 
     // spellchecker:on
 
@@ -199,7 +199,7 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = DataTransactionHeader {
+        let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
@@ -211,10 +211,9 @@ mod tests {
             ledger_id: 0,
             bundle_format: None,
             chain_id: testing_config.chain_id,
-            version: 0,
             promoted_height: None,
             signature: Default::default(),
-        };
+        });
 
         let transaction = DataTransaction {
             header: original_header,
@@ -235,24 +234,24 @@ mod tests {
 
         assert_eq!(transaction.header.signature, signature2);
 
-        // serde-json
+        // serde-json base58 roundtrip
         let ser = serde_json::to_string(&transaction.header.signature)?;
         let de_ser: IrysSignature = serde_json::from_str(&ser)?;
         assert_eq!(transaction.header.signature, de_ser);
 
-        // assert parity against hardcoded signatures
-        assert_eq!(SIG_BS58, ser);
-        let decoded_js_sig = Signature::try_from(&hex::decode(SIG_HEX)?[..])?;
+        // Verify base58 encoding matches expected (parity check with JS client)
+        assert_eq!(ser, format!("\"{}\"", SIG_BS58));
+
+        // assert parity against regenerated hex
+        let decoded_js_sig = Signature::try_from(&hex::decode(&SIG_HEX[2..])?[..])?;
 
         let d2 = hex::encode(transaction.header.signature.as_bytes());
-        println!("{}", d2);
-
-        // let d2 = hex::encode(transaction.header.signature.as_bytes());
+        // println!("{}", &d2);
         // assert_eq!(
         //     transaction.header.signature,
         //     Signature::try_from(&hex::decode(&d2)?[..])?.into()
         // );
-        // assert_eq!(SIG_HEX, format!("0x{}", d2));
+        assert_eq!(SIG_HEX, format!("0x{}", d2));
 
         assert_eq!(transaction.header.signature, decoded_js_sig.into());
 

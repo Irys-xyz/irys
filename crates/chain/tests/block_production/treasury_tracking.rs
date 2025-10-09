@@ -35,9 +35,10 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 1: Stake commitment
     let stake_tx = {
-        let commitment =
+        let mut commitment =
             CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
-        user1_signer.sign_commitment(commitment)?
+        user1_signer.sign_commitment(&mut commitment)?;
+        commitment
     };
     node.post_commitment_tx(&stake_tx).await?;
     node.wait_for_mempool(stake_tx.id, 10).await?;
@@ -60,9 +61,10 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 4: Multiple transactions (stake + 2KB data tx)
     let stake_tx2 = {
-        let commitment =
+        let mut commitment =
             CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
-        user2_signer.sign_commitment(commitment)?
+        user2_signer.sign_commitment(&mut commitment)?;
+        commitment
     };
     node.post_commitment_tx(&stake_tx2).await?;
 
