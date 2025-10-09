@@ -25,6 +25,12 @@ use tracing::{debug, info, warn, Instrument as _};
 /// If this limit is reached, eviction will continue in the next cycle.
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
 
+/// Eviction target to prevent thrashing near size limit boundary.
+/// Evicts to 90% (9/10) of limit to provide a buffer before next eviction.
+/// Example: 10GB limit evicts down to 9GB, providing 1GB buffer.
+const SIZE_EVICTION_TARGET_NUMERATOR: u64 = 9;
+const SIZE_EVICTION_TARGET_DENOMINATOR: u64 = 10;
+
 #[derive(Debug)]
 pub enum CacheServiceAction {
     OnBlockMigrated(u64, Option<oneshot::Sender<eyre::Result<()>>>),
@@ -398,18 +404,8 @@ impl ChunkCacheService {
 
         let mut evicted_count = 0_u64;
         let mut evicted_size = 0_u64;
-        let mut eviction_count: usize = 0;
 
-        for (data_root, cached) in entries {
-            if eviction_count >= MAX_EVICTIONS_PER_RUN {
-                warn!(
-                    evictions_performed = eviction_count,
-                    evicted_count,
-                    "Hit max eviction limit in prune_cache_by_time, will continue next cycle"
-                );
-                break;
-            }
-
+        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
             if cached.cached_at >= expiry_threshold {
                 break;
             }
@@ -435,7 +431,6 @@ impl ChunkCacheService {
 
             evicted_count += chunks_removed;
             evicted_size += approx_size;
-            eviction_count += 1;
         }
 
         info!(
@@ -456,10 +451,9 @@ impl ChunkCacheService {
         current_chunk_size: u64,
         max_cache_size_bytes: u64,
     ) -> eyre::Result<()> {
-        // Evict to 90% of limit to prevent thrashing near the boundary.
-        // Example: If limit is 10GB, evict down to 9GB. This provides a 1GB buffer
-        // before next eviction triggers
-        let target_size_with_margin = max_cache_size_bytes.saturating_mul(9) / 10;
+        let target_size_with_margin = max_cache_size_bytes
+            .saturating_div(SIZE_EVICTION_TARGET_DENOMINATOR)
+            .saturating_mul(SIZE_EVICTION_TARGET_NUMERATOR);
 
         debug!(
             current_size_gb = (current_chunk_size / GIGABYTE as u64),
@@ -474,22 +468,11 @@ impl ChunkCacheService {
         let mut evicted_size = 0_u64;
         let mut running_chunk_count = current_chunk_count;
         let mut running_chunk_size = current_chunk_size;
-        let mut eviction_count: usize = 0;
 
         let now = irys_types::UnixTimestamp::now()
             .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
 
-        for (data_root, cached) in entries {
-            if eviction_count >= MAX_EVICTIONS_PER_RUN {
-                warn!(
-                    evictions_performed = eviction_count,
-                    evicted_count,
-                    remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
-                    "Hit max eviction limit in prune_cache_by_size, will continue next cycle"
-                );
-                break;
-            }
-
+        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
             if running_chunk_size <= target_size_with_margin {
                 break;
             }
@@ -519,7 +502,6 @@ impl ChunkCacheService {
             evicted_size += approx_size;
             running_chunk_count = running_chunk_count.saturating_sub(chunks_removed);
             running_chunk_size = running_chunk_size.saturating_sub(approx_size);
-            eviction_count += 1;
         }
 
         info!(
