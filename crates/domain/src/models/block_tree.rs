@@ -1362,7 +1362,9 @@ pub fn create_epoch_snapshot_for_block(
             .get_epoch_commitments();
         let mut new_snapshot = (*prev_epoch_snapshot).clone();
         let prev_epoch_block = new_snapshot.epoch_block.clone();
-        let _ = new_snapshot.perform_epoch_tasks(&Some(prev_epoch_block), block, commitments);
+        new_snapshot
+            .perform_epoch_tasks(&Some(prev_epoch_block), block, commitments)
+            .expect("performing epoch tasks must always succeed");
         Arc::new(new_snapshot)
     } else {
         parent_block_entry.epoch_snapshot.clone()
