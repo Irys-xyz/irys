@@ -16,8 +16,9 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData,
-    GossipDataRequest, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, VersionRequest, H256,
+    GossipDataRequest, IrysTransactionResponse, NodeConfig, NodeInfo, NumericVersionWrapper,
+    PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo,
+    VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -341,7 +342,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     let api_client_stub = MockApiClient {
         block_response: Some(CombinedBlockHeader {
-            irys: block2.clone(),
+            irys: NumericVersionWrapper::new(block2.clone()),
             execution: Default::default(),
         }),
     };

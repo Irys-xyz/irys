@@ -7,7 +7,7 @@ use actix_web::{
 use base58::{FromBase58 as _, ToBase58 as _};
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
+use irys_types::{CombinedBlockHeader, ExecutionHeader, NumericVersionWrapper, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
@@ -123,7 +123,7 @@ async fn get_block_by_hash(
         .collect::<Vec<TxHash>>();
 
     let cbh = CombinedBlockHeader {
-        irys: irys_header,
+        irys: NumericVersionWrapper::new(irys_header),
         execution: ExecutionHeader {
             header: reth_block.header,
             transactions: exec_txs,

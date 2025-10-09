@@ -5,9 +5,10 @@
 use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::versioning::{
-    compact_with_discriminant, split_discriminant, HasInnerVersion, Signable, VersionDiscriminant,
-    Versioned, VersioningError,
+    compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
+    VersioningError,
 };
+use crate::NumericVersionWrapper;
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash,
@@ -162,7 +163,9 @@ impl VDFLimiterInfo {
 }
 
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Display)]
+#[serde(tag = "version")]
 pub enum IrysBlockHeader {
+    #[serde(rename = "1")]
     V1(IrysBlockHeaderV1),
 }
 
@@ -278,51 +281,20 @@ impl IrysBlockHeader {
     }
 }
 
-impl Default for IrysBlockHeaderV1 {
-    fn default() -> Self {
-        Self {
-            block_hash: Default::default(),
-            signature: Default::default(),
-            version: 1,
-            height: Default::default(),
-            diff: Default::default(),
-            cumulative_diff: Default::default(),
-            solution_hash: Default::default(),
-            last_diff_timestamp: Default::default(),
-            previous_solution_hash: Default::default(),
-            last_epoch_hash: Default::default(),
-            chunk_hash: Default::default(),
-            previous_block_hash: Default::default(),
-            previous_cumulative_diff: Default::default(),
-            poa: Default::default(),
-            reward_address: Default::default(),
-            reward_amount: Default::default(),
-            miner_address: Default::default(),
-            timestamp: Default::default(),
-            vdf_limiter_info: Default::default(),
-            system_ledgers: Default::default(),
-            data_ledgers: Default::default(),
-            evm_block_hash: Default::default(),
-            oracle_irys_price: Default::default(),
-            ema_irys_price: Default::default(),
-            treasury: Default::default(),
-        }
-    }
-}
-
 impl Versioned for IrysBlockHeaderV1 {
     const VERSION: u8 = 1;
 }
-impl HasInnerVersion for IrysBlockHeaderV1 {
-    fn inner_version(&self) -> u8 {
-        self.version
-    }
-}
+// impl HasInnerVersion for IrysBlockHeaderV1 {
+//     fn inner_version(&self) -> u8 {
+//         self.version
+//     }
+// }
 
 /// Stores deserialized fields from a JSON formatted Irys block header.
 #[derive(
     Clone,
     Debug,
+    Default,
     Eq,
     Serialize,
     Deserialize,
@@ -346,10 +318,6 @@ pub struct IrysBlockHeaderV1 {
     #[rlp(skip)]
     #[rlp(default)]
     pub signature: IrysSignature,
-
-    /// The blocks version.
-    /// should always be `1` (for this version anyway)
-    pub version: u8,
 
     /// The block height.
     #[serde(with = "string_u64")]
@@ -828,7 +796,6 @@ impl IrysBlockHeaderV1 {
             ema_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             treasury: U256::zero(),
-            version: 1, // Set valid version for versioning support
             ..Default::default()
         }
     }
@@ -846,7 +813,7 @@ pub struct ExecutionHeader {
 #[serde(rename_all = "camelCase", default)]
 pub struct CombinedBlockHeader {
     #[serde(flatten)]
-    pub irys: IrysBlockHeader,
+    pub irys: NumericVersionWrapper<IrysBlockHeader>,
     pub execution: ExecutionHeader,
 }
 
@@ -1357,9 +1324,7 @@ mod tests {
     }
 
     fn mock_header() -> IrysBlockHeaderV1 {
-        let mut h = IrysBlockHeaderV1::new_mock_header();
-        h.version = 1;
-        h
+        IrysBlockHeaderV1::new_mock_header()
     }
 
     #[test]

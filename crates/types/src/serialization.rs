@@ -880,7 +880,7 @@ where
 
 // Generic wrapper that works with any T that has a version field
 // Converts a JSON serialized string version into a numeric one
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NumericVersionWrapper<T> {
     inner: T,
 }

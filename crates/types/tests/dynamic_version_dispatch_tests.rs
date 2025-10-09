@@ -22,19 +22,17 @@ fn data_tx_uses_new_constructor() {
 #[test]
 fn block_header_v1_construction_from_inner() {
     // Test that we can construct a versioned type from an inner V1 type
-    let header = IrysBlockHeaderV1 {
-        version: 1,
-        ..Default::default()
-    };
+    let header = IrysBlockHeaderV1::default();
+
     let versioned = IrysBlockHeader::V1(header);
-    assert_eq!(versioned.version, 1);
+    assert_eq!(versioned.discriminant(), 1);
 }
 
 #[test]
 fn block_header_uses_new_constructor() {
     // Prefer using the public constructor for normal usage
     let versioned = IrysBlockHeader::new_mock_header();
-    assert_eq!(versioned.version, 1);
+    assert_eq!(versioned.discriminant(), 1);
 }
 
 #[test]

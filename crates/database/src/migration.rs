@@ -136,7 +136,6 @@ mod tests {
             let header = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
                 block_hash,
                 height: 1,
-                version: 1, // Set valid version
                 ..Default::default()
             });
             write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;

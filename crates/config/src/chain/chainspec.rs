@@ -10,7 +10,6 @@ pub fn build_unsigned_irys_genesis_block(
     number_of_ingress_proofs_total: u64,
 ) -> IrysBlockHeader {
     IrysBlockHeader::V1(IrysBlockHeaderV1 {
-        version: 1,
         block_hash: H256::zero(),
         signature: IrysSignature::default(), // Empty signature to be replaced by actual signing
         height: 0,

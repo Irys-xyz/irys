@@ -62,7 +62,7 @@ fn test_versioned_block_header_json_roundtrip() {
     // Verify it deserializes correctly
     let deserialized: IrysBlockHeader =
         serde_json::from_str(&json).expect("Failed to deserialize block header");
-    assert_eq!(versioned.version, deserialized.version);
+    assert_eq!(versioned.discriminant(), deserialized.discriminant());
     assert_eq!(versioned.block_hash, deserialized.block_hash);
 }
 
