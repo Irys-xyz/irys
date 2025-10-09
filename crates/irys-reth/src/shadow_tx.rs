@@ -50,8 +50,8 @@ pub enum ShadowTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
-    /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
-    Unstake(EitherIncrementOrDecrement),
+    /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
+    Unstake(BalanceIncrement),
     /// Unstake at inclusion: fee-only via priority fee. No amount in packet; log-only.
     UnstakeDebit(UnstakeDebit),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
@@ -107,10 +107,7 @@ impl TransactionPacket {
     /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
     pub fn fee_payer_address(&self) -> Option<Address> {
         match self {
-            Self::Unstake(either) => match either {
-                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
-                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
-            },
+            Self::Unstake(inc) => Some(inc.target),
             Self::UnstakeDebit(dec) => Some(dec.target),
             Self::BlockReward(_) => None, // No target, uses beneficiary
             Self::Stake(dec) => Some(dec.target),
@@ -340,7 +337,7 @@ impl BorshDeserialize for TransactionPacket {
         let mut disc = [0_u8; 1];
         reader.read_exact(&mut disc)?;
         Ok(match disc[0] {
-            UNSTAKE_ID => Self::Unstake(EitherIncrementOrDecrement::deserialize_reader(reader)?),
+            UNSTAKE_ID => Self::Unstake(BalanceIncrement::deserialize_reader(reader)?),
             UNSTAKE_DEBIT_ID => Self::UnstakeDebit(UnstakeDebit::deserialize_reader(reader)?),
             BLOCK_REWARD_ID => Self::BlockReward(BlockRewardIncrement::deserialize_reader(reader)?),
             STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
@@ -840,13 +837,11 @@ mod tests {
                 target: test_address,
                 irys_ref: test_ref,
             }),
-            TransactionPacket::Unstake(EitherIncrementOrDecrement::BalanceIncrement(
-                BalanceIncrement {
-                    amount: U256::from(400_u64),
-                    target: test_address,
-                    irys_ref: test_ref,
-                },
-            )),
+            TransactionPacket::Unstake(BalanceIncrement {
+                amount: U256::from(400_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
             TransactionPacket::Unpledge(UnpledgeDebit {
                 target: test_address,
                 irys_ref: test_ref,

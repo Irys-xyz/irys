@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
-    TransactionPacket, UnstakeDebit,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
+    UnstakeDebit,
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -12,7 +12,7 @@ use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
 
 use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
-use crate::block_producer::UnpledgeRefundEvent;
+use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Structure holding publish ledger transactions with their proofs
 #[derive(Debug, Clone)]
@@ -141,8 +141,9 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
-        refund_events: &[UnpledgeRefundEvent],
-    ) -> Result<Self> {
+    refund_events: &[UnpledgeRefundEvent],
+    unstake_refund_events: &[UnstakeRefundEvent],
+) -> Result<Self> {
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
         for tx in &publish_ledger.txs {
@@ -211,11 +212,8 @@ impl<'a> ShadowTxGenerator<'a> {
             .into_iter();
 
         // Initialize commitment refunds iterator (epoch only -> may be empty)
-        let commitment_refund_txs = if refund_events.is_empty() {
-            Vec::new()
-        } else {
-            generator.create_commitment_refund_shadow_txs(refund_events)?
-        };
+        let commitment_refund_txs =
+            generator.create_commitment_refund_shadow_txs(refund_events, unstake_refund_events)?;
         let current_commitment_refunds_iter = commitment_refund_txs
             .into_iter()
             .map(Ok)
@@ -620,17 +618,22 @@ impl<'a> ShadowTxGenerator<'a> {
                 let metadata = result?;
                 match &metadata.shadow_tx {
                     ShadowTransaction::V1 {
-                        packet: TransactionPacket::UnpledgeRefund(increment),
+                        packet,
                         ..
                     } => {
-                        self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                        match packet {
+                            TransactionPacket::UnpledgeRefund(increment) => {
+                                self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                            }
+                            TransactionPacket::Unstake(increment) => {
+                                self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                            }
+                            _ => unreachable!(
+                                "commitment refund iterator contains only refund packets"
+                            ),
+                        }
                     }
-                    _ => {
-                        return Err(eyre!(
-                            "Unexpected shadow transaction type in commitment refunds phase: {:?}",
-                            metadata.shadow_tx
-                        ));
-                    }
+                    _ => unreachable!("commitment refund iterator contains only refund packets"),
                 }
                 Ok(metadata)
             })
@@ -639,10 +642,12 @@ impl<'a> ShadowTxGenerator<'a> {
 
     fn create_commitment_refund_shadow_txs(
         &self,
-        refund_events: &[UnpledgeRefundEvent],
+        unpledge_events: &[UnpledgeRefundEvent],
+        unstake_events: &[UnstakeRefundEvent],
     ) -> Result<Vec<ShadowMetadata>> {
         let mut out = Vec::new();
-        for event in refund_events.iter().copied() {
+        // Unpledge refunds first (lower priority number in Ord)
+        for event in unpledge_events.iter().copied() {
             out.push(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnpledgeRefund(BalanceIncrement {
@@ -653,6 +658,20 @@ impl<'a> ShadowTxGenerator<'a> {
                     (*self.solution_hash).into(),
                 ),
                 transaction_fee: 0, // zero-priority fee for refunds
+            });
+        }
+        // Unstake refunds after
+        for event in unstake_events.iter().copied() {
+            out.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Unstake(BalanceIncrement {
+                        amount: event.amount.into(),
+                        target: event.account,
+                        irys_ref: event.irys_ref_txid.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
+                transaction_fee: 0,
             });
         }
         Ok(out)

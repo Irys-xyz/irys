@@ -1021,47 +1021,23 @@ where
 
         match shadow_tx {
             shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
-                shadow_tx::TransactionPacket::Unstake(either_inc_dec) => match either_inc_dec {
-                    shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(balance_increment) => {
-                        let log = Self::create_shadow_log(
-                            balance_increment.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_increment.amount, 256),
-                                DynSolValue::Address(balance_increment.target),
-                            ],
-                        );
-                        let target = balance_increment.target;
-                        let (plain_account, execution_result, account_existed) =
-                            self.handle_balance_increment(log, balance_increment)?;
-                        Ok((
-                            Ok((plain_account, execution_result, account_existed)),
-                            target,
-                        ))
-                    }
-                    shadow_tx::EitherIncrementOrDecrement::BalanceDecrement(balance_decrement) => {
-                        let log = Self::create_shadow_log(
-                            balance_decrement.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_decrement.amount, 256),
-                                DynSolValue::Address(balance_decrement.target),
-                            ],
-                        );
-                        let target = balance_decrement.target;
-                        let res = self.handle_balance_decrement(
-                            log,
-                            &balance_decrement.irys_ref,
-                            balance_decrement,
-                        )?;
-                        Ok((
-                            res.map(|(plain_account, execution_result)| {
-                                (plain_account, execution_result, true)
-                            }),
-                            target,
-                        ))
-                    }
-                },
+                shadow_tx::TransactionPacket::Unstake(balance_increment) => {
+                    let log = Self::create_shadow_log(
+                        balance_increment.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(balance_increment.amount, 256),
+                            DynSolValue::Address(balance_increment.target),
+                        ],
+                    );
+                    let target = balance_increment.target;
+                    let (plain_account, execution_result, account_existed) =
+                        self.handle_balance_increment(log, balance_increment)?;
+                    Ok((
+                        Ok((plain_account, execution_result, account_existed)),
+                        target,
+                    ))
+                }
                 shadow_tx::TransactionPacket::UnstakeDebit(unstake_debit) => {
                     // Fee-only via priority fee (already processed). Emit a log only.
                     let log = Self::create_shadow_log(
