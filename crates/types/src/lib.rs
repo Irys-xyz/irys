@@ -32,8 +32,6 @@ pub mod block_provider;
 pub mod h256;
 pub mod remote_packing;
 
-pub mod macrotest;
-
 use std::sync::{atomic::AtomicU64, Arc};
 
 pub use block::*;
