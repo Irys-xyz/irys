@@ -1,5 +1,6 @@
 use irys_types::{
-    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, H256,
+    CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
+    VersionDiscriminant as _, H256,
 };
 
 #[test]
@@ -24,7 +25,7 @@ fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
     let deserialized: CommitmentTransaction =
         serde_json::from_str(&json).expect("Failed to deserialize commitment transaction");
     assert_eq!(commitment_tx.id, deserialized.id);
-    assert_eq!(commitment_tx.version, deserialized.version);
+    assert_eq!(commitment_tx.discriminant(), deserialized.discriminant());
 }
 
 #[test]
@@ -48,7 +49,7 @@ fn test_versioned_data_transaction_header_json_no_duplicate_type_field() {
     let deserialized: DataTransactionHeader =
         serde_json::from_str(&json).expect("Failed to deserialize data transaction header");
     assert_eq!(data_tx_header.id, deserialized.id);
-    assert_eq!(data_tx_header.version, deserialized.version);
+    assert_eq!(data_tx_header.discriminant(), deserialized.discriminant());
 }
 
 #[test]
@@ -72,7 +73,11 @@ fn test_commitment_transaction_json_structure() {
     commitment_tx.id = H256::from([1_u8; 32]);
 
     // Serialize to pretty JSON for inspection
-    let json = serde_json::to_string_pretty(&commitment_tx).unwrap();
+    // note: we use `NumericVersionWrapper` so version is serialized as a number, not a string.
+    let json = serde_json::to_string_pretty(&irys_types::NumericVersionWrapper::new(
+        commitment_tx.clone(),
+    ))
+    .unwrap();
     println!("CommitmentTransaction JSON:\n{}", json);
 
     // Parse as a generic JSON value

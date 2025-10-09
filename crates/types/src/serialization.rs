@@ -18,7 +18,10 @@ use serde::{
     de::{self, Error as _},
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use serde_json::json;
+use serde_json::Value;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
 use uint::construct_uint;
 
@@ -872,6 +875,125 @@ where
         }
         StringOrNumber::Number(n) => Ok(Some(n)),
         StringOrNumber::Null => Ok(None),
+    }
+}
+
+// Generic wrapper that works with any T that has a version field
+// Converts a JSON serialized string version into a numeric one
+#[derive(Debug, Clone)]
+pub struct NumericVersionWrapper<T> {
+    inner: T,
+}
+
+impl<T> NumericVersionWrapper<T> {
+    pub fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+impl<T> Deref for NumericVersionWrapper<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> DerefMut for NumericVersionWrapper<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+// Generic serialization - convert version to number using Value
+impl<T> Serialize for NumericVersionWrapper<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::Error as _;
+
+        // Serialize the inner struct to Value
+        let mut value = serde_json::to_value(&self.inner).map_err(S::Error::custom)?;
+
+        // Convert version field from string to number (if it exists)
+        if let Some(obj) = value.as_object_mut() {
+            if let Some(version_str) = obj.get("version").and_then(|v| v.as_str()) {
+                match version_str.parse::<i64>() {
+                    Ok(version_num) => {
+                        obj.insert("version".to_string(), json!(version_num));
+                    }
+                    Err(_) => {
+                        // If parsing fails, keep the original string
+                        // Or you could return an error here if you prefer strict parsing
+                    }
+                }
+            }
+        }
+
+        // Serialize the modified Value
+        value.serialize(serializer)
+    }
+}
+
+// Generic deserialization - convert version back to string using Value
+impl<'de, T> Deserialize<'de> for NumericVersionWrapper<T>
+where
+    T: serde::de::DeserializeOwned, // Changed to DeserializeOwned
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        // Deserialize to Value first
+        let mut value = Value::deserialize(deserializer)?;
+
+        // Convert version field from number to string (if it exists and is a number)
+        if let Some(obj) = value.as_object_mut() {
+            if let Some(version_val) = obj.get("version") {
+                if let Some(version_str) = match version_val {
+                    Value::Number(n) => {
+                        // Convert number to string
+                        if let Some(i) = n.as_i64() {
+                            Some(json!(i.to_string()))
+                        } else {
+                            n.as_u64().map(|u| json!(u.to_string()))
+                        }
+                    }
+                    Value::String(_) => {
+                        // Already a string, keep as is
+                        None
+                    }
+                    _ => {
+                        // For other types, keep as is
+                        None
+                    }
+                } {
+                    obj.insert("version".to_string(), version_str);
+                }
+            }
+        }
+
+        // Deserialize from modified Value to the inner type
+        let inner = serde_json::from_value(value).map_err(D::Error::custom)?;
+
+        Ok(Self { inner })
     }
 }
 

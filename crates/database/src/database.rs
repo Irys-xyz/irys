@@ -371,10 +371,7 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1 {
-            version: 1,
-            ..Default::default()
-        });
+        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1::default());
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -388,7 +385,6 @@ mod tests {
         let commitment_tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             // Override some defaults to insure deserialization is working
             id: H256::from([10_u8; 32]),
-            version: 1,
             ..Default::default()
         });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;

@@ -295,7 +295,6 @@ mod tests {
             fee: 100,
             value,
             commitment_type,
-            version: 1,
             chain_id: 1,
         });
         // Generate a proper ID for the transaction

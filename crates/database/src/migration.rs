@@ -142,10 +142,7 @@ mod tests {
             write_tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
 
             // IrysDataTxHeaders (non-dupsort)
-            let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1 {
-                version: 1,
-                ..Default::default()
-            });
+            let tx_header = DataTransactionHeader::V1(Default::default());
             write_tx.put::<IrysDataTxHeaders>(tx_id, tx_header.into())?;
 
             let cached_at = UnixTimestamp::now()?;

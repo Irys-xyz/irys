@@ -1,7 +1,7 @@
 pub use crate::ingress::IngressProof;
 use crate::versioning::{
-    compact_with_discriminant, split_discriminant, HasInnerVersion, Signable, VersionDiscriminant,
-    Versioned, VersioningError,
+    compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
+    VersioningError,
 };
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
@@ -53,9 +53,21 @@ pub enum CommitmentValidationError {
 
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary)]
 #[repr(u8)]
-#[serde(untagged)]
+#[serde(tag = "version")]
 pub enum DataTransactionHeader {
+    #[serde(rename = "1")]
     V1(DataTransactionHeaderV1) = 1,
+}
+
+#[test]
+fn d2() {
+    let tx = CommitmentTransaction::default();
+    let wrapped = crate::NumericVersionWrapper::new(tx.clone());
+    println!(
+        "{}\n{}",
+        &serde_json::to_string_pretty(&tx).unwrap(),
+        &serde_json::to_string_pretty(&wrapped).unwrap()
+    )
 }
 
 impl VersionDiscriminant for DataTransactionHeader {
@@ -176,41 +188,34 @@ impl DataTransactionHeader {
     }
 }
 
-impl Default for DataTransactionHeaderV1 {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            id: Default::default(),
-            anchor: Default::default(),
-            signer: Default::default(),
-            data_root: Default::default(),
-            data_size: Default::default(),
-            header_size: Default::default(),
-            term_fee: Default::default(),
-            perm_fee: Default::default(),
-            ledger_id: Default::default(),
-            bundle_format: Default::default(),
-            chain_id: Default::default(),
-            signature: Default::default(),
-            promoted_height: Default::default(),
-        }
-    }
-}
 impl Versioned for DataTransactionHeaderV1 {
     const VERSION: u8 = 1;
 }
-impl HasInnerVersion for DataTransactionHeaderV1 {
-    fn inner_version(&self) -> u8 {
-        self.version
-    }
-}
+
+// impl HasInnerVersion for DataTransactionHeaderV1 {
+//     fn inner_version(&self) -> u8 {
+//         self.VERSION
+//     }
+// }
 
 // Commitment Transaction versioned wrapper
 #[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
-#[serde(untagged)]
+#[serde(tag = "version")]
 pub enum CommitmentTransaction {
+    #[serde(rename = "1")]
     V1(CommitmentTransactionV1) = 1,
+}
+
+#[test]
+fn d() {
+    let tx = CommitmentTransaction::default();
+    let wrapped = crate::NumericVersionWrapper::new(tx.clone());
+    println!(
+        "{}\n{}",
+        &serde_json::to_string_pretty(&tx).unwrap(),
+        &serde_json::to_string_pretty(&wrapped).unwrap()
+    )
 }
 
 impl Default for CommitmentTransaction {
@@ -369,34 +374,14 @@ impl CommitmentTransaction {
     }
 }
 
-impl Default for CommitmentTransactionV1 {
-    fn default() -> Self {
-        Self {
-            id: Default::default(),
-            anchor: Default::default(),
-            signer: Default::default(),
-            commitment_type: Default::default(),
-            version: 1,
-            chain_id: Default::default(),
-            fee: Default::default(),
-            value: Default::default(),
-            signature: Default::default(),
-        }
-    }
-}
-
 impl Versioned for CommitmentTransactionV1 {
     const VERSION: u8 = 1;
-}
-impl HasInnerVersion for CommitmentTransactionV1 {
-    fn inner_version(&self) -> u8 {
-        self.version
-    }
 }
 
 #[derive(
     Clone,
     Debug,
+    Default,
     Eq,
     Serialize,
     Deserialize,
@@ -413,9 +398,6 @@ impl HasInnerVersion for CommitmentTransactionV1 {
 /// NOTE: be CAREFUL with using serde(default) it should ONLY be for `Option`al fields.
 #[serde(rename_all = "camelCase")]
 pub struct DataTransactionHeaderV1 {
-    /// The transaction's version
-    pub version: u8,
-
     /// A 256-bit hash of the transaction signature.
     #[rlp(skip)]
     #[rlp(default)]
@@ -562,7 +544,6 @@ impl DataTransactionHeaderV1 {
             perm_fee: None,
             ledger_id: 0,
             bundle_format: None,
-            version: 1,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
             promoted_height: None,
@@ -603,6 +584,7 @@ pub type TxPathHash = H256;
 #[derive(
     Clone,
     Debug,
+    Default,
     Eq,
     Serialize,
     Deserialize,
@@ -634,9 +616,6 @@ pub struct CommitmentTransactionV1 {
 
     /// The type of commitment Stake/UnStake Pledge/UnPledge
     pub commitment_type: CommitmentType,
-
-    /// The transaction's version
-    pub version: u8,
 
     /// EVM chain ID - used to prevent cross-chain replays
     #[serde(with = "string_u64")]
@@ -699,7 +678,6 @@ impl CommitmentTransactionV1 {
             anchor: H256::zero(),
             signer: Address::default(),
             commitment_type: CommitmentType::default(),
-            version: 1,
             chain_id: config.chain_id,
             fee: 0,
             value: U256::zero(),
@@ -969,7 +947,6 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
         // Store the signer address
         self.signer = Address::from_public_key(signer.signer.verifying_key());
-        self.version = 1;
 
         // Create the signature hash and sign it
         let prehash = self.signature_hash();
@@ -1248,7 +1225,7 @@ mod tests {
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.discriminant(), 1);
     }
 
     #[test]
@@ -1268,7 +1245,7 @@ mod tests {
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.discriminant(), 1);
     }
 
     #[test]
@@ -1285,7 +1262,7 @@ mod tests {
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_header, decoded_header);
         // Verify version discriminant is preserved in Compact encoding
-        assert_eq!(decoded_header.version, 1);
+        assert_eq!(decoded_header.discriminant(), 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
         assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
@@ -1304,7 +1281,7 @@ mod tests {
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in Compact encoding
-        assert_eq!(decoded_tx.version, 1);
+        assert_eq!(decoded_tx.discriminant(), 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
         assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
@@ -1459,7 +1436,6 @@ mod tests {
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,
-            version: 1,
             promoted_height: None,
             signature: Signature::test_signature().into(),
         })
@@ -1470,7 +1446,6 @@ mod tests {
         tx.id = H256::from([255_u8; 32]);
         tx.signer = Address::default();
         tx.signature = Signature::test_signature().into();
-        tx.version = 1; // ensure supported version for signing tests
         tx
     }
 }
@@ -1626,7 +1601,6 @@ mod commitment_ordering_tests {
             fee,
             value: U256::zero(),
             commitment_type,
-            version: 1,
             chain_id: 1,
         }
     }

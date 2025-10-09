@@ -85,7 +85,6 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     // Create a data transaction that appears promoted
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
-        version: 1,
         anchor: H256::zero(),
         signer: test_signer.address(),
         data_root: H256::random(),

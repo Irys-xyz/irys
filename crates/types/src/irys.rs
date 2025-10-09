@@ -111,8 +111,6 @@ impl IrysSigner {
     pub fn sign_transaction(&self, mut transaction: DataTransaction) -> Result<DataTransaction> {
         // Store the signer address
         transaction.header.signer = Address::from_public_key(self.signer.verifying_key());
-        // Ensure version is set
-        transaction.header.version = 1;
 
         // Create the signature hash and sign it
         let prehash = transaction.signature_hash();
@@ -129,7 +127,6 @@ impl IrysSigner {
     pub fn sign_commitment(&self, commitment: &mut CommitmentTransaction) -> Result<()> {
         // Store the signer address
         commitment.signer = Address::from_public_key(self.signer.verifying_key());
-        commitment.version = 1;
 
         // Create the signature hash and sign it
         let prehash = commitment.signature_hash();

@@ -1,6 +1,6 @@
 use irys_types::{
     CommitmentTransaction, Compact as _, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
-    H256,
+    VersionDiscriminant as _, H256,
 };
 
 #[test]
@@ -48,7 +48,7 @@ fn test_versioned_data_transaction_header_compact_roundtrip() {
 
     // Verify the decoded version matches the original
     assert_eq!(decoded_versioned, versioned);
-    assert_eq!(decoded_versioned.version, 1);
+    assert_eq!(decoded_versioned.discriminant(), 1);
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn test_versioned_commitment_transaction_compact_roundtrip() {
 
     // Verify the decoded version matches the original
     assert_eq!(decoded_versioned, versioned);
-    assert_eq!(decoded_versioned.version, 1);
+    assert_eq!(decoded_versioned.discriminant(), 1);
 }
 
 #[test]
@@ -95,7 +95,11 @@ fn test_versioned_block_header_compact_with_default() {
 fn test_versioned_data_transaction_header_compact_with_default() {
     // Test with Default implementation which sets version = 1
     let versioned = DataTransactionHeader::default();
-    assert_eq!(versioned.version, 1, "default should set version to 1");
+    assert_eq!(
+        versioned.discriminant(),
+        1,
+        "default should set version to 1"
+    );
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);
@@ -110,7 +114,11 @@ fn test_versioned_data_transaction_header_compact_with_default() {
 fn test_versioned_commitment_transaction_compact_with_default() {
     // Test with Default implementation which sets version = 1
     let versioned = CommitmentTransaction::default();
-    assert_eq!(versioned.version, 1, "default should set version to 1");
+    assert_eq!(
+        versioned.discriminant(),
+        1,
+        "default should set version to 1"
+    );
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);

@@ -182,10 +182,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0xa65e24b381f759e7719f69d9ee09274babd564a680c219e5ae29e0acc2317bfb23d79097dad3e0ab5f04a8d45814bbd4184e38fcc8852ccb1f016832166279541b";
+    const SIG_HEX: &str = "0x3219accff2a40786e9387ab861649e6b3830e4650bcbb70345d57153a129608b4b585c1a827c2f0ef9cc8355d89c810e0abeb9e781c0e68f8b043c756e70c7311b";
     // Base58 encoding of the signature (for version=1 signing preimage)
     const SIG_BS58: &str =
-        "FgWn1ee5uD8BNxR5jYxQr7rvKSFHispz5DfmhUpkABdhRFneBg7zmpAfmhSLtKL48xL2GGVkLWuAbivQiBYFDWmmk";
+        "5RRj9zESnU7c488x1zP34KhoTY3K9xnEaKDHEMkaYtk3AB5xXZ9JV7jT87jpny1SVXXPBqMpXpBdZnL8D8Pq31RML";
 
     // spellchecker:on
 
@@ -211,8 +211,6 @@ mod tests {
             ledger_id: 0,
             bundle_format: None,
             chain_id: testing_config.chain_id,
-            // Updated to current supported version.
-            version: 1,
             promoted_height: None,
             signature: Default::default(),
         });
@@ -247,12 +245,13 @@ mod tests {
         // assert parity against regenerated hex
         let decoded_js_sig = Signature::try_from(&hex::decode(&SIG_HEX[2..])?[..])?;
 
-        // let d2 = hex::encode(transaction.header.signature.as_bytes());
+        let d2 = hex::encode(transaction.header.signature.as_bytes());
+        // println!("{}", &d2);
         // assert_eq!(
         //     transaction.header.signature,
         //     Signature::try_from(&hex::decode(&d2)?[..])?.into()
         // );
-        // assert_eq!(SIG_HEX, format!("0x{}", d2));
+        assert_eq!(SIG_HEX, format!("0x{}", d2));
 
         assert_eq!(transaction.header.signature, decoded_js_sig.into());
 
