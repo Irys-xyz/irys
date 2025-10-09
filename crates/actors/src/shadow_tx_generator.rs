@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
-    ShadowTransaction, TransactionPacket, UnstakeDebit,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
+    TransactionPacket, UnstakeDebit,
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
