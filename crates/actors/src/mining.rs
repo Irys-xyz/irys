@@ -27,7 +27,6 @@ use tracing::{debug, error, info, warn, Span};
 pub struct PartitionMiningActor {
     config: Config,
     service_senders: ServiceSenders,
-    packing_actor: Recipient<PackingRequest>,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
     difficulty: U256,
@@ -44,7 +43,6 @@ impl PartitionMiningActor {
     pub fn new(
         config: &Config,
         service_senders: ServiceSenders,
-        packing_actor: Recipient<PackingRequest>,
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStateReadonly,
@@ -55,7 +53,6 @@ impl PartitionMiningActor {
         Self {
             config: config.clone(),
             service_senders,
-            packing_actor,
             ranges: Ranges::new(
                 num_recall_ranges_in_partition(&config.consensus)
                     .try_into()
@@ -349,7 +346,8 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
             if msg.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(?partition_hash, ?interval, "Expiring partition hash");
-                    self.packing_actor.do_send(PackingRequest {
+                    let sender = self.service_senders.packing_sender();
+                    let _ = sender.try_send(PackingRequest {
                         storage_module: self.storage_module.clone(),
                         chunk_range: PartitionChunkRange(interval),
                     });
@@ -407,9 +405,7 @@ mod tests {
         block_producer::BlockProducerCommand,
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::{PartitionMiningActor, Seed},
-        packing::PackingActor,
     };
-    use actix::actors::mocker::Mocker;
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
     use irys_storage::ie;
@@ -422,7 +418,6 @@ mod tests {
         ledger_chunk_offset_ie, ConsensusConfig, H256List, LedgerChunkOffset, NodeConfig,
     };
     use irys_vdf::state::test_helpers::mocked_vdf_service;
-    use std::any::Any;
     use std::sync::atomic::AtomicU64;
     use std::sync::RwLock;
     use std::time::Duration;
@@ -463,7 +458,7 @@ mod tests {
         let arc_rwlock = Arc::new(rwlock);
         let closure_arc = arc_rwlock.clone();
 
-        let (service_senders, mut receivers) = ServiceSenders::new();
+        let (service_senders, mut receivers) = crate::test_helpers::build_test_service_senders();
 
         // Spawn task to handle block producer messages
         let closure_arc_clone = closure_arc.clone();
@@ -475,10 +470,6 @@ mod tests {
                 }
             }
         });
-
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
-            Box::new(Some(())) as Box<dyn Any>
-        }));
 
         // Set up the storage geometry for this test
         let infos = [StorageModuleInfo {
@@ -543,7 +534,6 @@ mod tests {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders,
-            packing.start().recipient(),
             storage_module,
             true,
             vdf_steps_guard.clone(),
@@ -647,7 +637,7 @@ mod tests {
         let storage_module_info = &infos[0];
         let storage_module = Arc::new(StorageModule::new(storage_module_info, &config).unwrap());
 
-        let (service_senders, _receivers) = ServiceSenders::new();
+        let (service_senders, _receivers) = crate::test_helpers::build_test_service_senders();
 
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -673,14 +663,9 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let packing = Mocker::<PackingActor>::mock(Box::new(move |_msg, _ctx| {
-            Box::new(Some(())) as Box<dyn Any>
-        }));
-
         let mut partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders,
-            packing.start().recipient(),
             storage_module,
             false,
             vdf_steps_guard.clone(),

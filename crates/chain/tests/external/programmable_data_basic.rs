@@ -6,7 +6,7 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_actors::packing::wait_for_packing;
+
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_primitives::precompile::IrysPrecompileOffsets;
@@ -71,11 +71,10 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
     node.node_ctx.stop_mining()?;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // let signer: PrivateKeySigner = config.mining_signer.signer.into();
     // let wallet = EthereumWallet::from(signer.clone());

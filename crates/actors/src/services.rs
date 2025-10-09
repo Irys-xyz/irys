@@ -8,6 +8,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
+    packing::PackingSender,
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
@@ -36,13 +37,6 @@ impl Deref for ServiceSenders {
 }
 
 impl ServiceSenders {
-    // Create both the sender and receiver sides
-    #[must_use]
-    pub fn new() -> (Self, ServiceReceivers) {
-        let (senders, receivers) = ServiceSendersInner::init();
-        (Self(Arc::new(senders)), receivers)
-    }
-
     pub fn subscribe_reorgs(&self) -> broadcast::Receiver<ReorgEvent> {
         self.0.subscribe_reorgs()
     }
@@ -57,6 +51,15 @@ impl ServiceSenders {
 
     pub fn subscribe_peer_events(&self) -> broadcast::Receiver<PeerEvent> {
         self.0.peer_events.subscribe()
+    }
+
+    pub fn new_with_packing_sender(sender: PackingSender) -> (Self, ServiceReceivers) {
+        let (senders, receivers) = ServiceSendersInner::init_with_sender(sender);
+        (Self(Arc::new(senders)), receivers)
+    }
+
+    pub fn packing_sender(&self) -> PackingSender {
+        self.0.packing_sender.clone()
     }
 }
 
@@ -102,11 +105,11 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
+    pub packing_sender: PackingSender,
 }
 
 impl ServiceSendersInner {
-    #[must_use]
-    pub fn init() -> (Self, ServiceReceivers) {
+    pub fn init_with_sender(sender: PackingSender) -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
@@ -157,6 +160,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
+            packing_sender: sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,

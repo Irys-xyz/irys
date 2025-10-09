@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{
     get_cache_size,
@@ -49,11 +49,10 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config).start().await;
 
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
