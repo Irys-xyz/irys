@@ -74,10 +74,7 @@ fn test_commitment_transaction_json_structure() {
 
     // Serialize to pretty JSON for inspection
     // note: we use `NumericVersionWrapper` so version is serialized as a number, not a string.
-    let json = serde_json::to_string_pretty(&irys_types::NumericVersionWrapper::new(
-        commitment_tx.clone(),
-    ))
-    .unwrap();
+    let json = serde_json::to_string_pretty(&commitment_tx).unwrap();
     println!("CommitmentTransaction JSON:\n{}", json);
 
     // Parse as a generic JSON value

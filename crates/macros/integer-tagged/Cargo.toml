@@ -1,0 +1,20 @@
+[package]
+name = "irys-macros-integer-tagged"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "1.0", features = ["full", "derive", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[lints]
+workspace = true

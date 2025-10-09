@@ -16,7 +16,9 @@ use crate::irys::IrysSigner;
 use crate::{generate_data_root, generate_ingress_leaves, DataRoot, IrysSignature, Node, H256};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
+#[serde(tag = "version")]
 pub enum IngressProof {
+    #[serde(rename = "1")]
     V1(IngressProofV1),
 }
 

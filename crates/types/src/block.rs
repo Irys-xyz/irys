@@ -8,7 +8,6 @@ use crate::versioning::{
     compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
     VersioningError,
 };
-use crate::NumericVersionWrapper;
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash,
@@ -23,6 +22,7 @@ use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
+use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
@@ -162,10 +162,19 @@ impl VDFLimiterInfo {
     }
 }
 
-#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Arbitrary, Display)]
-#[serde(tag = "version")]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    /* Serialize, Deserialize, */ IntegerTagged,
+    PartialEq,
+    Arbitrary,
+    Display,
+)]
+// #[serde(tag = "version")]
+#[integer_tagged(tag = "version")]
 pub enum IrysBlockHeader {
-    #[serde(rename = "1")]
+    #[integer_tagged(version = 1)]
     V1(IrysBlockHeaderV1),
 }
 
@@ -813,7 +822,7 @@ pub struct ExecutionHeader {
 #[serde(rename_all = "camelCase", default)]
 pub struct CombinedBlockHeader {
     #[serde(flatten)]
-    pub irys: NumericVersionWrapper<IrysBlockHeader>,
+    pub irys: IrysBlockHeader,
     pub execution: ExecutionHeader,
 }
 
