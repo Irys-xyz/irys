@@ -5288,7 +5288,6 @@ dependencies = [
 name = "irys-macros-integer-tagged"
 version = "0.1.0"
 dependencies = [
- "proc-macro2",
  "quote",
  "syn 1.0.109",
 ]
