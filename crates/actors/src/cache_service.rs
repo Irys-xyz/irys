@@ -137,10 +137,15 @@ impl ChunkCacheService {
         // Data roots from earlier blocks can be safely evicted as they're no longer needed
         // for current epoch validation.
         let ledger_id = DataLedger::Submit;
-        let first_unexpired_slot_index: u64 = epoch_snapshot
-            .get_first_unexpired_slot_index(ledger_id)
-            .try_into()
-            .unwrap();
+        let raw_index = epoch_snapshot.get_first_unexpired_slot_index(ledger_id);
+        let first_unexpired_slot_index: u64 = raw_index.try_into().map_err(|e| {
+            eyre::eyre!(
+                "first_unexpired_slot_index overflow: value {} exceeds u64::MAX: {}",
+                raw_index,
+                e
+            )
+        })?;
+
         let chunk_offset =
             first_unexpired_slot_index * self.config.consensus.num_chunks_in_partition;
 
@@ -176,12 +181,23 @@ impl ChunkCacheService {
                     None
                 }
             });
-            let (block_height, _ledger_max_offset) = found_block.unwrap();
+            let (block_height, _ledger_max_offset) = found_block.ok_or_else(|| {
+                eyre::eyre!(
+                    "No block found in canonical chain with ledger_total_chunks <= {}. Chain may be incomplete or corrupted.",
+                    chunk_offset
+                )
+            })?;
             prune_height = Some(block_height - 1);
         }
 
         // Prune the data root cache at the start of the submit ledger
-        self.prune_data_root_cache(prune_height.unwrap())
+        let prune_height = prune_height.ok_or_else(|| {
+            eyre::eyre!(
+                "Unable to determine prune height. First unexpired slot: {}",
+                first_unexpired_slot_index
+            )
+        })?;
+        self.prune_data_root_cache(prune_height)
     }
 
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
@@ -268,14 +284,16 @@ impl ChunkCacheService {
                 (None, Some(e)) => Some(e),
                 (None, None) => None,
             };
-            if horizon.is_none() {
-                debug!(
-                    ?data_root,
-                    "Skipping prune for data root without inclusion or expiry"
-                );
-                continue;
-            }
-            let max_height: u64 = horizon.unwrap();
+            let max_height: u64 = match horizon {
+                Some(h) => h,
+                None => {
+                    debug!(
+                        ?data_root,
+                        "Skipping prune for data root without inclusion or expiry"
+                    );
+                    continue;
+                }
+            };
 
             debug!(
                 "Processing data root {} max height: {}, prune height: {}",
