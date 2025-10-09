@@ -1062,15 +1062,16 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::IrysBlockHeaderV1;
     use std::sync::Arc;
 
     fn make_header(block_byte: u8, parent_byte: u8, height: u64) -> Arc<IrysBlockHeader> {
-        let header = IrysBlockHeader {
+        let header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             block_hash: BlockHash::repeat_byte(block_byte),
             previous_block_hash: BlockHash::repeat_byte(parent_byte),
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
         Arc::new(header)
     }
 

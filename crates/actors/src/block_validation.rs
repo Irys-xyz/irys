@@ -2285,8 +2285,8 @@ mod tests {
     use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
-        Signature, H256, U256,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
+        NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2598,7 +2598,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2630,8 +2630,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);
@@ -2858,7 +2858,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2890,8 +2890,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);

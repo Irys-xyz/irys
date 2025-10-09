@@ -12,7 +12,8 @@ use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
+    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -128,7 +129,7 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
-/// Takes an [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
+/// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
@@ -141,12 +142,17 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     let result = tx.get::<CachedDataRoots>(key)?;
 
     // Create or update the CachedDataRoot
-    let mut cached_data_root = result.unwrap_or_else(|| CachedDataRoot {
-        data_size: tx_header.data_size,
-        txid_set: vec![tx_header.id],
-        block_set: vec![],
-        expiry_height: None,
-    });
+    let mut cached_data_root = match result {
+        Some(existing) => existing,
+        None => CachedDataRoot {
+            data_size: tx_header.data_size,
+            txid_set: vec![tx_header.id],
+            block_set: vec![],
+            expiry_height: None,
+            cached_at: UnixTimestamp::now()
+                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
+        },
+    };
 
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
@@ -365,7 +371,7 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader::default();
+        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1::default());
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -376,12 +382,11 @@ mod tests {
         assert_eq!(result, Some(tx_header));
 
         // Write a commitment tx
-        let commitment_tx = CommitmentTransaction {
+        let commitment_tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             // Override some defaults to insure deserialization is working
             id: H256::from([10_u8; 32]),
-            version: 1,
             ..Default::default()
-        };
+        });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 
         // Read a commitment tx

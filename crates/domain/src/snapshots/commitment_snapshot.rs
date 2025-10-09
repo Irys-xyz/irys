@@ -250,6 +250,7 @@ impl CommitmentSnapshot {
 
         // Sort commitments directly
         all_commitments.sort();
+
         all_commitments
     }
 
@@ -286,7 +287,7 @@ mod tests {
         commitment_type: CommitmentType,
         value: U256,
     ) -> CommitmentTransaction {
-        let mut tx = CommitmentTransaction {
+        let mut tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             id: H256::zero(),
             anchor: H256::zero(),
             signer,
@@ -294,9 +295,8 @@ mod tests {
             fee: 100,
             value,
             commitment_type,
-            version: 1,
             chain_id: 1,
-        };
+        });
         // Generate a proper ID for the transaction
         tx.id = H256::random();
         tx

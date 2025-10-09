@@ -13,12 +13,12 @@ use awc::{body::MessageBody, http::StatusCode};
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
+use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
     block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
-    packing::wait_for_packing,
 };
 use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
@@ -552,12 +552,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
-        wait_for_packing(
-            self.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(seconds_to_wait as u64)),
-        )
-        .await
-        .expect("for packing to complete in the wait period");
+        self.node_ctx
+            .packing_waiter
+            .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
+            .await
+            .expect("for packing to complete in the wait period");
     }
 
     pub fn start_mining(&self) {
@@ -1395,7 +1394,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         publish_txs: usize,
         commitment_txs: usize,
         seconds_to_wait: u32,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<(
+        Vec<DataTransactionHeader>,
+        PublishLedgerWithTxs,
+        Vec<CommitmentTransaction>,
+    )> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
@@ -1418,25 +1421,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             prev = (submit_tx.len(), publish_tx.txs.len(), commitment_tx.len());
 
             if prev == expected {
-                break;
+                info!("mempool state valid after {} retries", &retries);
+                return Ok((submit_tx, publish_tx, commitment_tx));
             }
             debug!("got {:?} expected {:?} - txs: {:?}", &prev, expected, &txs);
 
             tokio::time::sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
-
-        if retries == max_retries {
-            Err(eyre::eyre!(
+        Err(eyre::eyre!(
                 "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
                 retries,
                 &prev,
                 &expected
             ))
-        } else {
-            info!("mempool state valid after {} retries", &retries);
-            Ok(())
-        }
     }
 
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
@@ -2192,7 +2190,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2200,7 +2198,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2221,15 +2219,14 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("failed to get anchor for pledge commitment");
 
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
             anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
         .await;
-
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2261,9 +2258,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2281,8 +2278,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = self.get_anchor().await?;
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2317,6 +2314,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         api_uri: &str,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
+        info!("Posting Commitment TX: {}", commitment_tx.id);
+
         let client = awc::Client::default();
         let url = format!("{}/v1/commitment_tx", api_uri);
         let result = client
@@ -2849,8 +2848,9 @@ pub fn new_stake_tx(
     signer: &IrysSigner,
     config: &ConsensusConfig,
 ) -> CommitmentTransaction {
-    let stake_tx = CommitmentTransaction::new_stake(config, *anchor);
-    signer.sign_commitment(stake_tx).unwrap()
+    let mut stake_tx = CommitmentTransaction::new_stake(config, *anchor);
+    signer.sign_commitment(&mut stake_tx).unwrap();
+    stake_tx
 }
 
 pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
@@ -2859,9 +2859,10 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     config: &ConsensusConfig,
     pledge_provider: &P,
 ) -> CommitmentTransaction {
-    let pledge_tx =
+    let mut pledge_tx =
         CommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
-    signer.sign_commitment(pledge_tx).unwrap()
+    signer.sign_commitment(&mut pledge_tx).unwrap();
+    pledge_tx
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

@@ -157,6 +157,7 @@ impl Inner {
             &commitment_tx.id,
             &commitment_status
         );
+
         if commitment_status == CommitmentSnapshotStatus::Accepted {
             // Add the commitment tx to the valid tx list to be included in the next block
             trace!(

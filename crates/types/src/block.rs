@@ -4,31 +4,39 @@
 //! making them easy to reference and maintain.
 use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
+use crate::versioning::{
+    compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
+    VersioningError,
+};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash,
     resolve_proofs,
     serialization::{optional_string_u64, string_u64},
-    string_u128, u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave,
-    DataTransactionHeader, H256List, IngressProofsList, IrysSignature, Proof, H256, U256,
+    string_u128,
+    transaction::DataTransactionHeader,
+    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave, H256List, IngressProofsList,
+    IrysSignature, Proof, H256, U256,
 };
 use actix::MessageResponse;
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
+use derive_more::Display;
+use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::{Index, IndexMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use tracing::debug;
 
 pub type BlockHash = H256;
 
 pub type EvmBlockHash = B256;
 
-/// Stores the `vdf_limiter_info` in the [`IrysBlockHeader`]
+/// Stores the `vdf_limiter_info` in the [`IrysBlockHeaderV1`]
 #[derive(
     Clone,
     Debug,
@@ -154,12 +162,140 @@ impl VDFLimiterInfo {
     }
 }
 
+#[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary, Display)]
+#[integer_tagged(tag = "version")]
+pub enum IrysBlockHeader {
+    #[integer_tagged(version = 1)]
+    V1(IrysBlockHeaderV1),
+}
+
+impl Default for IrysBlockHeader {
+    fn default() -> Self {
+        Self::V1(IrysBlockHeaderV1::default())
+    }
+}
+
+impl VersionDiscriminant for IrysBlockHeader {
+    fn version(&self) -> u8 {
+        match self {
+            Self::V1(_) => 1,
+        }
+    }
+}
+
+impl Deref for IrysBlockHeader {
+    type Target = IrysBlockHeaderV1;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::V1(v1) => v1,
+        }
+    }
+}
+
+impl DerefMut for IrysBlockHeader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::V1(v1) => v1,
+        }
+    }
+}
+
+impl Compact for IrysBlockHeader {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        match self {
+            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
+        }
+    }
+
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        let (disc, rest) = split_discriminant(buf);
+        match disc {
+            1 => {
+                let (inner, rest2) = IrysBlockHeaderV1::from_compact(rest, rest.len());
+                (Self::V1(inner), rest2)
+            }
+            other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
+        }
+    }
+}
+
+impl Signable for IrysBlockHeader {
+    fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
+        out.put_u8(self.version());
+        match self {
+            Self::V1(inner) => {
+                let mut tmp = Vec::new();
+                inner.digest_for_signing(&mut tmp);
+                out.put_slice(&tmp);
+            }
+        }
+    }
+}
+
+impl IrysBlockHeader {
+    /// Create a new mock header wrapped in the versioned wrapper
+    pub fn new_mock_header() -> Self {
+        Self::V1(IrysBlockHeaderV1::new_mock_header())
+    }
+
+    /// Get the block hash (convenience method for Arc<IrysBlockHeader>)
+    pub fn block_hash(&self) -> BlockHash {
+        self.block_hash
+    }
+
+    /// Get the block height (convenience method for Arc<IrysBlockHeader>)
+    pub fn height(&self) -> u64 {
+        self.height
+    }
+
+    /// Validate the block signature
+    pub fn is_signature_valid(&self) -> bool {
+        match self {
+            Self::V1(inner) => {
+                // First, verify the signature is valid for the data
+                let signature_valid = inner
+                    .signature
+                    .validate_signature(self.signature_hash(), inner.miner_address);
+
+                // Second, verify the block_hash matches the hash of the signature
+                let expected_block_hash = H256::from(keccak256(inner.signature.as_bytes()).0);
+                let block_hash_valid = inner.block_hash == expected_block_hash;
+
+                signature_valid && block_hash_valid
+            }
+        }
+    }
+
+    /// Get the chunk hash (convenience method)
+    pub fn chunk_hash(&self) -> H256 {
+        self.chunk_hash
+    }
+
+    /// Get the timestamp (convenience method)
+    pub fn timestamp(&self) -> u128 {
+        self.timestamp
+    }
+}
+
+impl Versioned for IrysBlockHeaderV1 {
+    const VERSION: u8 = 1;
+}
+// impl HasInnerVersion for IrysBlockHeaderV1 {
+//     fn inner_version(&self) -> u8 {
+//         self.version
+//     }
+// }
+
 /// Stores deserialized fields from a JSON formatted Irys block header.
 #[derive(
     Clone,
     Debug,
-    Eq,
     Default,
+    Eq,
     Serialize,
     Deserialize,
     PartialEq,
@@ -170,7 +306,7 @@ impl VDFLimiterInfo {
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
-pub struct IrysBlockHeader {
+pub struct IrysBlockHeaderV1 {
     /// The block identifier.
     /// Excluded from RLP encoding as it's derived from the signature hash.
     #[rlp(skip)]
@@ -260,7 +396,7 @@ pub struct IrysBlockHeader {
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
 
-impl IrysBlockHeader {
+impl IrysBlockHeaderV1 {
     /// Returns true if the block is the genesis block, false otherwise
     pub fn is_genesis(&self) -> bool {
         self.height == 0
@@ -275,26 +411,6 @@ impl IrysBlockHeader {
     {
         // Using trait directly because `reth_db_api` also has an `encode` method.
         Encodable::encode(&self, buf);
-    }
-
-    /// Create a `keccak256` hash of the [`IrysBlockHeader`]
-    pub fn signature_hash(&self) -> [u8; 32] {
-        // allocate the buffer, guesstimate the required capacity
-        let mut bytes = Vec::with_capacity(size_of::<Self>() * 3);
-        self.digest_for_signing(&mut bytes);
-        keccak256(bytes).0
-    }
-
-    /// Validates the block hash signature by:
-    /// 1.) generating the prehash
-    /// 2.) recovering the sender address, and comparing it to the block headers miner_address (miner_address MUST be part of the prehash)
-    pub fn is_signature_valid(&self) -> bool {
-        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
-        let signature_hash_matches_block_hash = self.block_hash.0 == id;
-        signature_hash_matches_block_hash
-            && self
-                .signature
-                .validate_signature(self.signature_hash(), self.miner_address)
     }
 
     // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
@@ -572,11 +688,11 @@ pub struct SystemTransactionLedger {
     pub tx_ids: H256List,
 }
 
-impl fmt::Display for IrysBlockHeader {
+impl fmt::Display for IrysBlockHeaderV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
         match serde_json::to_string_pretty(self) {
-            Ok(json) => write!(f, "{}", json), // Write the JSON string to the formatter
+            Ok(json) => write!(f, "{json}"), // Write the JSON string to the formatter
             Err(_) => write!(f, "Failed to serialize IrysBlockHeader"), // Handle serialization errors
         }
     }
@@ -606,7 +722,7 @@ pub fn compute_solution_hash(poa_chunk: &[u8], offset_le: u32, seed: &H256) -> H
     H256::from(hasher.finish())
 }
 
-impl IrysBlockHeader {
+impl IrysBlockHeaderV1 {
     pub fn new_mock_header() -> Self {
         use std::str::FromStr as _;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -788,6 +904,15 @@ impl TryFrom<&str> for DataLedger {
     }
 }
 
+impl std::fmt::Display for DataLedger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Publish => write!(f, "publish"),
+            Self::Submit => write!(f, "submit"),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BlockIndexQuery {
@@ -898,11 +1023,11 @@ impl BlockIndexItem {
 
 #[cfg(test)]
 mod tests {
-    use crate::ingress::IngressProof;
+    use crate::ingress::{IngressProof, IngressProofV1};
     use crate::{validate_path, Config, NodeConfig};
 
     use super::*;
-    use alloy_primitives::Signature;
+    use alloy_primitives::{keccak256, Signature};
     use alloy_rlp::Decodable;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use rstest::rstest;
@@ -985,12 +1110,12 @@ mod tests {
             tx_ids: H256List(vec![]),
             total_chunks: 55,
             expires: None,
-            proofs: Some(IngressProofsList(vec![IngressProof {
+            proofs: Some(IngressProofsList(vec![IngressProof::V1(IngressProofV1 {
                 proof: H256::random(),
                 signature: IrysSignature::new(Signature::test_signature()),
                 data_root: H256::random(),
                 chain_id: 1,
-            }])),
+            })])),
             required_proof_count: None,
         };
 
@@ -1027,7 +1152,7 @@ mod tests {
 
         // action
         let serialized = serde_json::to_string_pretty(&header).unwrap();
-        let deserialized: IrysBlockHeader = serde_json::from_str(&serialized).unwrap();
+        let deserialized: IrysBlockHeaderV1 = serde_json::from_str(&serialized).unwrap();
 
         // Assert
         assert_eq!(header, deserialized);
@@ -1067,7 +1192,7 @@ mod tests {
         // action
         header.to_compact(&mut buf);
         assert!(!buf.is_empty(), "expect data to be written into the buffer");
-        let (derived_header, rest_of_the_buffer) = IrysBlockHeader::from_compact(&buf, buf.len());
+        let (derived_header, rest_of_the_buffer) = IrysBlockHeaderV1::from_compact(&buf, buf.len());
         assert!(
             rest_of_the_buffer.is_empty(),
             "the whole buffer should be read"
@@ -1097,7 +1222,7 @@ mod tests {
         #[case] expected_prev_ema: u64,
     ) {
         let interval = 10;
-        let header = IrysBlockHeader {
+        let header = IrysBlockHeaderV1 {
             height,
             ..Default::default()
         };
@@ -1123,7 +1248,7 @@ mod tests {
     #[case(100, false)]
     fn test_is_ema_recalculation_block(#[case] height: u64, #[case] expected_is_ema: bool) {
         let interval = 10;
-        let header = IrysBlockHeader {
+        let header = IrysBlockHeaderV1 {
             height,
             ..Default::default()
         };
@@ -1154,7 +1279,7 @@ mod tests {
     #[test]
     fn test_irys_block_header_signing() {
         // setup
-        let mut header = mock_header();
+        let mut header = IrysBlockHeader::V1(mock_header());
         let testing_config = NodeConfig::testing();
         let config = Config::new(testing_config);
         let signer = config.irys_signer();
@@ -1198,13 +1323,13 @@ mod tests {
         assert!(!header.is_signature_valid());
     }
 
-    fn mock_header() -> IrysBlockHeader {
-        IrysBlockHeader::new_mock_header()
+    fn mock_header() -> IrysBlockHeaderV1 {
+        IrysBlockHeaderV1::new_mock_header()
     }
 
     #[test]
     fn test_block_header_serialization() {
-        let header = IrysBlockHeader {
+        let header = IrysBlockHeaderV1 {
             height: u64::MAX,
             ..Default::default()
         };
@@ -1212,7 +1337,7 @@ mod tests {
         let json = serde_json::to_string(&header).unwrap();
         assert!(json.contains(&format!("\"height\":\"{}\"", u64::MAX)));
 
-        let deserialized: IrysBlockHeader = serde_json::from_str(&json).unwrap();
+        let deserialized: IrysBlockHeaderV1 = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.height, u64::MAX);
     }
 

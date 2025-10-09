@@ -335,7 +335,7 @@ where
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
-                data: irys_block.as_ref().clone(),
+                data: (*irys_block).clone(),
             },
             peer_info.address.api,
             peer_info.address.gossip,
@@ -365,7 +365,7 @@ where
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
-                data: irys_block.as_ref().clone(),
+                data: (*irys_block).clone(),
             },
             peer_info.address.api,
             peer_info.address.gossip,

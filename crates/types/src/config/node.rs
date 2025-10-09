@@ -7,6 +7,7 @@ use crate::{
     ConsensusConfig, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
 };
 use crate::{serde_utils, ConsensusOptions};
+#[cfg(any(test, feature = "test-utils"))]
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::Address;
 
@@ -287,6 +288,43 @@ pub struct RemotePackingConfig {
     pub timeout: Option<Duration>,
 }
 
+/// Default maximum cache size: 10 GB
+pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
+
+/// Cache eviction strategy - node operators select one
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum CacheEvictionStrategy {
+    /// Time-based eviction: remove cached data after a fixed time period
+    /// Runs on every prune_cache() call, evicts entries older than max_age
+    TimeBased {
+        /// Maximum age of cached data in seconds before eviction
+        /// Example: 86400 = 24 hours, 604800 = 7 days
+        max_age_seconds: u64,
+    },
+
+    /// Size-based eviction: remove oldest cached data (FIFO) when limits exceeded
+    /// Runs on every prune_cache() call, evicts oldest entries when over limit
+    SizeBased {
+        /// Maximum cache size in bytes
+        /// Default: 10737418240 (10 GB)
+        #[serde(default = "default_max_cache_size_bytes")]
+        max_cache_size_bytes: u64,
+    },
+}
+
+const fn default_max_cache_size_bytes() -> u64 {
+    DEFAULT_MAX_CACHE_SIZE_BYTES
+}
+
+impl Default for CacheEvictionStrategy {
+    fn default() -> Self {
+        Self::SizeBased {
+            max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
+        }
+    }
+}
+
 /// # Cache Configuration
 ///
 /// Settings for in-memory caching to improve performance.
@@ -296,6 +334,10 @@ pub struct CacheConfig {
     /// Number of blocks cache cleaning will lag behind block finalization
     /// Higher values keep more data in cache but use more memory
     pub cache_clean_lag: u8,
+
+    /// Cache eviction strategy - choose time-based OR size-based
+    #[serde(default)]
+    pub eviction_strategy: CacheEvictionStrategy,
 }
 
 /// # HTTP API Configuration
@@ -574,7 +616,10 @@ impl NodeConfig {
                 },
                 remote: Default::default(),
             },
-            cache: CacheConfig { cache_clean_lag: 2 },
+            cache: CacheConfig {
+                cache_clean_lag: 2,
+                eviction_strategy: CacheEvictionStrategy::default(),
+            },
             http: HttpConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 0,
@@ -703,7 +748,10 @@ impl NodeConfig {
                 },
                 remote: Default::default(),
             },
-            cache: CacheConfig { cache_clean_lag: 2 },
+            cache: CacheConfig {
+                cache_clean_lag: 2,
+                eviction_strategy: CacheEvictionStrategy::default(),
+            },
             http: HttpConfig {
                 public_ip: "127.0.0.1".parse().expect("valid IP address"),
                 public_port: 8080,

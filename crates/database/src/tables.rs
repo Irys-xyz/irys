@@ -6,8 +6,9 @@ use crate::{
     submodule::tables::{ChunkOffsets, ChunkPathHashes},
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Address, Base64, CommitmentTransaction, PeerListItem};
-use irys_types::{ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader, H256};
+use irys_types::{Address, Base64, PeerListItem};
+use irys_types::{ChunkPathHash, DataRoot, H256};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
 use reth_db::{TableType, TableViewer};

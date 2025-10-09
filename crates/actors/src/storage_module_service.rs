@@ -14,7 +14,7 @@
 /// consistency throughout the system.
 use crate::{
     chunk_migration_service::ChunkMigrationServiceMessage, packing::PackingRequest,
-    services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
+    services::ServiceSenders, DataSyncServiceMessage,
 };
 use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
@@ -58,7 +58,6 @@ pub struct StorageModuleServiceInner {
     storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
     block_index: BlockIndexReadGuard,
     block_tree: BlockTreeReadGuard,
-    actor_addresses: ActorAddresses,
     submodules_config: StorageSubmodulesConfig,
     service_senders: ServiceSenders,
     config: Config,
@@ -70,7 +69,6 @@ impl StorageModuleServiceInner {
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
-        actor_addresses: ActorAddresses,
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
@@ -84,7 +82,6 @@ impl StorageModuleServiceInner {
             storage_modules,
             block_index,
             block_tree,
-            actor_addresses,
             submodules_config,
             service_senders,
             config,
@@ -221,8 +218,9 @@ impl StorageModuleServiceInner {
         for packing_sm in packing_modules {
             // Reset packing params and indexes on the storage module
             if let Ok(interval) = packing_sm.reset() {
-                // Message packing actor to fill up fresh entropy chunks on the drive
-                self.actor_addresses.packing.do_send(PackingRequest {
+                // Message packing service to fill up fresh entropy chunks on the drive
+                let sender = self.service_senders.packing_sender();
+                let _ = sender.try_send(PackingRequest {
                     storage_module: packing_sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
@@ -231,7 +229,7 @@ impl StorageModuleServiceInner {
 
         // For each storage module assigned to a data ledger, we need to update the data_root indexes
         // that may overlap the assigned slot so that it can index chunks
-        let mut blocks_to_migrate: BTreeMap<u128, BlockHash> = BTreeMap::new();
+        let mut blocks_to_migrate: BTreeMap<u64, BlockHash> = BTreeMap::new();
         for assigned_sm in assigned_modules {
             // Rebuild indexes
             let ledger_id = assigned_sm
@@ -316,7 +314,7 @@ impl StorageModuleServiceInner {
                     let bi = self.block_index.read();
                     for height in start_block..=end_block {
                         let block_hash = bi
-                            .get_item(height.try_into().unwrap())
+                            .get_item(height)
                             .expect("block item to be present in index")
                             .block_hash;
                         blocks_to_migrate.insert(height, block_hash);
@@ -524,7 +522,6 @@ impl StorageModuleService {
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
-        actor_addresses: &ActorAddresses,
         service_senders: ServiceSenders,
         config: &Config,
         runtime_handle: tokio::runtime::Handle,
@@ -533,7 +530,6 @@ impl StorageModuleService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let actor_addresses = actor_addresses.clone();
         let config = config.clone();
 
         let handle = runtime_handle.spawn(
@@ -545,7 +541,6 @@ impl StorageModuleService {
                         storage_modules,
                         block_index,
                         block_tree,
-                        actor_addresses,
                         service_senders,
                         config,
                     ),

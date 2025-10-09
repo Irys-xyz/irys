@@ -32,6 +32,7 @@ irys-testing-utils.workspace = true
 futures.workspace = true
 rust_decimal.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 irys-reward-curve.workspace = true
 async-trait.workspace = true
@@ -55,6 +56,7 @@ irys-api-client = { workspace = true, features = ["test-utils"] }
 irys-domain = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rstest.workspace = true
+proptest.workspace = true
 rand.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true

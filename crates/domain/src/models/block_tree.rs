@@ -1451,11 +1451,11 @@ mod tests {
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testing();
-        let genesis_header = IrysBlockHeader {
+        let genesis_header = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             oracle_irys_price: config.genesis.genesis_price,
             ema_irys_price: config.genesis.genesis_price,
             ..Default::default()
-        };
+        });
         EmaSnapshot::genesis(&genesis_header)
     }
 
@@ -2436,12 +2436,12 @@ mod tests {
         block
     }
 
-    const fn extend_chain(
+    fn extend_chain(
         mut new_block: IrysBlockHeader,
         previous_block: &IrysBlockHeader,
     ) -> IrysBlockHeader {
-        new_block.previous_block_hash = previous_block.block_hash;
-        new_block.height = previous_block.height + 1;
+        new_block.previous_block_hash = previous_block.block_hash();
+        new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;
         // Don't modify solution_hash - keep the random one from block creation
         new_block
@@ -2485,7 +2485,7 @@ mod tests {
 
         let expected = expected_blocks
             .iter()
-            .map(|b| b.block_hash)
+            .map(|b| b.block_hash())
             .collect::<Vec<_>>();
 
         println!("actual: {:?}\nexpected: {:?}", actual_blocks, expected);
