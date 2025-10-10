@@ -9,8 +9,6 @@ use tracing::trace;
 use irys_packing::capacity_pack_range_cuda_c;
 #[cfg(feature = "nvidia")]
 use irys_types::split_interval;
-#[cfg(feature = "nvidia")]
-use tracing::debug;
 
 use crate::types::RemotePackingRequest;
 use crate::worker::{PackingWorkerState, PACKING_TYPE};
