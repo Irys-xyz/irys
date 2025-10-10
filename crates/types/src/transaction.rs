@@ -1,13 +1,16 @@
 pub use crate::ingress::IngressProof;
-use crate::versioning::{
-    compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
-    VersioningError,
-};
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
-use crate::{TxChunkOffset, UnpackedChunk};
+use crate::{decode_rlp_version, TxChunkOffset, UnpackedChunk};
+use crate::{
+    encode_rlp_version,
+    versioning::{
+        compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
+        VersioningError,
+    },
+};
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 use irys_macros_integer_tagged::IntegerTagged;
@@ -134,37 +137,26 @@ impl Compact for DataTransactionHeader {
 
 impl Signable for DataTransactionHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        out.put_u8(self.version());
-        match self {
-            Self::V1(inner) => {
-                let mut tmp = Vec::new();
-                inner.encode_for_signing(&mut tmp);
-                out.put_slice(&tmp);
-            }
-        }
+        self.encode(out);
     }
 }
 
 impl alloy_rlp::Encodable for DataTransactionHeader {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        // Encode discriminant followed by inner struct
-        out.put_u8(self.version());
+        let mut buf = Vec::new();
         match self {
-            Self::V1(inner) => inner.encode(out),
+            Self::V1(inner) => inner.encode(&mut buf),
         }
+        encode_rlp_version(buf, self.version(), out);
     }
 }
 
 impl alloy_rlp::Decodable for DataTransactionHeader {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        // Read discriminant
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
-        }
-        let discriminant = buf[0];
-        *buf = &buf[1..];
+        let (version, buf) = decode_rlp_version(buf)?;
+        let buf = &mut &buf[..];
 
-        match discriminant {
+        match version {
             1 => {
                 let inner = DataTransactionHeaderV1::decode(buf)?;
                 Ok(Self::V1(inner))
@@ -275,37 +267,26 @@ impl Compact for CommitmentTransaction {
 
 impl Signable for CommitmentTransaction {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        out.put_u8(self.version());
-        match self {
-            Self::V1(inner) => {
-                let mut tmp = Vec::new();
-                inner.encode_for_signing(&mut tmp);
-                out.put_slice(&tmp);
-            }
-        }
+        self.encode(out);
     }
 }
 
 impl alloy_rlp::Encodable for CommitmentTransaction {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        // Encode discriminant followed by inner struct
-        out.put_u8(self.version());
+        let mut buf = Vec::new();
         match self {
-            Self::V1(inner) => inner.encode(out),
+            Self::V1(inner) => inner.encode(&mut buf),
         }
+        encode_rlp_version(buf, self.version(), out);
     }
 }
 
 impl alloy_rlp::Decodable for CommitmentTransaction {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        // Read discriminant
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::InputTooShort);
-        }
-        let discriminant = buf[0];
-        *buf = &buf[1..];
+        let (version, buf) = decode_rlp_version(buf)?;
+        let buf = &mut &buf[..];
 
-        match discriminant {
+        match version {
             1 => {
                 let inner = CommitmentTransactionV1::decode(buf)?;
                 Ok(Self::V1(inner))
@@ -1226,12 +1207,145 @@ mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::irys::IrysSigner;
+    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner};
 
     use alloy_rlp::Decodable as _;
-
     use k256::ecdsa::SigningKey;
     use serde_json;
+
+    #[test]
+    fn test_complex_versioned_rlp_roundtrip() {
+        // this tests multiple versions, as well as deeper structures.
+        // as we don't have any V2/nested versioned structures right now
+
+        #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]
+        #[repr(u8)]
+        #[integer_tagged(tag = "version")]
+        enum DataTransactionHeader2 {
+            #[integer_tagged(version = 1)]
+            V1(DataTransactionHeaderV1) = 1,
+            #[integer_tagged(version = 2)]
+            V2(DataTransactionHeaderV1) = 2,
+        }
+
+        impl Default for DataTransactionHeader2 {
+            fn default() -> Self {
+                Self::V1(Default::default())
+            }
+        }
+
+        impl VersionDiscriminant for DataTransactionHeader2 {
+            fn version(&self) -> u8 {
+                match self {
+                    Self::V1(_) => 1,
+                    &Self::V2(_) => 2,
+                }
+            }
+        }
+
+        impl alloy_rlp::Encodable for DataTransactionHeader2 {
+            fn encode(&self, out: &mut dyn bytes::BufMut) {
+                let mut tmp = Vec::new();
+                match self {
+                    Self::V1(inner) => inner.encode(&mut tmp),
+                    Self::V2(inner) => inner.encode(&mut tmp),
+                }
+                encode_rlp_version(tmp, self.version(), out);
+            }
+        }
+
+        impl alloy_rlp::Decodable for DataTransactionHeader2 {
+            fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+                let (version, buf) = decode_rlp_version(buf)?;
+                let buf = &mut &buf[..];
+                match version {
+                    1 => Ok(Self::V1(DataTransactionHeaderV1::decode(buf)?)),
+                    2 => Ok(Self::V2(DataTransactionHeaderV1::decode(buf)?)),
+                    _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
+                }
+            }
+        }
+
+        #[derive(
+            Clone, Debug, Default, Eq, Serialize, Deserialize, PartialEq, RlpEncodable, RlpDecodable,
+        )]
+        struct Test {
+            version: u8,
+            tx: DataTransactionHeaderV1,
+        }
+
+        // setup
+        let inner_header = DataTransactionHeaderV1 {
+            id: H256::zero(),
+            anchor: H256::from([1_u8; 32]),
+            signer: Address::default(),
+            data_root: H256::from([3_u8; 32]),
+            data_size: 1024,
+            header_size: 0,
+            term_fee: U256::from(100),
+            perm_fee: Some(U256::from(200)),
+            ledger_id: 1,
+            bundle_format: None,
+            chain_id: 1,
+            promoted_height: None,
+            signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
+        };
+
+        // encode as a v2
+        let header = DataTransactionHeader2::V2(inner_header.clone());
+
+        // action - test RLP encoding/decoding the outer versioned structure
+        let mut buffer = vec![];
+        header.encode(&mut buffer);
+
+        let decoded = DataTransactionHeader2::decode(&mut buffer.as_slice()).unwrap();
+
+        // Assert
+
+        assert_eq!(header, decoded);
+        // Verify version discriminant is preserved in RLP encoding
+        assert_eq!(decoded.version(), 2);
+
+        // Nested data structure tests
+        // setup
+
+        #[derive(
+            Clone, Debug, Default, Eq, Serialize, Deserialize, PartialEq, RlpEncodable, RlpDecodable,
+        )]
+        struct Nested {
+            a: DataTransactionHeader2,
+            b: DataTransactionHeaderV1,
+        }
+
+        #[derive(
+            Clone, Debug, Default, Eq, Serialize, Deserialize, PartialEq, RlpEncodable, RlpDecodable,
+        )]
+        struct NestedOuter {
+            a: DataTransactionHeader2,
+            b: Nested, // make sure nested doesn't interfere with elements before or after it
+            c: DataTransactionHeader2,
+        }
+
+        let nested = Nested {
+            a: header.clone(),
+            b: inner_header,
+        };
+
+        let nested_outer = NestedOuter {
+            a: header.clone(),
+            b: nested,
+            c: header,
+        };
+
+        // action: RLP encode/decode roundtrip
+        let mut buf = Vec::new();
+
+        nested_outer.encode(&mut buf);
+        let dec = NestedOuter::decode(&mut &buf[..]).unwrap();
+
+        // Assert: verify the nested structure
+        assert_eq!(nested_outer, dec);
+    }
 
     #[test]
     fn test_irys_transaction_header_rlp_round_trip() {
@@ -1248,6 +1362,7 @@ mod tests {
         // zero out the id and signature, those do not get encoded
         header.id = H256::zero();
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
         assert_eq!(decoded.version(), 1);

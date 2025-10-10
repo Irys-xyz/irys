@@ -30,8 +30,11 @@ pub trait SubVersioned {
 }
 
 /// Trait for types that produce a signing / hashing preimage.
+/// DO NOT IMPLEMENT THIS FOR VERSIONED VARIANTS
+/// IT MUST BE IMPLEMENTED ON THE VERSIONED CONTAINER
 pub trait Signable {
     /// Writes the canonical preimage into the provided buffer.
+    /// YOU MUST HAVE A VERY GOOD REASON TO CHANGE THIS FROM THE RLP ENCODING
     fn encode_for_signing(&self, out: &mut dyn BufMut);
 
     /// Returns the Keccak-256 hash of the signing preimage.
