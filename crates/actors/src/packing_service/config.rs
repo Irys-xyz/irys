@@ -1,7 +1,7 @@
 use irys_types::{Config, RemotePackingConfig};
 use std::time::Duration;
 
-const DEFAULT_POLL_DURATION_MS: u64 = 1000;
+use super::constants::{DEFAULT_POLL_DURATION_MS, DEFAULT_UNPACKING_QUEUE_CAPACITY};
 
 #[derive(Debug, Clone)]
 pub struct PackingConfig {
@@ -26,6 +26,23 @@ impl PackingConfig {
             #[cfg(feature = "nvidia")]
             max_chunks: config.node_config.packing.local.gpu_packing_batch_size,
             remotes: config.node_config.packing.remote.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnpackingConfig {
+    /// CPU thread pool size for unpacking
+    pub unpacking_concurrency: u16,
+    /// Unpacking queue capacity
+    pub unpacking_queue_capacity: usize,
+}
+
+impl UnpackingConfig {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            unpacking_concurrency: config.node_config.packing.local.cpu_unpacking_concurrency,
+            unpacking_queue_capacity: DEFAULT_UNPACKING_QUEUE_CAPACITY,
         }
     }
 }

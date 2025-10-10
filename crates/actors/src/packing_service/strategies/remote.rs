@@ -11,13 +11,14 @@ use reth::revm::primitives::bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
 use tracing::{debug, error};
 
+use super::common::PackingParams;
 use crate::packing_service::{
     client_pool::HttpClientPool, config::PackingConfig, REMOTE_STREAM_BUFFER_MULTIPLIER,
 };
 
 /// Remote packing strategy that delegates to external services
 pub(crate) struct RemotePackingStrategy {
-    config: Arc<Config>,
+    params: PackingParams,
     packing_config: PackingConfig,
     client_pool: HttpClientPool,
     notify: Arc<Notify>,
@@ -30,7 +31,7 @@ impl RemotePackingStrategy {
         notify: Arc<Notify>,
     ) -> Self {
         Self {
-            config,
+            params: PackingParams::from_config(&config),
             packing_config,
             client_pool: HttpClientPool::new(),
             notify,
@@ -49,12 +50,11 @@ impl RemotePackingStrategy {
         partition_hash: PartitionHash,
         mining_address: [u8; 20],
     ) -> Result<u32, String> {
-        let chunk_size = self.config.consensus.chunk_size as usize;
-        let mut buffer = BytesMut::with_capacity(
-            (self.config.consensus.chunk_size * REMOTE_STREAM_BUFFER_MULTIPLIER)
-                .try_into()
-                .unwrap(),
-        );
+        let chunk_size = self.params.chunk_size;
+        let buffer_size: usize = ((chunk_size as u64) * REMOTE_STREAM_BUFFER_MULTIPLIER)
+            .try_into()
+            .map_err(|_| "Buffer size conversion overflow for remote streaming".to_string())?;
+        let mut buffer = BytesMut::with_capacity(buffer_size);
 
         let notify = self.notify.clone();
 
@@ -143,9 +143,9 @@ impl RemotePackingStrategy {
             mining_address: mining_address.into(),
             partition_hash,
             chunk_range: current_chunk_range,
-            chain_id: self.packing_config.chain_id,
-            chunk_size: self.config.consensus.chunk_size,
-            entropy_packing_iterations: self.config.consensus.entropy_packing_iterations,
+            chain_id: self.params.chain_id,
+            chunk_size: self.params.chunk_size as u64,
+            entropy_packing_iterations: self.params.entropy_iterations,
         };
 
         // Send packing request
