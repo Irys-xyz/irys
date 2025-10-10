@@ -1,14 +1,11 @@
-use actix::{actors::mocker::Mocker, Arbiter};
+use actix::Arbiter;
 use actix::{Actor as _, SystemService as _};
 
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
 use irys_actors::{
-    block_producer::BlockProducerCommand,
-    mining::PartitionMiningActor,
-    packing::{PackingActor, PackingRequest},
-    services::ServiceSenders,
+    block_producer::BlockProducerCommand, mining::PartitionMiningActor, services::ServiceSenders,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
@@ -28,8 +25,7 @@ use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
-use tokio::time::sleep;
+use std::{sync::atomic::AtomicU64, time::Duration};
 use tracing::{debug, error};
 
 #[actix::test]
@@ -435,12 +431,20 @@ async fn partition_expiration_and_repacking_test() {
         storage_modules.push(arc_module.clone());
     }
 
-    let rwlock: RwLock<Option<PackingRequest>> = RwLock::new(None);
-    let arc_rwlock = Arc::new(rwlock);
-    let closure_arc = arc_rwlock.clone();
+    // Wire a Tokio packing handle that captures a single request via oneshot
+    let (tx_packing, mut rx_packing) =
+        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(1);
+    let (pack_req_tx, pack_req_rx) =
+        tokio::sync::oneshot::channel::<irys_actors::packing::PackingRequest>();
+    tokio::spawn(async move {
+        if let Some(packing_req) = rx_packing.recv().await {
+            let _ = pack_req_tx.send(packing_req);
+        }
+    });
 
-    // Create ServiceSenders for testing
-    let (service_senders, mut receivers) = ServiceSenders::new();
+    // Create ServiceSenders for testing (channel-first)
+    let (service_senders, mut receivers) =
+        ServiceSenders::new_with_packing_sender(tx_packing.clone());
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {
@@ -452,22 +456,8 @@ async fn partition_expiration_and_repacking_test() {
         }
     });
 
-    let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
-        let packing_req = *msg.downcast::<PackingRequest>().unwrap();
-        debug!("Packing request arrived ...");
-
-        {
-            let mut lck = closure_arc.write().unwrap();
-            lck.replace(packing_req);
-        }
-
-        debug!("Packing request result pushed ...");
-        Box::new(Some(())) as Box<dyn Any>
-    }));
-
     let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
-    let packing_addr = packing.start();
     let mut part_actors = Vec::new();
 
     let atomic_global_step_number = Arc::new(AtomicU64::new(0));
@@ -476,7 +466,6 @@ async fn partition_expiration_and_repacking_test() {
         let partition_mining_actor = PartitionMiningActor::new(
             &config,
             service_senders.clone(),
-            packing_addr.clone().recipient(),
             sm.clone(),
             true, // do not start mining automatically
             vdf_steps_guard.clone(),
@@ -588,29 +577,11 @@ async fn partition_expiration_and_repacking_test() {
         debug!("{:#?}", epoch_snapshot.ledgers);
     }
 
-    // busypoll the solution context rwlock
-    let mut max_pools = 10;
-    let pack_req = 'outer: loop {
-        if max_pools == 0 {
-            panic!("Max. retries reached");
-        } else {
-            max_pools -= 1;
-        }
-        match arc_rwlock.try_read() {
-            Ok(lck) => {
-                if lck.is_none() {
-                    debug!("Packing request not ready waiting!");
-                } else {
-                    debug!("Packing request received ready!");
-                    break 'outer lck.as_ref().unwrap().clone();
-                }
-            }
-            Err(err) => {
-                debug!("Packing request read error {:?}", err);
-            }
-        }
-        sleep(Duration::from_millis(50)).await;
-    };
+    // wait for packing request with a short timeout instead of busy-polling
+    let pack_req = tokio::time::timeout(Duration::from_secs(3), pack_req_rx)
+        .await
+        .expect("timed out waiting for packing request")
+        .expect("packing request sender dropped");
 
     // check a new slots is inserted with a partition assigned to it, and slot 0 expired and its partition was removed
     let (publish_partition, submit_partition, submit_partition2) = {

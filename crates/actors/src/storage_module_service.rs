@@ -14,13 +14,14 @@
 /// consistency throughout the system.
 use crate::{
     chunk_migration_service::ChunkMigrationServiceMessage, packing::PackingRequest,
-    services::ServiceSenders, ActorAddresses, DataSyncServiceMessage,
+    services::ServiceSenders, DataSyncServiceMessage,
 };
-use eyre::eyre;
+use eyre::{eyre, OptionExt as _};
 use irys_config::StorageSubmodulesConfig;
 use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, PackingParams, StorageModule, StorageModuleInfo,
+    PACKING_PARAMS_FILE_NAME,
 };
 use irys_types::{
     BlockHash, Config, DataLedger, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
@@ -28,14 +29,14 @@ use irys_types::{
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ops::Range,
     path::Path,
     sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
-use tracing::{debug, error, warn, Instrument as _, Span};
+use tracing::{debug, error, warn, Instrument as _};
 
 // Messages that the StorageModuleService service supports
 #[derive(Debug)]
@@ -58,7 +59,6 @@ pub struct StorageModuleServiceInner {
     storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
     block_index: BlockIndexReadGuard,
     block_tree: BlockTreeReadGuard,
-    actor_addresses: ActorAddresses,
     submodules_config: StorageSubmodulesConfig,
     service_senders: ServiceSenders,
     config: Config,
@@ -70,7 +70,6 @@ impl StorageModuleServiceInner {
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
-        actor_addresses: ActorAddresses,
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
@@ -84,7 +83,6 @@ impl StorageModuleServiceInner {
             storage_modules,
             block_index,
             block_tree,
-            actor_addresses,
             submodules_config,
             service_senders,
             config,
@@ -120,31 +118,77 @@ impl StorageModuleServiceInner {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle_partition_assignments_update(
         &mut self,
-        storage_module_infos: Arc<Vec<StorageModuleInfo>>,
+        storage_module_info_update: Arc<Vec<StorageModuleInfo>>,
         update_height: u64,
     ) -> eyre::Result<()> {
-        let span = Span::current();
-        let _span = span.enter();
-
         // Read the current storage modules once, outside the loop
         // this is the current state of the storage modules prior of the partition assignments update
-        let modules_snapshot: Vec<Arc<StorageModule>> =
-            { self.storage_modules.read().unwrap().clone() };
-        let mut assigned_modules: Vec<Arc<StorageModule>> = Vec::new();
-        let mut packing_modules: Vec<Arc<StorageModule>> = Vec::new();
+        let local_modules_by_id: HashMap<usize, Arc<StorageModule>> = {
+            let modules_guard = self.storage_modules.read().unwrap();
+            modules_guard
+                .iter()
+                .map(|module| (module.id, module.clone()))
+                .collect()
+        };
+        let mut assigned_modules = Vec::new();
+        let mut packing_modules = Vec::new();
 
-        debug!("StorageModuleInfos:\n{:#?}", storage_module_infos);
+        debug!("StorageModuleInfos:\n{:#?}", storage_module_info_update);
 
-        for sm_info in storage_module_infos.iter() {
+        let update_info_by_id: HashMap<usize, &StorageModuleInfo> = storage_module_info_update
+            .iter()
+            .map(|info| (info.id, info))
+            .collect();
+
+        for info in storage_module_info_update.iter() {
+            if !local_modules_by_id.contains_key(&info.id) {
+                eyre::bail!(
+                    "StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}",
+                    info.id, info
+                );
+            }
+        }
+
+        for (module_id, module) in local_modules_by_id.iter() {
+            match update_info_by_id.get(module_id) {
+                None => {
+                    // storage module is present locally, not present in the update
+                    self.clear_assignment_if_outdated(module, update_height, "missing_from_update");
+                }
+                Some(sm_info) => {
+                    if sm_info.submodules.is_empty() {
+                        return Err(eyre::eyre!(
+                            "StorageModuleInfo {} missing submodule entries",
+                            sm_info.id
+                        ));
+                    }
+
+                    let path = &self.submodules_config.submodule_paths[sm_info.id];
+
+                    if *path != sm_info.submodules[0].1 {
+                        return Err(eyre::eyre!("Submodule paths don't match"));
+                    }
+
+                    if sm_info.partition_assignment.is_none() {
+                        // storage module is present locally, present in the incoming update, but it has no partition assignment
+                        self.clear_assignment_if_outdated(
+                            module,
+                            update_height,
+                            "explicitly_unassigned",
+                        );
+                    }
+                }
+            }
+        }
+
+        for sm_info in storage_module_info_update.iter() {
             // Get the existing StorageModule from our state with the same storage module id
-            let existing = {
-                modules_snapshot
-                    .iter()
-                    .find(|sm| sm.id == sm_info.id)
-                    .unwrap_or_else(|| panic!("StorageModuleInfo should only reference valid storage module ids - ID: {}, current info: {:#?}, sms: {:#?}, infos: {:#?}", &sm_info.id, &sm_info, &modules_snapshot, &storage_module_infos))
-            };
+            let existing = local_modules_by_id
+                .get(&sm_info.id)
+                .ok_or_eyre("StorageModuleInfo must reference an existing storage module id")?;
 
             // Did this storage module from our state get assigned a new partition_hash ?
             if existing.partition_assignment().is_none() && sm_info.partition_assignment.is_some() {
@@ -221,8 +265,9 @@ impl StorageModuleServiceInner {
         for packing_sm in packing_modules {
             // Reset packing params and indexes on the storage module
             if let Ok(interval) = packing_sm.reset() {
-                // Message packing actor to fill up fresh entropy chunks on the drive
-                self.actor_addresses.packing.do_send(PackingRequest {
+                // Message packing service to fill up fresh entropy chunks on the drive
+                let sender = self.service_senders.packing_sender();
+                let _ = sender.try_send(PackingRequest {
                     storage_module: packing_sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
@@ -375,6 +420,59 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
+    fn clear_assignment_if_outdated(
+        &self,
+        module: &Arc<StorageModule>,
+        update_height: u64,
+        reason: &'static str,
+    ) {
+        if module.partition_assignment().is_none() {
+            return;
+        }
+
+        let path = &self.submodules_config.submodule_paths[module.id];
+        let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+        let newer_local = match PackingParams::from_toml(&params_path) {
+            Ok(params) => params
+                .last_updated_height
+                .is_some_and(|h| h > update_height),
+            Err(_) => false,
+        };
+
+        if newer_local {
+            debug!(
+                module_id = module.id,
+                update_height,
+                reason,
+                "skipping unassign: local packing params are newer than update"
+            );
+            return;
+        }
+
+        debug!(
+            module_id = module.id,
+            update_height, reason, "clearing local partition assignment"
+        );
+        module.clear_assignment(update_height);
+
+        match module.reset() {
+            Ok(interval) => {
+                debug!(
+                    ?interval,
+                    module_id = module.id,
+                    reason,
+                    "storage module reset after unassign"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    module_id = module.id,
+                    reason, "failed to reset storage module after unassign: {}", e
+                );
+            }
+        }
+    }
+
     fn get_max_partition_offset(&self, storage_module: Arc<StorageModule>) -> PartitionChunkOffset {
         let ledger_id = storage_module
             .partition_assignment()
@@ -524,7 +622,6 @@ impl StorageModuleService {
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
-        actor_addresses: &ActorAddresses,
         service_senders: ServiceSenders,
         config: &Config,
         runtime_handle: tokio::runtime::Handle,
@@ -533,7 +630,6 @@ impl StorageModuleService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let actor_addresses = actor_addresses.clone();
         let config = config.clone();
 
         let handle = runtime_handle.spawn(
@@ -545,7 +641,6 @@ impl StorageModuleService {
                         storage_modules,
                         block_index,
                         block_tree,
-                        actor_addresses,
                         service_senders,
                         config,
                     ),

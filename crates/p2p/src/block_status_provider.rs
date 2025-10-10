@@ -3,7 +3,7 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_types::{IrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeader, IrysBlockHeaderV1, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -258,28 +258,32 @@ impl BlockStatusProvider {
         starting_block: Option<&IrysBlockHeader>,
     ) -> Vec<IrysBlockHeader> {
         let first_block = starting_block
-            .map(|parent| IrysBlockHeader {
-                block_hash: BlockHash::random(),
-                height: parent.height + 1,
-                previous_block_hash: parent.block_hash,
-                ..IrysBlockHeader::new_mock_header()
+            .map(|parent| {
+                IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                    block_hash: BlockHash::random(),
+                    height: parent.height + 1,
+                    previous_block_hash: parent.block_hash,
+                    ..IrysBlockHeaderV1::new_mock_header()
+                })
             })
-            .unwrap_or_else(|| IrysBlockHeader {
-                block_hash: BlockHash::random(),
-                height: 1,
-                ..IrysBlockHeader::new_mock_header()
+            .unwrap_or_else(|| {
+                IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                    block_hash: BlockHash::random(),
+                    height: 1,
+                    ..IrysBlockHeaderV1::new_mock_header()
+                })
             });
 
         let mut blocks = vec![first_block];
 
         for _ in 1..num_blocks {
             let prev_block = blocks.last().expect("to have at least one block");
-            let block = IrysBlockHeader {
+            let block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
                 block_hash: BlockHash::random(),
                 height: prev_block.height + 1,
                 previous_block_hash: prev_block.block_hash,
-                ..IrysBlockHeader::new_mock_header()
-            };
+                ..IrysBlockHeaderV1::new_mock_header()
+            });
             blocks.push(block);
         }
 

@@ -526,8 +526,8 @@ mod tests {
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
-        app_state::DatabaseProvider, Base64, Config, DataTransactionHeader, IrysBlockHeader,
-        NodeConfig, TxChunkOffset, UnpackedChunk,
+        app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
+        DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use std::sync::{Arc, RwLock};
 
@@ -544,10 +544,11 @@ mod tests {
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let tx_header = DataTransactionHeader {
+        // Create a data root cached via mempool path (no block header -> empty block_set)
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             data_size: 64,
             ..Default::default()
-        };
+        });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
@@ -619,10 +620,10 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = DataTransactionHeader {
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             data_size: 64,
             ..Default::default()
-        };
+        });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())

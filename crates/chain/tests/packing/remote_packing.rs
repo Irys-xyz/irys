@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, num::NonZero, sync::Arc, time::Duration};
 
-use actix::Actor as _;
-use irys_actors::packing::{wait_for_packing, PackingActor, PackingRequest};
+use irys_actors::packing::PackingRequest;
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing_worker::worker::start_worker;
@@ -15,6 +14,22 @@ use irys_types::{
 };
 use irys_utils::listener::create_listener;
 use tokio::sync::mpsc::channel;
+
+async fn wait_for_packing_worker_ready(base_url_v1: &str, timeout: Duration) -> eyre::Result<()> {
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(resp) = client.get(format!("{}/info", base_url_v1)).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+        if start.elapsed() > timeout {
+            eyre::bail!("remote packing worker not ready after {:?}", timeout);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 #[actix::test]
 pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
@@ -39,6 +54,10 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
 
     let (tx, rx) = channel(1);
     let exit_handle = tokio::spawn(start_worker(packing_config.clone(), listener, rx));
+
+    // Wait for remote packing worker to be ready
+    let base_url = format!("http://{}:{}/v1", &local_addr.ip(), &local_addr.port());
+    wait_for_packing_worker_ready(&base_url, Duration::from_secs(10)).await?;
 
     // setup
     let partition_hash = PartitionHash::zero();
@@ -95,22 +114,37 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
         storage_module: storage_module.clone(),
         chunk_range: PartitionChunkRange(irys_types::partition_chunk_offset_ie!(0, packing_end)),
     };
-    // Create an instance of the packing actor
-    let sm_ids = vec![storage_module.id];
-    let packing = PackingActor::new(sm_ids, Arc::new(config.clone()));
+    // Create an instance of the packing service
+    let packing = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
 
     // Spawn packing controllers with runtime handle
-    // In actix test context, we need to get the tokio runtime this way
+    // Get the current Tokio runtime handle for this test context
     let runtime_handle =
         tokio::runtime::Handle::try_current().expect("Should be running in tokio runtime");
-    let _packing_handles = packing.spawn_packing_controllers(runtime_handle);
+    let _packing_handles = packing.spawn_packing_controllers(runtime_handle.clone());
 
-    let packing_addr = packing.start();
+    let handle = packing.spawn_tokio_service(runtime_handle.clone());
 
     // action
-    packing_addr.send(request).await?;
-    wait_for_packing(packing_addr, Some(Duration::from_secs(99999))).await?;
-    storage_module.sync_pending_chunks()?;
+    handle.send(request)?;
+
+    // Wait until packing starts to avoid racing the idle waiter
+    let wait_start = std::time::Instant::now();
+    loop {
+        if !storage_module.get_intervals(ChunkType::Entropy).is_empty() {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(5) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    handle
+        .waiter()
+        .wait_for_idle(Some(Duration::from_secs(99999)))
+        .await?;
+    storage_module.force_sync_pending_chunks()?;
 
     // assert
     // check that the chunks are marked as packed

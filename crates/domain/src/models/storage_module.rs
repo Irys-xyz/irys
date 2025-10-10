@@ -433,6 +433,30 @@ impl StorageModule {
         }
     }
 
+    /// Clears the current partition assignment and persists the change on disk.
+    ///
+    /// Writes `packing_params.toml` with `partition_hash = None`, `ledger = None`,
+    /// `slot = None`, and updates `last_updated_height`. In-memory assignment is set to `None`.
+    pub fn clear_assignment(&self, update_height: u64) {
+        // Clear in-memory assignment
+        let mut pa = self.partition_assignment.write().unwrap();
+        *pa = None;
+
+        // Persist to each submodule's packing params
+        for (_, submodule) in self.submodules.iter() {
+            let params = PackingParams {
+                packing_address: self.config.node_config.miner_address(),
+                partition_hash: None,
+                ledger: None,
+                slot: None,
+                last_updated_height: Some(update_height),
+            };
+
+            let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            params.write_to_disk(&params_path);
+        }
+    }
+
     /// Returns the StorageModules partition_hash if assigned
     pub fn partition_hash(&self) -> Option<PartitionHash> {
         let pa = self.partition_assignment.read().unwrap();

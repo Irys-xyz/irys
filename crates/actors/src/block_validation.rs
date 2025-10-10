@@ -15,8 +15,8 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
 };
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
-    ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -217,6 +217,8 @@ pub enum PreValidationError {
     DuplicateIngressProofSigner { tx_id: H256, signer: Address },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
+    #[error("Invalid Epoch snapshot {error}")]
+    InvalidEpochSnapshot { error: String },
 }
 
 /// Full pre-validation steps for a block
@@ -912,6 +914,7 @@ pub async fn shadow_transactions_are_valid(
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
@@ -1031,6 +1034,7 @@ pub async fn shadow_transactions_are_valid(
         block,
         db,
         parent_epoch_snapshot,
+        parent_commitment_snapshot,
         block_index,
     )
     .await?;
@@ -1152,6 +1156,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
@@ -1179,7 +1184,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
 
     // Lookup publish ledger for term fee rewards
-    let mut publish_ledger_with_txs =
+    let publish_ledger_with_txs =
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     // Get treasury balance from previous block
@@ -1204,6 +1209,17 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
+    // Compute commitment refund events for epoch blocks from parent's commitment snapshot
+    let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
+        if is_epoch_block {
+            crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &config.consensus,
+            )?
+        } else {
+            Vec::new()
+        };
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1213,9 +1229,10 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &config.consensus,
         &commitment_txs,
         &data_txs,
-        &mut publish_ledger_with_txs,
+        &publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
+        &commitment_refund_events,
     )
     .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 
@@ -1410,6 +1427,18 @@ pub async fn commitment_txs_are_valid(
         })?;
     }
 
+    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
+        let read = block_tree_guard.read();
+        let commitment_snapshot = read.get_commitment_snapshot(&block.previous_block_hash)?;
+        let epoch_snapshot = read
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .ok_or_eyre(format!(
+                "Parent epoch snapshot missing for block {}",
+                block.previous_block_hash
+            ))?;
+        (commitment_snapshot, epoch_snapshot)
+    };
+
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
@@ -1419,9 +1448,6 @@ pub async fn commitment_txs_are_valid(
         );
 
         // Get expected commitments from parent's snapshot
-        let parent_commitment_snapshot = block_tree_guard
-            .read()
-            .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
@@ -1461,13 +1487,46 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
+    // Regular block validation: ensure commitments align with snapshot state
+    let mut simulated_snapshot = CommitmentSnapshot {
+        commitments: parent_commitment_snapshot.commitments.clone(),
+    };
+
+    for tx in &actual_commitments {
+        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
+            let partition_hash = H256::from(partition_hash);
+            let owner = parent_epoch_snapshot
+                .partition_assignments
+                .get_assignment(partition_hash)
+                .map(|assignment| assignment.miner_address);
+            ensure!(
+                owner == Some(tx.signer),
+                "Unpledge commitment {} targets partition {} not owned by signer {} (owner {:?})",
+                tx.id,
+                partition_hash,
+                tx.signer,
+                owner
+            );
+        }
+
+        let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
+        ensure!(
+            status == CommitmentSnapshotStatus::Accepted,
+            "Commitment {} rejected by snapshot validation with status {:?}",
+            tx.id,
+            status
+        );
+    }
+
     // Regular block validation: check priority ordering for stake and pledge commitments
     let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
         .iter()
         .filter(|tx| {
             matches!(
                 tx.commitment_type,
-                CommitmentType::Stake | CommitmentType::Pledge { .. }
+                CommitmentType::Stake
+                    | CommitmentType::Pledge { .. }
+                    | CommitmentType::Unpledge { .. }
             )
         })
         .collect();
@@ -1856,6 +1915,218 @@ pub async fn data_txs_are_valid(
                     expected: expected_assigned_proofs,
                     actual: assigned_proofs.len(),
                 });
+            }
+
+            // Enforce data availability by verifying ingress proofs with the actual chunks
+            // possible future improvements: refresh peer list on failure of all 5, try peers concurrently
+            if config.consensus.enable_full_ingress_proof_validation {
+                // Collect all chunks for this transaction from the DB (by tx-relative offset)
+                let expected_chunk_count =
+                    tx_header.data_size.div_ceil(config.consensus.chunk_size);
+
+                let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
+                    error: e.to_string(),
+                })?;
+
+                let mut chunks: Vec<irys_types::ChunkBytes> =
+                    Vec::with_capacity(expected_chunk_count as usize);
+
+                let client = reqwest::Client::new();
+
+                // Fetch active peers once outside the chunk loop (take up to 5)
+                let api_addrs: Vec<_> = {
+                    let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
+                    let _ = service_senders
+                        .data_sync
+                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+
+                    match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
+                        Ok(Ok(active_peers)) => {
+                            let guard = active_peers.read().unwrap();
+                            guard
+                                .iter()
+                                .take(5)
+                                .map(|(_addr, pbm)| pbm.peer_address.api)
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+
+                for i in 0..expected_chunk_count {
+                    let tx_offset_u32 =
+                        u32::try_from(i).map_err(|_| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!("Tx chunk offset index {} exceeds u32::MAX", i),
+                        })?;
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(tx_offset_u32);
+
+                    // Try local cache first
+                    let mut maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                        &ro_tx,
+                        tx_header.data_root,
+                        tx_chunk_offset,
+                    )
+                    .map_err(|e| PreValidationError::DatabaseError {
+                        error: e.to_string(),
+                    })?;
+
+                    // If missing locally, attempt fetch-on-miss from pre-selected peers and ingest
+                    if maybe_chunk.is_none() {
+                        for api_addr in api_addrs.iter() {
+                            // Build data_root/offset fetch URL using peer API address
+                            let url = format!(
+                                "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                api_addr,
+                                publish_ledger.ledger_id,
+                                tx_header.data_root,
+                                tx_offset_u32
+                            );
+
+                            // Fetch with short timeout
+                            let resp = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                client.get(&url).send(),
+                            )
+                            .await;
+
+                            let Ok(Ok(resp)) = resp else {
+                                continue;
+                            };
+                            if !resp.status().is_success() {
+                                continue;
+                            }
+
+                            // Parse ChunkFormat and convert to UnpackedChunk
+                            let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
+                            else {
+                                continue;
+                            };
+
+                            let unpacked = match chunk_format {
+                                irys_types::ChunkFormat::Unpacked(u) => u,
+                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
+                                    &p,
+                                    config.consensus.entropy_packing_iterations,
+                                    config.consensus.chunk_size as usize,
+                                    config.consensus.chain_id,
+                                ),
+                            };
+
+                            // Basic sanity checks before ingest
+                            if unpacked.data_root != tx_header.data_root
+                                || *unpacked.tx_offset != tx_offset_u32
+                            {
+                                continue;
+                            }
+
+                            // Ingest via mempool to persist and validate
+                            let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
+                            if service_senders
+                                .mempool
+                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .is_err()
+                            {
+                                return Err(PreValidationError::ValidationServiceUnreachable);
+                            }
+
+                            // Wait briefly for ingest to complete and log outcome
+                            let recv_res =
+                                tokio::time::timeout(std::time::Duration::from_millis(500), ing_rx)
+                                    .await;
+                            match recv_res {
+                                Err(_elapsed) => {
+                                    tracing::warn!(
+                                        "Timed out waiting for chunk ingest completion for data_root {:?}, tx_offset {}",
+                                        tx_header.data_root,
+                                        tx_offset_u32
+                                    );
+                                }
+                                Ok(Err(recv_err)) => {
+                                    tracing::warn!(
+                                        "IngestChunk oneshot channel error for data_root {:?}, tx_offset {}: {:?}",
+                                        tx_header.data_root,
+                                        tx_offset_u32,
+                                        recv_err
+                                    );
+                                }
+                                Ok(Ok(ingest_res)) => match ingest_res {
+                                    Ok(()) => {
+                                        tracing::debug!(
+                                                "Chunk ingested successfully for data_root {:?}, tx_offset {}",
+                                                tx_header.data_root,
+                                                tx_offset_u32
+                                            );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                                "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
+                                                tx_header.data_root,
+                                                tx_offset_u32,
+                                                e
+                                            );
+                                    }
+                                },
+                            }
+
+                            // Re-open a fresh read tx to observe the write
+                            let ro_tx2 =
+                                db.tx().map_err(|e| PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                })?;
+                            maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                                &ro_tx2,
+                                tx_header.data_root,
+                                tx_chunk_offset,
+                            )
+                            .map_err(|e| {
+                                PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                }
+                            })?;
+
+                            if maybe_chunk.is_some() {
+                                break;
+                            }
+                        }
+                    }
+
+                    let (_meta, cached_chunk) =
+                        maybe_chunk.ok_or_else(|| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!(
+                                "Data unavailable: missing chunk at offset {} for data_root {:?}",
+                                i, tx_header.data_root
+                            ),
+                        })?;
+
+                    let chunk_bytes = cached_chunk.chunk.ok_or_else(|| {
+                        PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: "Missing chunk body bytes".to_string(),
+                        }
+                    })?;
+                    chunks.push(chunk_bytes.0);
+                }
+
+                // Verify each ingress proof against the actual chunks
+                for proof in tx_proofs.iter() {
+                    let ok = irys_types::ingress::verify_ingress_proof(
+                        proof,
+                        &chunks,
+                        config.consensus.chain_id,
+                    )
+                    .map_err(|e| PreValidationError::InvalidIngressProof {
+                        tx_id: tx_header.id,
+                        reason: e.to_string(),
+                    })?;
+
+                    if !ok {
+                        return Err(PreValidationError::IngressProofMismatch {
+                            tx_id: tx_header.id,
+                        });
+                    }
+                }
             }
 
             if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
@@ -2285,8 +2556,8 @@ mod tests {
     use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
-        Signature, H256, U256,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
+        NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2598,7 +2869,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2630,8 +2901,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);
@@ -2858,7 +3129,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2890,8 +3161,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);

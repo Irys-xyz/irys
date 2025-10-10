@@ -3,11 +3,11 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IrysTransactionResponse,
-    NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
+    IrysTransactionResponse, NodeConfig, H256,
 };
 use reth_db::Database as _;
 use tokio::time::Duration;
@@ -25,19 +25,18 @@ async fn test_get_tx() -> eyre::Result<()> {
         },
     )]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     node.node_ctx.start_mining().unwrap();
     let db = node.node_ctx.db.clone();
 
-    let storage_tx = DataTransactionHeader {
+    let storage_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         ..Default::default()
-    };
+    });
     info!("Generated storage_tx.id: {}", storage_tx.id);
 
     let consensus = &node.node_ctx.config.consensus;

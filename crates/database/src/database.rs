@@ -129,7 +129,7 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
-/// Takes an [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
+/// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
@@ -371,7 +371,7 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader::default();
+        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1::default());
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -382,12 +382,11 @@ mod tests {
         assert_eq!(result, Some(tx_header));
 
         // Write a commitment tx
-        let commitment_tx = CommitmentTransaction {
+        let commitment_tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             // Override some defaults to insure deserialization is working
             id: H256::from([10_u8; 32]),
-            version: 1,
             ..Default::default()
-        };
+        });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 
         // Read a commitment tx
