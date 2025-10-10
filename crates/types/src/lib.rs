@@ -25,6 +25,7 @@ pub mod storage;
 pub mod storage_pricing;
 pub mod time;
 pub mod transaction;
+pub mod tx_source;
 pub mod version;
 pub mod versioning;
 
@@ -43,6 +44,7 @@ pub use signature::*;
 pub use storage::*;
 pub use time::*;
 pub use transaction::*;
+pub use tx_source::*;
 
 pub use alloy_primitives::{Address, Signature};
 pub use app_state::*;

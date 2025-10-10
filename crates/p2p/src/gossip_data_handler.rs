@@ -175,7 +175,7 @@ where
 
         match self
             .mempool
-            .handle_data_transaction_ingress(tx)
+            .handle_data_transaction_ingress_gossip(tx)
             .await
             .map_err(GossipError::from)
         {
@@ -286,7 +286,7 @@ where
 
         match self
             .mempool
-            .handle_commitment_transaction_ingress(tx)
+            .handle_commitment_transaction_ingress_gossip(tx)
             .await
             .map_err(GossipError::from)
         {

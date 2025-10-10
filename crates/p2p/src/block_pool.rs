@@ -689,7 +689,7 @@ where
                     let id = commitment_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_commitment_transaction_ingress(commitment_tx)
+                        .handle_commitment_transaction_ingress_gossip(commitment_tx)
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
@@ -711,7 +711,7 @@ where
                     let id = storage_tx.id;
                     if let Err(err) = self
                         .mempool
-                        .handle_data_transaction_ingress(storage_tx)
+                        .handle_data_transaction_ingress_gossip(storage_tx)
                         .await
                     {
                         if !matches!(err, TxIngressError::Skipped) {
