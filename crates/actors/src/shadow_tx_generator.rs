@@ -621,7 +621,7 @@ impl<'a> ShadowTxGenerator<'a> {
                         TransactionPacket::UnpledgeRefund(increment) => {
                             self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                         }
-                        TransactionPacket::Unstake(increment) => {
+                        TransactionPacket::UnstakeRefund(increment) => {
                             self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                         }
                         _ => {
@@ -659,7 +659,7 @@ impl<'a> ShadowTxGenerator<'a> {
         for event in unstake_events.iter().copied() {
             out.push(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::Unstake(BalanceIncrement {
+                    TransactionPacket::UnstakeRefund(BalanceIncrement {
                         amount: event.amount.into(),
                         target: event.account,
                         irys_ref: event.irys_ref_txid.into(),

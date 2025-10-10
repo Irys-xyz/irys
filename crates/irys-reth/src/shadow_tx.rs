@@ -50,8 +50,6 @@ pub enum ShadowTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
-    /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
-    Unstake(BalanceIncrement),
     /// Unstake at inclusion: fee-only via priority fee. No amount in packet; log-only.
     UnstakeDebit(UnstakeDebit),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
@@ -73,6 +71,8 @@ pub enum TransactionPacket {
     IngressProofReward(BalanceIncrement),
     /// Permanent fee refund to users whose transactions were not promoted before ledger expiry (balance increment).
     PermFeeRefund(BalanceIncrement),
+    /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
+    UnstakeRefund(BalanceIncrement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -107,7 +107,7 @@ impl TransactionPacket {
     /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
     pub fn fee_payer_address(&self) -> Option<Address> {
         match self {
-            Self::Unstake(inc) => Some(inc.target),
+            Self::UnstakeRefund(inc) => Some(inc.target),
             Self::UnstakeDebit(dec) => Some(dec.target),
             Self::BlockReward(_) => None, // No target, uses beneficiary
             Self::Stake(dec) => Some(dec.target),
@@ -210,7 +210,7 @@ impl TransactionPacket {
     pub fn topic(&self) -> FixedBytes<32> {
         use shadow_tx_topics::*;
         match self {
-            Self::Unstake(_) => *UNSTAKE,
+            Self::UnstakeRefund(_) => *UNSTAKE,
             Self::UnstakeDebit(_) => *UNSTAKE_DEBIT,
             Self::BlockReward(_) => *BLOCK_REWARD,
             Self::Stake(_) => *STAKE,
@@ -284,7 +284,7 @@ impl BorshDeserialize for ShadowTransaction {
 impl BorshSerialize for TransactionPacket {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         match self {
-            Self::Unstake(inner) => {
+            Self::UnstakeRefund(inner) => {
                 writer.write_all(&[UNSTAKE_ID])?;
                 inner.serialize(writer)
             }
@@ -337,7 +337,7 @@ impl BorshDeserialize for TransactionPacket {
         let mut disc = [0_u8; 1];
         reader.read_exact(&mut disc)?;
         Ok(match disc[0] {
-            UNSTAKE_ID => Self::Unstake(BalanceIncrement::deserialize_reader(reader)?),
+            UNSTAKE_ID => Self::UnstakeRefund(BalanceIncrement::deserialize_reader(reader)?),
             UNSTAKE_DEBIT_ID => Self::UnstakeDebit(UnstakeDebit::deserialize_reader(reader)?),
             BLOCK_REWARD_ID => Self::BlockReward(BlockRewardIncrement::deserialize_reader(reader)?),
             STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
@@ -837,7 +837,7 @@ mod tests {
                 target: test_address,
                 irys_ref: test_ref,
             }),
-            TransactionPacket::Unstake(BalanceIncrement {
+            TransactionPacket::UnstakeRefund(BalanceIncrement {
                 amount: U256::from(400_u64),
                 target: test_address,
                 irys_ref: test_ref,

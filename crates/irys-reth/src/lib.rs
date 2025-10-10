@@ -3097,7 +3097,7 @@ pub mod test_utils {
     /// Compose a shadow tx for unstaking.
     pub fn unstake(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(
-            TransactionPacket::Unstake(shadow_tx::BalanceIncrement {
+            TransactionPacket::UnstakeRefund(shadow_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,

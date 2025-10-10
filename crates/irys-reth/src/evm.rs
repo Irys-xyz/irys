@@ -1021,7 +1021,7 @@ where
 
         match shadow_tx {
             shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
-                shadow_tx::TransactionPacket::Unstake(balance_increment) => {
+                shadow_tx::TransactionPacket::UnstakeRefund(balance_increment) => {
                     let log = Self::create_shadow_log(
                         balance_increment.target,
                         vec![topic],
