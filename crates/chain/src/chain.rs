@@ -1567,10 +1567,9 @@ impl IrysNode {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 let sender = service_senders.packing_sender();
-                let _ = sender.try_send(PackingRequest {
-                    storage_module: sm.clone(),
-                    chunk_range: PartitionChunkRange(interval),
-                });
+                if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
+                    let _ = sender.try_send(req);
+                }
             }
         }
         (part_actors, arbiters)
