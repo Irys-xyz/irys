@@ -21,6 +21,16 @@ use tokio::sync::{
 };
 use tracing::{debug, info, warn, Instrument as _};
 
+/// Maximum evictions per invocation to prevent blocking the service.
+/// If this limit is reached, eviction will continue in the next cycle.
+const MAX_EVICTIONS_PER_RUN: usize = 10_000;
+
+/// Eviction target to prevent thrashing near size limit boundary.
+/// Evicts to 90% (9/10) of limit to provide a buffer before next eviction.
+/// Example: 10GB limit evicts down to 9GB, providing 1GB buffer.
+const SIZE_EVICTION_TARGET_NUMERATOR: u64 = 9;
+const SIZE_EVICTION_TARGET_DENOMINATOR: u64 = 10;
+
 #[derive(Debug)]
 pub enum CacheServiceAction {
     OnBlockMigrated(u64, Option<oneshot::Sender<eyre::Result<()>>>),
@@ -43,6 +53,24 @@ pub struct ChunkCacheService {
 }
 
 impl ChunkCacheService {
+    /// Spawns the chunk cache service on the provided runtime.
+    ///
+    /// The service manages cache eviction based on the configured strategy
+    /// (time-based or size-based) and responds to block migration and epoch
+    /// processing events.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_index_guard` - Read guard for block index lookups
+    /// * `block_tree_guard` - Read guard for canonical chain access
+    /// * `db` - Database provider for cache storage
+    /// * `rx` - Channel receiver for cache service actions
+    /// * `config` - Node configuration including eviction strategy
+    /// * `runtime_handle` - Tokio runtime for spawning the service
+    ///
+    /// # Returns
+    ///
+    /// A `TokioServiceHandle` for managing the service lifecycle
     pub fn spawn_service(
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
@@ -112,6 +140,11 @@ impl ChunkCacheService {
         Ok(())
     }
 
+    /// Dispatches incoming cache service messages to appropriate handlers.
+    ///
+    /// Handles two message types:
+    /// - `OnBlockMigrated`: Triggers cache pruning based on block height
+    /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         match msg {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
@@ -132,15 +165,28 @@ impl ChunkCacheService {
         }
     }
 
+    /// Processes epoch completion by pruning expired data roots.
+    ///
+    /// Determines the pruning horizon (one block before active submit ledger slots begin)
+    /// and removes data roots from earlier blocks that are no longer needed for validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - First unexpired slot index overflows u64
+    /// - Block index or canonical chain lookup fails
+    /// - Database pruning operation fails
     fn on_epoch_processed(&self, epoch_snapshot: Arc<EpochSnapshot>) -> eyre::Result<()> {
-        // Find pruning horizon: one block before where active submit ledger slots begin.
-        // Data roots from earlier blocks can be safely evicted as they're no longer needed
-        // for current epoch validation.
         let ledger_id = DataLedger::Submit;
-        let first_unexpired_slot_index: u64 = epoch_snapshot
-            .get_first_unexpired_slot_index(ledger_id)
-            .try_into()
-            .unwrap();
+        let raw_index = epoch_snapshot.get_first_unexpired_slot_index(ledger_id);
+        let first_unexpired_slot_index: u64 = raw_index.try_into().map_err(|e| {
+            eyre::eyre!(
+                "first_unexpired_slot_index overflow: value {} exceeds u64::MAX: {}",
+                raw_index,
+                e
+            )
+        })?;
+
         let chunk_offset =
             first_unexpired_slot_index * self.config.consensus.num_chunks_in_partition;
 
@@ -149,7 +195,6 @@ impl ChunkCacheService {
         if let Some(latest) = self.block_index_guard.read().get_latest_item() {
             let submit_ledger_max_chunk_offset = latest.ledgers[ledger_id].total_chunks;
             if submit_ledger_max_chunk_offset > chunk_offset {
-                // If the chunk_offset is in the block index look up the block_bounds
                 let block_bounds = self
                     .block_index_guard
                     .read()
@@ -161,7 +206,6 @@ impl ChunkCacheService {
             }
         }
 
-        // If it wasn't in the index, we'll have to check the canonical
         if prune_height.is_none() {
             let (canonical, _) = self.block_tree_guard.read().get_canonical_chain();
 
@@ -176,12 +220,24 @@ impl ChunkCacheService {
                     None
                 }
             });
-            let (block_height, _ledger_max_offset) = found_block.unwrap();
-            prune_height = Some(block_height - 1);
+            let (block_height, _ledger_max_offset) = found_block.ok_or_else(|| {
+                eyre::eyre!(
+                    "No block found in canonical chain with ledger_total_chunks <= {}. Chain may be incomplete or corrupted.",
+                    chunk_offset
+                )
+            })?;
+            // Genesis block (height 0) never enters canonical chain with submit ledger data,
+            // but use saturating_sub (defensive) for consistency
+            prune_height = Some(block_height.saturating_sub(1));
         }
 
-        // Prune the data root cache at the start of the submit ledger
-        self.prune_data_root_cache(prune_height.unwrap())
+        let prune_height = prune_height.ok_or_else(|| {
+            eyre::eyre!(
+                "Unable to determine prune height. First unexpired slot: {}",
+                first_unexpired_slot_index
+            )
+        })?;
+        self.prune_data_root_cache(prune_height)
     }
 
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
@@ -207,7 +263,6 @@ impl ChunkCacheService {
             ingress_proof_count
         );
 
-        // Dispatch to appropriate eviction strategy
         match &self.config.node_config.cache.eviction_strategy {
             CacheEvictionStrategy::TimeBased { max_age_seconds } => {
                 debug!(max_age_seconds, "Running time-based cache eviction");
@@ -216,7 +271,6 @@ impl ChunkCacheService {
             CacheEvictionStrategy::SizeBased {
                 max_cache_size_bytes,
             } => {
-                // Check if size limit is exceeded
                 let size_limit_exceeded = chunk_cache_size > *max_cache_size_bytes;
 
                 if size_limit_exceeded {
@@ -244,10 +298,18 @@ impl ChunkCacheService {
 
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
         let mut chunks_pruned: u64 = 0;
+        let mut eviction_count: usize = 0;
         let write_tx = self.db.tx_mut()?;
         let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
         while let Some((data_root, cached)) = walker.next().transpose()? {
+            if eviction_count >= MAX_EVICTIONS_PER_RUN {
+                warn!(
+                    evictions_performed = eviction_count,
+                    "Hit max eviction limit in prune_data_root_cache, will continue next cycle"
+                );
+                break;
+            }
             // Pruning horizon priority: block inclusion > expiry height > skip
             // Rationale: Confirmed blocks provide the most reliable pruning point.
             // Unconfirmed mempool entries use expiry_height as a conservative fallback.
@@ -268,14 +330,16 @@ impl ChunkCacheService {
                 (None, Some(e)) => Some(e),
                 (None, None) => None,
             };
-            if horizon.is_none() {
-                debug!(
-                    ?data_root,
-                    "Skipping prune for data root without inclusion or expiry"
-                );
-                continue;
-            }
-            let max_height: u64 = horizon.unwrap();
+            let max_height: u64 = match horizon {
+                Some(h) => h,
+                None => {
+                    debug!(
+                        ?data_root,
+                        "Skipping prune for data root without inclusion or expiry"
+                    );
+                    continue;
+                }
+            };
 
             debug!(
                 "Processing data root {} max height: {}, prune height: {}",
@@ -293,6 +357,7 @@ impl ChunkCacheService {
                 chunks_pruned = chunks_pruned
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
+                eviction_count += 1;
             }
         }
         debug!(?chunks_pruned, "Pruned chunks");
@@ -305,15 +370,16 @@ impl ChunkCacheService {
     /// Returns entries sorted by cached_at timestamp (oldest first)
     fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
         let tx = self.db.tx()?;
+        let estimated_count = tx.entries::<CachedDataRoots>()?;
+        let mut entries = Vec::with_capacity(estimated_count);
+
         let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;
-        let mut entries = Vec::new();
 
         while let Some((data_root, cached)) = walker.next().transpose()? {
             entries.push((data_root, cached));
         }
 
-        // Sort by cached_at timestamp (oldest first for FIFO eviction)
         entries.sort_by_key(|(_, cached)| cached.cached_at);
 
         Ok(entries)
@@ -339,8 +405,7 @@ impl ChunkCacheService {
         let mut evicted_count = 0_u64;
         let mut evicted_size = 0_u64;
 
-        for (data_root, cached) in entries {
-            // Stop when we reach entries that are still fresh
+        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
             if cached.cached_at >= expiry_threshold {
                 break;
             }
@@ -353,7 +418,6 @@ impl ChunkCacheService {
                 "Evicting expired cache entry"
             );
 
-            // Calculate approximate size contribution
             let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
             let approx_size = chunk_count * self.config.consensus.chunk_size;
 
@@ -387,10 +451,9 @@ impl ChunkCacheService {
         current_chunk_size: u64,
         max_cache_size_bytes: u64,
     ) -> eyre::Result<()> {
-        // Evict to 90% of limit to prevent thrashing near the boundary.
-        // Example: If limit is 10GB, evict down to 9GB. This provides a 1GB buffer
-        // before next eviction triggers
-        let target_size_with_margin = max_cache_size_bytes.saturating_mul(9) / 10;
+        let target_size_with_margin = max_cache_size_bytes
+            .saturating_div(SIZE_EVICTION_TARGET_DENOMINATOR)
+            .saturating_mul(SIZE_EVICTION_TARGET_NUMERATOR);
 
         debug!(
             current_size_gb = (current_chunk_size / GIGABYTE as u64),
@@ -399,7 +462,6 @@ impl ChunkCacheService {
             "Size-based eviction: cache limit exceeded"
         );
 
-        // Collect all entries sorted by age (oldest first)
         let entries = self.collect_cache_entries_by_age()?;
 
         let mut evicted_count = 0_u64;
@@ -407,12 +469,10 @@ impl ChunkCacheService {
         let mut running_chunk_count = current_chunk_count;
         let mut running_chunk_size = current_chunk_size;
 
-        // Get current timestamp once for age calculations
         let now = irys_types::UnixTimestamp::now()
             .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
 
-        // Evict oldest entries until we're under the limit (with margin)
-        for (data_root, cached) in entries {
+        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
             if running_chunk_size <= target_size_with_margin {
                 break;
             }
@@ -427,7 +487,6 @@ impl ChunkCacheService {
                 "Evicting oldest cache entry to free space"
             );
 
-            // Calculate approximate size contribution of this data root
             let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
             let approx_size = chunk_count * self.config.consensus.chunk_size;
 
@@ -476,7 +535,6 @@ mod tests {
     // are pruned once prune_height > 0 and they should not be pruned!
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
-        // Minimal config and database
         let node_config = NodeConfig::testing();
         let config = Config::new(node_config);
         let db_env = open_or_create_db(
@@ -496,7 +554,6 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        // Also cache one chunk + index so pruning is observable
         let chunk = UnpackedChunk {
             data_root: tx_header.data_root,
             data_size: tx_header.data_size,
@@ -509,14 +566,12 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        // Sanity check: entries exist before pruning
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots missing before prune");
             Ok(())
         })??;
 
-        // Build minimal guards (not used by prune_data_root_cache)
         let genesis_block = IrysBlockHeader::new_mock_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
@@ -528,7 +583,6 @@ mod tests {
             RwLock::new(block_index),
         ));
 
-        // Construct service (we won't drive the async loop; just call the internal prune)
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
@@ -543,7 +597,6 @@ mod tests {
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
         service.prune_data_root_cache(1)?;
 
-        // Ensure root still exists
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots was prematurely pruned");
@@ -557,7 +610,6 @@ mod tests {
     // is pruned when prune_height exceeds expiry.
     #[tokio::test]
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
-        // Minimal config and database
         let node_config = NodeConfig::testing();
         let config = Config::new(node_config);
         let db_env = open_or_create_db(
@@ -594,7 +646,6 @@ mod tests {
             Ok(())
         })??;
 
-        // Build minimal guards (not used by prune_data_root_cache)
         let genesis_block = IrysBlockHeader::new_mock_header();
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
