@@ -198,13 +198,10 @@ impl Inner {
     /// transactions that are no longer promoted on the new canonical chain.
     ///
     /// Behavior:
-    /// - Fast-path: If the transaction header exists in `mempool_state.valid_submit_ledger_tx`,
-    ///   set `promoted_height` to `None` and update `recent_valid_tx`.
-    /// - Fallback: If the header is not in the mempool, attempt to load it from the database.
-    ///   If found, set `promoted_height` to `None` and insert it into the mempool as a valid
-    ///   submit transaction.
-    /// - Logging: Emits debug logs on success and a warning if the transaction cannot be found
-    ///   in either the mempool or the database.
+    /// - If the transaction header exists in `mempool_state.valid_submit_ledger_tx`, set
+    ///   `promoted_height` to `None` and update `recent_valid_tx`.
+    /// - If the header is not in the mempool, leave it unchanged; do not load or insert from DB.
+    /// - Logging: Emits debug logs whether the tx was updated or left unchanged.
     ///
     /// Notes:
     /// - This method only mutates in-memory mempool state. It does not persist changes to the DB.
@@ -223,41 +220,8 @@ impl Inner {
             }
         }
 
-        // Fallback: try to load from DB and insert back into mempool
-        match self.read_tx() {
-            Ok(read_tx) => match tx_header_by_txid(&read_tx, &txid) {
-                Ok(Some(mut header)) => {
-                    header.promoted_height = None;
-
-                    let mut state = self.mempool_state.write().await;
-                    state.valid_submit_ledger_tx.insert(txid, header.clone());
-                    state.recent_valid_tx.put(txid, ());
-                    tracing::debug!(%txid, "Inserted unpromoted header into mempool from DB");
-                    return Ok(());
-                }
-                Ok(None) => {
-                    // Not found in DB; handled by the not-found error below.
-                }
-                Err(e) => {
-                    return Err(eyre::eyre!(
-                        "mark_unpromoted_in_mempool: DB lookup error for {}: {}",
-                        txid,
-                        e
-                    ));
-                }
-            },
-            Err(e) => {
-                return Err(eyre::eyre!(
-                    "mark_unpromoted_in_mempool: failed to open DB read transaction: {}",
-                    e
-                ));
-            }
-        }
-
-        Err(eyre::eyre!(
-            "mark_unpromoted_in_mempool: tx {} not found in mempool or DB",
-            txid
-        ))
+        tracing::debug!(%txid, "Tx not in mempool; leaving unchanged");
+        Ok(())
     }
 
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
