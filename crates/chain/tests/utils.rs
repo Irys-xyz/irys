@@ -1836,7 +1836,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromGossip(tx_header.clone(), tx))
+                .send(MempoolServiceMessage::IngestDataTxFromGossip(
+                    tx_header.clone(),
+                    tx,
+                ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
