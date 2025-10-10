@@ -803,32 +803,17 @@ mod tests {
     }
 
     fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
-        // Create proof hash
-        let proof = H256::from([12_u8; 32]);
-        let chain_id = 1_u64;
-
-        // Create the message that would be signed using the official prehash generation
-        let prehash = IngressProof::generate_prehash(
-            &proof,
-            &data_root,
-            chain_id,
-            IngressProof::CURRENT_VERSION,
-        );
-
-        // Sign the message with the signer's internal signing key
-        // Note: sign_prehash_recoverable is a method on k256::ecdsa::SigningKey
-        let signature: Signature = signer
-            .signer
-            .sign_prehash_recoverable(&prehash)
-            .unwrap()
-            .into();
-
-        IngressProof::V1(IngressProofV1 {
-            signature: IrysSignature::new(signature),
+        let mut proof = IngressProof::V1(IngressProofV1 {
+            signature: Default::default(),
             data_root,
-            proof,
-            chain_id,
-        })
+            proof: H256::from([12_u8; 32]),
+            chain_id: 1_u64,
+        });
+
+        signer
+            .sign_ingress_proof(&mut proof)
+            .expect("Test Ingress proof generation failed");
+        proof
     }
 
     #[test]

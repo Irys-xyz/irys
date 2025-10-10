@@ -1,10 +1,9 @@
 use alloy_primitives::{Address, ChainId};
-use alloy_signer::Signature;
+use alloy_rlp::Encodable as _;
 use arbitrary::Arbitrary;
 use bytes::BufMut;
 use eyre::OptionExt as _;
 use irys_macros_integer_tagged::IntegerTagged;
-use openssl::sha;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
 use reth_db_api::table::{Compress, Decompress};
@@ -13,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
 use crate::irys::IrysSigner;
-use crate::{generate_data_root, generate_ingress_leaves, DataRoot, IrysSignature, Node, H256};
+use crate::{
+    decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves, DataRoot,
+    IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
+};
 
 #[derive(Debug, Clone, PartialEq, IntegerTagged, Eq, Compact, Arbitrary)]
 #[repr(u8)]
@@ -49,29 +51,24 @@ impl DerefMut for IngressProof {
 
 impl alloy_rlp::Encodable for IngressProof {
     fn encode(&self, out: &mut dyn BufMut) {
-        out.put_u8(self.version());
-
+        let mut buf = Vec::new();
         match self {
             Self::V1(inner) => {
-                let mut tmp = Vec::new();
-                inner.encode(&mut tmp);
-                out.put_slice(&tmp)
+                inner.encode(&mut buf);
             }
         }
+        encode_rlp_version(buf, self.version(), out);
     }
 }
 
 impl alloy_rlp::Decodable for IngressProof {
     fn decode(buf: &mut &[u8]) -> Result<Self, alloy_rlp::Error> {
-        if buf.is_empty() {
-            return Err(alloy_rlp::Error::Custom("Empty buffer"));
-        }
-        let version = buf[0];
-        *buf = &buf[1..];
+        let (version, inner_buf) = decode_rlp_version(buf)?;
+        let inner_buf = &mut &inner_buf[..];
 
         match version {
-            IngressProofV1::VERSION => {
-                let inner = IngressProofV1::decode(buf)?;
+            1 => {
+                let inner = IngressProofV1::decode(inner_buf)?;
                 Ok(Self::V1(inner))
             }
             _ => Err(alloy_rlp::Error::Custom("Unknown version")),
@@ -79,29 +76,35 @@ impl alloy_rlp::Decodable for IngressProof {
     }
 }
 
-impl IngressProof {
-    pub const CURRENT_VERSION: u8 = IngressProofV1::VERSION;
+impl Signable for IngressProof {
+    fn encode_for_signing(&self, out: &mut dyn BufMut) {
+        self.encode(out);
+    }
+}
 
-    /// Generates the prehash for signing/verification
-    /// Combines proof, data_root, and chain_id into a single digest
-    pub fn generate_prehash(
-        proof: &H256,
-        data_root: &H256,
-        chain_id: ChainId,
-        version: u8,
-    ) -> [u8; 32] {
-        let mut hasher = sha::Sha256::new();
-        hasher.update(&[version]);
-        hasher.update(&proof.0);
-        hasher.update(&data_root.0);
-        hasher.update(&chain_id.to_be_bytes());
-        hasher.finish()
+impl VersionDiscriminant for IngressProof {
+    fn version(&self) -> u8 {
+        match self {
+            Self::V1(_) => 1,
+        }
+    }
+}
+
+impl IngressProof {
+    pub fn recover_signer(&self) -> eyre::Result<Address> {
+        let prehash = self.signature_hash();
+        self.signature.recover_signer(prehash)
     }
 
-    pub fn version(&self) -> u8 {
-        match self {
-            Self::V1(_) => IngressProofV1::VERSION,
+    /// Validates that the proof matches the provided data_root and recovers the signer address
+    /// This method ensures the proof is for the correct data_root before validating the signature
+    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
+        // Validate that the data_root matches
+        if self.data_root != *data_root {
+            return Err(eyre::eyre!("Ingress proof data_root mismatch"));
         }
+        // Recover and return the signer address
+        self.recover_signer()
     }
 }
 
@@ -125,43 +128,16 @@ pub struct CachedIngressProof {
     alloy_rlp::RlpDecodable,
 )]
 pub struct IngressProofV1 {
+    #[rlp(skip)]
+    #[rlp(default)]
     pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
     pub chain_id: ChainId,
 }
 
-impl IngressProofV1 {
+impl Versioned for IngressProofV1 {
     const VERSION: u8 = 1;
-
-    /// Recovers the signer address from the ingress proof signature
-    pub fn recover_signer(&self) -> eyre::Result<Address> {
-        // Recreate the prehash that was signed
-        let prehash = IngressProof::generate_prehash(
-            &self.proof,
-            &self.data_root,
-            self.chain_id,
-            Self::VERSION,
-        );
-
-        // Recover the signer from the signature
-        let sig = self.signature.as_bytes();
-        let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
-
-        Ok(recovered_address)
-    }
-
-    /// Validates that the proof matches the provided data_root and recovers the signer address
-    /// This method ensures the proof is for the correct data_root before validating the signature
-    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
-        // Validate that the data_root matches
-        if self.data_root != *data_root {
-            return Err(eyre::eyre!("Ingress proof data_root mismatch"));
-        }
-
-        // Recover and return the signer address
-        self.recover_signer()
-    }
 }
 
 impl Compress for IngressProofV1 {
@@ -200,18 +176,15 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof = H256(root.id);
 
-    // Use the shared prehash generation function
-    let prehash =
-        IngressProof::generate_prehash(&proof, &data_root, chain_id, IngressProof::CURRENT_VERSION);
-
-    let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
-
-    Ok(IngressProof::V1(IngressProofV1 {
-        signature: signature.into(),
+    let mut proof = IngressProof::V1(IngressProofV1 {
+        signature: Default::default(),
         data_root,
         proof,
         chain_id,
-    }))
+    });
+
+    signer.sign_ingress_proof(&mut proof)?;
+    Ok(proof)
 }
 
 pub fn verify_ingress_proof<C: AsRef<[u8]>>(
@@ -223,14 +196,8 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
         return Ok(false); // Chain ID mismatch
     }
 
-    let prehash = IngressProof::generate_prehash(
-        &proof.proof,
-        &proof.data_root,
-        proof.chain_id,
-        proof.version(),
-    );
-
     let sig = proof.signature.as_bytes();
+    let prehash = proof.signature_hash();
 
     let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
 
@@ -245,12 +212,14 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
     );
 
     // re-compute the prehash (combining data_root, proof, and chain_id)
-    let new_prehash = IngressProof::generate_prehash(
-        &H256(proof_root.id),
-        &data_root,
-        proof.chain_id,
-        proof.version(),
-    );
+
+    let new_prehash = IngressProof::V1(IngressProofV1 {
+        signature: Default::default(),
+        data_root,
+        proof: H256(proof_root.id),
+        chain_id,
+    })
+    .signature_hash();
 
     // make sure they match
     Ok(new_prehash == prehash)
@@ -258,14 +227,35 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
 
 #[cfg(test)]
 mod tests {
+    use alloy_rlp::{Decodable as _, Encodable as _};
     use rand::Rng as _;
 
     use crate::{
-        generate_data_root, generate_leaves, hash_sha256, ingress::verify_ingress_proof,
-        irys::IrysSigner, ConsensusConfig, H256,
+        generate_data_root, generate_leaves, hash_sha256,
+        ingress::{verify_ingress_proof, IngressProofV1},
+        irys::IrysSigner,
+        ConsensusConfig, IngressProof, H256,
     };
 
     use super::generate_ingress_proof;
+
+    #[test]
+    fn ingress_proof_rlp_roundtrip_test() {
+        use bytes::BytesMut;
+        let original = IngressProof::V1(IngressProofV1 {
+            signature: crate::IrysSignature::default(),
+            proof: H256::from([12_u8; 32]),
+            chain_id: 1_u64,
+            data_root: H256::from([13_u8; 32]),
+        });
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf);
+        let mut slice = buf.as_ref();
+        let decoded = IngressProof::decode(&mut slice).unwrap();
+        assert_eq!(original, decoded);
+        assert!(slice.is_empty());
+    }
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {

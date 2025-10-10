@@ -8,6 +8,7 @@ use crate::versioning::{
     compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
     VersioningError,
 };
+use crate::{decode_rlp_version, encode_rlp_version};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash,
@@ -225,13 +226,31 @@ impl Compact for IrysBlockHeader {
 
 impl Signable for IrysBlockHeader {
     fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        out.put_u8(self.version());
+        self.encode(out);
+    }
+}
+
+impl alloy_rlp::Encodable for IrysBlockHeader {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        let mut buf = Vec::new();
         match self {
-            Self::V1(inner) => {
-                let mut tmp = Vec::new();
-                inner.digest_for_signing(&mut tmp);
-                out.put_slice(&tmp);
+            Self::V1(inner) => inner.encode(&mut buf),
+        }
+        encode_rlp_version(buf, self.version(), out);
+    }
+}
+
+impl alloy_rlp::Decodable for IrysBlockHeader {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let (version, buf) = decode_rlp_version(buf)?;
+        let buf = &mut &buf[..];
+
+        match version {
+            1 => {
+                let inner = IrysBlockHeaderV1::decode(buf)?;
+                Ok(Self::V1(inner))
             }
+            _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
         }
     }
 }
@@ -405,10 +424,7 @@ impl IrysBlockHeaderV1 {
     /// Proxy method for `Encodable::encode`
     ///
     /// Packs all the header data into a byte buffer, using RLP encoding.
-    pub fn digest_for_signing<B>(&self, buf: &mut B)
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
+    pub fn digest_for_signing(&self, buf: &mut dyn alloy_rlp::BufMut) {
         // Using trait directly because `reth_db_api` also has an `encode` method.
         Encodable::encode(&self, buf);
     }
@@ -1112,7 +1128,7 @@ mod tests {
             expires: None,
             proofs: Some(IngressProofsList(vec![IngressProof::V1(IngressProofV1 {
                 proof: H256::random(),
-                signature: IrysSignature::new(Signature::test_signature()),
+                signature: Default::default(), // signature is ignored by RLP & substituted with the default value
                 data_root: H256::random(),
                 chain_id: 1,
             })])),
