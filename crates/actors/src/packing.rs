@@ -397,7 +397,7 @@ impl PackingService {
                         );
                         capacity_pack_range_cuda_c(
                             num_chunks,
-                            mining_address,
+                            mining_address.into(),
                             start as u64,
                             partition_hash,
                             entropy_iterations,
