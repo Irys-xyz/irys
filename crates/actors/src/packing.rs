@@ -3,8 +3,8 @@ use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_packing::{capacity_single::compute_entropy_chunk, PackingType, PACKING_TYPE};
 use irys_types::{
-    ii, partition_chunk_offset_ii, remote_packing::RemotePackingRequest, Config,
-    PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
+    ii, partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
+    Config, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
 };
 use reth::revm::primitives::bytes::{Bytes, BytesMut};
 use std::{
@@ -44,7 +44,7 @@ pub type PackingSemaphore = Arc<Semaphore>;
 pub struct PackingService {
     /// list of all the pending packing jobs
     pending_jobs: PackingQueues,
-    /// semaphore to control concurrency -- sm_id => semaphore
+    /// Semaphore limiting concurrent packing operations across all storage modules
     semaphore: PackingSemaphore,
     /// Atomic counter of the number of active workers - used primarily to determine when packing has finished
     active_workers: Arc<AtomicUsize>,
@@ -84,15 +84,12 @@ impl PackingConfig {
     }
 }
 
-// log every 1000 chunks
 const LOG_PER_CHUNKS: u32 = 1000;
 
 impl PackingService {
-    /// creates a new packing service
     pub fn new(config: Arc<Config>) -> Self {
         let packing_config = PackingConfig::new(&config);
         let semaphore = Arc::new(Semaphore::new(packing_config.concurrency.into()));
-        // Dynamic registration: start with an empty map of queues; queues are created on first use
         let pending_jobs: PackingQueues = Arc::new(RwLock::new(HashMap::new()));
         Self {
             pending_jobs,
@@ -104,56 +101,358 @@ impl PackingService {
         }
     }
 
-    async fn process_jobs(self, runtime_handle: tokio::runtime::Handle) {
-        let mut was_active = false;
-        'main: loop {
-            if was_active {
-                // basic atomic counter so we can keep track of the number of active workers
-                self.active_workers.fetch_sub(1, Ordering::Relaxed);
-                // signal potential idle transition
-                self.notify.notify_waiters();
-                was_active = false
-            }
-            // Try to pop from any non-empty queue across all storage modules
-            // Capture the Notified future before re-checking work to avoid missed notifications
-            let notified = self.notify.notified();
-            let front = {
-                let map_guard = self
-                    .pending_jobs
-                    .read()
-                    .expect("Unable to acquire pending jobs map read lock");
-                let mut popped = None;
-                for queue in map_guard.values() {
-                    let mut q = queue
-                        .as_ref()
-                        .write()
-                        .expect("Unable to acquire pending queue write lock");
-                    if let Some(req) = q.pop_front() {
-                        popped = Some(req);
-                        break;
-                    }
+    /// Try to poll a job from any non-empty queue, or wait for new work
+    async fn poll_next_job(&self) -> Option<PackingRequest> {
+        // NOTE: Must capture Notified future BEFORE checking queue to avoid race:
+        // If notification arrives between queue check and notified() call, we'd deadlock
+        let notified = self.notify.notified();
+        let job = {
+            let map_guard = self
+                .pending_jobs
+                .read()
+                .expect("Unable to acquire pending jobs map read lock");
+            let mut popped = None;
+            for queue in map_guard.values() {
+                let mut q = queue
+                    .as_ref()
+                    .write()
+                    .expect("Unable to acquire pending queue write lock");
+                if let Some(req) = q.pop_front() {
+                    popped = Some(req);
+                    break;
                 }
-                popped
+            }
+            popped
+        };
+
+        match job {
+            Some(req) => Some(req),
+            None => {
+                tokio::select! {
+                    _ = notified => {},
+                    _ = tokio::time::sleep(self.packing_config.poll_duration) => {},
+                }
+                None
+            }
+        }
+    }
+
+    /// Process a stream of packed chunks from a remote packing service
+    async fn process_remote_chunk_stream(
+        &self,
+        mut stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+        storage_module: Arc<StorageModule>,
+        current_chunk_range: &PartitionChunkRange,
+        mut range_start: u32,
+        _range_end: u32,
+        short_writes_before_sync: u32,
+        storage_module_id: usize,
+        partition_hash: PartitionHash,
+        mining_address: [u8; 20],
+    ) -> Result<u32, String> {
+        let chunk_size = self.config.consensus.chunk_size as usize;
+        // Buffer capacity is 2x chunk_size to handle worst-case fragmentation across network packets
+        let mut buffer =
+            BytesMut::with_capacity((self.config.consensus.chunk_size * 2).try_into().unwrap());
+        let notify = self.notify.clone();
+
+        let mut process_chunk = |chunk_bytes: Bytes| {
+            storage_module.write_chunk(
+                irys_types::PartitionChunkOffset(range_start),
+                chunk_bytes.to_vec(),
+                ChunkType::Entropy,
+            );
+            notify.notify_waiters();
+
+            if range_start % LOG_PER_CHUNKS == 0 {
+                debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {:?} iterations {}", current_chunk_range.0.start(), &range_start, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+            }
+            if range_start % short_writes_before_sync == 0 {
+                debug!("triggering sync");
+                let _ = storage_module.sync_pending_chunks();
+                notify.notify_waiters();
+            }
+
+            range_start += 1;
+        };
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| format!("Error getting chunk: {:?}", e))?;
+            buffer.extend_from_slice(&chunk);
+
+            while buffer.len() >= chunk_size {
+                let chunk_to_process = buffer.split_to(chunk_size).freeze();
+                process_chunk(chunk_to_process);
+            }
+        }
+
+        if !buffer.is_empty() {
+            process_chunk(buffer.freeze());
+        }
+
+        Ok(range_start)
+    }
+
+    /// Attempt to pack using remote packing services
+    /// Returns Ok(final_range_start) if successful, Err if all remotes fail
+    async fn try_remote_packing(
+        &self,
+        storage_module: Arc<StorageModule>,
+        mut range_start: u32,
+        range_end: u32,
+        mining_address: [u8; 20],
+        partition_hash: PartitionHash,
+        storage_module_id: usize,
+        short_writes_before_sync: u32,
+    ) -> Result<u32, ()> {
+        for remote in &self.packing_config.remotes {
+            let current_chunk_range =
+                PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
+
+            let RemotePackingConfig { url, timeout } = remote;
+            let v1_url = format!("{}/v1", &url);
+
+            let _span = span!(
+                Level::DEBUG,
+                "remote_packing",
+                url = v1_url,
+                target = "irys::packing::remote"
+            );
+
+            let mut client = reqwest::Client::builder();
+            if let Some(timeout) = timeout {
+                client = client.connect_timeout(*timeout).read_timeout(*timeout);
+            }
+
+            let client = client
+                .build()
+                .expect("Building the reqwest client should not fail");
+
+            debug!("Attempting to connect to remote packing host {}", &v1_url);
+            if let Err(e) = client.get(format!("{}/info", &v1_url)).send().await {
+                warn!("Unable to connect to remote packing host {} - {}", url, e);
+                continue;
+            }
+
+            let request = RemotePackingRequest {
+                mining_address: mining_address.into(),
+                partition_hash,
+                chunk_range: current_chunk_range,
+                chain_id: self.packing_config.chain_id,
+                chunk_size: self.config.consensus.chunk_size,
+                entropy_packing_iterations: self.config.consensus.entropy_packing_iterations,
             };
 
-            let next_range = match front {
-                Some(v) => v,
-                None => {
-                    // No work available; wait for a notification or fall back to a short sleep
-                    tokio::select! {
-                        _ = notified => {},
-                        _ = tokio::time::sleep(self.packing_config.poll_duration) => {},
-                    }
+            let response = match client
+                .post(format!("{}/pack", &v1_url))
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    error!("Error sending packing request to {} - {}", &v1_url, &e);
                     continue;
                 }
             };
 
+            let stream = response.bytes_stream();
+
+            match self
+                .process_remote_chunk_stream(
+                    stream,
+                    storage_module.clone(),
+                    &current_chunk_range,
+                    range_start,
+                    range_end,
+                    short_writes_before_sync,
+                    storage_module_id,
+                    partition_hash,
+                    mining_address,
+                )
+                .await
+            {
+                Ok(new_range_start) => {
+                    range_start = new_range_start;
+                    if range_start >= range_end {
+                        return Ok(range_start);
+                    }
+                }
+                Err(e) => {
+                    error!("Error processing remote chunk stream: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        Err(())
+    }
+
+    /// Pack chunks using CPU
+    async fn pack_with_cpu(
+        &self,
+        runtime_handle: tokio::runtime::Handle,
+        storage_module: Arc<StorageModule>,
+        chunk_range: PartitionChunkRange,
+        mining_address: [u8; 20],
+        partition_hash: PartitionHash,
+        storage_module_id: usize,
+        short_writes_before_sync: u32,
+    ) {
+        let range_start = *chunk_range.0.start();
+        let range_end = *chunk_range.0.end();
+        let semaphore = self.semaphore.clone();
+
+        for i in range_start..=range_end {
+            if i % short_writes_before_sync == 0 {
+                let _ = storage_module.sync_pending_chunks();
+                yield_now().await
+            }
+
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Failure acquiring a CPU packing semaphore");
+
+            let config = self.config.clone();
+            let storage_module_clone = storage_module.clone();
+            let chain_id = self.packing_config.chain_id;
+            let notify = self.notify.clone();
+            runtime_handle.clone().spawn_blocking(move || {
+                let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
+                compute_entropy_chunk(
+                    mining_address.into(),
+                    i as u64,
+                    partition_hash.0,
+                    config.consensus.entropy_packing_iterations,
+                    config.consensus.chunk_size as usize,
+                    &mut out,
+                    chain_id,
+                );
+
+                debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {:?} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &config.consensus.entropy_packing_iterations);
+
+                storage_module_clone.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
+                drop(permit);
+                notify.notify_waiters();
+            });
+
+            if i % LOG_PER_CHUNKS == 0 {
+                debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {:?} iterations {}", chunk_range.0.start(), &i, chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+            }
+        }
+        trace!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {:?} iterations {}", chunk_range.0.start(), chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+    }
+
+    /// Pack chunks using CUDA/GPU
+    #[cfg(feature = "nvidia")]
+    async fn pack_with_cuda(
+        &self,
+        runtime_handle: tokio::runtime::Handle,
+        storage_module: Arc<StorageModule>,
+        chunk_range: PartitionChunkRange,
+        mining_address: [u8; 20],
+        partition_hash: PartitionHash,
+        storage_module_id: usize,
+        short_writes_before_sync: u32,
+    ) {
+        let chunk_size = storage_module.config.consensus.chunk_size;
+        assert_eq!(
+            chunk_size,
+            irys_types::ConsensusConfig::CHUNK_SIZE,
+            "Chunk size is not aligned with C code"
+        );
+
+        let semaphore = self.semaphore.clone();
+
+        for chunk_range_split in split_interval(&chunk_range, self.packing_config.max_chunks)
+            .unwrap()
+            .iter()
+        {
+            let start: u32 = *(*chunk_range_split).start();
+            let end: u32 = *(*chunk_range_split).end();
+            let num_chunks = end - start + 1;
+
+            debug!(
+                "Packing using CUDA C implementation, start:{} end:{} (len: {})",
+                &start, &end, &num_chunks
+            );
+
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Failure acquiring a CUDA packing semaphore");
+            let storage_module_clone = storage_module.clone();
+            let chain_id = self.packing_config.chain_id;
+            let entropy_iterations = storage_module.config.consensus.entropy_packing_iterations;
+            let runtime_handle_clone = runtime_handle.clone();
+
+            runtime_handle.clone().spawn(async move {
+                let out = runtime_handle_clone
+                    .spawn_blocking(move || {
+                        let mut out: Vec<u8> = Vec::with_capacity(
+                            (num_chunks * chunk_size as u32).try_into().unwrap(),
+                        );
+                        capacity_pack_range_cuda_c(
+                            num_chunks,
+                            mining_address,
+                            start as u64,
+                            partition_hash,
+                            entropy_iterations,
+                            chain_id,
+                            &mut out,
+                        );
+                        out
+                    })
+                    .await
+                    .unwrap();
+
+                for i in 0..num_chunks {
+                    storage_module_clone.write_chunk(
+                        (start + i).into(),
+                        out[(i * chunk_size as u32) as usize
+                            ..((i + 1) * chunk_size as u32) as usize]
+                            .to_vec(),
+                        ChunkType::Entropy,
+                    );
+                    if i % short_writes_before_sync == 0 {
+                        yield_now().await;
+                        let _ = storage_module_clone.sync_pending_chunks();
+                    }
+                }
+                drop(permit);
+            });
+
+            debug!(
+                target: "irys::packing::update",
+                ?start, ?end, ?storage_module_id, ?partition_hash, ?mining_address, ?storage_module.config.consensus.entropy_packing_iterations,
+                "CUDA Packed chunks"
+            );
+        }
+    }
+
+    async fn process_jobs(self, runtime_handle: tokio::runtime::Handle) {
+        let mut was_active = false;
+        'main: loop {
+            if was_active {
+                self.active_workers.fetch_sub(1, Ordering::Relaxed);
+                self.notify.notify_waiters();
+                was_active = false
+            }
+
+            let next_range = match self.poll_next_job().await {
+                Some(job) => job,
+                None => continue,
+            };
+
             self.active_workers.fetch_add(1, Ordering::Relaxed);
-            // signal activity observed
             self.notify.notify_waiters();
             was_active = true;
 
-            // TODO: should we be validating if the requested range is valid?
+            // TODO: Validate requested range isn't already packed to avoid redundant work.
+            //       If packed, fragment into unpacked sub-ranges and re-enqueue.
             let PackingRequest {
                 storage_module,
                 chunk_range: job_chunk_range,
@@ -170,12 +469,12 @@ impl PackingService {
             let mining_address = assignment.miner_address;
             let partition_hash = assignment.partition_hash;
             let storage_module_id = storage_module.id;
-            let semaphore = self.semaphore.clone();
-            let chunk_size = self.config.consensus.chunk_size as usize;
 
-            let mut range_start = *job_chunk_range.0.start();
+            let range_start = *job_chunk_range.0.start();
             let range_end = *job_chunk_range.0.end();
 
+            // Use half the normal sync frequency for packing operations to reduce disk I/O overhead
+            // while maintaining reasonable durability guarantees
             let short_writes_before_sync: u32 = (self
                 .config
                 .node_config
@@ -185,275 +484,50 @@ impl PackingService {
             .try_into()
             .expect("Should be able to convert min_writes_before_sync to u32");
 
-            // TODO: double-check that the requested job is still valid (i.e check the range hasn't been packed already - if it has, fragment it as required into smaller jobs and resubmit them)
-
-            // try to use a remote packing service
-            'outer: for remote in &self.packing_config.remotes {
-                // recompute this so we account for partial completions from other packing remotes
-                let current_chunk_range =
-                    PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
-
-                let RemotePackingConfig { url, timeout } = remote;
-
-                let v1_url = format!("{}/v1", &url);
-                // try to connect
-
-                let _span = span!(
-                    Level::DEBUG,
-                    "remote_packing",
-                    url = v1_url,
-                    target = "irys::packing::remote"
-                );
-
-                // let mut headers = HeaderMap::new();
-                // // TODO: actual auth, don't just send the secret in the headers (at least hash it with a nonce)
-                // headers.append(
-                //     "X-Irys-Packing-Auth-Secret",
-                //     HeaderValue::from_str(secret)
-                //         .expect("packing secret must be a valid header value"),
-                // );
-                // let mut client = reqwest::Client::builder().default_headers(headers);
-
-                let mut client = reqwest::Client::builder();
-
-                if let Some(timeout) = timeout {
-                    client = client.connect_timeout(*timeout).read_timeout(*timeout);
-                };
-
-                let client = client
-                    .build()
-                    .expect("Building the reqwest client should not fail");
-
-                debug!("Attempting to connect to remote packing host {}", &v1_url);
-                if let Err(e) = client.get(format!("{}/info", &v1_url)).send().await {
-                    // skip this client
-                    // TODO: add some exponential backoff/global removal
-                    warn!("Unable to connect to remote packing host {} - {}", url, e);
-                    continue;
-                };
-
-                // now produce the packing request
-                let request = RemotePackingRequest {
-                    mining_address,
+            if self
+                .try_remote_packing(
+                    storage_module.clone(),
+                    range_start,
+                    range_end,
+                    **mining_address,
                     partition_hash,
-                    chunk_range: current_chunk_range,
-                    chain_id: self.packing_config.chain_id,
-                    chunk_size: chunk_size as u64,
-                    entropy_packing_iterations: self.config.consensus.entropy_packing_iterations,
-                };
-
-                let response = match client
-                    .post(format!("{}/pack", &v1_url))
-                    .json(&request)
-                    .send()
-                    .await
-                {
-                    Ok(res) => res,
-                    Err(e) => {
-                        error!("Error sending packing request to {} - {}", &v1_url, &e);
-                        continue;
-                    }
-                };
-
-                let mut stream = response.bytes_stream();
-
-                let mut buffer = BytesMut::with_capacity(
-                    (self.config.consensus.chunk_size * 2).try_into().unwrap(),
-                );
-
-                let notify = self.notify.clone();
-                let mut process_chunk = |chunk_bytes: Bytes| {
-                    // TODO: move our use of Vec for bytes to, well, Bytes, so we get much cheaper copies etc
-
-                    storage_module.write_chunk(
-                        irys_types::PartitionChunkOffset(range_start),
-                        chunk_bytes.to_vec(),
-                        ChunkType::Entropy,
-                    );
-                    // notify after each chunk write to allow idle detection to observe permit/state changes
-                    notify.notify_waiters();
-
-                    if range_start % LOG_PER_CHUNKS == 0 {
-                        debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &range_start, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
-                    }
-                    if range_start % short_writes_before_sync == 0 {
-                        debug!("triggering sync");
-                        // TODO: we shouldn't ignore these errors - if we get one, we should try to sample the SM's state and re-compute job(s) (depending on fragmentation) to pack the range this job would've covered
-                        let _ = storage_module.sync_pending_chunks();
-                        // don't need this as stream.next() uses await, so it naturally yields
-                        // yield_now().await // so the shutdown can stop us
-                        notify.notify_waiters();
-                    }
-
-                    range_start += 1;
-                };
-
-                while let Some(chunk_result) = stream.next().await {
-                    let chunk = match chunk_result {
-                        Ok(c) => c,
-                        Err(e) => {
-                            error!("Error getting chunk {:?}", &e);
-                            // we assume this means the packing remote has failed
-                            // so we move to the next one
-                            continue 'outer;
-                        }
-                    };
-
-                    buffer.extend_from_slice(&chunk);
-
-                    // Process complete chunks
-                    while buffer.len() >= chunk_size {
-                        let chunk_to_process = buffer.split_to(chunk_size).freeze();
-                        process_chunk(chunk_to_process);
-                    }
-                }
-
-                // Process any remaining bytes
-                if !buffer.is_empty() {
-                    process_chunk(buffer.freeze());
-                }
-
-                // we finished (>= because when we process the last chunk we still += 1)
-                if range_start >= range_end {
-                    continue 'main;
-                }
+                    storage_module_id,
+                    short_writes_before_sync,
+                )
+                .await
+                .is_ok()
+            {
+                continue 'main;
             }
 
-            // we fall back to local packing if the remote packing systems fail
-            // TODO: maybe allow for no local packing? if so, push the Jobs CURRENT state back to the pending queue
-
-            // recompute this so we account for partial completions from other packing remotes
             let current_chunk_range =
                 PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
             match PACKING_TYPE {
                 PackingType::CPU => {
-                    for i in range_start..=range_end {
-                        // each semaphore permit corresponds to a single chunk to be packed, as we assume it'll use an entire CPU thread's worth of compute.
-                        // when we implement GPU packing, this is where we need to fork the logic between the two methods - GPU can take larger contiguous segments
-                        // whereas CPU will do this permit system
-
-                        // TODO: have stateful executor threads / an arena for entropy chunks so we don't have to allocate chunks all over the place when we can just re-use
-                        // TODO: improve this! use wakers instead of polling, allow for work-stealing, use a dedicated thread pool w/ lower priorities etc
-                        if i % short_writes_before_sync == 0 {
-                            debug!("triggering sync");
-                            let _ = storage_module.sync_pending_chunks();
-                            yield_now().await // so the shutdown can stop us
-                        }
-
-                        // wait for the permit before spawning the thread
-                        let permit = semaphore
-                            .clone()
-                            .acquire_owned()
-                            .await
-                            .expect("Failure acquiring a CPU packing semaphore");
-
-                        let config = self.config.clone();
-                        let storage_module_clone = storage_module.clone();
-                        let chain_id = self.packing_config.chain_id;
-                        let notify = self.notify.clone();
-                        runtime_handle.clone().spawn_blocking(move || {
-                            let mut out = Vec::with_capacity(config.consensus.chunk_size as usize);
-                            compute_entropy_chunk(
-                                mining_address,
-                                i as u64,
-                                partition_hash.0,
-                                config.consensus.entropy_packing_iterations,
-                                config.consensus.chunk_size as usize,
-                                &mut out,
-                                chain_id
-                            );
-
-                            debug!(target: "irys::packing::progress", "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}", &i, &storage_module_id, &partition_hash, &mining_address, &config.consensus.entropy_packing_iterations);
-
-                            // write the chunk
-                            storage_module_clone.write_chunk(PartitionChunkOffset::from(i), out, ChunkType::Entropy);
-                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing through the internal pending_writes lock write_chunk acquires
-                            // notify waiters so idle detection can re-check available permits/state
-                            notify.notify_waiters();
-                        });
-
-                        if i % LOG_PER_CHUNKS == 0 {
-                            debug!(target: "irys::packing::update", "CPU Packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {} iterations {}", current_chunk_range.0.start(), &i, current_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
-                        }
-                    }
-                    trace!(target: "irys::packing::done", "CPU Packed chunk {} - {} for SM {} partition_hash {} mining_address {} iterations {}", job_chunk_range.0.start(), job_chunk_range.0.end(), &storage_module_id, &partition_hash, &mining_address, &storage_module.config.consensus.entropy_packing_iterations);
+                    self.pack_with_cpu(
+                        runtime_handle.clone(),
+                        storage_module.clone(),
+                        current_chunk_range,
+                        **mining_address,
+                        partition_hash,
+                        storage_module_id,
+                        short_writes_before_sync,
+                    )
+                    .await;
                 }
                 #[cfg(feature = "nvidia")]
                 PackingType::CUDA => {
-                    let chunk_size = storage_module.config.consensus.chunk_size;
-                    assert_eq!(
-                        chunk_size,
-                        irys_types::ConsensusConfig::CHUNK_SIZE,
-                        "Chunk size is not aligned with C code"
-                    );
-
-                    for chunk_range_split in
-                        split_interval(&current_chunk_range, self.packing_config.max_chunks)
-                            .unwrap()
-                            .iter()
-                    {
-                        let start: u32 = *(*chunk_range_split).start();
-                        let end: u32 = *(*chunk_range_split).end();
-
-                        let num_chunks = end - start + 1;
-
-                        debug!(
-                            "Packing using CUDA C implementation, start:{} end:{} (len: {})",
-                            &start, &end, &num_chunks
-                        );
-
-                        let semaphore = semaphore.clone();
-                        // wait for the permit before spawning the thread
-                        let permit = semaphore.clone().acquire_owned().await.unwrap();
-                        let storage_module_clone = storage_module.clone();
-                        let chain_id = self.packing_config.chain_id;
-                        let entropy_iterations =
-                            storage_module.config.consensus.entropy_packing_iterations;
-                        let runtime_handle_clone = runtime_handle.clone();
-                        runtime_handle.clone().spawn(async move {
-                            // Run the GPU packing in a blocking task
-                            let out = runtime_handle_clone
-                                .spawn_blocking(move || {
-                                    let mut out: Vec<u8> = Vec::with_capacity(
-                                        (num_chunks * chunk_size as u32).try_into().unwrap(),
-                                    );
-                                    capacity_pack_range_cuda_c(
-                                        num_chunks,
-                                        mining_address,
-                                        start as u64,
-                                        partition_hash,
-                                        entropy_iterations,
-                                        chain_id,
-                                        &mut out,
-                                    );
-                                    out
-                                })
-                                .await
-                                .unwrap();
-
-                            for i in 0..num_chunks {
-                                storage_module_clone.write_chunk(
-                                    (start + i).into(),
-                                    out[(i * chunk_size as u32) as usize
-                                        ..((i + 1) * chunk_size as u32) as usize]
-                                        .to_vec(),
-                                    ChunkType::Entropy,
-                                );
-                                if i % short_writes_before_sync == 0 {
-                                    debug!("triggering sync");
-                                    yield_now().await; // so the shutdown can stop us
-                                    let _ = storage_module_clone.sync_pending_chunks();
-                                }
-                            }
-                            drop(permit); // drop after chunk write so the SM can apply backpressure to packing
-                        });
-                        debug!(
-                            target: "irys::packing::update",
-                            ?start, ?end, ?storage_module_id, ?partition_hash, ?mining_address, ?storage_module.config.consensus.entropy_packing_iterations,
-                            "CUDA Packed chunks"
-                        );
-                    }
+                    self.pack_with_cuda(
+                        runtime_handle.clone(),
+                        storage_module.clone(),
+                        current_chunk_range,
+                        **mining_address,
+                        partition_hash,
+                        storage_module_id,
+                        short_writes_before_sync,
+                    )
+                    .await;
                 }
                 _ => unimplemented!(),
             }
@@ -463,15 +537,26 @@ impl PackingService {
     }
 }
 
+/// Transfers ownership of a byte vector to an array-of-arrays vector without copying.
+///
+/// # Safety
+///
+/// This function performs a zero-copy transformation by reinterpreting the memory layout.
+/// The input Vec's allocation is transferred to the output Vec, preventing double-free.
+///
+/// # Panics
+///
+/// Panics if `input.len()` is not evenly divisible by `N`.
 #[cfg(test)]
 #[inline]
 fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     assert!(input.len() % N == 0, "wrong input N {}", N);
     let length = input.len() / N;
     let ptr = input.as_ptr() as *const [u8; N];
-    std::mem::forget(input); // So input never drops
+    std::mem::forget(input);
 
-    // safety: we've asserted that `input` length is divisible by N
+    // SAFETY: We've verified input.len() % N == 0, ensuring alignment is valid.
+    // mem::forget prevents double-free as ownership transfers to the returned Vec.
     unsafe { Vec::from_raw_parts(ptr as *mut [u8; N], length, length) }
 }
 
@@ -608,6 +693,28 @@ pub type PackingSender = tokio::sync::mpsc::Sender<PackingRequest>;
 pub type PackingReceiver = tokio::sync::mpsc::Receiver<PackingRequest>;
 
 impl PackingService {
+    /// Check if the packing system is idle (no queued jobs, no active workers, all permits available)
+    fn is_system_idle(internals: &Internals) -> bool {
+        let queued_jobs = {
+            let map = internals.pending_jobs.read().unwrap();
+            map.values()
+                .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
+        };
+        let available_permits = internals.semaphore.available_permits();
+        let target_permits = internals.config.concurrency as usize;
+        let active = internals.active_workers.load(Ordering::Relaxed);
+
+        queued_jobs == 0 && active == 0 && available_permits == target_permits
+    }
+
+    /// Flush all pending waiters by sending idle notification
+    fn flush_waiters(pending_waiters: &Mutex<Vec<oneshot::Sender<()>>>) {
+        let mut guard = pending_waiters.lock().unwrap();
+        for tx in guard.drain(..) {
+            let _ = tx.send(());
+        }
+    }
+
     /// Create a detached channel for packing requests (channel-first).
     pub fn channel(bound: usize) -> (PackingSender, PackingReceiver) {
         tokio::sync::mpsc::channel::<PackingRequest>(bound)
@@ -640,24 +747,12 @@ impl PackingService {
         let pending_waiters: Arc<Mutex<Vec<oneshot::Sender<()>>>> =
             Arc::new(Mutex::new(Vec::new()));
 
-        // Helper to flush pending waiters if the system is idle
         let flush_if_idle = {
             let internals = internals.clone();
             let pending = pending_waiters.clone();
             move || {
-                let queued_jobs = {
-                    let map = internals.pending_jobs.read().unwrap();
-                    map.values()
-                        .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
-                };
-                let available_permits = internals.semaphore.available_permits();
-                let target_permits = internals.config.concurrency as usize;
-                let active = internals.active_workers.load(Ordering::Relaxed);
-                if queued_jobs == 0 && active == 0 && available_permits == target_permits {
-                    let mut guard = pending.lock().unwrap();
-                    for tx in guard.drain(..) {
-                        let _ = tx.send(());
-                    }
+                if Self::is_system_idle(&internals) {
+                    Self::flush_waiters(&pending);
                 }
             }
         };
@@ -669,21 +764,16 @@ impl PackingService {
             let pending = pending_waiters.clone();
             runtime_handle.spawn(async move {
                 loop {
-                    notify.notified().await;
-                    let queued_jobs = {
-                        let map = internals.pending_jobs.read().unwrap();
-                        map.values()
-                            .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
-                    };
-                    let available_permits = internals.semaphore.available_permits();
-                    let target_permits = internals.config.concurrency as usize;
-                    let active = internals.active_workers.load(Ordering::Relaxed);
-                    if queued_jobs == 0 && active == 0 && available_permits == target_permits {
-                        let mut guard = pending.lock().unwrap();
-                        for tx in guard.drain(..) {
-                            let _ = tx.send(());
-                        }
+                    // Capture Notified future BEFORE checking state to avoid missing notifications
+                    let notified = notify.notified();
+
+                    // Check if idle and flush waiters if so
+                    if Self::is_system_idle(&internals) {
+                        Self::flush_waiters(&pending);
                     }
+
+                    // Wait for next state change
+                    notified.await;
                 }
             });
         }
@@ -728,19 +818,9 @@ impl PackingService {
                         Some(ctrl) = ctrl_rx.recv() => {
                             match ctrl {
                                 PackingServiceMessage::Drain { respond_to } => {
-                                    // fast-path if already idle
-                                    let queued_jobs = {
-                                        let map = internals_ctrl.pending_jobs.read().unwrap();
-                                        map.values()
-                                            .fold(0, |acc, q| acc + q.as_ref().read().unwrap().len())
-                                    };
-                                    let available_permits = internals_ctrl.semaphore.available_permits();
-                                    let target_permits = internals_ctrl.config.concurrency as usize;
-                                    let active = internals_ctrl.active_workers.load(Ordering::Relaxed);
-                                    if queued_jobs == 0 && active == 0 && available_permits == target_permits {
+                                    if Self::is_system_idle(&internals_ctrl) {
                                         let _ = respond_to.send(());
                                     } else {
-                                        // store waiter and wait for state-change watcher to flush
                                         pending_waiters.lock().unwrap().push(respond_to);
                                     }
                                 }
