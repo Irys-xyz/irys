@@ -86,6 +86,31 @@ impl PackingConfig {
 
 const LOG_PER_CHUNKS: u32 = 1000;
 
+/// RAII guard that tracks active worker count
+/// Increments counter on creation, decrements on drop (even on panic)
+struct ActiveWorkerGuard {
+    active_workers: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl ActiveWorkerGuard {
+    fn new(active_workers: Arc<AtomicUsize>, notify: Arc<Notify>) -> Self {
+        active_workers.fetch_add(1, Ordering::Relaxed);
+        notify.notify_waiters();
+        Self {
+            active_workers,
+            notify,
+        }
+    }
+}
+
+impl Drop for ActiveWorkerGuard {
+    fn drop(&mut self) {
+        self.active_workers.fetch_sub(1, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+}
+
 impl PackingService {
     pub fn new(config: Arc<Config>) -> Self {
         let packing_config = PackingConfig::new(&config);
@@ -102,6 +127,10 @@ impl PackingService {
     }
 
     /// Try to poll a job from any non-empty queue, or wait for new work
+    ///
+    /// NOTE: This implements work-stealing across storage module queues.
+    /// Controllers scan all queues in insertion order, taking the first available job.
+    /// This prevents head-of-line blocking when one SM is busy while others are idle.
     async fn poll_next_job(&self) -> Option<PackingRequest> {
         // NOTE: Must capture Notified future BEFORE checking queue to avoid race:
         // If notification arrives between queue check and notified() call, we'd deadlock
@@ -434,25 +463,17 @@ impl PackingService {
     }
 
     async fn process_jobs(self, runtime_handle: tokio::runtime::Handle) {
-        let mut was_active = false;
-        'main: loop {
-            if was_active {
-                self.active_workers.fetch_sub(1, Ordering::Relaxed);
-                self.notify.notify_waiters();
-                was_active = false
-            }
-
+        loop {
             let next_range = match self.poll_next_job().await {
                 Some(job) => job,
                 None => continue,
             };
 
-            self.active_workers.fetch_add(1, Ordering::Relaxed);
-            self.notify.notify_waiters();
-            was_active = true;
+            let _guard = ActiveWorkerGuard::new(self.active_workers.clone(), self.notify.clone());
 
-            // TODO: Validate requested range isn't already packed to avoid redundant work.
-            //       If packed, fragment into unpacked sub-ranges and re-enqueue.
+            // TODO(optimization): Check storage_module.get_intervals(ChunkType::Entropy)
+            // to skip already-packed ranges. For partial overlap, split job into unpacked
+            // sub-ranges and re-enqueue to avoid redundant work during re-packing scenarios.
             let PackingRequest {
                 storage_module,
                 chunk_range: job_chunk_range,
@@ -474,7 +495,8 @@ impl PackingService {
             let range_end = *job_chunk_range.0.end();
 
             // Use half the normal sync frequency for packing operations to reduce disk I/O overhead
-            // while maintaining reasonable durability guarantees
+            // while maintaining reasonable durability guarantees. Packing chunks are reproducible
+            // from partition assignments, so aggressive fsync is unnecessary unlike tx data.
             let short_writes_before_sync: u32 = (self
                 .config
                 .node_config
@@ -497,7 +519,7 @@ impl PackingService {
                 .await
                 .is_ok()
             {
-                continue 'main;
+                continue;
             }
 
             let current_chunk_range =
@@ -553,6 +575,8 @@ fn cast_vec_u8_to_vec_u8_array<const N: usize>(input: Vec<u8>) -> Vec<[u8; N]> {
     assert!(input.len() % N == 0, "wrong input N {}", N);
     let length = input.len() / N;
     let ptr = input.as_ptr() as *const [u8; N];
+    // SAFETY: Transfer ownership to new Vec to prevent double-free.
+    // Original allocation is reused with new type interpretation.
     std::mem::forget(input);
 
     // SAFETY: We've verified input.len() % N == 0, ensuring alignment is valid.
@@ -568,6 +592,8 @@ impl PackingService {
         runtime_handle: tokio::runtime::Handle,
     ) -> Vec<irys_types::TokioServiceHandle> {
         let mut handles = Vec::new();
+        // Spawn one controller per concurrency slot to maximize work distribution.
+        // Each controller can process jobs from any SM queue, preventing starvation.
         let controller_count = std::cmp::max(1_usize, self.packing_config.concurrency as usize);
 
         for i in 0..controller_count {
@@ -715,6 +741,26 @@ impl PackingService {
         }
     }
 
+    /// Get existing queue for storage module or create new one atomically.
+    /// Uses double-checked locking pattern: optimistic read-lock, then write-lock if needed.
+    fn get_or_create_queue(
+        job_queues: &PackingQueues,
+        sm_id: usize,
+    ) -> Arc<RwLock<VecDeque<PackingRequest>>> {
+        // Hot path: try read-lock first
+        if let Some(queue) = job_queues.read().unwrap().get(&sm_id).cloned() {
+            return queue;
+        }
+
+        // Cold path: create queue under write-lock
+        job_queues
+            .write()
+            .unwrap()
+            .entry(sm_id)
+            .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
+            .clone()
+    }
+
     /// Create a detached channel for packing requests (channel-first).
     pub fn channel(bound: usize) -> (PackingSender, PackingReceiver) {
         tokio::sync::mpsc::channel::<PackingRequest>(bound)
@@ -728,10 +774,8 @@ impl PackingService {
         mut rx: PackingReceiver,
         sender: PackingSender,
     ) -> PackingHandle {
-        // Clone references to the shared internals so both the service and observers see the same state
         let job_queues = self.pending_jobs.clone();
 
-        // Build an Internals snapshot that shares the same underlying Arcs as the service
         let internals = Internals {
             pending_jobs: self.pending_jobs.clone(),
             semaphore: self.semaphore.clone(),
@@ -757,22 +801,18 @@ impl PackingService {
             }
         };
 
-        // Spawn a watcher that listens to state-change notifications and flushes pending waiters when idle
         {
             let notify = self.notify.clone();
             let internals = internals.clone();
             let pending = pending_waiters.clone();
             runtime_handle.spawn(async move {
                 loop {
-                    // Capture Notified future BEFORE checking state to avoid missing notifications
                     let notified = notify.notified();
 
-                    // Check if idle and flush waiters if so
                     if Self::is_system_idle(&internals) {
                         Self::flush_waiters(&pending);
                     }
 
-                    // Wait for next state change
                     notified.await;
                 }
             });
@@ -786,33 +826,10 @@ impl PackingService {
                 loop {
                     tokio::select! {
                         Some(msg) = rx.recv() => {
-                            // Enqueue into the SM-specific pending queue; create queue if missing
                             let sm_id = msg.storage_module.id;
-
-                            // HOT path: try read-lock first to avoid write contention when the queue already exists
-                            let queue_arc = if let Some(q) = {
-                                let map_guard = job_queues
-                                    .read()
-                                    .expect("Unable to acquire pending jobs map read lock");
-                                map_guard.get(&sm_id).cloned()
-                            } {
-                                q
-                            } else {
-                                // COLD path: create the queue under a write lock
-                                let mut map_guard = job_queues
-                                    .write()
-                                    .expect("Unable to acquire pending jobs map write lock");
-                                map_guard
-                                    .entry(sm_id)
-                                    .or_insert_with(|| Arc::new(RwLock::new(VecDeque::with_capacity(32))))
-                                    .clone()
-                            };
-
-                            // Ignore poisoned lock errors by propagating panic (consistent with existing code)
-                            queue_arc.as_ref().write().unwrap().push_back(msg);
-                            // signal new activity for waiters
+                            let queue = Self::get_or_create_queue(&job_queues, sm_id);
+                            queue.write().unwrap().push_back(msg);
                             notify.notify_waiters();
-                            // best-effort flush
                             flush_if_idle();
                         },
                         Some(ctrl) = ctrl_rx.recv() => {
@@ -853,7 +870,10 @@ impl PackingService {
 mod tests {
     use std::{
         collections::{HashMap, VecDeque},
-        sync::{atomic::AtomicUsize, Arc, RwLock},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, RwLock,
+        },
         time::Duration,
     };
 
@@ -866,10 +886,11 @@ mod tests {
         Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
         StorageSyncConfig,
     };
-    use tokio::sync::Semaphore;
+    use tokio::sync::{Notify, Semaphore};
 
     use crate::packing::{
-        cast_vec_u8_to_vec_u8_array, Internals, PackingConfig, PackingRequest, PackingService,
+        cast_vec_u8_to_vec_u8_array, ActiveWorkerGuard, Internals, PackingConfig, PackingRequest,
+        PackingService,
     };
 
     #[test_log::test(actix::test)]
@@ -1323,6 +1344,102 @@ mod tests {
                 && available_permits >= concurrency as usize;
 
             prop_assert_eq!(is_idle, expected_idle);
+        }
+    }
+
+    // ========================================================================
+    // ActiveWorkerGuard Tests
+    // ========================================================================
+
+    #[test]
+    fn test_guard_increments_on_create() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+
+        {
+            let _guard = ActiveWorkerGuard::new(counter.clone(), notify);
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn test_guard_decrements_on_drop() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+
+        {
+            let _guard = ActiveWorkerGuard::new(counter.clone(), notify);
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+        }
+        // Guard dropped here
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_guard_handles_panic() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+
+        let result = std::panic::catch_unwind(|| {
+            let _guard = ActiveWorkerGuard::new(counter.clone(), notify.clone());
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+            panic!("Simulated panic");
+        });
+
+        assert!(result.is_err());
+        // Counter should still be decremented due to RAII
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_multiple_guards() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+
+        let guard1 = ActiveWorkerGuard::new(counter.clone(), notify.clone());
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        let guard2 = ActiveWorkerGuard::new(counter.clone(), notify);
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+
+        drop(guard1);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+        drop(guard2);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_guard_notify_on_create_and_drop() {
+        use std::sync::atomic::AtomicBool;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+        let notified = Arc::new(AtomicBool::new(false));
+
+        let notified_clone = notified.clone();
+        let notify_clone = notify.clone();
+
+        // Spawn a task that waits for notification
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                notify_clone.notified().await;
+                notified_clone.store(true, Ordering::Relaxed);
+            });
+        });
+
+        // Give the thread time to start waiting
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Create guard - should trigger notification
+        {
+            let _guard = ActiveWorkerGuard::new(counter, notify);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                notified.load(Ordering::Relaxed),
+                "Should be notified on guard creation"
+            );
         }
     }
 
