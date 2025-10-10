@@ -16,6 +16,7 @@ irys-efficient-sampling.workspace = true
 irys-vdf.workspace = true
 
 actix.workspace = true
+dashmap.workspace = true
 nodit.workspace = true
 actix-rt.workspace = true
 priority-queue.workspace = true

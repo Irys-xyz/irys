@@ -8,7 +8,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    packing::PackingSender,
+    packing_service::PackingSender,
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
