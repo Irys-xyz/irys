@@ -633,6 +633,16 @@ impl BlockDiscoveryServiceInner {
                                     "Duplicate unpledge for the same capacity partition in snapshot".to_string(),
                                 ));
                             }
+                            CommitmentSnapshotStatus::AlreadyPendingUnstake => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unstake already pending for signer".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::HasActivePledges => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unstake not allowed while pledges are active".to_string(),
+                                ));
+                            }
                             CommitmentSnapshotStatus::Unknown => {} // Success case
                         }
 

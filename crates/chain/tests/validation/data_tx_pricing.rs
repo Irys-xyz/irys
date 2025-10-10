@@ -66,6 +66,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }

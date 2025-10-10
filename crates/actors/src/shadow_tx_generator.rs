@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, EitherIncrementOrDecrement,
-    ShadowTransaction, TransactionPacket,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
+    UnstakeDebit,
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -12,7 +12,7 @@ use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
 
 use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
-use crate::block_producer::UnpledgeRefundEvent;
+use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Structure holding publish ledger transactions with their proofs
 #[derive(Debug, Clone)]
@@ -141,8 +141,9 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
-        refund_events: &[UnpledgeRefundEvent],
-    ) -> Result<Self> {
+    refund_events: &[UnpledgeRefundEvent],
+    unstake_refund_events: &[UnstakeRefundEvent],
+) -> Result<Self> {
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
         for tx in &publish_ledger.txs {
@@ -211,11 +212,8 @@ impl<'a> ShadowTxGenerator<'a> {
             .into_iter();
 
         // Initialize commitment refunds iterator (epoch only -> may be empty)
-        let commitment_refund_txs = if refund_events.is_empty() {
-            Vec::new()
-        } else {
-            generator.create_commitment_refund_shadow_txs(refund_events)?
-        };
+        let commitment_refund_txs =
+            generator.create_commitment_refund_shadow_txs(refund_events, unstake_refund_events)?;
         let current_commitment_refunds_iter = commitment_refund_txs
             .into_iter()
             .map(Ok)
@@ -356,47 +354,10 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(())
     }
 
+    /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         // Keep existing commitment transaction logic unchanged
-        let commitment_value = Uint::from_le_bytes(tx.commitment_value().to_le_bytes());
-        let fee = Uint::from(tx.fee);
         let total_cost = Uint::from_le_bytes(tx.total_cost().to_le_bytes());
-
-        let create_increment_or_decrement =
-            |operation_type: &str| -> Result<EitherIncrementOrDecrement> {
-                if fee > commitment_value {
-                    let amount = fee.checked_sub(commitment_value).ok_or_else(|| {
-                        eyre::eyre!(
-                            "Underflow when calculating {} decrement amount for {}",
-                            operation_type,
-                            tx.id
-                        )
-                    })?;
-                    Ok(EitherIncrementOrDecrement::BalanceDecrement(
-                        BalanceDecrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    ))
-                } else {
-                    let amount = commitment_value.checked_sub(fee).ok_or_else(|| {
-                        eyre::eyre!(
-                            "Underflow when calculating {} amount for {}",
-                            operation_type,
-                            tx.id
-                        )
-                    })?;
-                    Ok(EitherIncrementOrDecrement::BalanceIncrement(
-                        BalanceIncrement {
-                            amount,
-                            target: tx.signer,
-                            irys_ref: tx.id.into(),
-                        },
-                    ))
-                }
-            };
-
         let transaction_fee = tx.fee as u128;
 
         match tx.commitment_type {
@@ -433,14 +394,16 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee,
             }),
-            irys_primitives::CommitmentType::Unstake => create_increment_or_decrement("unstake")
-                .map(|result| ShadowMetadata {
-                    shadow_tx: ShadowTransaction::new_v1(
-                        TransactionPacket::Unstake(result),
-                        (*self.solution_hash).into(),
-                    ),
-                    transaction_fee,
-                }),
+            irys_primitives::CommitmentType::Unstake => Ok(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::UnstakeDebit(UnstakeDebit {
+                        target: tx.signer,
+                        irys_ref: tx.id.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
+                transaction_fee,
+            }),
         }
     }
 
@@ -655,17 +618,22 @@ impl<'a> ShadowTxGenerator<'a> {
                 let metadata = result?;
                 match &metadata.shadow_tx {
                     ShadowTransaction::V1 {
-                        packet: TransactionPacket::UnpledgeRefund(increment),
+                        packet,
                         ..
                     } => {
-                        self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                        match packet {
+                            TransactionPacket::UnpledgeRefund(increment) => {
+                                self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                            }
+                            TransactionPacket::Unstake(increment) => {
+                                self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                            }
+                            _ => unreachable!(
+                                "commitment refund iterator contains only refund packets"
+                            ),
+                        }
                     }
-                    _ => {
-                        return Err(eyre!(
-                            "Unexpected shadow transaction type in commitment refunds phase: {:?}",
-                            metadata.shadow_tx
-                        ));
-                    }
+                    _ => unreachable!("commitment refund iterator contains only refund packets"),
                 }
                 Ok(metadata)
             })
@@ -674,10 +642,12 @@ impl<'a> ShadowTxGenerator<'a> {
 
     fn create_commitment_refund_shadow_txs(
         &self,
-        refund_events: &[UnpledgeRefundEvent],
+        unpledge_events: &[UnpledgeRefundEvent],
+        unstake_events: &[UnstakeRefundEvent],
     ) -> Result<Vec<ShadowMetadata>> {
         let mut out = Vec::new();
-        for event in refund_events.iter().copied() {
+        // Unpledge refunds first (lower priority number in Ord)
+        for event in unpledge_events.iter().copied() {
             out.push(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnpledgeRefund(BalanceIncrement {
@@ -688,6 +658,20 @@ impl<'a> ShadowTxGenerator<'a> {
                     (*self.solution_hash).into(),
                 ),
                 transaction_fee: 0, // zero-priority fee for refunds
+            });
+        }
+        // Unstake refunds after
+        for event in unstake_events.iter().copied() {
+            out.push(ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::Unstake(BalanceIncrement {
+                        amount: event.amount.into(),
+                        target: event.account,
+                        irys_ref: event.irys_ref_txid.into(),
+                    }),
+                    (*self.solution_hash).into(),
+                ),
+                transaction_fee: 0,
             });
         }
         Ok(out)
@@ -875,6 +859,7 @@ mod tests {
             initial_treasury,
             &empty_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -957,16 +942,13 @@ mod tests {
                 ),
                 transaction_fee: 2000,
             },
-            // Unstake (150000 - 500 fee = 149500 increment)
+            // Unstake inclusion: fee-only via priority fee (log-only)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
-                    TransactionPacket::Unstake(EitherIncrementOrDecrement::BalanceIncrement(
-                        BalanceIncrement {
-                            amount: U256::from(149500).into(), // 150000 - 500 fee
-                            target: commitments[2].signer,
-                            irys_ref: commitments[2].id.into(),
-                        },
-                    )),
+                    TransactionPacket::UnstakeDebit(UnstakeDebit {
+                        target: commitments[2].signer,
+                        irys_ref: commitments[2].id.into(),
+                    }),
                     H256::zero().into(),
                 ),
                 transaction_fee: 500,
@@ -1001,6 +983,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &empty_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");
@@ -1082,6 +1065,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &empty_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");
@@ -1269,6 +1253,7 @@ mod tests {
             initial_treasury,
             &empty_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -1362,6 +1347,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &expired_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");
@@ -1463,6 +1449,7 @@ mod tests {
             initial_treasury,
             &expired_fees,
             &[],
+            &[],
         )
         .expect("Should create generator");
 
@@ -1524,6 +1511,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             &expired_fees,
+            &[],
             &[],
         )
         .expect("Should create generator");

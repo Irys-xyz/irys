@@ -94,6 +94,16 @@ impl Inner {
                 // Cache pledge while address is unstaked
                 self.cache_unstaked_pledge(commitment_tx).await;
             }
+            // tx cannot be accepted in any form
+            CommitmentSnapshotStatus::AlreadyPendingUnstake
+            | CommitmentSnapshotStatus::HasActivePledges => {
+                return Err(TxIngressError::Other(
+                    format!(
+                        "commitment rejected by snapshot: {:?}",
+                        commitment_status
+                    ),
+                ))
+            }
             CommitmentSnapshotStatus::Unsupported => {
                 return Err(TxIngressError::Other("unsupported tx type".to_string()));
             }
@@ -440,6 +450,8 @@ impl Inner {
                 return cache_status
             }
             CommitmentSnapshotStatus::Unsupported
+            | CommitmentSnapshotStatus::AlreadyPendingUnstake
+            | CommitmentSnapshotStatus::HasActivePledges
             | CommitmentSnapshotStatus::InvalidPledgeCount
             | CommitmentSnapshotStatus::PartitionNotOwned
             | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
