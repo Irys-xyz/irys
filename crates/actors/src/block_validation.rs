@@ -1219,15 +1219,14 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         } else {
             Vec::new()
         };
-    let unstake_refund_events: Vec<crate::block_producer::UnstakeRefundEvent> =
-        if is_epoch_block {
-            crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
-                &parent_commitment_snapshot,
-                &config.consensus,
-            )?
-        } else {
-            Vec::new()
-        };
+    let unstake_refund_events: Vec<crate::block_producer::UnstakeRefundEvent> = if is_epoch_block {
+        crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
+            &parent_commitment_snapshot,
+            &config.consensus,
+        )?
+    } else {
+        Vec::new()
+    };
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,

@@ -141,9 +141,9 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
-    refund_events: &[UnpledgeRefundEvent],
-    unstake_refund_events: &[UnstakeRefundEvent],
-) -> Result<Self> {
+        refund_events: &[UnpledgeRefundEvent],
+        unstake_refund_events: &[UnstakeRefundEvent],
+    ) -> Result<Self> {
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
         for tx in &publish_ledger.txs {
@@ -617,22 +617,17 @@ impl<'a> ShadowTxGenerator<'a> {
             .map(|result| {
                 let metadata = result?;
                 match &metadata.shadow_tx {
-                    ShadowTransaction::V1 {
-                        packet,
-                        ..
-                    } => {
-                        match packet {
-                            TransactionPacket::UnpledgeRefund(increment) => {
-                                self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
-                            }
-                            TransactionPacket::Unstake(increment) => {
-                                self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
-                            }
-                            _ => unreachable!(
-                                "commitment refund iterator contains only refund packets"
-                            ),
+                    ShadowTransaction::V1 { packet, .. } => match packet {
+                        TransactionPacket::UnpledgeRefund(increment) => {
+                            self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                         }
-                    }
+                        TransactionPacket::Unstake(increment) => {
+                            self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
+                        }
+                        _ => {
+                            unreachable!("commitment refund iterator contains only refund packets")
+                        }
+                    },
                     _ => unreachable!("commitment refund iterator contains only refund packets"),
                 }
                 Ok(metadata)

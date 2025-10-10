@@ -1185,10 +1185,11 @@ pub trait BlockProdStrategy {
             .await?;
 
         let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
-        let unstake_refund_events = crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
-            &parent_commitment_snapshot,
-            &self.inner().config.consensus,
-        )?;
+        let unstake_refund_events =
+            crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &self.inner().config.consensus,
+            )?;
 
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user

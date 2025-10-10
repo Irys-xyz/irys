@@ -1895,8 +1895,12 @@ mod tests {
 
         // Create unstake-debit transaction: fee-only via priority fee
         let unstake_debit_tx = unstake_debit(target_address);
-        let unstake_debit_tx =
-            sign_shadow_tx(unstake_debit_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let unstake_debit_tx = sign_shadow_tx(
+            unstake_debit_tx,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
         let unstake_debit_tx_hash = *unstake_debit_tx.hash();
 
         // Mine block with unstake-debit transaction

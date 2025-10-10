@@ -314,7 +314,8 @@ impl CommitmentSnapshot {
 
                 // Compute effective pledge count (epoch + local - local unpledges)
                 let miner_commitments = self.commitments.entry(*signer).or_default();
-                let current_pledge_count = Self::active_pledge_count(miner_commitments, pledges_in_epoch);
+                let current_pledge_count =
+                    Self::active_pledge_count(miner_commitments, pledges_in_epoch);
                 if current_pledge_count > 0 {
                     return CommitmentSnapshotStatus::HasActivePledges;
                 }
