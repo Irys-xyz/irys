@@ -116,8 +116,8 @@ pub struct ConsensusConfig {
     /// Enable full ingress proof verification against actual chunks during block validation.
     /// When enabled, nodes will reconstruct the data_root from locally available chunks and
     /// verify ingress proofs, enforcing data availability at validation time.
-    /// Defaults to `true` to preserve current behavior.
-    #[serde(default = "default_enable_full_ingress_proof_validation")]
+    /// Defaults to `false` to preserve current behavior.
+    #[serde(default = "default_disable_full_ingress_proof_validation")]
     pub enable_full_ingress_proof_validation: bool,
 
     /// Target number of years data should be preserved on the network
@@ -184,7 +184,7 @@ fn default_max_future_timestamp_drift_millis() -> u128 {
 
 /// Default for `enable_full_ingress_proof_validation` when the field is not
 /// present in the provided TOML. This preserves current behavior.
-fn default_enable_full_ingress_proof_validation() -> bool {
+fn default_disable_full_ingress_proof_validation() -> bool {
     false
 }
 
