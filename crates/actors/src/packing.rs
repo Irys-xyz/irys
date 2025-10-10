@@ -851,7 +851,14 @@ impl PackingService {
 /// waits for any pending & active packing tasks to complete
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        collections::{HashMap, VecDeque},
+        sync::{
+            atomic::AtomicUsize,
+            Arc, RwLock,
+        },
+        time::Duration,
+    };
 
     use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
     use irys_packing::capacity_single::compute_entropy_chunk;
@@ -859,11 +866,14 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
-        StorageSyncConfig,
+        Config, ConsensusConfig, NodeConfig, PartitionChunkOffset,
+        PartitionChunkRange, StorageSyncConfig,
     };
+    use tokio::sync::Semaphore;
 
-    use crate::packing::{cast_vec_u8_to_vec_u8_array, PackingRequest, PackingService};
+    use crate::packing::{
+        cast_vec_u8_to_vec_u8_array, Internals, PackingConfig, PackingRequest, PackingService,
+    };
 
     #[test_log::test(actix::test)]
     async fn test_packing_actor() -> eyre::Result<()> {
@@ -1011,5 +1021,362 @@ mod tests {
     fn test_casting_error() {
         let v: Vec<u8> = (1..=10).collect();
         let _c2 = cast_vec_u8_to_vec_u8_array::<3>(v);
+    }
+
+    // ========================================================================
+    // Race Condition & Concurrency Tests
+    // ========================================================================
+
+    #[rstest::rstest]
+    #[case::already_idle(true)]
+    #[case::becomes_idle(false)]
+    #[test_log::test(tokio::test)]
+    #[timeout(Duration::from_secs(5))]
+    async fn test_idle_detection_no_lost_notifications(#[case] start_idle: bool) -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_idle_detection"), false);
+        let config = create_test_config_with_chunks(&tmp_dir, 1, 10);
+        let service = PackingService::new(Arc::new(config.clone()));
+
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = service.spawn_packing_controllers(runtime_handle.clone());
+        let handle = service.spawn_tokio_service(runtime_handle);
+
+        if !start_idle {
+            let storage_module = create_test_storage_module(&config, &tmp_dir, 0)?;
+            let req = PackingRequest {
+                storage_module: storage_module.clone(),
+                chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(5))),
+            };
+            handle.send(req)?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let result = handle.waiter().wait_for_idle(Some(Duration::from_secs(3))).await;
+        assert!(result.is_ok(), "Idle detection should not hang");
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_concurrent_job_enqueue_no_lost_jobs() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_concurrent_enqueue"), false);
+        let config = create_test_config(&tmp_dir, 4);
+        let service = PackingService::new(Arc::new(config.clone()));
+        let handle = service.spawn_tokio_service(tokio::runtime::Handle::current());
+
+        let job_count = 100;
+        let num_sms = 5;
+
+        let storage_modules: Vec<_> = (0..num_sms)
+            .map(|i| create_test_storage_module(&config, &tmp_dir, i))
+            .collect::<Result<_, _>>()?;
+
+        let handles: Vec<_> = (0..job_count)
+            .map(|i| {
+                let h = handle.clone();
+                let sm = storage_modules[i % num_sms].clone();
+                tokio::spawn(async move {
+                    let req = PackingRequest {
+                        storage_module: sm,
+                        chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+                    };
+                    h.send(req).unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.await?;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let internals = handle.internals();
+        let total_queued: usize = internals.pending_jobs.read().unwrap()
+            .values()
+            .map(|q| q.read().unwrap().len())
+            .sum();
+
+        assert_eq!(total_queued, job_count, "All jobs should be queued");
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::single_permit(1)]
+    #[case::multiple_permits(4)]
+    #[case::high_concurrency(8)]
+    #[test_log::test(tokio::test)]
+    #[timeout(Duration::from_secs(10))]
+    async fn test_semaphore_permits_released(#[case] concurrency: u16) -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_semaphore"), false);
+        let config = create_test_config_with_chunks(&tmp_dir, concurrency, 5);
+
+        let service = PackingService::new(Arc::new(config.clone()));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = service.spawn_packing_controllers(runtime_handle.clone());
+        let handle = service.spawn_tokio_service(runtime_handle);
+
+        let storage_module = create_test_storage_module(&config, &tmp_dir, 0)?;
+
+        for _ in 0..(concurrency as usize * 2) {
+            let req = PackingRequest {
+                storage_module: storage_module.clone(),
+                chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(4))),
+            };
+            handle.send(req)?;
+        }
+
+        handle.waiter()
+            .wait_for_idle(Some(Duration::from_secs(8)))
+            .await
+            .expect("Should not deadlock on permit exhaustion");
+
+        let internals = handle.internals();
+        assert_eq!(
+            internals.semaphore.available_permits(),
+            concurrency as usize,
+            "All permits should be released"
+        );
+        Ok(())
+    }
+
+    // ========================================================================
+    // Storage Module Isolation Tests
+    // ========================================================================
+
+    #[rstest::rstest]
+    #[case::single_sm(vec![0])]
+    #[case::two_sms(vec![0, 1])]
+    #[case::many_sms(vec![0, 1, 2, 3, 4])]
+    #[test_log::test(tokio::test)]
+    async fn test_storage_module_queue_isolation(#[case] sm_ids: Vec<usize>) -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_sm_isolation"), false);
+        let config = create_test_config(&tmp_dir, 4);
+        let service = PackingService::new(Arc::new(config.clone()));
+        let handle = service.spawn_tokio_service(tokio::runtime::Handle::current());
+
+        let storage_modules: Vec<_> = sm_ids.iter()
+            .map(|&id| create_test_storage_module(&config, &tmp_dir, id))
+            .collect::<Result<_, _>>()?;
+
+        for sm in &storage_modules {
+            let req = PackingRequest {
+                storage_module: sm.clone(),
+                chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+            };
+            handle.send(req)?;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let internals = handle.internals();
+        let queues = internals.pending_jobs.read().unwrap();
+        assert_eq!(queues.len(), sm_ids.len(), "Should have separate queue per SM");
+
+        for &sm_id in &sm_ids {
+            assert!(queues.contains_key(&sm_id), "Queue should exist for SM {}", sm_id);
+            assert_eq!(
+                queues[&sm_id].read().unwrap().len(),
+                1,
+                "Each SM should have exactly 1 job"
+            );
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Channel Saturation Tests
+    // ========================================================================
+
+    #[test_log::test(tokio::test)]
+    async fn test_channel_saturation_drops_jobs_gracefully() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("test_channel_saturation"), false);
+        let config = create_test_config(&tmp_dir, 2);
+        let service = PackingService::new(Arc::new(config.clone()));
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<PackingRequest>(2);
+        let handle = service.attach_receiver_loop(
+            tokio::runtime::Handle::current(),
+            rx,
+            tx,
+        );
+
+        let storage_module = create_test_storage_module(&config, &tmp_dir, 0)?;
+
+        handle.send(PackingRequest {
+            storage_module: storage_module.clone(),
+            chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+        })?;
+        handle.send(PackingRequest {
+            storage_module: storage_module.clone(),
+            chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+        })?;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let result = handle.send(PackingRequest {
+            storage_module: storage_module.clone(),
+            chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+        });
+
+        assert!(result.is_ok(), "Saturated send should not error, just drop");
+        Ok(())
+    }
+
+    // ========================================================================
+    // Property-Based Tests
+    // ========================================================================
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_cast_preserves_data(data in prop::collection::vec(any::<u8>(), 0..1000)) {
+            let padded_len = (data.len() / 3) * 3;
+            if padded_len == 0 {
+                return Ok(());
+            }
+
+            let input: Vec<u8> = data.into_iter().take(padded_len).collect();
+            let expected: Vec<[u8; 3]> = input.chunks_exact(3)
+                .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                .collect();
+
+            let result = cast_vec_u8_to_vec_u8_array::<3>(input);
+
+            prop_assert_eq!(result, expected);
+        }
+
+        #[test]
+        fn test_cast_ownership_transfer(data in prop::collection::vec(any::<u8>(), 3..300)) {
+            let len = (data.len() / 3) * 3;
+            let input: Vec<u8> = data.into_iter().take(len).collect();
+            let ptr_before = input.as_ptr();
+
+            let result = cast_vec_u8_to_vec_u8_array::<3>(input);
+            let ptr_after = result.as_ptr() as *const u8;
+
+            prop_assert_eq!(ptr_before, ptr_after, "Should be zero-copy transformation");
+        }
+
+        #[test]
+        fn test_is_system_idle_invariant(
+            queued_jobs in 0..100_usize,
+            active_workers in 0..20_usize,
+            available_permits in 0..20_usize,
+            concurrency in 1..20_u16,
+        ) {
+            let pending_jobs = Arc::new(RwLock::new(HashMap::new()));
+            if queued_jobs > 0 {
+                let queue = Arc::new(RwLock::new(VecDeque::new()));
+                for _ in 0..queued_jobs {
+                    queue.write().unwrap().push_back(create_dummy_request());
+                }
+                pending_jobs.write().unwrap().insert(0, queue);
+            }
+
+            let semaphore = Arc::new(Semaphore::new(concurrency as usize));
+            for _ in 0..(concurrency as usize - available_permits.min(concurrency as usize)) {
+                semaphore.try_acquire().unwrap().forget();
+            }
+
+            let internals = Internals {
+                pending_jobs,
+                semaphore,
+                active_workers: Arc::new(AtomicUsize::new(active_workers)),
+                config: PackingConfig {
+                    poll_duration: Duration::from_millis(100),
+                    concurrency,
+                    chain_id: 1,
+                    #[cfg(feature = "nvidia")]
+                    max_chunks: 100,
+                    remotes: vec![],
+                },
+            };
+
+            let is_idle = PackingService::is_system_idle(&internals);
+
+            let expected_idle = queued_jobs == 0
+                && active_workers == 0
+                && available_permits >= concurrency as usize;
+
+            prop_assert_eq!(is_idle, expected_idle);
+        }
+    }
+
+    // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    fn create_test_config(tmp_dir: &tempfile::TempDir, concurrency: u16) -> Config {
+        create_test_config_with_chunks(tmp_dir, concurrency, 50)
+    }
+
+    fn create_test_config_with_chunks(tmp_dir: &tempfile::TempDir, concurrency: u16, num_chunks: u64) -> Config {
+        let base_path = tmp_dir.path().to_path_buf();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                entropy_packing_iterations: 100000,
+                num_chunks_in_partition: num_chunks,
+                chunk_size: 32,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 10,
+            },
+            packing: irys_types::PackingConfig {
+                local: irys_types::LocalPackingConfig {
+                    cpu_packing_concurrency: concurrency,
+                    gpu_packing_batch_size: 10,
+                },
+                remote: Default::default(),
+            },
+            base_directory: base_path,
+            ..NodeConfig::testing()
+        };
+        Config::new(node_config)
+    }
+
+    fn create_test_storage_module(
+        config: &Config,
+        _tmp_dir: &tempfile::TempDir,
+        id: usize,
+    ) -> eyre::Result<Arc<StorageModule>> {
+        let partition_hash = PartitionHash::zero();
+        let info = StorageModuleInfo {
+            id,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(
+                ie(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(config.consensus.num_chunks_in_partition as u32)
+                ),
+                format!("hdd{}", id).into(),
+            )],
+        };
+
+        Ok(Arc::new(StorageModule::new(&info, config)?))
+    }
+
+    fn create_dummy_request() -> PackingRequest {
+        use std::sync::OnceLock;
+        static DUMMY_SM: OnceLock<Arc<StorageModule>> = OnceLock::new();
+
+        let sm = DUMMY_SM.get_or_init(|| {
+            let tmp_dir = tempfile::tempdir().unwrap();
+            let config = create_test_config(&tmp_dir, 1);
+            let sm = create_test_storage_module(&config, &tmp_dir, 999).unwrap();
+            std::mem::forget(tmp_dir);
+            sm
+        });
+
+        PackingRequest {
+            storage_module: sm.clone(),
+            chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+        }
     }
 }
