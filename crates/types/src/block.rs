@@ -1128,7 +1128,7 @@ mod tests {
             expires: None,
             proofs: Some(IngressProofsList(vec![IngressProof::V1(IngressProofV1 {
                 proof: H256::random(),
-                signature: Default::default(), // signature is ignored by RLP & subtituted with the default value
+                signature: Default::default(), // signature is ignored by RLP & substituted with the default value
                 data_root: H256::random(),
                 chain_id: 1,
             })])),
