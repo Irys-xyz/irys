@@ -523,7 +523,7 @@ where
             let fee_payer = tx.caller;
             let beneficiary = self.block().beneficiary;
             // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
-            // that will alos make accounting easier on irys side
+            // that will also make accounting easier on irys side
             let base_sink = Address::ZERO;
 
             // Charge PD base fee and PD priority fee.
@@ -538,7 +538,7 @@ where
             tx.data = stripped;
 
             // TODO: bug - when we distribute fees we only update the self.state hashmap, not the undrlying evm state. As a result, if `self.inner` operates on any evm state for an account, then it will be ovreriden.
-            // - We neeed to either change the order of operations (play evm, then deduct fees)
+            // - We need to either change the order of operations (play evm, then deduct fees)
             // - Or make a more sophisticated state tracking apporac, interacting with the evm more directly, eliminating our self.state
 
             // Execute the (stripped) transaction and merge our custom fee distribution changes
@@ -1482,7 +1482,6 @@ mod tests {
         use alloy_eips::eip2930::AccessListItem as AlItem;
         use alloy_primitives::{Bytes, FixedBytes};
         use reth_transaction_pool::{TransactionOrigin, TransactionPool as _};
-        
 
         use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
         use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};

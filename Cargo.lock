@@ -4953,6 +4953,7 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-signer-local",
  "async-trait",
+ "dashmap 6.1.0",
  "eyre",
  "fastrand",
  "futures",

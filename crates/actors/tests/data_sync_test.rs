@@ -400,7 +400,7 @@ impl TestSetup {
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 100,
-                max_storage_throughput_bps: 100 * 1024 * 1024, // 100 MB/s as BPS
+                max_storage_throughput_bps: 1000 * 1024 * 1024, // 100 MB/s as BPS
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
             },
