@@ -6,7 +6,7 @@ const DEFAULT_POLL_DURATION_MS: u64 = 1000;
 #[derive(Debug, Clone)]
 pub struct PackingConfig {
     pub poll_duration: Duration,
-    /// Max. number of packing threads for CPU packing, max number of concurrent batches of `max_chunks` for GPU packing
+    /// Max. number of packing threads for CPU packing
     pub concurrency: u16,
     /// Max. number of chunks send to GPU packing
     #[cfg(feature = "nvidia")]

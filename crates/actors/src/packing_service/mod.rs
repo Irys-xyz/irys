@@ -304,8 +304,8 @@ impl PackingService {
     /// Check if the packing system is idle
     fn is_system_idle(internals: &Internals) -> bool {
         let has_queued_jobs = internals.pending_jobs.iter().any(|entry| {
-            let (_sm_id, (tx, _rx)) = entry.pair();
-            tx.capacity() < PER_SM_CHANNEL_CAPACITY
+            let (_sm_id, (_tx, _rx)) = entry.pair();
+            _tx.capacity() < PER_SM_CHANNEL_CAPACITY
         });
 
         let available_permits = internals.semaphore.available_permits();
@@ -829,56 +829,56 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10))]
-        #[test]
-        fn test_is_system_idle_invariant(
-            queued_jobs in 0..100_usize,
-            active_workers in 0..20_usize,
-            available_permits in 0..20_usize,
-            concurrency in 1..20_u16,
-        ) {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let pending_jobs = Arc::new(DashMap::new());
+            #![proptest_config(ProptestConfig::with_cases(10))]
+            #[test]
+            fn test_is_system_idle_invariant(
+                queued_jobs in 0..100_usize,
+                active_workers in 0..20_usize,
+                available_permits in 0..20_usize,
+                concurrency in 1..20_u16,
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let pending_jobs = Arc::new(DashMap::new());
 
-            if queued_jobs > 0 {
-                // Create a channel with items in it
-                let (tx, rx) = tokio::sync::mpsc::channel(PER_SM_CHANNEL_CAPACITY);
-                rt.block_on(async {
-                    for _ in 0..queued_jobs.min(PER_SM_CHANNEL_CAPACITY) {
-                        tx.send(create_dummy_request()).await.unwrap();
-                    }
-                });
-                pending_jobs.insert(0, (tx, Arc::new(tokio::sync::Mutex::new(rx))));
+                if queued_jobs > 0 {
+                    // Create a channel with items in it
+                    let (tx, rx) = tokio::sync::mpsc::channel(PER_SM_CHANNEL_CAPACITY);
+                    rt.block_on(async {
+                        for _ in 0..queued_jobs.min(PER_SM_CHANNEL_CAPACITY) {
+                            tx.send(create_dummy_request()).await.unwrap();
+                        }
+                    });
+                    pending_jobs.insert(0, (tx, Arc::new(tokio::sync::Mutex::new(rx))));
+                }
+
+                let semaphore = Arc::new(Semaphore::new(concurrency as usize));
+                for _ in 0..(concurrency as usize - available_permits.min(concurrency as usize)) {
+                    semaphore.try_acquire().unwrap().forget();
+                }
+
+                let internals = Internals {
+                    pending_jobs,
+                    semaphore,
+                    active_workers: Arc::new(AtomicUsize::new(active_workers)),
+                    config: PackingConfig {
+                        poll_duration: Duration::from_millis(100),
+                        concurrency,
+                        chain_id: 1,
+                        #[cfg(feature = "nvidia")]
+                        max_chunks: 100,
+                        remotes: vec![],
+                    },
+                };
+
+                let is_idle = PackingService::is_system_idle(&internals);
+
+                let expected_idle = queued_jobs == 0
+                    && active_workers == 0
+                    && available_permits >= concurrency as usize;
+
+                prop_assert_eq!(is_idle, expected_idle);
             }
-
-            let semaphore = Arc::new(Semaphore::new(concurrency as usize));
-            for _ in 0..(concurrency as usize - available_permits.min(concurrency as usize)) {
-                semaphore.try_acquire().unwrap().forget();
-            }
-
-            let internals = Internals {
-                pending_jobs,
-                semaphore,
-                active_workers: Arc::new(AtomicUsize::new(active_workers)),
-                config: PackingConfig {
-                    poll_duration: Duration::from_millis(100),
-                    concurrency,
-                    chain_id: 1,
-                    #[cfg(feature = "nvidia")]
-                    max_chunks: 100,
-                    remotes: vec![],
-                },
-            };
-
-            let is_idle = PackingService::is_system_idle(&internals);
-
-            let expected_idle = queued_jobs == 0
-                && active_workers == 0
-                && available_permits >= concurrency as usize;
-
-            prop_assert_eq!(is_idle, expected_idle);
         }
-    }
 
     fn create_test_config(tmp_dir: &tempfile::TempDir, concurrency: u16) -> Config {
         create_test_config_with_chunks(tmp_dir, concurrency, 50)
