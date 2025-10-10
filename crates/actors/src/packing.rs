@@ -853,10 +853,7 @@ impl PackingService {
 mod tests {
     use std::{
         collections::{HashMap, VecDeque},
-        sync::{
-            atomic::AtomicUsize,
-            Arc, RwLock,
-        },
+        sync::{atomic::AtomicUsize, Arc, RwLock},
         time::Duration,
     };
 
@@ -866,8 +863,8 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        Config, ConsensusConfig, NodeConfig, PartitionChunkOffset,
-        PartitionChunkRange, StorageSyncConfig,
+        Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
+        StorageSyncConfig,
     };
     use tokio::sync::Semaphore;
 
@@ -1032,7 +1029,9 @@ mod tests {
     #[case::becomes_idle(false)]
     #[test_log::test(tokio::test)]
     #[timeout(Duration::from_secs(5))]
-    async fn test_idle_detection_no_lost_notifications(#[case] start_idle: bool) -> eyre::Result<()> {
+    async fn test_idle_detection_no_lost_notifications(
+        #[case] start_idle: bool,
+    ) -> eyre::Result<()> {
         let tmp_dir = setup_tracing_and_temp_dir(Some("test_idle_detection"), false);
         let config = create_test_config_with_chunks(&tmp_dir, 1, 10);
         let service = PackingService::new(Arc::new(config.clone()));
@@ -1045,13 +1044,19 @@ mod tests {
             let storage_module = create_test_storage_module(&config, &tmp_dir, 0)?;
             let req = PackingRequest {
                 storage_module: storage_module.clone(),
-                chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(5))),
+                chunk_range: PartitionChunkRange(ie(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(5),
+                )),
             };
             handle.send(req)?;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let result = handle.waiter().wait_for_idle(Some(Duration::from_secs(3))).await;
+        let result = handle
+            .waiter()
+            .wait_for_idle(Some(Duration::from_secs(3)))
+            .await;
         assert!(result.is_ok(), "Idle detection should not hang");
         Ok(())
     }
@@ -1077,7 +1082,10 @@ mod tests {
                 tokio::spawn(async move {
                     let req = PackingRequest {
                         storage_module: sm,
-                        chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+                        chunk_range: PartitionChunkRange(ie(
+                            PartitionChunkOffset(0),
+                            PartitionChunkOffset(10),
+                        )),
                     };
                     h.send(req).unwrap();
                 })
@@ -1091,7 +1099,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let internals = handle.internals();
-        let total_queued: usize = internals.pending_jobs.read().unwrap()
+        let total_queued: usize = internals
+            .pending_jobs
+            .read()
+            .unwrap()
             .values()
             .map(|q| q.read().unwrap().len())
             .sum();
@@ -1120,12 +1131,16 @@ mod tests {
         for _ in 0..(concurrency as usize * 2) {
             let req = PackingRequest {
                 storage_module: storage_module.clone(),
-                chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(4))),
+                chunk_range: PartitionChunkRange(ie(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(4),
+                )),
             };
             handle.send(req)?;
         }
 
-        handle.waiter()
+        handle
+            .waiter()
             .wait_for_idle(Some(Duration::from_secs(8)))
             .await
             .expect("Should not deadlock on permit exhaustion");
@@ -1154,14 +1169,18 @@ mod tests {
         let service = PackingService::new(Arc::new(config.clone()));
         let handle = service.spawn_tokio_service(tokio::runtime::Handle::current());
 
-        let storage_modules: Vec<_> = sm_ids.iter()
+        let storage_modules: Vec<_> = sm_ids
+            .iter()
             .map(|&id| create_test_storage_module(&config, &tmp_dir, id))
             .collect::<Result<_, _>>()?;
 
         for sm in &storage_modules {
             let req = PackingRequest {
                 storage_module: sm.clone(),
-                chunk_range: PartitionChunkRange(ie(PartitionChunkOffset(0), PartitionChunkOffset(10))),
+                chunk_range: PartitionChunkRange(ie(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(10),
+                )),
             };
             handle.send(req)?;
         }
@@ -1170,10 +1189,18 @@ mod tests {
 
         let internals = handle.internals();
         let queues = internals.pending_jobs.read().unwrap();
-        assert_eq!(queues.len(), sm_ids.len(), "Should have separate queue per SM");
+        assert_eq!(
+            queues.len(),
+            sm_ids.len(),
+            "Should have separate queue per SM"
+        );
 
         for &sm_id in &sm_ids {
-            assert!(queues.contains_key(&sm_id), "Queue should exist for SM {}", sm_id);
+            assert!(
+                queues.contains_key(&sm_id),
+                "Queue should exist for SM {}",
+                sm_id
+            );
             assert_eq!(
                 queues[&sm_id].read().unwrap().len(),
                 1,
@@ -1194,11 +1221,7 @@ mod tests {
         let service = PackingService::new(Arc::new(config.clone()));
 
         let (tx, rx) = tokio::sync::mpsc::channel::<PackingRequest>(2);
-        let handle = service.attach_receiver_loop(
-            tokio::runtime::Handle::current(),
-            rx,
-            tx,
-        );
+        let handle = service.attach_receiver_loop(tokio::runtime::Handle::current(), rx, tx);
 
         let storage_module = create_test_storage_module(&config, &tmp_dir, 0)?;
 
@@ -1311,7 +1334,11 @@ mod tests {
         create_test_config_with_chunks(tmp_dir, concurrency, 50)
     }
 
-    fn create_test_config_with_chunks(tmp_dir: &tempfile::TempDir, concurrency: u16, num_chunks: u64) -> Config {
+    fn create_test_config_with_chunks(
+        tmp_dir: &tempfile::TempDir,
+        concurrency: u16,
+        num_chunks: u64,
+    ) -> Config {
         let base_path = tmp_dir.path().to_path_buf();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -1353,7 +1380,7 @@ mod tests {
             submodules: vec![(
                 ie(
                     PartitionChunkOffset(0),
-                    PartitionChunkOffset(config.consensus.num_chunks_in_partition as u32)
+                    PartitionChunkOffset(config.consensus.num_chunks_in_partition as u32),
                 ),
                 format!("hdd{}", id).into(),
             )],
