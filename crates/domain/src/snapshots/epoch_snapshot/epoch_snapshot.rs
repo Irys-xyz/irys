@@ -753,7 +753,8 @@ impl EpochSnapshot {
                 }
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
                 irys_primitives::CommitmentType::Unpledge { .. } => {}
-                _ => unimplemented!(),
+                // Unstakes are applied in `apply_unstakes()` after pledges have been processed
+                irys_primitives::CommitmentType::Unstake => {}
             }
         }
 

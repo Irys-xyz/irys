@@ -829,7 +829,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn setup_genesis_env(
+pub(crate) async fn setup_genesis_env(
     num_blocks_in_epoch: u64,
     seconds_to_wait: usize,
 ) -> eyre::Result<(IrysNodeTest<irys_chain::IrysNodeCtx>, ConsensusConfig)> {
@@ -845,7 +845,7 @@ async fn setup_genesis_env(
     Ok((genesis_node, consensus))
 }
 
-async fn setup_env(
+pub(crate) async fn setup_env(
     num_blocks_in_epoch: u64,
     seconds_to_wait: usize,
 ) -> eyre::Result<(
@@ -888,7 +888,7 @@ async fn setup_env(
     Ok((genesis_node, peer_node, peer_addr, capacity_pa, consensus))
 }
 
-fn assert_single_log_for(
+pub(crate) fn assert_single_log_for(
     receipts: &[reth::primitives::Receipt],
     topic: &[u8; 32],
     addr: Address,

@@ -615,6 +615,7 @@ impl Inner {
                             CommitmentType::Stake
                                 | CommitmentType::Pledge { .. }
                                 | CommitmentType::Unpledge { .. }
+                                | CommitmentType::Unstake
                         )
                     })
                     .cloned()

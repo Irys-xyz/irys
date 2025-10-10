@@ -8,4 +8,5 @@ mod reset_seed;
 pub mod test_double_spend;
 pub mod testing_primitives;
 pub mod treasury_tracking;
-mod unpledge_refund;
+pub mod unpledge_refund;
+mod unstake_refund;
