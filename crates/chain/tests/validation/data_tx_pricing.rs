@@ -8,7 +8,7 @@ use irys_chain::IrysNodeCtx;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    H256List, IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256, U256,
+    H256List, IrysBlockHeader, NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 
@@ -51,27 +51,22 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            LedgerExpiryBalanceDelta,
-        )> {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Return malicious tx in Submit ledger (would normally be waiting for proofs)
-            Ok((
-                vec![],
-                vec![],
-                vec![self.malicious_tx.clone()], // Submit ledger tx
-                PublishLedgerWithTxs {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.malicious_tx.clone()],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
-                }, // No Publish ledger txs
-                LedgerExpiryBalanceDelta {
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
                     miner_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
-                }, // No expired ledger fees
-            ))
+                },
+                commitment_refund_events: vec![],
+            })
         }
     }
 

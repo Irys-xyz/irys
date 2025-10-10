@@ -3,6 +3,7 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
+use base58::FromBase58 as _;
 use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
@@ -30,6 +31,7 @@ pub struct CommitmentPriceInfo {
     pub value: U256,
     pub fee: U256,
     pub user_address: Option<Address>,
+    pub pledge_count: Option<u64>,
 }
 
 pub async fn get_price(
@@ -117,6 +119,7 @@ pub async fn get_stake_price(state: web::Data<ApiState>) -> ActixResult<HttpResp
         value: stake_value.amount,
         fee: U256::from(commitment_fee),
         user_address: None,
+        pledge_count: None,
     }))
 }
 
@@ -128,11 +131,20 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
         value: stake_value.amount,
         fee: U256::from(commitment_fee),
         user_address: None,
+        pledge_count: None,
     }))
 }
 
 /// Parse and validate a user address from a string
 fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
+    // try Base58 format first
+    if let Ok(decoded) = address_str.from_base58() {
+        if let Ok(arr) = TryInto::<[u8; 20]>::try_into(decoded.as_slice()) {
+            return Ok(Address::from(&arr));
+        }
+    }
+
+    // fall back to hex/EVM address format
     Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
 }
 
@@ -161,6 +173,7 @@ pub async fn get_pledge_price(
         value: pledge_value,
         fee: U256::from(commitment_fee),
         user_address: Some(user_address),
+        pledge_count: Some(pledge_count),
     }))
 }
 
@@ -193,6 +206,7 @@ pub async fn get_unpledge_price(
         value: refund_amount,
         fee: U256::from(commitment_fee),
         user_address: Some(user_address),
+        pledge_count: Some(pledge_count),
     }))
 }
 

@@ -489,7 +489,8 @@ impl TestSetup {
         ];
 
         // Create service senders to finish initializing the PeerList
-        let (service_senders, service_receivers) = ServiceSenders::new();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
 
         let peer_list = PeerList::from_peers(
             peers_data,

@@ -827,6 +827,8 @@ pub mod string_u128 {
     }
 }
 
+// note: U256 doesn't have a string_ serialisation mod, as it doesn't need one
+
 fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,

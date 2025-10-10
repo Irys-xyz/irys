@@ -1,22 +1,111 @@
 use alloy_primitives::{Address, ChainId};
 use alloy_signer::Signature;
 use arbitrary::Arbitrary;
+use bytes::BufMut;
 use eyre::OptionExt as _;
+use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
 use reth_codecs::Compact;
 use reth_db::DatabaseError;
 use reth_db_api::table::{Compress, Decompress};
 use reth_primitives::transaction::recover_signer;
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 
 use crate::irys::IrysSigner;
+use crate::{generate_data_root, generate_ingress_leaves, DataRoot, IrysSignature, Node, H256};
 
-use crate::{
-    generate_data_root, generate_ingress_leaves, ChunkBytes, DataRoot, IrysSignature, Node, H256,
-};
+#[derive(Debug, Clone, PartialEq, IntegerTagged, Eq, Compact, Arbitrary)]
+#[repr(u8)]
+#[integer_tagged(tag = "version")]
+pub enum IngressProof {
+    #[integer_tagged(version = 1)]
+    V1(IngressProofV1) = 1,
+}
+
+impl Default for IngressProof {
+    fn default() -> Self {
+        Self::V1(Default::default())
+    }
+}
+
+impl Deref for IngressProof {
+    type Target = IngressProofV1;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::V1(inner) => inner,
+        }
+    }
+}
+
+impl DerefMut for IngressProof {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::V1(inner) => inner,
+        }
+    }
+}
+
+impl alloy_rlp::Encodable for IngressProof {
+    fn encode(&self, out: &mut dyn BufMut) {
+        out.put_u8(self.version());
+
+        match self {
+            Self::V1(inner) => {
+                let mut tmp = Vec::new();
+                inner.encode(&mut tmp);
+                out.put_slice(&tmp)
+            }
+        }
+    }
+}
+
+impl alloy_rlp::Decodable for IngressProof {
+    fn decode(buf: &mut &[u8]) -> Result<Self, alloy_rlp::Error> {
+        if buf.is_empty() {
+            return Err(alloy_rlp::Error::Custom("Empty buffer"));
+        }
+        let version = buf[0];
+        *buf = &buf[1..];
+
+        match version {
+            IngressProofV1::VERSION => {
+                let inner = IngressProofV1::decode(buf)?;
+                Ok(Self::V1(inner))
+            }
+            _ => Err(alloy_rlp::Error::Custom("Unknown version")),
+        }
+    }
+}
+
+impl IngressProof {
+    pub const CURRENT_VERSION: u8 = IngressProofV1::VERSION;
+
+    /// Generates the prehash for signing/verification
+    /// Combines proof, data_root, and chain_id into a single digest
+    pub fn generate_prehash(
+        proof: &H256,
+        data_root: &H256,
+        chain_id: ChainId,
+        version: u8,
+    ) -> [u8; 32] {
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&[version]);
+        hasher.update(&proof.0);
+        hasher.update(&data_root.0);
+        hasher.update(&chain_id.to_be_bytes());
+        hasher.finish()
+    }
+
+    pub fn version(&self) -> u8 {
+        match self {
+            Self::V1(_) => IngressProofV1::VERSION,
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
-
 pub struct CachedIngressProof {
     pub address: Address, // subkey
     pub proof: IngressProof,
@@ -35,28 +124,25 @@ pub struct CachedIngressProof {
     alloy_rlp::RlpEncodable,
     alloy_rlp::RlpDecodable,
 )]
-pub struct IngressProof {
+pub struct IngressProofV1 {
     pub signature: IrysSignature,
     pub data_root: H256,
     pub proof: H256,
     pub chain_id: ChainId,
 }
 
-impl IngressProof {
-    /// Generates the prehash for signing/verification
-    /// Combines proof, data_root, and chain_id into a single digest
-    pub fn generate_prehash(proof: &H256, data_root: &H256, chain_id: ChainId) -> [u8; 32] {
-        let mut hasher = sha::Sha256::new();
-        hasher.update(&proof.0);
-        hasher.update(&data_root.0);
-        hasher.update(&chain_id.to_be_bytes());
-        hasher.finish()
-    }
+impl IngressProofV1 {
+    const VERSION: u8 = 1;
 
     /// Recovers the signer address from the ingress proof signature
     pub fn recover_signer(&self) -> eyre::Result<Address> {
         // Recreate the prehash that was signed
-        let prehash = Self::generate_prehash(&self.proof, &self.data_root, self.chain_id);
+        let prehash = IngressProof::generate_prehash(
+            &self.proof,
+            &self.data_root,
+            self.chain_id,
+            Self::VERSION,
+        );
 
         // Recover the signer from the signature
         let sig = self.signature.as_bytes();
@@ -78,21 +164,21 @@ impl IngressProof {
     }
 }
 
-impl Compress for IngressProof {
+impl Compress for IngressProofV1 {
     type Compressed = Vec<u8>;
     fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
         let _ = Compact::to_compact(&self, buf);
     }
 }
-impl Decompress for IngressProof {
+impl Decompress for IngressProofV1 {
     fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
 }
 
-pub fn generate_ingress_proof_tree(
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+pub fn generate_ingress_proof_tree<C: AsRef<[u8]>>(
+    chunks: impl Iterator<Item = eyre::Result<C>>,
     address: Address,
     and_regular: bool,
 ) -> eyre::Result<(Node, Option<Node>)> {
@@ -105,45 +191,52 @@ pub fn generate_ingress_proof_tree(
     ))
 }
 
-pub fn generate_ingress_proof(
+pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     signer: &IrysSigner,
     data_root: DataRoot,
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+    chunks: impl Iterator<Item = eyre::Result<C>>,
     chain_id: u64,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof = H256(root.id);
 
     // Use the shared prehash generation function
-    let prehash = IngressProof::generate_prehash(&proof, &data_root, chain_id);
+    let prehash =
+        IngressProof::generate_prehash(&proof, &data_root, chain_id, IngressProof::CURRENT_VERSION);
 
     let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
-    Ok(IngressProof {
+    Ok(IngressProof::V1(IngressProofV1 {
         signature: signature.into(),
         data_root,
         proof,
         chain_id,
-    })
+    }))
 }
 
-pub fn verify_ingress_proof(
-    proof: IngressProof,
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+pub fn verify_ingress_proof<C: AsRef<[u8]>>(
+    proof: &IngressProof,
+    chunks: impl IntoIterator<Item = C>,
     chain_id: ChainId,
 ) -> eyre::Result<bool> {
     if chain_id != proof.chain_id {
         return Ok(false); // Chain ID mismatch
     }
 
-    let prehash = IngressProof::generate_prehash(&proof.proof, &proof.data_root, proof.chain_id);
+    let prehash = IngressProof::generate_prehash(
+        &proof.proof,
+        &proof.data_root,
+        proof.chain_id,
+        proof.version(),
+    );
 
     let sig = proof.signature.as_bytes();
 
     let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
 
     // re-compute the ingress proof & regular trees & roots
-    let (proof_root, regular_root) = generate_ingress_proof_tree(chunks, recovered_address, true)?;
+    let (proof_root, regular_root) =
+        generate_ingress_proof_tree(chunks.into_iter().map(Ok), recovered_address, true)?;
 
     let data_root = H256(
         regular_root
@@ -152,8 +245,12 @@ pub fn verify_ingress_proof(
     );
 
     // re-compute the prehash (combining data_root, proof, and chain_id)
-    let new_prehash =
-        IngressProof::generate_prehash(&H256(proof_root.id), &data_root, proof.chain_id);
+    let new_prehash = IngressProof::generate_prehash(
+        &H256(proof_root.id),
+        &data_root,
+        proof.chain_id,
+        proof.version(),
+    );
 
     // make sure they match
     Ok(new_prehash == prehash)
@@ -223,21 +320,21 @@ mod tests {
         let proof = generate_ingress_proof(
             &signer,
             data_root,
-            chunks.clone().into_iter().map(Ok),
+            chunks.iter().map(|c| Ok(c.as_slice())),
             chain_id,
         )?;
 
         // Verify the ingress proof
         assert!(verify_ingress_proof(
-            proof.clone(),
-            chunks.clone().into_iter().map(Ok),
+            &proof,
+            chunks.iter().as_slice(),
             chain_id
         )?);
         let mut reversed = chunks;
         reversed.reverse();
         assert!(!verify_ingress_proof(
-            proof,
-            reversed.into_iter().map(Ok),
+            &proof,
+            reversed.iter().as_slice(),
             chain_id
         )?);
 
@@ -272,7 +369,7 @@ mod tests {
         let testnet_proof = generate_ingress_proof(
             &signer,
             data_root,
-            chunks.clone().into_iter().map(Ok),
+            chunks.iter().map(|c| Ok(c.as_slice())),
             testnet_chain_id,
         )?;
 
@@ -281,21 +378,21 @@ mod tests {
         let mainnet_proof = generate_ingress_proof(
             &signer,
             data_root,
-            chunks.clone().into_iter().map(Ok),
+            chunks.iter().map(|c| Ok(c.as_slice())),
             mainnet_chain_id,
         )?;
 
         // Verify that testnet proof is valid for testnet
         assert!(verify_ingress_proof(
-            testnet_proof.clone(),
-            chunks.clone().into_iter().map(Ok),
+            &testnet_proof,
+            chunks.iter().as_slice(),
             testnet_chain_id
         )?);
 
         // Verify that mainnet proof is valid for mainnet
         assert!(verify_ingress_proof(
-            mainnet_proof,
-            chunks.clone().into_iter().map(Ok),
+            &mainnet_proof,
+            chunks.iter().as_slice(),
             mainnet_chain_id
         )?);
 
@@ -306,16 +403,16 @@ mod tests {
         // This should fail verification because the signature was created with testnet chain_id
         // but we're trying to verify it with mainnet chain_id
         assert!(!verify_ingress_proof(
-            replay_attack_proof.clone(),
-            chunks.clone().into_iter().map(Ok),
+            &replay_attack_proof,
+            chunks.iter().as_slice(),
             mainnet_chain_id
         )?);
 
         // This should fail verification because there's going to be a mismatch in chain_id
         // even if the proof is valid for testnet
         assert!(!verify_ingress_proof(
-            replay_attack_proof,
-            chunks.into_iter().map(Ok),
+            &replay_attack_proof,
+            chunks.iter().as_slice(),
             testnet_chain_id
         )?);
 

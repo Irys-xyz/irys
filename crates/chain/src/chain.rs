@@ -17,7 +17,7 @@ use irys_actors::{
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
-    packing::{PackingRequest, PackingService},
+    packing::PackingRequest,
     partition_mining_service::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
@@ -81,7 +81,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::mpsc::{self};
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
 use tokio::time::sleep;
@@ -104,6 +104,7 @@ pub struct IrysNodeCtx {
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub partition_controllers: Vec<PartitionMiningController>,
+    pub packing_waiter: irys_actors::packing::PackingIdleWaiter,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -141,6 +142,7 @@ impl IrysNodeCtx {
     }
 
     pub async fn stop(self) {
+        info!("stop function called, shutting down...");
         let _ = self.stop_mining();
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
@@ -408,6 +410,7 @@ impl IrysNode {
             evm_block_hash,
             self.config.consensus.number_of_ingress_proofs_total,
         );
+
         // Generate genesis commitments from configuration
         let commitments = get_genesis_commitments(&self.config).await;
 
@@ -946,8 +949,19 @@ impl IrysNode {
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
-        // start service senders/receivers
-        let (service_senders, receivers) = ServiceSenders::new();
+        // initialize packing service early
+        let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
+        // channel-first: create sender/receiver before attaching the service loop
+        let (packing_tx, packing_rx) = irys_actors::packing::PackingService::channel(5_000);
+        // start service senders/receivers with packing sender
+        let (service_senders, receivers) =
+            ServiceSenders::new_with_packing_sender(packing_tx.clone());
+        // attach the receiver loop and obtain a handle for waiters/tests
+        let packing_handle = packing_service.attach_receiver_loop(
+            runtime_handle.clone(),
+            packing_rx,
+            packing_tx.clone(),
+        );
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1206,15 +1220,10 @@ impl IrysNode {
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
 
-        // set up packing service
-        let (atomic_global_step_number, packing_controller_handles, packing_handle) =
-            Self::init_packing_service(
-                &config,
-                global_step_number,
-                &storage_modules_guard,
-                runtime_handle.clone(),
-            );
-        service_senders.set_packing_handle(packing_handle.clone());
+        // spawn packing controllers and set global step number
+        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
+        let packing_controller_handles =
+            packing_service.spawn_packing_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
@@ -1305,6 +1314,7 @@ impl IrysNode {
             vdf_steps_guard: vdf_state_readonly,
             service_senders: service_senders.clone(),
             partition_controllers,
+            packing_waiter: packing_handle.waiter(),
             reth_shutdown_sender,
             reth_thread_handle: None,
             block_tree_guard: block_tree_guard.clone(),
@@ -1548,37 +1558,14 @@ impl IrysNode {
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
-                let handle = service_senders.packing_handle();
-                let _ = handle.send(PackingRequest {
+                let sender = service_senders.packing_sender();
+                let _ = sender.try_send(PackingRequest {
                     storage_module: sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
                 });
             }
         }
         (controllers, handles)
-    }
-
-    fn init_packing_service(
-        config: &Config,
-        global_step_number: u64,
-        storage_modules_guard: &StorageModulesReadGuard,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> (
-        Arc<AtomicU64>,
-        Vec<TokioServiceHandle>,
-        irys_actors::packing::PackingHandle,
-    ) {
-        let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let sm_ids = storage_modules_guard.read().iter().map(|s| s.id).collect();
-        let config = Arc::new(config.clone());
-        let packing_service = PackingService::new(sm_ids, config);
-        let packing_handle = packing_service.spawn_tokio_service(runtime_handle.clone());
-        let packing_controller_handles = packing_service.spawn_packing_controllers(runtime_handle);
-        (
-            atomic_global_step_number,
-            packing_controller_handles,
-            packing_handle,
-        )
     }
 
     fn init_block_producer(
@@ -1909,8 +1896,8 @@ async fn stake_and_pledge(
         );
 
         // post a stake tx
-        let stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
-        let stake_tx = signer.sign_commitment(stake_tx)?;
+        let mut stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
+        signer.sign_commitment(&mut stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
         debug!("Posted stake tx {:?}", &stake_tx.id);
@@ -1938,7 +1925,7 @@ async fn stake_and_pledge(
 
     for idx in 0..to_pledge_count {
         // post a pledge tx
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             &config.consensus,
             latest_block_hash,
             mempool_pledge_provider.as_ref(),
@@ -1946,7 +1933,7 @@ async fn stake_and_pledge(
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx)?;
+        signer.sign_commitment(&mut pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
         debug!(

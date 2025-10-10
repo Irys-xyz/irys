@@ -2,8 +2,7 @@ use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
 use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_actors::packing::wait_for_packing;
+
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_testing_utils::initialize_tracing;
@@ -26,7 +25,7 @@ const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 /// Run this test, until you see `waiting for tx header...`, then start the JS client test
 /// that's it!, just kill this test once the JS client test finishes.
 async fn external_api() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_actors::mining=error,irys_actors::packing=error,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
     let mut testing_config = NodeConfig::testing();
     testing_config.http.bind_port = 8080; // external test, should never be run concurrently
@@ -51,9 +50,10 @@ async fn external_api() -> eyre::Result<()> {
             },
         ),
         (
+            // below is the wallet hardcoded in the JS client test
             Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
             GenesisAccount {
-                balance: U256::from(4200000000000000000_u128),
+                balance: U256::from(42000000000000000000000000000000_u128),
                 ..Default::default()
             },
         ),
@@ -62,11 +62,10 @@ async fn external_api() -> eyre::Result<()> {
     info!("started node {}", &node.cfg.http.bind_port);
 
     node.node_ctx.stop_mining()?;
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
@@ -88,21 +87,10 @@ async fn external_api() -> eyre::Result<()> {
 
     info!("waiting for tx header...");
 
-    let recv_tx = loop {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        node.node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx))?;
-        match oneshot_rx.await {
-            Ok(Ok(mempool_tx)) if !mempool_tx.submit_tx.is_empty() => {
-                break mempool_tx.submit_tx[0].clone();
-            }
-            _ => {
-                sleep(Duration::from_millis(100)).await;
-            }
-        }
-    };
+    let (submit, _publish, _commitment) = node
+        .wait_for_mempool_best_txs_shape(1, 0, 1, 999999)
+        .await?;
+    let recv_tx = submit.first().unwrap();
 
     info!(
         "got tx {:?}- waiting for chunks & ingress proof generation...",

@@ -4,7 +4,7 @@ use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use awc::http::StatusCode;
-use irys_actors::packing::wait_for_packing;
+
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
@@ -30,12 +30,10 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let app = node.start_public_api().await;
 
@@ -173,21 +171,21 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
         let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[1];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-        println!("1:{}", block_tx1);
+        println!("1:{:?}", block_tx1);
     } else if block_tx1.height > block_tx2.height {
         let txid_1 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         let txid_2 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-        println!("1:{}", block_tx2);
-        println!("2:{}", block_tx1);
+        println!("1:{:?}", block_tx2);
+        println!("2:{:?}", block_tx1);
     } else {
         let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         let txid_2 = block_tx2.data_ledgers[DataLedger::Publish].tx_ids.0[0];
         first_tx_index = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
         next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-        println!("1:{}", block_tx1);
-        println!("2:{}", block_tx2);
+        println!("1:{:?}", block_tx1);
+        println!("2:{:?}", block_tx2);
     }
 
     // ==============================

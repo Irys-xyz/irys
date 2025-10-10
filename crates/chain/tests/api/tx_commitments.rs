@@ -1,12 +1,13 @@
 use crate::utils::*;
 use assert_matches::assert_matches;
 use eyre::eyre;
-use irys_actors::packing::wait_for_packing;
+
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, CommitmentType, NodeConfig, H256, U256,
+    irys::IrysSigner, Address, CommitmentTransaction, CommitmentTransactionV1, CommitmentType,
+    NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -405,11 +406,10 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Initialize packing and mining
-    wait_for_packing(
-        node.node_ctx.service_senders.packing_handle().clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
@@ -468,14 +468,14 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Create a pledge for the unstaked address manually
     let consensus = &node.node_ctx.config.consensus;
-    let pledge_tx = CommitmentTransaction::new_pledge(
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         node.get_anchor().await?,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
     )
     .await;
-    let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
+    signer2.sign_commitment(&mut pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unstaked' state
@@ -513,16 +513,16 @@ async fn post_stake_commitment(
         .get_anchor()
         .await
         .expect("anchor should be available for stake commitment");
-    let stake_tx = CommitmentTransaction {
+    let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransaction::new(consensus)
-    };
+        ..CommitmentTransactionV1::new(consensus)
+    });
 
     info!("Created stake_tx with value: {:?}", stake_tx.value);
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    signer.sign_commitment(&mut stake_tx).unwrap();
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
     // Submit stake commitment via API
@@ -544,17 +544,17 @@ async fn post_pledge_commitment(
         .expect("Failed to get pledge price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let pledge_tx = CommitmentTransaction {
+    let mut pledge_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Pledge {
             pledge_count_before_executing: 0, // First pledge
         },
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransaction::new(consensus)
-    };
+        ..CommitmentTransactionV1::new(consensus)
+    });
 
-    let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+    signer.sign_commitment(&mut pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Submit pledge commitment via API

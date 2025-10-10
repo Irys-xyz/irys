@@ -159,14 +159,18 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     let stopped_peer = peer_node.stop().await;
 
     let submodule_path = &peer_sm_infos_before[0].submodules[0].1;
-    let params_path = submodule_path.join(PACKING_PARAMS_FILE_NAME);
+    let params_path = stopped_peer
+        .cfg
+        .storage_module_dir()
+        .join(submodule_path.file_name().expect("submodule dir name"))
+        .join(PACKING_PARAMS_FILE_NAME);
     let mut params = PackingParams::from_toml(&params_path).expect("packing params to load");
     params.last_updated_height = None;
     params.write_to_disk(&params_path);
 
     // 5. Mine another epoch to get peer partition assigned to data ledger slot
     info!("Mining second epoch to assign peer to data ledger slot...");
-    genesis_node.mine_until_next_epoch().await?;
+    let (_, final_height) = genesis_node.mine_until_next_epoch().await?;
 
     // 6. Delete DB and block index to force sync from genesis
     fs::remove_dir_all(stopped_peer.cfg.irys_consensus_data_dir())?;
@@ -176,6 +180,17 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     info!("Restarting peer to replay epoch changes...");
     let restarted_node = stopped_peer.start().await;
     restarted_node.wait_for_packing(10).await;
+    // Ensure the restarted peer has fully synced to the current chain height
+    let target_height = genesis_node.get_canonical_chain_height().await;
+    restarted_node
+        .wait_until_height(target_height, seconds_to_wait)
+        .await?;
+
+    // Ensure the peer has synced to the epoch that performs the publish-slot assignment.
+    restarted_node
+        .wait_until_height(final_height, 30)
+        .await
+        .expect("peer should sync to second epoch before checking assignments");
 
     // Verify commitments persisted after restart
     let epoch_snapshot = restarted_node
@@ -236,7 +251,11 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         .map_storage_modules_to_partition_assignments();
 
     let peer_assignment_before = peer_sm_infos_before[0].partition_assignment.unwrap();
-    let peer_assignment_after = sm_infos_after[0].partition_assignment.unwrap();
+    let peer_assignment_after = sm_infos_after
+        .iter()
+        .filter_map(|info| info.partition_assignment)
+        .find(|pa| pa.partition_hash == peer_assignment_before.partition_hash)
+        .expect("expected partition assignment for peer after replay");
 
     assert_eq!(
         peer_assignment_after.partition_hash,

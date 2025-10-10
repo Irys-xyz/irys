@@ -113,6 +113,13 @@ pub struct ConsensusConfig {
     /// required for data to be promoted
     pub number_of_ingress_proofs_from_assignees: u64,
 
+    /// Enable full ingress proof verification against actual chunks during block validation.
+    /// When enabled, nodes will reconstruct the data_root from locally available chunks and
+    /// verify ingress proofs, enforcing data availability at validation time.
+    /// Defaults to `false` to preserve current behavior.
+    #[serde(default = "default_disable_full_ingress_proof_validation")]
+    pub enable_full_ingress_proof_validation: bool,
+
     /// Target number of years data should be preserved on the network
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
@@ -173,6 +180,12 @@ pub struct ConsensusConfig {
 /// present in the provided TOML. This keeps legacy configurations working.
 fn default_max_future_timestamp_drift_millis() -> u128 {
     15_000
+}
+
+/// Default for `enable_full_ingress_proof_validation` when the field is not
+/// present in the provided TOML. This preserves current behavior.
+fn default_disable_full_ingress_proof_validation() -> bool {
+    false
 }
 
 /// # Consensus Configuration Source
@@ -570,6 +583,7 @@ impl ConsensusConfig {
             immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
                 .expect("valid percentage"),
             minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
+            enable_full_ingress_proof_validation: false,
             max_future_timestamp_drift_millis: 15_000,
         }
     }
