@@ -1,75 +1,28 @@
-use crate::mempool_service::{Inner, MempoolServiceMessage, TxIngressError, TxReadError};
+use crate::mempool_service::{
+    validate_commitment_transaction, Inner, MempoolServiceMessage, TxIngressError, TxReadError,
+};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionCommon as _, IrysTransactionId, H256,
+    IrysTransactionId, H256,
 };
 use lru::LruCache;
+// Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use std::{collections::HashMap, num::NonZeroUsize};
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, instrument, warn};
 
 impl Inner {
-    #[instrument(skip_all)]
-    pub async fn handle_ingress_commitment_tx_message(
+    // Shared pre-checks for both API and Gossip commitment ingress paths.
+    // Performs signature validation, whitelist check, mempool/db duplicate detection, and anchor validation.
+    #[inline]
+    async fn precheck_commitment_ingress_common(
         &mut self,
-        commitment_tx: CommitmentTransaction,
+        commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        debug!("received commitment tx {:?}", &commitment_tx.id);
-
-        // Check stake/pledge whitelist early - reject if address is not whitelisted
-        let whitelist = &self.stake_and_pledge_whitelist;
-        if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
-            warn!(
-                "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
-                commitment_tx.id, commitment_tx.signer
-            );
-            return Err(CommitmentValidationError::ForbiddenSigner.into());
-        }
-
-        let mempool_state_guard = self.mempool_state.read().await;
-
-        // Early out if we already know about this transaction (invalid)
-        if mempool_state_guard
-            .recent_invalid_tx
-            .contains(&commitment_tx.id)
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        // Early out if we already know about this transaction in mempool (recent valid)
-        if mempool_state_guard
-            .recent_valid_tx
-            .contains(&commitment_tx.id)
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        //  Early out if the transaction already exists in valid_commitment_tx
-        if mempool_state_guard
-            .valid_commitment_tx
-            .get(&commitment_tx.signer)
-            .is_some_and(|txs| txs.iter().any(|c| c.id == commitment_tx.id))
-        {
-            return Err(TxIngressError::Skipped);
-        }
-        drop(mempool_state_guard);
-
-        // Early out if we already know about this transaction in index / database
-        if self
-            .irys_db
-            .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, &commitment_tx.id))
-            .map_err(|_| TxIngressError::DatabaseError)?
-            .is_some()
-        {
-            return Err(TxIngressError::Skipped);
-        }
-
-        // Validate tx signature
-        // we MUST do this before using the ID
-        if let Err(e) = self.validate_signature(&commitment_tx).await {
+        // Validate tx signature first to prevent ID poisoning
+        if let Err(e) = self.validate_signature(commitment_tx).await {
             tracing::error!(
                 "Signature validation for commitment_tx {:?} failed with error: {:?}",
                 &commitment_tx,
@@ -78,147 +31,256 @@ impl Inner {
             return Err(TxIngressError::InvalidSignature);
         }
 
-        let _anchor_height = self.validate_anchor(&commitment_tx).await?;
+        // Check stake/pledge whitelist early - reject if address is not whitelisted
+        self.check_commitment_whitelist(commitment_tx)?;
 
-        // Validate fee
-        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
-            drop(mempool_state_guard);
-            tracing::warn!(
-                "Commitment tx {} failed fee validation: {}",
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::CommitmentValidationError(e));
+        // Early out if we already know about this transaction (invalid/recent valid/valid_commitment_tx)
+        if self
+            .is_known_commitment_in_mempool(&commitment_tx.id, commitment_tx.signer)
+            .await
+        {
+            return Err(TxIngressError::Skipped);
         }
 
-        // Validate value based on commitment type
-        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
-            drop(mempool_state_guard);
-            tracing::warn!(
-                "Commitment tx {} failed value validation: {}",
-                commitment_tx.id,
-                e
-            );
-            return Err(TxIngressError::CommitmentValidationError(e));
+        // Early out if we already know about this transaction in index / database
+        if self.is_known_commitment_in_db(&commitment_tx.id)? {
+            return Err(TxIngressError::Skipped);
         }
 
-        // Validate funding before storing in mempool
-        if let Err(e) = self.validate_funding(&commitment_tx) {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            mempool_state_guard
-                .recent_invalid_tx
-                .put(commitment_tx.id, ());
+        // Validate anchor (height is unused at this stage)
+        self.validate_anchor(commitment_tx).await?;
 
-            tracing::info!(
-                "Rejected unfunded commitment tx {} from signer {}",
-                commitment_tx.id,
-                commitment_tx.signer
-            );
+        Ok(())
+    }
+
+    // Shared post-validation processing for commitment transactions.
+    // Computes commitment status and handles insert/cache/gossip accordingly.
+    // The log_status_debug flag controls whether the status log is at debug (API) or trace (Gossip) level.
+    // The warn_on_unstaked flag controls whether we emit a warning on Unstaked status (true for API only).
+    #[inline]
+    async fn process_commitment_after_prechecks(
+        &mut self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        // Check pending commitments and cached commitments and active commitments of the canonical chain
+        let commitment_status = self.get_commitment_status(commitment_tx).await;
+        debug!(
+            "commitment tx {} status {:?}",
+            &commitment_tx.id, &commitment_status
+        );
+
+        match commitment_status {
+            CommitmentSnapshotStatus::Unknown
+            | CommitmentSnapshotStatus::Accepted
+            | CommitmentSnapshotStatus::InvalidPledgeCount
+            | CommitmentSnapshotStatus::PartitionNotOwned
+            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                // Add to valid set and mark recent
+                self.insert_commitment_and_mark_valid(commitment_tx).await;
+
+                // Process any pending pledges for this newly staked address
+                self.process_pending_pledges_for_new_stake(commitment_tx.signer)
+                    .await;
+
+                // Gossip transaction
+                self.broadcast_commitment_gossip(commitment_tx);
+            }
+            CommitmentSnapshotStatus::Unstaked => {
+                warn!(
+                    tx = ?commitment_tx.id,
+                    status = ?commitment_status,
+                    "commitment tx cached while address is unstaked"
+                );
+                // Cache pledge while address is unstaked
+                self.cache_unstaked_pledge(commitment_tx).await;
+            }
+            CommitmentSnapshotStatus::Unsupported => {
+                return Err(TxIngressError::Other("unsupported tx type".to_string()));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    pub async fn handle_ingress_commitment_tx_message_gossip(
+        &mut self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        debug!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            "Received commitment tx from Gossip"
+        );
+
+        // Common pre-checks shared with API path
+        self.precheck_commitment_ingress_common(&commitment_tx)
+            .await?;
+
+        // Validate economic constraints only for API-submitted transactions
+        // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
+        // while still being able to process them when building blocks.
+        // Gossip path: skip fee/value/funding checks
+
+        // Post-processing shared with API path (trace-level status, no warn on unstaked)
+        self.process_commitment_after_prechecks(&commitment_tx)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn handle_ingress_commitment_tx_message_api(
+        &mut self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        debug!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            "Received commitment tx from API"
+        );
+
+        // Common pre-checks shared with Gossip path
+        self.precheck_commitment_ingress_common(&commitment_tx)
+            .await?;
+
+        // API-only: fee/value/funding validations
+        if let Err(e) = validate_commitment_transaction(
+            &self.reth_node_adapter,
+            &self.config.consensus,
+            &commitment_tx,
+            None,
+        ) {
+            let mut guard = self.mempool_state.write().await;
+            guard.recent_invalid_tx.put(commitment_tx.id, ());
+            drop(guard);
 
             return Err(e);
         }
 
-        // Check pending commitments and cached commitments and active commitments of the canonical chain
-        let commitment_status = self.get_commitment_status(&commitment_tx).await;
-        trace!(
-            "commitment tx {} status {:?}",
-            &commitment_tx.id,
-            &commitment_status
-        );
-        if commitment_status == CommitmentSnapshotStatus::Accepted {
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            // Add the commitment tx to the valid tx list to be included in the next block
-            trace!(
-                "pushing commitment {} to valid_commitment_tx",
-                &commitment_tx.id
+        // Post-processing shared with Gossip path (debug-level status, warn on unstaked)
+        self.process_commitment_after_prechecks(&commitment_tx)
+            .await
+    }
+
+    /// Check stake/pledge whitelist; reject if address is not whitelisted.
+    fn check_commitment_whitelist(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let whitelist = &self.stake_and_pledge_whitelist;
+        if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
+            warn!(
+                "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
+                commitment_tx.id, commitment_tx.signer
             );
-            mempool_state_guard
-                .valid_commitment_tx
-                .entry(commitment_tx.signer)
-                .or_default()
-                .push(commitment_tx.clone());
+            return Err(CommitmentValidationError::ForbiddenSigner.into());
+        }
+        Ok(())
+    }
 
-            mempool_state_guard
-                .recent_valid_tx
-                .put(commitment_tx.id, ());
+    /// Returns true if the commitment tx is already known in the mempool caches/maps.
+    async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: Address) -> bool {
+        let guard = self.mempool_state.read().await;
+        if guard.recent_invalid_tx.contains(tx_id) || guard.recent_valid_tx.contains(tx_id) {
+            return true;
+        }
+        if guard
+            .valid_commitment_tx
+            .get(&signer)
+            .is_some_and(|txs| txs.iter().any(|c| c.id == *tx_id))
+        {
+            return true;
+        }
+        false
+    }
 
-            // Process any pending pledges for this newly staked address
-            // ------------------------------------------------------
-            // When a stake transaction is accepted, we can now process any pledge
-            // transactions from the same address that arrived earlier but were
-            // waiting for the stake. This effectively resolves the dependency
-            // order for address-based validation.
-            let pop = mempool_state_guard
-                .pending_pledges
-                .pop(&commitment_tx.signer);
-            drop(mempool_state_guard);
-            if let Some(pledges_lru) = pop {
-                // Extract all pending pledges as a vector of owned transactions
-                let pledges: Vec<_> = pledges_lru
-                    .into_iter()
-                    .map(|(_, pledge_tx)| pledge_tx)
-                    .collect();
+    /// Checks the database index for an existing commitment transaction by id.
+    fn is_known_commitment_in_db(&self, tx_id: &H256) -> Result<bool, TxIngressError> {
+        let known_in_db = self
+            .irys_db
+            .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, tx_id))
+            .map_err(|_| TxIngressError::DatabaseError)?
+            .is_some();
+        Ok(known_in_db)
+    }
 
-                for pledge_tx in pledges {
-                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    // todo switch _ to actually handle the result
-                    let _ = self
-                        .handle_message(MempoolServiceMessage::IngestCommitmentTx(
-                            pledge_tx, oneshot_tx,
-                        ))
-                        .await;
+    /// Inserts a commitment into the mempool valid map and marks it as recently valid.
+    async fn insert_commitment_and_mark_valid(&mut self, tx: &CommitmentTransaction) {
+        let mut guard = self.mempool_state.write().await;
+        guard
+            .valid_commitment_tx
+            .entry(tx.signer)
+            .or_default()
+            .push(tx.clone());
+        guard.recent_valid_tx.put(tx.id, ());
+    }
 
-                    let _ = oneshot_rx
-                        .await
-                        .expect("to process pending pledge for newly staked address");
+    /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.
+    async fn process_pending_pledges_for_new_stake(&mut self, signer: Address) {
+        let mut guard = self.mempool_state.write().await;
+        let pop = guard.pending_pledges.pop(&signer);
+        drop(guard);
+        if let Some(pledges_lru) = pop {
+            // Extract all pending pledges as a vector of owned transactions
+            let pledges: Vec<_> = pledges_lru
+                .into_iter()
+                .map(|(_, pledge_tx)| pledge_tx)
+                .collect();
+
+            for pledge_tx in pledges {
+                let tx_id = pledge_tx.id;
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                if let Err(e) = self
+                    .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                        pledge_tx, oneshot_tx,
+                    ))
+                    .await
+                {
+                    warn!(
+                        tx = ?tx_id,
+                        error = ?e,
+                        "Failed to process pending pledge for newly staked address"
+                    );
+                }
+
+                if let Err(e) = oneshot_rx
+                    .await
+                    .expect("to process pending pledge for newly staked address")
+                {
+                    warn!(
+                        "Failed to process pending pledge for newly staked address: {:?}",
+                        e
+                    );
                 }
             }
-
-            // Gossip transaction
-            self.service_senders
-                .gossip_broadcast
-                .send(GossipBroadcastMessage::from(commitment_tx.clone()))
-                .expect("Failed to send gossip data");
-        } else if commitment_status == CommitmentSnapshotStatus::Unstaked {
-            // For unstaked pledges, we cache them in a 2-level LRU structure:
-            // Level 1: Keyed by signer address (allows tracking multiple addresses)
-            // Level 2: Keyed by transaction ID (allows tracking multiple pledge tx per address)
-
-            let mut mempool_state_guard = self.mempool_state.write().await;
-            if let Some(pledges_cache) = mempool_state_guard
-                .pending_pledges
-                .get_mut(&commitment_tx.signer)
-            {
-                // Address already exists in cache - add this pledge transaction to its lru cache
-                pledges_cache.put(commitment_tx.id, commitment_tx.clone());
-            } else {
-                // First pledge from this address - create a new nested lru cache
-                let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
-                let mut new_address_cache =
-                    LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-                // Add the pledge transaction to the new lru cache for the address
-                new_address_cache.put(commitment_tx.id, commitment_tx.clone());
-
-                // Add the address cache to the primary lru cache
-                mempool_state_guard
-                    .pending_pledges
-                    .put(commitment_tx.signer, new_address_cache);
-            }
-            drop(mempool_state_guard)
-        } else {
-            return Err(TxIngressError::Skipped);
         }
+    }
 
-        Ok(())
+    /// Caches an unstaked pledge in the two-level LRU structure.
+    async fn cache_unstaked_pledge(&mut self, tx: &CommitmentTransaction) {
+        let mut guard = self.mempool_state.write().await;
+        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer) {
+            // Address already exists in cache - add this pledge transaction to its lru cache
+            pledges_cache.put(tx.id, tx.clone());
+        } else {
+            // First pledge from this address - create a new nested lru cache
+            let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
+            let mut new_address_cache =
+                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+            // Add the pledge transaction to the new lru cache for the address
+            new_address_cache.put(tx.id, tx.clone());
+
+            // Add the address cache to the primary lru cache
+            guard.pending_pledges.put(tx.signer, new_address_cache);
+        }
+    }
+
+    /// Broadcasts the commitment transaction over gossip.
+    fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
+        self.service_senders
+            .gossip_broadcast
+            .send(GossipBroadcastMessage::from(tx.clone()))
+            .expect("Failed to send gossip data");
     }
 
     /// checks only the mempool
@@ -355,53 +417,7 @@ impl Inner {
         found
     }
 
-    fn validate_funding(
-        &self,
-        commitment_tx: &CommitmentTransaction,
-    ) -> Result<(), TxIngressError> {
-        // Get the current balance of the transaction signer
-        let balance: irys_types::U256 = self
-            .reth_node_adapter
-            .rpc
-            .get_balance(commitment_tx.signer, None)
-            .map(From::from)
-            .map_err(|e| {
-                tracing::error!(
-                    tx_id = %commitment_tx.id,
-                    signer = %commitment_tx.signer,
-                    error = %e,
-                    "Failed to fetch balance for commitment tx"
-                );
-                TxIngressError::BalanceFetchError {
-                    address: commitment_tx.signer.to_string(),
-                    reason: e.to_string(),
-                }
-            })?;
-
-        // Calculate total cost (value + fee)
-        let total_cost = commitment_tx.total_cost();
-
-        // Ensure balance is sufficient
-        if balance < total_cost {
-            tracing::warn!(
-                tx_id = %commitment_tx.id,
-                balance = %balance,
-                required = %total_cost,
-                "Insufficient balance for commitment tx"
-            );
-            return Err(TxIngressError::Unfunded);
-        }
-
-        tracing::debug!(
-            tx_id = %commitment_tx.id,
-            balance = %balance,
-            required = %total_cost,
-            "Funding validated for commitment tx"
-        );
-
-        Ok(())
-    }
-
+    #[tracing::instrument(skip_all, fields(tx_id = ?commitment_tx.id))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -415,39 +431,46 @@ impl Inner {
             )
         };
 
-        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
+        let cache_status =
+            commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot);
 
-        let cache_status = commitment_snapshot.get_commitment_status(commitment_tx, is_staked);
-
-        // Reject unsupported commitment types
-        if matches!(cache_status, CommitmentSnapshotStatus::Unsupported) {
-            warn!("Commitment is unsupported: {}", commitment_tx.id);
-            return CommitmentSnapshotStatus::Unsupported;
-        }
-
-        // For unstaked addresses, check for pending stake transactions
-        if matches!(cache_status, CommitmentSnapshotStatus::Unstaked) {
-            let mempool_state_guard = self.mempool_state.read().await;
-            // Get pending transactions for this address
-            if let Some(pending) = mempool_state_guard
-                .valid_commitment_tx
-                .get(&commitment_tx.signer)
-            {
-                // Check if there's at least one pending stake transaction
-                if pending
-                    .iter()
-                    .any(|c| c.commitment_type == CommitmentType::Stake)
-                {
-                    return CommitmentSnapshotStatus::Accepted;
-                }
+        // Reject unsupported or invalid commitment types/targets
+        match cache_status {
+            CommitmentSnapshotStatus::Unknown | CommitmentSnapshotStatus::Accepted => {
+                return cache_status
             }
+            CommitmentSnapshotStatus::Unsupported
+            | CommitmentSnapshotStatus::InvalidPledgeCount
+            | CommitmentSnapshotStatus::PartitionNotOwned
+            | CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                warn!(
+                    "Commitment rejected: {:?} id={} ",
+                    cache_status, commitment_tx.id
+                );
+                return cache_status;
+            }
+            CommitmentSnapshotStatus::Unstaked => {
+                // For unstaked addresses, check for pending stake transactions
+                let mempool_state_guard = self.mempool_state.read().await;
+                // Get pending transactions for this address
+                if let Some(pending) = mempool_state_guard
+                    .valid_commitment_tx
+                    .get(&commitment_tx.signer)
+                {
+                    // Check if there's at least one pending stake transaction
+                    if pending
+                        .iter()
+                        .any(|c| c.commitment_type == CommitmentType::Stake)
+                    {
+                        // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
+                        return CommitmentSnapshotStatus::Unknown;
+                    }
+                }
 
-            // No pending stakes found
-            warn!("Pledge Commitment is unstaked: {}", commitment_tx.id);
-            return CommitmentSnapshotStatus::Unstaked;
+                // No pending stakes found
+                warn!("Commitment is unstaked: {}", commitment_tx.id);
+                return CommitmentSnapshotStatus::Unstaked;
+            }
         }
-
-        // All other cases are valid
-        CommitmentSnapshotStatus::Accepted
     }
 }

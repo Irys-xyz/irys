@@ -5,6 +5,7 @@ use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, DataTransactionLedger, GossipBroadcastMessage, H256List, IrysBlockHeader,
+    IrysBlockHeaderV1,
 };
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
@@ -33,7 +34,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
         .send(data)
         .expect("Failed to send transaction through message bus");
 
-    // Waiting a little for service 2 to receive the tx over gossip
+    // Service 2 receives it over gossip
     tokio::time::sleep(Duration::from_millis(3000)).await;
 
     // Service 2 receives the message from Service 1
@@ -94,7 +95,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
         .first()
         .expect("to have a fixture")
         .mempool_stub
-        .handle_data_transaction_ingress(generate_test_tx().header)
+        .handle_data_transaction_ingress_gossip(generate_test_tx().header)
         .await
         .expect("To handle tx");
 
@@ -243,10 +244,10 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture2.add_peer(&fixture1);
 
     // Create a test block with transactions
-    let mut block = IrysBlockHeader {
+    let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: BlockHash::random(),
-        ..IrysBlockHeader::new_mock_header()
-    };
+        ..IrysBlockHeaderV1::new_mock_header()
+    });
     let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
@@ -259,8 +260,8 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
         .expect("to sign block header");
 
     // Set up the mock API client to return the transactions
-    fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());
-    fixture2.api_client_stub.txs.insert(tx2.id, tx2.clone());
+    fixture2.api_client_stub.txs.insert(tx1.id, tx1);
+    fixture2.api_client_stub.txs.insert(tx2.id, tx2);
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
@@ -319,7 +320,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
         .expect("to sign block header");
 
     // Set up the mock API client to return only one transaction
-    fixture2.api_client_stub.txs.insert(tx1.id, tx1.clone());
+    fixture2.api_client_stub.txs.insert(tx1.id, tx1);
     // Don't add tx2 to expected transactions, so it will be missing
 
     // Send block from service 1 to service 2
@@ -371,11 +372,11 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     let sealed_block = evm_block.clone().seal_slow();
 
     // Create a test block with transactions
-    let mut block = IrysBlockHeader {
+    let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: BlockHash::random(),
         evm_block_hash: sealed_block.hash(),
-        ..IrysBlockHeader::new_mock_header()
-    };
+        ..IrysBlockHeaderV1::new_mock_header()
+    });
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
     signer
         .sign_block_header(&mut block)

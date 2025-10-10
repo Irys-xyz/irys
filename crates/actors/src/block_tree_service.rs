@@ -416,7 +416,10 @@ impl BlockTreeServiceInner {
 
         // Create epoch snapshot for this block
         let arc_epoch_snapshot =
-            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus);
+            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus)
+                .map_err(|x| PreValidationError::InvalidEpochSnapshot {
+                    error: x.to_string(),
+                })?;
 
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
@@ -755,7 +758,7 @@ impl BlockTreeServiceInner {
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
-            self.send_epoch_events(&epoch_block);
+            self.send_epoch_events(&epoch_block)?;
         }
 
         // Now that the epoch events are sent, let the node know about the reorg
@@ -808,23 +811,23 @@ impl BlockTreeServiceInner {
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height % self.config.consensus.epoch.num_blocks_in_epoch == 0
+        block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) {
+    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Get the epoch snapshot
+        let block_hash = epoch_block.block_hash();
         let epoch_snapshot = self
             .cache
             .read()
             .expect("cache read lock poisoned")
-            .get_epoch_snapshot(&epoch_block.block_hash);
-
-        let epoch_snapshot = epoch_snapshot.unwrap_or_else(|| {
-            panic!(
-                "Epoch block {} should have a snapshot in cache",
-                epoch_block.block_hash
-            )
-        });
+            .get_epoch_snapshot(&block_hash)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "epoch block should have a snapshot in cache {:?}",
+                    block_hash
+                )
+            })?;
 
         // Check for partitions expired at this epoch boundary
         if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
@@ -853,14 +856,13 @@ impl BlockTreeServiceInner {
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
-        if let Err(e) = self.service_senders.storage_modules.send(
+        self.service_senders.storage_modules.send(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
                 update_height: epoch_block.height,
             },
-        ) {
-            error!("Failed to send partition assignments update: {}", e);
-        }
+        )?;
+        Ok(())
     }
 
     /// Fetches full transaction headers from mempool using the txids from a ledger in a block

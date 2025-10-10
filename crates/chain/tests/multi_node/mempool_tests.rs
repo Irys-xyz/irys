@@ -2238,7 +2238,7 @@ async fn stake_tx_fee_and_value_validation_test(
     // Create stake transaction and apply the modifier
     let mut stake_tx = CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
-    let stake_tx = signer.sign_commitment(stake_tx)?;
+    signer.sign_commitment(&mut stake_tx)?;
 
     // Test that the transaction is rejected with the expected error
     let res = genesis_node
@@ -2317,7 +2317,7 @@ async fn pledge_tx_fee_validation_test(
 
     // Apply the modification (fee or value)
     tx_modifier(&mut pledge_tx, config, pledge_count, required_fee);
-    let pledge_tx = signer.sign_commitment(pledge_tx)?;
+    signer.sign_commitment(&mut pledge_tx)?;
 
     // Test that the transaction is rejected with the expected error
     let res = genesis_node
@@ -2378,7 +2378,7 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Apply the fee multiplier
     commitment_tx.fee = required_fee * fee_multiplier;
-    let commitment_tx = signer.sign_commitment(commitment_tx)?;
+    signer.sign_commitment(&mut commitment_tx)?;
 
     // Should be accepted
     genesis_node

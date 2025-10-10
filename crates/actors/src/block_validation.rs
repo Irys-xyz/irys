@@ -15,8 +15,8 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
 };
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
-    ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
@@ -217,6 +217,8 @@ pub enum PreValidationError {
     DuplicateIngressProofSigner { tx_id: H256, signer: Address },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
+    #[error("Invalid Epoch snapshot {error}")]
+    InvalidEpochSnapshot { error: String },
 }
 
 /// Full pre-validation steps for a block
@@ -912,6 +914,7 @@ pub async fn shadow_transactions_are_valid(
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
@@ -1031,6 +1034,7 @@ pub async fn shadow_transactions_are_valid(
         block,
         db,
         parent_epoch_snapshot,
+        parent_commitment_snapshot,
         block_index,
     )
     .await?;
@@ -1152,6 +1156,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
@@ -1179,7 +1184,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
 
     // Lookup publish ledger for term fee rewards
-    let mut publish_ledger_with_txs =
+    let publish_ledger_with_txs =
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     // Get treasury balance from previous block
@@ -1204,6 +1209,17 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
+    // Compute commitment refund events for epoch blocks from parent's commitment snapshot
+    let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
+        if is_epoch_block {
+            crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &config.consensus,
+            )?
+        } else {
+            Vec::new()
+        };
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1213,9 +1229,10 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &config.consensus,
         &commitment_txs,
         &data_txs,
-        &mut publish_ledger_with_txs,
+        &publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
+        &commitment_refund_events,
     )
     .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 
@@ -1410,6 +1427,18 @@ pub async fn commitment_txs_are_valid(
         })?;
     }
 
+    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
+        let read = block_tree_guard.read();
+        let commitment_snapshot = read.get_commitment_snapshot(&block.previous_block_hash)?;
+        let epoch_snapshot = read
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .ok_or_eyre(format!(
+                "Parent epoch snapshot missing for block {}",
+                block.previous_block_hash
+            ))?;
+        (commitment_snapshot, epoch_snapshot)
+    };
+
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
@@ -1419,9 +1448,6 @@ pub async fn commitment_txs_are_valid(
         );
 
         // Get expected commitments from parent's snapshot
-        let parent_commitment_snapshot = block_tree_guard
-            .read()
-            .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
@@ -1461,13 +1487,46 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
+    // Regular block validation: ensure commitments align with snapshot state
+    let mut simulated_snapshot = CommitmentSnapshot {
+        commitments: parent_commitment_snapshot.commitments.clone(),
+    };
+
+    for tx in &actual_commitments {
+        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
+            let partition_hash = H256::from(partition_hash);
+            let owner = parent_epoch_snapshot
+                .partition_assignments
+                .get_assignment(partition_hash)
+                .map(|assignment| assignment.miner_address);
+            ensure!(
+                owner == Some(tx.signer),
+                "Unpledge commitment {} targets partition {} not owned by signer {} (owner {:?})",
+                tx.id,
+                partition_hash,
+                tx.signer,
+                owner
+            );
+        }
+
+        let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
+        ensure!(
+            status == CommitmentSnapshotStatus::Accepted,
+            "Commitment {} rejected by snapshot validation with status {:?}",
+            tx.id,
+            status
+        );
+    }
+
     // Regular block validation: check priority ordering for stake and pledge commitments
     let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
         .iter()
         .filter(|tx| {
             matches!(
                 tx.commitment_type,
-                CommitmentType::Stake | CommitmentType::Pledge { .. }
+                CommitmentType::Stake
+                    | CommitmentType::Pledge { .. }
+                    | CommitmentType::Unpledge { .. }
             )
         })
         .collect();
@@ -2497,8 +2556,8 @@ mod tests {
     use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
-        Signature, H256, U256,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
+        NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2810,7 +2869,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2842,8 +2901,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);
@@ -3070,7 +3129,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -3102,8 +3161,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);

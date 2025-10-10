@@ -2,11 +2,13 @@ use crate::utils::IrysNodeTest;
 use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
-use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig, H256};
+use irys_types::{
+    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, NodeConfig, H256,
+};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -42,11 +44,10 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let mut consensus = node.cfg.consensus.clone();
     let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
@@ -266,11 +267,11 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     let mut consensus = genesis_node.cfg.consensus.clone();
     let block_migration_depth: u64 = consensus.get_mut().block_migration_depth.into();
 
-    wait_for_packing(
-        genesis_node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    genesis_node
+        .node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // Wait a little for a peer to connect
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -311,9 +312,9 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?;
     info!("Commitment whitelist test: stake tx from a whitelisted account accepted");
 
-    let stake_tx2 =
+    let mut stake_tx2 =
         CommitmentTransaction::new_stake(&config.consensus_config(), block_1.irys.block_hash);
-    let stake_tx2 = account2.sign_commitment(stake_tx2)?;
+    account2.sign_commitment(&mut stake_tx2)?;
     let response2 = api_client
         .post_commitment_transaction(peer_socket_address, stake_tx2.clone())
         .await;
@@ -392,11 +393,11 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?
         .expect("block to be accessible");
 
-    let new_stake_tx2 = CommitmentTransaction::new_stake(
+    let mut new_stake_tx2 = CommitmentTransaction::new_stake(
         &config.consensus_config(),
         another_anchor_block.irys.block_hash,
     );
-    let new_stake_tx2 = account2.sign_commitment(new_stake_tx2)?;
+    account2.sign_commitment(&mut new_stake_tx2)?;
     let new_response2 = api_client
         .post_commitment_transaction(peer_socket_address, new_stake_tx2.clone())
         .await;
@@ -408,11 +409,11 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     peer.wait_for_mempool_commitment_txs(vec![new_stake_tx2.id], max_seconds)
         .await?;
 
-    let stake_tx3 = CommitmentTransaction::new_stake(
+    let mut stake_tx3 = CommitmentTransaction::new_stake(
         &config.consensus_config(),
         another_anchor_block.irys.block_hash,
     );
-    let stake_tx3 = account3.sign_commitment(stake_tx3)?;
+    account3.sign_commitment(&mut stake_tx3)?;
     let response3 = api_client
         .post_commitment_transaction(peer_socket_address, stake_tx3.clone())
         .await;
@@ -448,14 +449,15 @@ async fn create_stake_tx(
         .expect("Failed to get stake price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction {
+    let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransaction::new(consensus)
-    };
+        ..CommitmentTransactionV1::new(consensus)
+    });
 
     info!("Created stake_tx with value: {:?}", stake_tx.value);
-    signer.sign_commitment(stake_tx).unwrap()
+    signer.sign_commitment(&mut stake_tx).unwrap();
+    stake_tx
 }

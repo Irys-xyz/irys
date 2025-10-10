@@ -398,6 +398,15 @@ impl DataSyncServiceInner {
                 .collect()
         };
 
+        // Drop orchestrators for modules that no longer hold a data ledger assignment
+        self.chunk_orchestrators.retain(|sm_id, _| {
+            storage_modules
+                .get(*sm_id)
+                .and_then(|sm| sm.partition_assignment())
+                .and_then(|pa| pa.ledger_id)
+                .is_some()
+        });
+
         for sm in storage_modules {
             let sm_id = sm.id;
 

@@ -66,7 +66,7 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolFacade for MempoolStub {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
@@ -96,17 +96,24 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
+        &self,
+        tx_header: DataTransactionHeader,
+    ) -> std::result::Result<(), TxIngressError> {
+        self.handle_data_transaction_ingress_api(tx_header).await
+    }
+
+    async fn handle_commitment_transaction_ingress_api(
         &self,
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
-    async fn handle_ingest_ingress_proof(
+    async fn handle_commitment_transaction_ingress_gossip(
         &self,
-        _ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError> {
+        _tx_header: CommitmentTransaction,
+    ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
@@ -138,6 +145,13 @@ impl MempoolFacade for MempoolStub {
             .iter()
             .any(|message| message.id == tx_id);
         Ok(exists)
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        _ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        Ok(())
     }
 
     async fn get_block_header(
@@ -406,7 +420,8 @@ impl GossipServiceTestFixture {
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let (service_senders, service_receivers) = ServiceSenders::new();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
         let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
         let gossip_broadcast_rx = service_receivers.gossip_broadcast;
         let block_tree_rx = service_receivers.block_tree;
@@ -844,7 +859,8 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
-    let (service_senders, _service_receivers) = ServiceSenders::new();
+    let (service_senders, _service_receivers) =
+        irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
     let mempool_stub = MempoolStub::new(gossip_tx);

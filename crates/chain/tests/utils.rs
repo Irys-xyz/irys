@@ -19,7 +19,6 @@ use irys_actors::{
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
-    packing::wait_for_packing,
 };
 use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
@@ -553,12 +552,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
-        wait_for_packing(
-            self.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(seconds_to_wait as u64)),
-        )
-        .await
-        .expect("for packing to complete in the wait period");
+        self.node_ctx
+            .packing_waiter
+            .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
+            .await
+            .expect("for packing to complete in the wait period");
     }
 
     pub fn start_mining(&self) {
@@ -1139,13 +1137,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .read()
             .canonical_commitment_snapshot();
 
-        let is_staked = self
+        let epoch_snapshot = self
             .node_ctx
             .block_tree_guard
             .read()
-            .canonical_epoch_snapshot()
-            .is_staked(commitment_tx.signer);
-        commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
+            .canonical_epoch_snapshot();
+        commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot)
     }
 
     /// wait for specific block to be available via block tree guard
@@ -1315,6 +1312,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
+    #[tracing::instrument(skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -1342,6 +1340,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         if retries == max_retries {
+            tracing::error!("failed to locate tx");
             Err(eyre::eyre!(
                 "Failed to locate tx in mempool after {} retries",
                 retries
@@ -1512,7 +1511,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTx(
+                .send(MempoolServiceMessage::IngestDataTxFromApi(
                     tx.header.clone(),
                     oneshot_tx,
                 ));
@@ -1837,7 +1836,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTx(tx_header.clone(), tx))
+                .send(MempoolServiceMessage::IngestDataTxFromGossip(tx_header.clone(), tx))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
@@ -1938,10 +1937,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTx(commitment_tx, tx))
+                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                    commitment_tx,
+                    tx,
+                ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
-                tracing::error!("Error sending message IngestCommitmentTx to mempool: {e:?}");
+                tracing::error!(
+                    "Error sending message IngestCommitmentTxFromGossip to mempool: {e:?}"
+                );
             }
         }
 
@@ -2236,11 +2240,13 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestDataTx(data_tx, oneshot_tx));
+        let result =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTxFromApi(
+                    data_tx, oneshot_tx,
+                ));
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2257,14 +2263,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result =
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTx(
-                    commitment_tx,
-                    oneshot_tx,
-                ));
+        let result = self.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx),
+        );
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2286,7 +2287,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2294,7 +2295,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2310,15 +2311,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         signer: &IrysSigner,
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
+        let anchor = self
+            .get_anchor()
+            .await
+            .expect("failed to get anchor for pledge commitment");
 
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
-            self.get_anchor().await.expect("anchor should be provided"),
+            anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
         .await;
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2350,9 +2355,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2370,8 +2375,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = self.get_anchor().await?;
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2940,8 +2945,9 @@ pub fn new_stake_tx(
     signer: &IrysSigner,
     config: &ConsensusConfig,
 ) -> CommitmentTransaction {
-    let stake_tx = CommitmentTransaction::new_stake(config, *anchor);
-    signer.sign_commitment(stake_tx).unwrap()
+    let mut stake_tx = CommitmentTransaction::new_stake(config, *anchor);
+    signer.sign_commitment(&mut stake_tx).unwrap();
+    stake_tx
 }
 
 pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
@@ -2950,9 +2956,10 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     config: &ConsensusConfig,
     pledge_provider: &P,
 ) -> CommitmentTransaction {
-    let pledge_tx =
+    let mut pledge_tx =
         CommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
-    signer.sign_commitment(pledge_tx).unwrap()
+    signer.sign_commitment(&mut pledge_tx).unwrap();
+    pledge_tx
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

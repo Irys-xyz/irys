@@ -7,7 +7,7 @@ use crate::utils::IrysNodeTest;
 use actix_web::test::{call_service, read_body, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_domain::ScoreDecreaseReason;
 use irys_types::{
     build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
@@ -36,11 +36,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config.clone());
     let node = node.start().await;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     node.node_ctx.start_mining().unwrap();
 

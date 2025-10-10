@@ -5268,6 +5268,7 @@ dependencies = [
  "serde",
  "serde_json",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "toml",
  "tracing",
@@ -5282,6 +5283,14 @@ dependencies = [
  "openssl",
  "rstest",
  "tracing",
+]
+
+[[package]]
+name = "irys-macros-integer-tagged"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5559,6 +5568,7 @@ dependencies = [
  "fixed-hash",
  "futures",
  "hex",
+ "irys-macros-integer-tagged",
  "irys-primitives",
  "irys-reth",
  "k256",

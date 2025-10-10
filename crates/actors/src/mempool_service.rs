@@ -29,6 +29,7 @@ use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
+use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
@@ -62,6 +63,108 @@ use std::{
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+
+/// Public helper to validate that a commitment transaction is sufficiently funded.
+/// Checks the current balance of the signer via the provided reth adapter and ensures it
+/// covers the total cost (value + fee) of the transaction.
+#[inline]
+pub fn validate_funding(
+    reth_adapter: &IrysRethNodeAdapter,
+    commitment_tx: &irys_types::CommitmentTransaction,
+    parent_evm_block_id: Option<BlockId>,
+) -> Result<(), TxIngressError> {
+    // Fetch the current balance of the signer
+    let balance: irys_types::U256 = reth_adapter
+        .rpc
+        .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
+        .map_err(|e| {
+            tracing::error!(
+                tx_id = %commitment_tx.id,
+                signer = %commitment_tx.signer,
+                error = %e,
+                "Failed to fetch balance for commitment tx"
+            );
+            TxIngressError::BalanceFetchError {
+                address: commitment_tx.signer.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+    let required = commitment_tx.total_cost();
+
+    if balance < required {
+        tracing::warn!(
+            tx_id = %commitment_tx.id,
+            balance = %balance,
+            required = %required,
+            account = %commitment_tx.signer,
+            "Insufficient balance for commitment tx"
+        );
+        return Err(TxIngressError::Unfunded);
+    }
+
+    tracing::debug!(
+        tx_id = %commitment_tx.id,
+        balance = %balance,
+        required = %required,
+        "Funding validated for commitment tx"
+    );
+
+    Ok(())
+}
+
+/// Public helper to validate a commitment transaction's basic invariants used during
+/// block discovery and mempool selection:
+/// - fee must meet minimum requirements
+/// - account must have enough funds at the specified EVM block state (Pass None for new incoming
+///   transactions - this will validate against the current canonical tip)
+/// - value must match the commitment type rules
+#[inline]
+pub fn validate_commitment_transaction(
+    reth_adapter: &IrysRethNodeAdapter,
+    consensus: &irys_types::ConsensusConfig,
+    commitment_tx: &irys_types::CommitmentTransaction,
+    parent_evm_block_id: Option<BlockId>,
+) -> Result<(), TxIngressError> {
+    debug!(
+        tx_id = ?commitment_tx.id,
+        signer = ?commitment_tx.signer,
+        "Validating commitment transaction"
+    );
+    // Fee
+    commitment_tx.validate_fee(consensus).map_err(|e| {
+        warn!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            error = ?e,
+            "Commitment tx fee validation failed"
+        );
+        TxIngressError::from(e)
+    })?;
+
+    // Funding
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
+        warn!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            error = ?e,
+            "Commitment tx funding validation failed"
+        );
+        e
+    })?;
+
+    // Value
+    commitment_tx.validate_value(consensus).map_err(|e| {
+        warn!(
+            tx_id = ?commitment_tx.id,
+            signer = ?commitment_tx.signer,
+            error = ?e,
+            "Commitment tx value validation failed"
+        );
+        TxIngressError::from(e)
+    })?;
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct Inner {
@@ -99,7 +202,7 @@ pub enum MempoolServiceMessage {
     },
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// Ingress CommitmentTransaction into the mempool
+    /// Ingress CommitmentTransaction into the mempool (from API)
     ///
     /// This function performs a series of checks and validations:
     /// - Skips the transaction if it is already known to be invalid or previously processed
@@ -108,14 +211,24 @@ pub enum MempoolServiceMessage {
     /// - Processes any pending pledge transactions that depended on this commitment
     /// - Gossips the transaction to peers if accepted
     /// - Caches the transaction for unstaked signers to be reprocessed later
-    IngestCommitmentTx(
+    IngestCommitmentTxFromApi(
+        CommitmentTransaction,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// Ingress CommitmentTransaction into the mempool (from Gossip)
+    IngestCommitmentTxFromGossip(
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Confirm data tx exists in mempool or database
     DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// validate and process an incoming DataTransactionHeader
-    IngestDataTx(
+    /// validate and process an incoming DataTransactionHeader (from API)
+    IngestDataTxFromApi(
+        DataTransactionHeader,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// validate and process an incoming DataTransactionHeader (from Gossip)
+    IngestDataTxFromGossip(
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
@@ -170,9 +283,17 @@ impl Inner {
                         .handle_ingress_blocks_message(prevalidated_blocks)
                         .await;
                 }
-                MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
+                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                     let response_message = self
-                        .handle_ingress_commitment_tx_message(commitment_tx)
+                        .handle_ingress_commitment_tx_message_api(commitment_tx)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+                    let response_message = self
+                        .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                         .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -232,8 +353,14 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::IngestDataTx(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message(tx).await;
+                MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -249,9 +376,12 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::GetState(response) => {
-                    let _ = response
+                    if let Err(e) = response
                         .send(Arc::clone(&self.mempool_state))
-                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
+                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
+                    {
+                        tracing::error!("response.send() error: {:?}", e);
+                    }
                 }
                 MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
                     let response_value = self.handle_ingest_ingress_proof(ingress_proof);
@@ -482,7 +612,9 @@ impl Inner {
                     .filter(|tx| {
                         matches!(
                             tx.commitment_type,
-                            CommitmentType::Stake | CommitmentType::Pledge { .. }
+                            CommitmentType::Stake
+                                | CommitmentType::Pledge { .. }
+                                | CommitmentType::Unpledge { .. }
                         )
                     })
                     .cloned()
@@ -506,8 +638,15 @@ impl Inner {
                 continue;
             }
 
-            // Check funding before simulation
-            if !check_funding(tx) {
+            // Full validation (fee, funding at parent block, value) before simulation
+            if validate_commitment_transaction(
+                &self.reth_node_adapter,
+                &self.config.consensus,
+                tx,
+                parent_evm_block_id,
+            )
+            .is_err()
+            {
                 continue;
             }
 
@@ -668,6 +807,34 @@ impl Inner {
                             actual_perm_fee = ?perm_fee,
                             expected_perm_fee = ?expected_perm_fee.amount,
                             "Skipping Publish tx: insufficient perm_fee"
+                        );
+                        continue;
+                    }
+
+                    // Mirror API-only structural checks to filter gossip txs that would fail API validation
+                    if TermFeeCharges::new(tx.term_fee, &self.config.node_config.consensus_config())
+                        .is_err()
+                    {
+                        trace!(
+                            tx_id = ?tx.id,
+                            term_fee = ?tx.term_fee,
+                            "Skipping Publish tx: invalid term fee structure"
+                        );
+                        continue;
+                    }
+
+                    if PublishFeeCharges::new(
+                        perm_fee,
+                        tx.term_fee,
+                        &self.config.node_config.consensus_config(),
+                    )
+                    .is_err()
+                    {
+                        trace!(
+                            tx_id = ?tx.id,
+                            perm_fee = ?perm_fee,
+                            term_fee = ?tx.term_fee,
+                            "Skipping Publish tx: invalid perm fee structure"
                         );
                         continue;
                     }
@@ -1052,10 +1219,10 @@ impl Inner {
 
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
-    // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
+    // if the anchor is valid, returns anchor block height
     #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
-        &mut self,
+        &self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
         let tx_id = tx.id();
@@ -1165,21 +1332,33 @@ impl Inner {
                 .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            let _ = self
-                .handle_ingress_commitment_tx_message(commitment_tx)
+            if let Err(e) = self
+                .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Commitment tx ingress error during mempool restore from disk")
-                });
+                })
+            {
+                tracing::warn!(
+                    "Commitment tx ingress error during mempool restore from disk: {:?}",
+                    e
+                );
+            }
         }
 
         for (_txid, storage_tx) in recovered.storage_txs {
-            let _ = self
-                .handle_data_tx_ingress_message(storage_tx)
+            if let Err(e) = self
+                .handle_data_tx_ingress_message_gossip(storage_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")
-                });
+                })
+            {
+                tracing::warn!(
+                    "Storage tx ingress error during mempool restore from disk: {:?}",
+                    e
+                );
+            }
         }
 
         self.wipe_blacklists().await;
