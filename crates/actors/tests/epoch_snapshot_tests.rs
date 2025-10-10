@@ -460,10 +460,9 @@ async fn partition_expiration_and_repacking_test() {
 
     // Wire a Tokio packing handle that captures a single request via oneshot
     let (tx_packing, mut rx_packing) =
-        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(storage_modules.len());
+        tokio::sync::mpsc::channel::<irys_actors::packing_service::PackingRequest>(1);
     let (pack_req_tx, pack_req_rx) =
-        tokio::sync::oneshot::channel::<irys_actors::packing::PackingRequest>();
-    //spawn a task that will await rx_packing and send the very first packing request before exiting
+        tokio::sync::oneshot::channel::<irys_actors::packing_service::PackingRequest>();
     tokio::spawn(async move {
         if let Some(packing_req) = rx_packing.recv().await {
             pack_req_tx.send(packing_req).expect("pack_req_rx dropped");
@@ -732,12 +731,12 @@ async fn partition_expiration_and_repacking_test() {
     }
 
     assert_eq!(
-        pack_req.storage_module.partition_hash(),
+        pack_req.storage_module().partition_hash(),
         Some(submit_partition_hash),
         "Partition hashes should be equal"
     );
     assert_eq!(
-        pack_req.chunk_range,
+        *pack_req.chunk_range(),
         PartitionChunkRange(partition_chunk_offset_ie!(0, chunk_count as u32)),
         "The whole partition should be repacked"
     );
