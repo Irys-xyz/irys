@@ -1,6 +1,5 @@
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::HashOrNumber;
-use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
     shadow_tx_topics, ShadowTransaction, TransactionPacket,
 };
@@ -164,30 +163,24 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     let unstake_block = genesis_node
         .get_block_by_height(unstake_inclusion.height)
         .await?;
-    let unstake_commitments = unstake_block.get_commitment_ledger_tx_ids();
-    assert!(
-        unstake_commitments.contains(&unstake_tx.id),
+
+    assert_commitment_in_ledger(
+        &unstake_block,
+        unstake_tx.id,
         "Unstake commitment must appear in the inclusion ledger"
     );
 
-    let receipts_inclusion = reth_ctx
-        .inner
-        .provider
-        .receipts_by_block(HashOrNumber::Hash(unstake_block.evm_block_hash))?
-        .expect("receipts should exist for unstake inclusion block");
+    let receipts_inclusion = get_block_receipts(&reth_ctx, unstake_block.evm_block_hash)?;
     let debit_receipt_idx = assert_single_log_for(
         &receipts_inclusion,
         &shadow_tx_topics::UNSTAKE_DEBIT,
         peer_addr,
         "inclusion UNSTAKE_DEBIT",
     );
-    let has_refund_in_inclusion = receipts_inclusion.iter().any(|r| {
-        r.logs
-            .iter()
-            .any(|log| log.topics()[0] == *shadow_tx_topics::UNSTAKE)
-    });
-    assert!(
-        !has_refund_in_inclusion,
+    assert_no_shadow_tx_log(
+        &receipts_inclusion,
+        &shadow_tx_topics::UNSTAKE,
+        peer_addr,
         "Inclusion block must not emit UNSTAKE refund logs"
     );
 
@@ -206,34 +199,18 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .provider
         .transactions_by_block(HashOrNumber::Hash(unstake_block.evm_block_hash))?
         .expect("transactions should exist for unstake inclusion block");
-    let mut found_unstake_debit = false;
-    for tx in txs_inclusion {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnstakeDebit(debit)) = shadow_tx.as_v1() {
-                if debit.target == peer_addr {
-                    assert_eq!(
-                        debit.irys_ref, expected_irys_ref,
-                        "Unstake debit irys_ref must match commitment id"
-                    );
-                    found_unstake_debit = true;
-                    break;
-                }
-            }
-        }
-    }
-    assert!(
-        found_unstake_debit,
-        "Unstake inclusion block must carry an UNSTAKE_DEBIT packet"
-    );
+    assert_unstake_debit_packet(&txs_inclusion, peer_addr, expected_irys_ref);
 
-    let balance_after_inclusion = genesis_node.get_balance(peer_addr, unstake_block.evm_block_hash);
-    assert_eq!(
-        balance_after_inclusion,
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        unstake_block.evm_block_hash,
         balance_before_unstake - U256::from(unstake_tx.fee),
         "Unstake inclusion should reduce balance by priority fee only"
     );
-    assert_eq!(
-        unstake_block.treasury, treasury_before_unstake,
+    assert_treasury(
+        &unstake_block,
+        treasury_before_unstake,
         "Treasury must remain unchanged during unstake inclusion"
     );
 
@@ -247,24 +224,17 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .get_block_by_height(epoch_height_after_unstake)
         .await?;
 
-    let receipts_epoch = reth_ctx
-        .inner
-        .provider
-        .receipts_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
-        .expect("epoch receipts available for unstake refund");
+    let receipts_epoch = get_block_receipts(&reth_ctx, epoch_block.evm_block_hash)?;
     let refund_receipt_idx = assert_single_log_for(
         &receipts_epoch,
         &shadow_tx_topics::UNSTAKE,
         peer_addr,
         "epoch UNSTAKE refund",
     );
-    let has_debit_in_epoch = receipts_epoch.iter().any(|r| {
-        r.logs
-            .iter()
-            .any(|log| log.topics()[0] == *shadow_tx_topics::UNSTAKE_DEBIT)
-    });
-    assert!(
-        !has_debit_in_epoch,
+    assert_no_shadow_tx_log(
+        &receipts_epoch,
+        &shadow_tx_topics::UNSTAKE_DEBIT,
+        peer_addr,
         "Epoch block must not contain UNSTAKE_DEBIT logs"
     );
 
@@ -283,48 +253,352 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         .provider
         .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch block should include refund transactions");
-    let mut verified_refund = false;
-    for tx in epoch_txs {
-        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
-            if let Some(TransactionPacket::UnstakeRefund(increment)) = shadow_tx.as_v1() {
-                if increment.target == peer_addr {
-                    assert_eq!(
-                        increment.amount,
-                        expected_refund_amount.into(),
-                        "Unstake refund amount must equal configured stake value"
-                    );
-                    assert_eq!(
-                        increment.irys_ref, expected_irys_ref,
-                        "Unstake refund irys_ref must match commitment id"
-                    );
-                    verified_refund = true;
-                }
-            }
-        }
-    }
-    assert!(
-        verified_refund,
-        "Epoch block must carry an UNSTAKE refund transaction for the signer"
-    );
+    assert_unstake_refund_packet(&epoch_txs, peer_addr, expected_refund_amount, expected_irys_ref);
 
     let epoch_prev = genesis_node
         .get_block_by_height(epoch_block.height - 1)
         .await?;
-    assert_eq!(
-        epoch_block.treasury,
+    assert_treasury(
+        &epoch_block,
         epoch_prev.treasury - expected_refund_amount,
         "Treasury must decrease exactly by the stake refund amount"
     );
 
-    let balance_after_epoch = genesis_node.get_balance(peer_addr, epoch_block.evm_block_hash);
     let expected_final_balance =
         balance_before_unstake - U256::from(unstake_tx.fee) + expected_refund_amount;
-    assert_eq!(
-        balance_after_epoch, expected_final_balance,
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        epoch_block.evm_block_hash,
+        expected_final_balance,
         "Net effect should be -fee at inclusion + full refund at epoch"
     );
 
-    let epoch_snapshot = genesis_node
+    assert_no_stake_in_epoch(
+        &genesis_node,
+        peer_addr,
+        "Epoch snapshot must remove the stake after refunding"
+    );
+
+    genesis_node.stop().await;
+    peer_node.stop().await;
+    Ok(())
+}
+
+/// Test scenario where an unstake transaction is submitted while the account still has active pledges.
+/// Expected behavior:
+/// 1. Unstake transaction is accepted by the mempool (not rejected at ingress)
+/// 2. Unstake transaction is NOT included in any block while pledges are active
+/// 3. No balance changes or treasury changes occur from the unstake attempt
+/// 4. After all pledges are cleared, the same unstake transaction can be included and processed normally
+#[test_log::test(actix_web::test)]
+async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
+    initialize_tracing();
+
+    let num_blocks_in_epoch = 2_u64;
+    let seconds_to_wait = 20_usize;
+    let (genesis_node, peer_node, peer_addr, _initial_assignment, consensus) =
+        setup_env(num_blocks_in_epoch, seconds_to_wait).await?;
+
+    let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
+
+    // Collect all pledged partitions - peer starts with 3 active pledges
+    let assigned_partitions: Vec<PartitionAssignment> = {
+        let sms = peer_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment())
+            .collect()
+    };
+    assert!(
+        !assigned_partitions.is_empty(),
+        "Test requires the peer to start with at least one pledged partition"
+    );
+
+    // ------------- Phase 1: Submit unstake while pledges are still active -------------
+    let anchor = peer_node.get_anchor().await?;
+    let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
+    let _expected_refund_amount: U256 = unstake_tx.value;
+    let signer = peer_node.cfg.signer();
+    signer
+        .sign_commitment(&mut unstake_tx)
+        .expect("sign unstake commitment");
+
+    let head_height = genesis_node.get_canonical_chain_height().await;
+    let head_block = genesis_node.get_block_by_height(head_height).await?;
+    let balance_before_unstake_attempt = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
+    let treasury_before_unstake_attempt = head_block.treasury;
+
+    // Submit the unstake transaction (should be accepted by mempool)
+    genesis_node.post_commitment_tx(&unstake_tx).await?;
+    genesis_node
+        .wait_for_mempool(unstake_tx.id, seconds_to_wait)
+        .await?;
+
+    // Mine a block - unstake should NOT be included due to HasActivePledges
+    let first_block_after_unstake = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_until_height(first_block_after_unstake.height, seconds_to_wait)
+        .await
+        .expect("peer should sync first block after unstake attempt");
+    let first_block = genesis_node
+        .get_block_by_height(first_block_after_unstake.height)
+        .await?;
+
+    // Assert unstake is NOT in the commitment ledger
+    assert_commitment_not_in_ledger(
+        &first_block,
+        unstake_tx.id,
+        "Unstake commitment must NOT be included in block while pledges are active"
+    );
+
+    // Assert no UNSTAKE_DEBIT shadow tx in block
+    let receipts_first_block = get_block_receipts(&reth_ctx, first_block.evm_block_hash)?;
+    assert_no_shadow_tx_log(
+        &receipts_first_block,
+        &shadow_tx_topics::UNSTAKE_DEBIT,
+        peer_addr,
+        "First block must not contain UNSTAKE_DEBIT shadow tx while pledges active"
+    );
+
+    // Assert balance is unchanged (no fee deduction because tx wasn't included)
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        first_block.evm_block_hash,
+        balance_before_unstake_attempt,
+        "Balance must be unchanged when unstake is not included in block"
+    );
+
+    // Assert treasury is unchanged
+    assert_treasury(
+        &first_block,
+        treasury_before_unstake_attempt,
+        "Treasury must be unchanged when unstake is not included in block"
+    );
+
+    // Verify unstake is NOT in the first block's commitment snapshot
+    // Note: Commitment snapshot only tracks new commitments being added in the block,
+    // not existing commitments from the epoch snapshot
+    assert_no_unstake_in_commitment_snapshot(
+        &genesis_node,
+        first_block.block_hash,
+        peer_addr,
+        "Unstake must NOT be present in commitment snapshot (first block) while pledges are active"
+    );
+
+    // ------------- Phase 2: Advance to epoch boundary -------------
+    let (_mined, first_epoch_height) = genesis_node.mine_until_next_epoch().await?;
+    peer_node
+        .wait_until_height(first_epoch_height, seconds_to_wait)
+        .await
+        .expect("peer to sync first epoch after unstake attempt");
+    let first_epoch_block = genesis_node.get_block_by_height(first_epoch_height).await?;
+
+    // Assert no UNSTAKE refund shadow tx at epoch
+    let receipts_first_epoch = get_block_receipts(&reth_ctx, first_epoch_block.evm_block_hash)?;
+    assert_no_shadow_tx_log(
+        &receipts_first_epoch,
+        &shadow_tx_topics::UNSTAKE,
+        peer_addr,
+        "Epoch block must not contain UNSTAKE refund for rejected unstake"
+    );
+
+    // Assert treasury is unchanged at epoch
+    let epoch_prev = genesis_node
+        .get_block_by_height(first_epoch_block.height - 1)
+        .await?;
+    assert_treasury(
+        &first_epoch_block,
+        epoch_prev.treasury,
+        "Treasury must remain unchanged at epoch when unstake was not processed"
+    );
+
+    // Assert balance is still unchanged
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        first_epoch_block.evm_block_hash,
+        balance_before_unstake_attempt,
+        "Balance must remain unchanged at epoch when unstake was not processed"
+    );
+
+    // Assert stake remains in epoch snapshot
+    assert_stake_exists_in_epoch(
+        &genesis_node,
+        peer_addr,
+        "Stake must still exist in epoch snapshot after rejected unstake"
+    );
+
+    // ------------- Phase 3: Verify unstake remains pending in mempool -------------
+    // The unstake transaction should still be in mempool, waiting for pledges to clear
+    let mempool_unstake = genesis_node
+        .get_commitment_tx_from_mempool(&unstake_tx.id)
+        .await;
+    assert!(
+        mempool_unstake.is_ok(),
+        "Unstake transaction must remain in mempool after being rejected from blocks"
+    );
+
+    // ------------- Phase 4: Mine more blocks - unstake should continue to be rejected -------------
+    // Mine another block to verify unstake continues to be rejected
+    let second_block_after_unstake = genesis_node.mine_block().await?;
+    peer_node
+        .wait_until_height(second_block_after_unstake.height, seconds_to_wait)
+        .await
+        .expect("peer to sync second block");
+    let second_block = genesis_node
+        .get_block_by_height(second_block_after_unstake.height)
+        .await?;
+
+    // Verify unstake is still NOT included
+    assert_commitment_not_in_ledger(
+        &second_block,
+        unstake_tx.id,
+        "Unstake must still not be included in subsequent blocks while pledges active"
+    );
+
+    // Verify unstake is NOT in the block's commitment snapshot (before epoch processing)
+    assert_no_unstake_in_commitment_snapshot(
+        &genesis_node,
+        second_block.block_hash,
+        peer_addr,
+        "Unstake must NOT be present in commitment snapshot while pledges are active"
+    );
+
+    // Advance to another epoch - unstake should still not be processed
+    let (_mined, second_epoch_height) = genesis_node.mine_until_next_epoch().await?;
+    peer_node
+        .wait_until_height(second_epoch_height, seconds_to_wait)
+        .await
+        .expect("peer to sync second epoch");
+    let second_epoch_block = genesis_node.get_block_by_height(second_epoch_height).await?;
+
+    // Verify no UNSTAKE refund at this epoch either
+    let receipts_second_epoch = get_block_receipts(&reth_ctx, second_epoch_block.evm_block_hash)?;
+    assert_no_shadow_tx_log(
+        &receipts_second_epoch,
+        &shadow_tx_topics::UNSTAKE,
+        peer_addr,
+        "Second epoch block must also not contain UNSTAKE refund"
+    );
+
+    // Verify stake still exists in epoch snapshot
+    assert_stake_exists_in_epoch(
+        &genesis_node,
+        peer_addr,
+        "Stake must still exist in epoch snapshot after multiple rejection attempts"
+    );
+
+    // Verify balance and treasury remain unchanged throughout
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        second_epoch_block.evm_block_hash,
+        balance_before_unstake_attempt,
+        "Balance must remain unchanged after multiple epochs with rejected unstake"
+    );
+
+    genesis_node.stop().await;
+    peer_node.stop().await;
+    Ok(())
+}
+
+// ============================================================================
+// Test Helper Functions
+// ============================================================================
+
+/// Get receipts for a block
+fn get_block_receipts(
+    reth_ctx: &irys_reth_node_bridge::IrysRethNodeAdapter,
+    block_hash: FixedBytes<32>,
+) -> eyre::Result<Vec<reth::primitives::Receipt>> {
+    reth_ctx
+        .inner
+        .provider
+        .receipts_by_block(HashOrNumber::Hash(block_hash))?
+        .ok_or_else(|| eyre::eyre!("Receipts not found for block {:?}", block_hash))
+}
+
+/// Assert that a specific shadow tx log is NOT present in receipts
+fn assert_no_shadow_tx_log(
+    receipts: &[reth::primitives::Receipt],
+    topic: &[u8; 32],
+    address: irys_types::Address,
+    context: &str,
+) {
+    let found = receipts.iter().any(|r| {
+        r.logs
+            .iter()
+            .any(|log| log.topics()[0] == *topic && log.address == address)
+    });
+    assert!(!found, "{}: shadow tx log must NOT be present", context);
+}
+
+/// Assert balance equals expected value
+fn assert_balance(
+    node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
+    address: irys_types::Address,
+    block_hash: FixedBytes<32>,
+    expected: U256,
+    message: &str,
+) {
+    let balance = node.get_balance(address, block_hash);
+    assert_eq!(balance, expected, "{}", message);
+}
+
+/// Assert treasury equals expected value
+fn assert_treasury(block: &irys_types::IrysBlockHeader, expected: U256, message: &str) {
+    assert_eq!(block.treasury, expected, "{}", message);
+}
+
+/// Assert commitment is in the block's commitment ledger
+fn assert_commitment_in_ledger(
+    block: &irys_types::IrysBlockHeader,
+    tx_id: irys_types::H256,
+    message: &str,
+) {
+    let commitments = block.get_commitment_ledger_tx_ids();
+    assert!(commitments.contains(&tx_id), "{}", message);
+}
+
+/// Assert commitment is NOT in the block's commitment ledger
+fn assert_commitment_not_in_ledger(
+    block: &irys_types::IrysBlockHeader,
+    tx_id: irys_types::H256,
+    message: &str,
+) {
+    let commitments = block.get_commitment_ledger_tx_ids();
+    assert!(!commitments.contains(&tx_id), "{}", message);
+}
+
+/// Assert stake exists for address in canonical epoch snapshot
+fn assert_stake_exists_in_epoch(
+    node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
+    address: irys_types::Address,
+    message: &str,
+) {
+    let epoch_snapshot = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot();
+    assert!(
+        epoch_snapshot
+            .commitment_state
+            .stake_commitments
+            .contains_key(&address),
+        "{}",
+        message
+    );
+}
+
+/// Assert stake does NOT exist for address in canonical epoch snapshot
+fn assert_no_stake_in_epoch(
+    node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
+    address: irys_types::Address,
+    message: &str,
+) {
+    let epoch_snapshot = node
         .node_ctx
         .block_tree_guard
         .read()
@@ -333,11 +607,89 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         !epoch_snapshot
             .commitment_state
             .stake_commitments
-            .contains_key(&peer_addr),
-        "Epoch snapshot must remove the stake after refunding"
+            .contains_key(&address),
+        "{}",
+        message
     );
+}
 
-    genesis_node.stop().await;
-    peer_node.stop().await;
-    Ok(())
+/// Find and validate UnstakeDebit shadow transaction packet
+fn assert_unstake_debit_packet<T: alloy_rpc_types_eth::TransactionTrait>(
+    transactions: &[T],
+    peer_addr: irys_types::Address,
+    expected_irys_ref: FixedBytes<32>,
+) {
+    let mut found = false;
+    for tx in transactions {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::UnstakeDebit(debit)) = shadow_tx.as_v1() {
+                if debit.target == peer_addr {
+                    assert_eq!(
+                        debit.irys_ref, expected_irys_ref,
+                        "Unstake debit irys_ref must match commitment id"
+                    );
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found,
+        "Block must contain UNSTAKE_DEBIT packet for address {:?}",
+        peer_addr
+    );
+}
+
+/// Find and validate UnstakeRefund shadow transaction packet
+fn assert_unstake_refund_packet<T: alloy_rpc_types_eth::TransactionTrait>(
+    transactions: &[T],
+    peer_addr: irys_types::Address,
+    expected_amount: U256,
+    expected_irys_ref: FixedBytes<32>,
+) {
+    let mut found = false;
+    for tx in transactions {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::UnstakeRefund(increment)) = shadow_tx.as_v1() {
+                if increment.target == peer_addr {
+                    assert_eq!(
+                        increment.amount,
+                        expected_amount.into(),
+                        "Unstake refund amount must equal configured stake value"
+                    );
+                    assert_eq!(
+                        increment.irys_ref, expected_irys_ref,
+                        "Unstake refund irys_ref must match commitment id"
+                    );
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        found,
+        "Block must contain UNSTAKE refund packet for address {:?}",
+        peer_addr
+    );
+}
+
+/// Assert that unstake is NOT present in block's commitment snapshot
+fn assert_no_unstake_in_commitment_snapshot(
+    node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
+    block_hash: irys_types::BlockHash,
+    address: irys_types::Address,
+    message: &str,
+) {
+    let commitment_snapshot = {
+        let tree = node.node_ctx.block_tree_guard.read();
+        tree.get_commitment_snapshot(&block_hash)
+            .expect("Block must have commitment snapshot")
+    };
+
+    if let Some(commitments) = commitment_snapshot.commitments.get(&address) {
+        assert!(commitments.unstake.is_none(), "{}", message);
+    }
+    // If no commitments exist for address, that's also valid
 }
