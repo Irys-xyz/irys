@@ -972,6 +972,9 @@ impl Inner {
 
             // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
+
+            // Note: get_data_tx_in_parallel_inner() read from both the mempool and
+            //       db as publishing can happen to a tx that is no longer in the mempool
             // TODO: improve this
             let mut tx_headers = get_data_tx_in_parallel_inner(
                 publish_txids,

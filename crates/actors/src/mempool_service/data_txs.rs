@@ -75,11 +75,22 @@ impl Inner {
             }
 
             // if data tx exists in mdbx
-            if let Ok(read_tx) = self.read_tx() {
-                if let Some(tx_header) = tx_header_by_txid(&read_tx, &tx).unwrap_or(None) {
-                    debug!("Got tx {} from DB", &tx);
-                    found_txs.push(Some(tx_header));
-                    continue;
+            match self.read_tx() {
+                Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
+                    Ok(Some(tx_header)) => {
+                        debug!("Got tx {} from DB", &tx);
+                        found_txs.push(Some(tx_header.clone()));
+                        continue;
+                    }
+                    Ok(None) => {
+                        debug!("Tx {} not found in DB", &tx);
+                    }
+                    Err(e) => {
+                        warn!("DB error reading tx {}: {}", &tx, e);
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to open DB read transaction: {}", e);
                 }
             }
             // not found anywhere
@@ -92,7 +103,7 @@ impl Inner {
 
     pub async fn handle_data_tx_ingress_message_gossip(
         &mut self,
-        mut tx: DataTransactionHeader,
+        tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
             tx_id = ?tx.id,
@@ -100,7 +111,16 @@ impl Inner {
             "Received data tx from Gossip"
         );
 
-        tx.promoted_height = None;
+        // preserving promoted_height value on ingress is the safest policy
+        // mutating on ingress would allow for various incorrect behaviours such as skipping already-promoted txs by consulting this flag
+        // this allows proper chain-handling flows to adjust it if needed (e.g., on a reorg event)
+        if tx.promoted_height.is_some() {
+            warn!(
+                "Ingressed tx {:?} has promoted_height set to {:?}; preserving existing promotion state",
+                tx.id,
+                tx.promoted_height
+            );
+        }
 
         // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
         let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;

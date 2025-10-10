@@ -1917,6 +1917,218 @@ pub async fn data_txs_are_valid(
                 });
             }
 
+            // Enforce data availability by verifying ingress proofs with the actual chunks
+            // possible future improvements: refresh peer list on failure of all 5, try peers concurrently
+            if config.consensus.enable_full_ingress_proof_validation {
+                // Collect all chunks for this transaction from the DB (by tx-relative offset)
+                let expected_chunk_count =
+                    tx_header.data_size.div_ceil(config.consensus.chunk_size);
+
+                let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
+                    error: e.to_string(),
+                })?;
+
+                let mut chunks: Vec<irys_types::ChunkBytes> =
+                    Vec::with_capacity(expected_chunk_count as usize);
+
+                let client = reqwest::Client::new();
+
+                // Fetch active peers once outside the chunk loop (take up to 5)
+                let api_addrs: Vec<_> = {
+                    let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
+                    let _ = service_senders
+                        .data_sync
+                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+
+                    match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
+                        Ok(Ok(active_peers)) => {
+                            let guard = active_peers.read().unwrap();
+                            guard
+                                .iter()
+                                .take(5)
+                                .map(|(_addr, pbm)| pbm.peer_address.api)
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+
+                for i in 0..expected_chunk_count {
+                    let tx_offset_u32 =
+                        u32::try_from(i).map_err(|_| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!("Tx chunk offset index {} exceeds u32::MAX", i),
+                        })?;
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(tx_offset_u32);
+
+                    // Try local cache first
+                    let mut maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                        &ro_tx,
+                        tx_header.data_root,
+                        tx_chunk_offset,
+                    )
+                    .map_err(|e| PreValidationError::DatabaseError {
+                        error: e.to_string(),
+                    })?;
+
+                    // If missing locally, attempt fetch-on-miss from pre-selected peers and ingest
+                    if maybe_chunk.is_none() {
+                        for api_addr in api_addrs.iter() {
+                            // Build data_root/offset fetch URL using peer API address
+                            let url = format!(
+                                "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                api_addr,
+                                publish_ledger.ledger_id,
+                                tx_header.data_root,
+                                tx_offset_u32
+                            );
+
+                            // Fetch with short timeout
+                            let resp = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                client.get(&url).send(),
+                            )
+                            .await;
+
+                            let Ok(Ok(resp)) = resp else {
+                                continue;
+                            };
+                            if !resp.status().is_success() {
+                                continue;
+                            }
+
+                            // Parse ChunkFormat and convert to UnpackedChunk
+                            let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
+                            else {
+                                continue;
+                            };
+
+                            let unpacked = match chunk_format {
+                                irys_types::ChunkFormat::Unpacked(u) => u,
+                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
+                                    &p,
+                                    config.consensus.entropy_packing_iterations,
+                                    config.consensus.chunk_size as usize,
+                                    config.consensus.chain_id,
+                                ),
+                            };
+
+                            // Basic sanity checks before ingest
+                            if unpacked.data_root != tx_header.data_root
+                                || *unpacked.tx_offset != tx_offset_u32
+                            {
+                                continue;
+                            }
+
+                            // Ingest via mempool to persist and validate
+                            let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
+                            if service_senders
+                                .mempool
+                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .is_err()
+                            {
+                                return Err(PreValidationError::ValidationServiceUnreachable);
+                            }
+
+                            // Wait briefly for ingest to complete and log outcome
+                            let recv_res =
+                                tokio::time::timeout(std::time::Duration::from_millis(500), ing_rx)
+                                    .await;
+                            match recv_res {
+                                Err(_elapsed) => {
+                                    tracing::warn!(
+                                        "Timed out waiting for chunk ingest completion for data_root {:?}, tx_offset {}",
+                                        tx_header.data_root,
+                                        tx_offset_u32
+                                    );
+                                }
+                                Ok(Err(recv_err)) => {
+                                    tracing::warn!(
+                                        "IngestChunk oneshot channel error for data_root {:?}, tx_offset {}: {:?}",
+                                        tx_header.data_root,
+                                        tx_offset_u32,
+                                        recv_err
+                                    );
+                                }
+                                Ok(Ok(ingest_res)) => match ingest_res {
+                                    Ok(()) => {
+                                        tracing::debug!(
+                                                "Chunk ingested successfully for data_root {:?}, tx_offset {}",
+                                                tx_header.data_root,
+                                                tx_offset_u32
+                                            );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                                "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
+                                                tx_header.data_root,
+                                                tx_offset_u32,
+                                                e
+                                            );
+                                    }
+                                },
+                            }
+
+                            // Re-open a fresh read tx to observe the write
+                            let ro_tx2 =
+                                db.tx().map_err(|e| PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                })?;
+                            maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                                &ro_tx2,
+                                tx_header.data_root,
+                                tx_chunk_offset,
+                            )
+                            .map_err(|e| {
+                                PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                }
+                            })?;
+
+                            if maybe_chunk.is_some() {
+                                break;
+                            }
+                        }
+                    }
+
+                    let (_meta, cached_chunk) =
+                        maybe_chunk.ok_or_else(|| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!(
+                                "Data unavailable: missing chunk at offset {} for data_root {:?}",
+                                i, tx_header.data_root
+                            ),
+                        })?;
+
+                    let chunk_bytes = cached_chunk.chunk.ok_or_else(|| {
+                        PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: "Missing chunk body bytes".to_string(),
+                        }
+                    })?;
+                    chunks.push(chunk_bytes.0);
+                }
+
+                // Verify each ingress proof against the actual chunks
+                for proof in tx_proofs.iter() {
+                    let ok = irys_types::ingress::verify_ingress_proof(
+                        proof,
+                        &chunks,
+                        config.consensus.chain_id,
+                    )
+                    .map_err(|e| PreValidationError::InvalidIngressProof {
+                        tx_id: tx_header.id,
+                        reason: e.to_string(),
+                    })?;
+
+                    if !ok {
+                        return Err(PreValidationError::IngressProofMismatch {
+                            tx_id: tx_header.id,
+                        });
+                    }
+                }
+            }
+
             if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
                 return Err(PreValidationError::IngressProofCountMismatch {
                     expected: config.consensus.number_of_ingress_proofs_total as usize,
