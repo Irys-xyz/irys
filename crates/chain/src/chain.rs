@@ -564,7 +564,8 @@ impl IrysNode {
         let commitments = get_genesis_commitments(&self.config).await;
 
         // Calculate initial difficulty based on number of storage modules
-        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
+        // let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
+        let storage_module_count = 8;
         let difficulty =
             calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
                 .expect("valid calculated initial difficulty");
