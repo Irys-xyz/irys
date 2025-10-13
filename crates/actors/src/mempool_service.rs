@@ -607,30 +607,20 @@ impl Inner {
         let mut sorted_commitments = mempool_state_guard
             .valid_commitment_tx
             .values()
-            .flat_map(|txs| {
-                txs.iter()
-                    .filter(|tx| {
-                        matches!(
-                            tx.commitment_type,
-                            CommitmentType::Stake
-                                | CommitmentType::Pledge { .. }
-                                | CommitmentType::Unpledge { .. }
-                                | CommitmentType::Unstake
-                        )
-                    })
-                    .cloned()
-            })
+            .flat_map(|txs| txs.iter().cloned())
             .collect::<Vec<_>>();
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
+        let tx_ids = sorted_commitments.iter().map(|x| x.id).collect::<Vec<_>>();
+        tracing::error!(?tx_ids);
 
         // Process sorted commitments
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
         let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
-                debug!(
+                error!(
                     tx_id = ?tx.id,
                     commitment_type = ?tx.commitment_type,
                     signer = ?tx.signer,
@@ -640,14 +630,13 @@ impl Inner {
             }
 
             // Full validation (fee, funding at parent block, value) before simulation
-            if validate_commitment_transaction(
+            if let Err(error) = validate_commitment_transaction(
                 &self.reth_node_adapter,
                 &self.config.consensus,
                 tx,
                 parent_evm_block_id,
-            )
-            .is_err()
-            {
+            ) {
+                tracing::warn!(?error, "rejecting commitment tx");
                 continue;
             }
 

@@ -39,6 +39,7 @@ impl Inner {
             .is_known_commitment_in_mempool(&commitment_tx.id, commitment_tx.signer)
             .await
         {
+            tracing::warn!(tx_id = ?commitment_tx.id, "already known to the mempool");
             return Err(TxIngressError::Skipped);
         }
 
