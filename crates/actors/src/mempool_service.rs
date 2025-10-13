@@ -612,15 +612,13 @@ impl Inner {
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
-        let tx_ids = sorted_commitments.iter().map(|x| x.id).collect::<Vec<_>>();
-        tracing::error!(?tx_ids);
 
         // Process sorted commitments
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
         let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
-                error!(
+                debug!(
                     tx_id = ?tx.id,
                     commitment_type = ?tx.commitment_type,
                     signer = ?tx.signer,

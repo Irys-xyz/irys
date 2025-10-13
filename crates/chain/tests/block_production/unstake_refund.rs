@@ -14,7 +14,7 @@ use crate::block_production::unpledge_refund::{
 };
 
 /// Two-node scenario exercising the full unstake flow:
-/// 1. Drain all pledges for the signer and process their epoch refunds.
+/// 1. unpledge all partitions from a signer and process epoch refunds.
 /// 2. Submit an unstake commitment, mine the inclusion block, and ensure it is fee-only.
 /// 3. Advance to the next epoch to assert the unstake refund, treasury delta, and stake removal.
 #[test_log::test(actix_web::test)]
@@ -41,7 +41,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         "Test requires the peer to start with at least one pledged partition"
     );
 
-    // ------------- Phase 1: Unpledge all partitions and process epoch refunds -------------
+    // Unpledge all partitions and process epoch refunds
     let mut unpledge_txs = Vec::with_capacity(assigned_partitions.len());
     for assignment in &assigned_partitions {
         let anchor = peer_node.get_anchor().await?;
@@ -67,10 +67,6 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 
     // Mine inclusion block for unpledges (keeps assignments intact until epoch).
     let unpledge_inclusion = genesis_node.mine_block().await?;
-    genesis_node
-        .wait_until_height(unpledge_inclusion.height, seconds_to_wait)
-        .await
-        .expect("peer should observe unpledge inclusion block");
     let unpledge_block = genesis_node
         .get_block_by_height(unpledge_inclusion.height)
         .await?;
@@ -137,7 +133,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         "Pledge count must reach zero before unstake"
     );
 
-    // ------------- Phase 2: Submit unstake commitment and validate inclusion semantics -------------
+    // Submit unstake commitment and validate inclusion semantics
     let anchor = peer_node.get_anchor().await?;
     let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
     let expected_refund_amount: U256 = unstake_tx.value;
@@ -216,7 +212,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         "Treasury must remain unchanged during unstake inclusion",
     );
 
-    // ------------- Phase 3: Advance to epoch and validate refunds + treasury delta -------------
+    // Advance to epoch and validate refunds + treasury delta
     let (_produced, epoch_height_after_unstake) = genesis_node.mine_until_next_epoch().await?;
     peer_node
         .wait_until_height(epoch_height_after_unstake, seconds_to_wait)
@@ -321,7 +317,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         "Test requires the peer to start with at least one pledged partition"
     );
 
-    // ------------- Phase 1: Submit unstake while pledges are still active -------------
+    // Submit unstake while pledges are still active
     let anchor = peer_node.get_anchor().await?;
     let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
     let _expected_refund_amount: U256 = unstake_tx.value;
@@ -394,7 +390,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         "Unstake must NOT be present in commitment snapshot (first block) while pledges are active",
     );
 
-    // ------------- Phase 2: Advance to epoch boundary -------------
+    // Advance to epoch boundary
     let (_mined, first_epoch_height) = genesis_node.mine_until_next_epoch().await?;
     peer_node
         .wait_until_height(first_epoch_height, seconds_to_wait)
@@ -437,7 +433,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         "Stake must still exist in epoch snapshot after rejected unstake",
     );
 
-    // ------------- Phase 3: Verify unstake remains pending in mempool -------------
+    // Verify unstake remains pending in mempool
     // The unstake transaction should still be in mempool, waiting for pledges to clear
     let mempool_unstake = genesis_node
         .get_commitment_tx_from_mempool(&unstake_tx.id)
@@ -447,7 +443,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         "Unstake transaction must remain in mempool after being rejected from blocks"
     );
 
-    // ------------- Phase 4: Mine more blocks - unstake should continue to be rejected -------------
+    // Mine more blocks - unstake should continue to be rejected
     // Mine another block to verify unstake continues to be rejected
     let second_block_after_unstake = genesis_node.mine_block().await?;
     peer_node
@@ -553,7 +549,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     genesis_node.mine_until_next_epoch().await?;
     genesis_node.mine_until_next_epoch().await?;
 
-    // ------------- Phase 1: Verify peer has no pledges -------------
+    // Verify peer has no pledges
     let assigned_partitions: Vec<PartitionAssignment> = {
         let sms = peer_node.node_ctx.storage_modules_guard.read();
         sms.iter()
@@ -578,7 +574,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .await;
     assert!(pledge_count == 0, "Peer must have no active pledges");
 
-    // ------------- Phase 2: Submit both pledge and unstake transactions -------------
+    // Submit both pledge and unstake transactions
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
     let balance_before = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
@@ -626,7 +622,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 
     tracing::error!("Both transactions confirmed in mempool, now mining block");
 
-    // ------------- Phase 3: Mine block and verify pledge is included, unstake is NOT -------------
+    // Mine block and verify pledge is included, unstake is NOT
     let block = genesis_node.mine_block().await?;
     let block_header = genesis_node.get_block_by_height(block.height).await?;
 
@@ -652,7 +648,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Unstake must NOT be in commitment snapshot when pledge is being added in same block",
     );
 
-    // ------------- Phase 4: Verify shadow transactions -------------
+    // Verify shadow transactions
     let receipts = get_block_receipts(&reth_ctx, block_header.evm_block_hash)?;
 
     // Verify PLEDGE shadow transaction exists
@@ -679,7 +675,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Block must not contain UNSTAKE refund when unstake was rejected",
     );
 
-    // ------------- Phase 5: Verify balance and treasury reflect ONLY pledge processing -------------
+    // Verify balance and treasury reflect ONLY pledge processing
     // Treasury should increase by pledge value (no unstake refund)
     assert_treasury(
         &block_header,
@@ -700,7 +696,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Balance should decrease by pledge value + fee only (unstake was rejected)",
     );
 
-    // ------------- Phase 6: Verify peer state after pledge inclusion -------------
+    // Verify peer state after pledge inclusion
     // Peer should still have stake
     assert_stake_exists_in_epoch(
         &genesis_node,
@@ -732,7 +728,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Exactly 1 pledge should be in commitment snapshot"
     );
 
-    // ------------- Phase 7: Verify unstake remains in mempool -------------
+    // Verify unstake remains in mempool
     let mempool_unstake = genesis_node
         .get_commitment_tx_from_mempool(&unstake_tx.id)
         .await;
@@ -741,7 +737,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Unstake transaction must remain in mempool after being rejected (contextually invalid)"
     );
 
-    // ------------- Phase 8: Verify unstake continues to be rejected in next block -------------
+    // Verify unstake continues to be rejected in next block
     let second_block = genesis_node.mine_block().await?;
     let second_block_header = genesis_node
         .get_block_by_height(second_block.height)
@@ -776,9 +772,6 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Test Helper Functions
-// ============================================================================
 
 /// Get receipts for a block
 fn get_block_receipts(

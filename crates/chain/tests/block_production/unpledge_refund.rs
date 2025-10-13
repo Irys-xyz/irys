@@ -945,19 +945,6 @@ pub(crate) fn assert_single_log_for(
     addr: Address,
     context: &str,
 ) -> usize {
-    use irys_reth_node_bridge::irys_reth::shadow_tx::shadow_tx_topics::*;
-    tracing::error!(UNSTAKE = ?(*UNSTAKE));
-    tracing::error!(UNSTAKE_DEBIT = ?(*UNSTAKE_DEBIT));
-    tracing::error!(BLOCK_REWARD = ?(*BLOCK_REWARD));
-    tracing::error!(STAKE = ?(*STAKE));
-    tracing::error!(STORAGE_FEES = ?(*STORAGE_FEES));
-    tracing::error!(PLEDGE = ?(*PLEDGE));
-    tracing::error!(UNPLEDGE = ?(*UNPLEDGE));
-    tracing::error!(UNPLEDGE_REFUND = ?(*UNPLEDGE_REFUND));
-    tracing::error!(TERM_FEE_REWARD = ?(*TERM_FEE_REWARD));
-    tracing::error!(INGRESS_PROOF_REWARD = ?(*INGRESS_PROOF_REWARD));
-    tracing::error!(PERM_FEE_REFUND = ?(*PERM_FEE_REFUND));
-
     // Find receipts that contain exactly one matching log for the given topic and address.
     let mut idx: Option<usize> = None;
     let hits: Vec<_> = receipts
@@ -967,9 +954,6 @@ pub(crate) fn assert_single_log_for(
             let has = r
                 .logs
                 .iter()
-                .inspect(|log| {
-                    tracing::warn!(topic = ?log.topics()[0], addrress =?log.address);
-                })
                 .any(|log| log.topics()[0] == *topic && log.address == addr);
             if has {
                 idx = Some(i);

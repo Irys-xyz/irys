@@ -391,6 +391,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 transaction_fee: tx.fee as u128,
             }),
             irys_primitives::CommitmentType::Unstake => Ok(ShadowMetadata {
+                // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
                         target: tx.signer,

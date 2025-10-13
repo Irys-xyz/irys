@@ -52,7 +52,6 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
 /// Derive epoch unstake refund events deterministically from a commitment snapshot.
 ///
 /// Ordering is the same as CommitmentTransaction::Ord for Unstake txs
-/// (stake/pledge/unpledge precedence already encoded; unstake last).
 pub(crate) fn derive_unstake_refunds_from_snapshot(
     commit_snapshot: &CommitmentSnapshot,
     config: &ConsensusConfig,
