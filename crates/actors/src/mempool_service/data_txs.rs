@@ -29,7 +29,7 @@ impl Inner {
         {
             // Compute composite fingerprint: keccak(signature + prehash)
             let prehash = tx.signature_hash();
-            let mut buf = Vec::with_capacity(64 + 32);
+            let mut buf = Vec::with_capacity(65 + 32);
             buf.extend_from_slice(&tx.signature.as_bytes());
             buf.extend_from_slice(&prehash);
             let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
