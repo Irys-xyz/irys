@@ -506,7 +506,7 @@ where
             App::new()
                 .app_data(Data::new(server.clone()))
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
-                .wrap(middleware::Logger::default()) // TODO: use tracing_actix_web TracingLogger
+                .wrap(middleware::Logger::default().log_target("gossip-server")) // TODO: use tracing_actix_web TracingLogger
                 .service(
                     web::scope("/gossip")
                         .route("/transaction", web::post().to(Self::handle_transaction))
