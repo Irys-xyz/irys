@@ -356,32 +356,28 @@ impl<'a> ShadowTxGenerator<'a> {
 
     /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
-        // Keep existing commitment transaction logic unchanged
-        let total_cost = Uint::from_le_bytes(tx.total_cost().to_le_bytes());
-        let transaction_fee = tx.fee as u128;
-
         match tx.commitment_type {
             irys_primitives::CommitmentType::Stake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
-                        amount: total_cost,
+                        amount: tx.value.into(),
                         target: tx.signer,
                         irys_ref: tx.id.into(),
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee,
+                transaction_fee: tx.fee as u128,
             }),
             irys_primitives::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
-                        amount: total_cost,
+                        amount: tx.value.into(),
                         target: tx.signer,
                         irys_ref: tx.id.into(),
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee,
+                transaction_fee: tx.fee as u128,
             }),
             irys_primitives::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
@@ -392,7 +388,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee,
+                transaction_fee: tx.fee as u128,
             }),
             irys_primitives::CommitmentType::Unstake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -402,7 +398,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee,
+                transaction_fee: tx.fee as u128,
             }),
         }
     }
