@@ -1278,7 +1278,6 @@ async fn get_block_index(
                         "Peer {:?} returned an empty index, trying all other peers",
                         miner_address
                     );
-                    to_remove = Some(*miner_address);
 
                     // Try all remaining peers
                     for (other_miner_address, other_peer) in peers_to_fetch_index_from.iter() {
