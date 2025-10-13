@@ -32,6 +32,7 @@ pub mod versioning;
 pub mod block_provider;
 pub mod h256;
 pub mod remote_packing;
+pub mod rlp;
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -56,6 +57,7 @@ pub use merkle::*;
 pub use nodit::Interval;
 pub use peer_list::*;
 pub use reth_codecs::Compact;
+pub use rlp::*;
 pub use simple_rng::*;
 pub use version::*;
 pub use versioning::*;
