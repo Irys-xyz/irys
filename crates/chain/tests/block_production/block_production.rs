@@ -29,6 +29,7 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
+use std::ops::Deref;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
@@ -926,7 +927,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let pledge_fee_amount = consensus_config.pledge_base_value.amount; // 0.1 token = 10^17 in U256
 
     // Each commitment transaction has:
-    // - fee: actual fee from the transaction (includes priority fees)
+    // - fee: actual fee for including the tx in a block
     // - value: stake_fee.amount or pledge_fee.amount
     // Total cost per transaction = fee + value
     let stake_tx_fee = U256::from(stake_tx.fee);
@@ -939,19 +940,13 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     let total_decrease = stake_total_cost + pledge_total_cost;
 
-    // Priority fees are distributed from the commitment transaction submitter to the block beneficiary
-    // Each commitment transaction has a priority fee equal to its fee value
-    let priority_fees_distributed = stake_tx_fee + pledge_tx_fee;
-    let total_decrease_with_priority_fees = total_decrease + priority_fees_distributed;
-
     assert_eq!(
         balance_after_block1,
-        initial_balance - total_decrease_with_priority_fees,
-        "Balance should decrease by {} (stake: {} + pledge: {} + priority fees: {})",
-        total_decrease_with_priority_fees,
+        initial_balance - total_decrease,
+        "Balance should decrease by {} (stake: {} + pledge: {})",
+        total_decrease,
         stake_total_cost,
         pledge_total_cost,
-        priority_fees_distributed
     );
 
     // Mine another block to verify the system continues to work
@@ -1015,9 +1010,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        // Expected amount is actual fee + stake_fee.amount (0.1 token = 10^17)
-        let expected_stake_amount = U256::from(stake_tx.fee)
-            + U256::from_le_bytes(consensus_config.stake_value.amount.to_le_bytes());
+        let expected_stake_amount = stake_tx.deref().value.into();
         assert_eq!(
             bd.amount, expected_stake_amount,
             "Stake amount should be fee + stake_fee.amount"
@@ -1031,9 +1024,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        // Expected amount is actual fee + pledge_fee.amount (0.1 token = 10^17)
-        let expected_pledge_amount = U256::from(pledge_tx.fee)
-            + U256::from_le_bytes(consensus_config.pledge_base_value.amount.to_le_bytes());
+        let expected_pledge_amount = consensus_config.pledge_base_value.amount.into();
         assert_eq!(
             bd.amount, expected_pledge_amount,
             "Pledge amount should be fee + pledge_fee.amount"
