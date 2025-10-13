@@ -6,7 +6,7 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionId, Signable, H256,
+    IrysTransactionId, Signable as _, H256,
 };
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings

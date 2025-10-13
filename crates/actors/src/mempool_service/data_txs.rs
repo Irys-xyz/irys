@@ -7,7 +7,8 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, Signable, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, Signable as _,
+    H256,
 };
 use reth::revm::primitives::alloy_primitives;
 use reth_db::transaction::DbTxMut as _;
