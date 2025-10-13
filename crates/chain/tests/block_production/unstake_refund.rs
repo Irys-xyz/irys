@@ -1,3 +1,4 @@
+use alloy_consensus::Transaction as _;
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::HashOrNumber;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
@@ -958,4 +959,240 @@ fn assert_no_unstake_in_commitment_snapshot(
         assert!(commitments.unstake.is_none(), "{}", message);
     }
     // If no commitments exist for address, that's also valid
+}
+
+/// Test scenario where unpledge transactions for all partitions and an unstake transaction
+/// are both submitted to the mempool concurrently while the account has active pledges.
+/// Expected behavior:
+/// 1. Both unpledge and unstake transactions are accepted by the mempool
+/// 2. When mining to the next epoch, both are processed successfully
+/// 3. Unpledges are processed (priority 2), clearing all active pledges
+/// 4. Unstake is processed (priority 3), removing the stake
+/// 5. Treasury decreases by total unpledge refunds + unstake refund
+/// 6. Balance increases by total unpledge refunds + unstake refund - fees
+/// 7. No storage modules remain assigned (all pledges cleared)
+/// 8. User is no longer staked (removed from epoch snapshot)
+#[test_log::test(actix_web::test)]
+async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
+    initialize_tracing();
+
+    let num_blocks_in_epoch = 2_u64;
+    let seconds_to_wait = 20_usize;
+    let (genesis_node, peer_node, peer_addr, _initial_assignment, consensus) =
+        setup_env(num_blocks_in_epoch, seconds_to_wait).await?;
+
+    let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
+
+    // Collect all capacity assignments so we can drain every active pledge
+    let assigned_partitions: Vec<PartitionAssignment> = {
+        let sms = peer_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment())
+            .collect()
+    };
+    assert!(
+        !assigned_partitions.is_empty(),
+        "Test requires the peer to start with at least one pledged partition"
+    );
+
+    let initial_pledge_count = peer_node
+        .node_ctx
+        .mempool_pledge_provider
+        .as_ref()
+        .pledge_count(peer_addr)
+        .await;
+    assert!(
+        initial_pledge_count > 0,
+        "Peer must have active pledges at start"
+    );
+
+    // Verify peer is staked
+    assert_stake_exists_in_epoch(&genesis_node, peer_addr, "Peer must be staked");
+
+    let head_height = genesis_node.get_canonical_chain_height().await;
+    let head_block = genesis_node.get_block_by_height(head_height).await?;
+    let balance_before = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
+
+    // Submit all unpledge transactions
+    let mut unpledge_txs = Vec::with_capacity(assigned_partitions.len());
+    let mut total_unpledge_fee = U256::from(0_u64);
+    let mut total_unpledge_refund = U256::from(0_u64);
+
+    for (idx, assignment) in assigned_partitions.iter().enumerate() {
+        let anchor = peer_node.get_anchor().await?;
+        let pledge_count = initial_pledge_count - (idx as u64);
+        let mut unpledge = CommitmentTransaction::new_unpledge(
+            &consensus,
+            anchor,
+            &pledge_count,
+            peer_addr,
+            assignment.partition_hash,
+        )
+        .await;
+        let signer = peer_node.cfg.signer();
+        signer
+            .sign_commitment(&mut unpledge)
+            .expect("sign unpledge commitment");
+
+        total_unpledge_fee += U256::from(unpledge.fee);
+        total_unpledge_refund += unpledge.value;
+
+        genesis_node.post_commitment_tx(&unpledge).await?;
+        genesis_node
+            .wait_for_mempool(unpledge.id, seconds_to_wait)
+            .await?;
+        unpledge_txs.push(unpledge);
+    }
+
+    // Submit unstake transaction
+    let anchor = peer_node.get_anchor().await?;
+    let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
+    let unstake_refund_amount: U256 = unstake_tx.value;
+    let signer = peer_node.cfg.signer();
+    signer
+        .sign_commitment(&mut unstake_tx)
+        .expect("sign unstake commitment");
+    let expected_irys_ref: FixedBytes<32> = unstake_tx.id.into();
+
+    genesis_node.post_commitment_tx(&unstake_tx).await?;
+    genesis_node
+        .wait_for_mempool(unstake_tx.id, seconds_to_wait)
+        .await?;
+
+    let total_fees = total_unpledge_fee + U256::from(unstake_tx.fee);
+    let total_refunds = total_unpledge_refund + unstake_refund_amount;
+
+    // Mine until next epoch - this should process both unpledges and unstake
+    let (_mined, epoch_height) = genesis_node.mine_until_next_epoch().await?;
+    peer_node
+        .wait_until_height(epoch_height, seconds_to_wait)
+        .await
+        .expect("peer to sync to epoch");
+    let epoch_block = genesis_node.get_block_by_height(epoch_height).await?;
+
+    // Assert epoch block contains UNPLEDGE_REFUND logs
+    let receipts_epoch = get_block_receipts(&reth_ctx, epoch_block.evm_block_hash)?;
+    let mut unpledge_refund_logs = 0_usize;
+    let mut unstake_refund_logs = 0_usize;
+
+    for receipt in &receipts_epoch {
+        unpledge_refund_logs += receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND && log.address == peer_addr
+            })
+            .count();
+        unstake_refund_logs += receipt
+            .logs
+            .iter()
+            .filter(|log| log.topics()[0] == *shadow_tx_topics::UNSTAKE && log.address == peer_addr)
+            .count();
+    }
+    assert_eq!(
+        unpledge_refund_logs,
+        unpledge_txs.len(),
+        "Expected one UNPLEDGE_REFUND log per unpledge transaction"
+    );
+    assert_eq!(
+        unstake_refund_logs, 1,
+        "Expected exactly one UNSTAKE refund log"
+    );
+
+    // Decode and verify unpledge refund packets
+    let epoch_txs = reth_ctx
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
+        .expect("epoch block should have transactions");
+
+    let mut found_unpledge_refunds = 0_usize;
+    let mut found_unstake_refund = false;
+
+    for tx in &epoch_txs {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::UnpledgeRefund(refund)) = shadow_tx.as_v1() {
+                if refund.target == peer_addr {
+                    found_unpledge_refunds += 1;
+                }
+            } else if let Some(TransactionPacket::UnstakeRefund(refund)) = shadow_tx.as_v1() {
+                if refund.target == peer_addr {
+                    assert_eq!(
+                        refund.amount,
+                        unstake_refund_amount.into(),
+                        "Unstake refund amount must match stake value"
+                    );
+                    assert_eq!(
+                        refund.irys_ref, expected_irys_ref,
+                        "Unstake refund irys_ref must match commitment id"
+                    );
+                    found_unstake_refund = true;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        found_unpledge_refunds,
+        unpledge_txs.len(),
+        "Must find all unpledge refund packets"
+    );
+    assert!(
+        found_unstake_refund,
+        "Must find unstake refund packet in epoch block"
+    );
+
+    // Verify treasury decreased by total refunds
+    let epoch_prev = genesis_node
+        .get_block_by_height(epoch_block.height - 1)
+        .await?;
+    assert_treasury(
+        &epoch_block,
+        epoch_prev.treasury - total_refunds,
+        "Treasury must decrease by total unpledge refunds + unstake refund",
+    );
+
+    // Verify balance increased by refunds minus fees
+    let expected_final_balance = balance_before - total_fees + total_refunds;
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        epoch_block.evm_block_hash,
+        expected_final_balance,
+        "Balance should equal initial - fees + total refunds",
+    );
+
+    // Verify all storage modules are unassigned
+    let post_epoch_assignments: Vec<_> = {
+        let sms = peer_node.node_ctx.storage_modules_guard.read();
+        sms.iter()
+            .filter_map(|sm| sm.partition_assignment())
+            .collect()
+    };
+    assert!(
+        post_epoch_assignments.is_empty(),
+        "All storage modules must be unassigned after unpledge refunds"
+    );
+
+    // Verify pledge count is zero
+    let pledge_count_after = peer_node
+        .node_ctx
+        .mempool_pledge_provider
+        .as_ref()
+        .pledge_count(peer_addr)
+        .await;
+    assert_eq!(
+        pledge_count_after, 0,
+        "Pledge count must be zero after unpledge refunds"
+    );
+
+    // Verify stake is removed from epoch snapshot
+    assert_no_stake_in_epoch(
+        &genesis_node,
+        peer_addr,
+        "Stake must be removed from epoch snapshot after unstake refund",
+    );
+
+    genesis_node.stop().await;
+    peer_node.stop().await;
+    Ok(())
 }
