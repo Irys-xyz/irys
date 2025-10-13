@@ -404,7 +404,7 @@ impl PartitionMiningService {
                             self.inner.lock().await.set_mining(enabled);
                         }
                         None => {
-                            // Controller dropped: disable command polling
+                            warn!("PartitionMiningService controller dropped; disabling command polling");
                             self.cmd_rx = None;
                         }
                     }
