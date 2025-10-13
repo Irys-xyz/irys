@@ -6,10 +6,11 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionId, H256,
+    IrysTransactionId, Signable, H256,
 };
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
+use reth::revm::primitives::alloy_primitives;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, warn};
 
@@ -21,6 +22,24 @@ impl Inner {
         &mut self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
+        // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
+        {
+            // Compute composite fingerprint: keccak(signature + prehash)
+            let prehash = commitment_tx.signature_hash();
+            let mut buf = Vec::with_capacity(65 + 32);
+            buf.extend_from_slice(&commitment_tx.signature.as_bytes());
+            buf.extend_from_slice(&prehash);
+            let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
+            if self
+                .mempool_state
+                .read()
+                .await
+                .recent_invalid_payload_fingerprints
+                .contains(&fingerprint)
+            {
+                return Err(TxIngressError::InvalidSignature);
+            }
+        }
         // Validate tx signature first to prevent ID poisoning
         if let Err(e) = self.validate_signature(commitment_tx).await {
             tracing::error!(
@@ -180,7 +199,8 @@ impl Inner {
     /// Returns true if the commitment tx is already known in the mempool caches/maps.
     async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: Address) -> bool {
         let guard = self.mempool_state.read().await;
-        if guard.recent_invalid_tx.contains(tx_id) || guard.recent_valid_tx.contains(tx_id) {
+        // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
+        if guard.recent_valid_tx.contains(tx_id) {
             return true;
         }
         if guard

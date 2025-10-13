@@ -7,8 +7,9 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, Signable, H256,
 };
+use reth::revm::primitives::alloy_primitives;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
@@ -23,6 +24,24 @@ impl Inner {
         &mut self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
+        {
+            // Compute composite fingerprint: keccak(signature + prehash)
+            let prehash = tx.signature_hash();
+            let mut buf = Vec::with_capacity(64 + 32);
+            buf.extend_from_slice(&tx.signature.as_bytes());
+            buf.extend_from_slice(&prehash);
+            let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
+            if self
+                .mempool_state
+                .read()
+                .await
+                .recent_invalid_payload_fingerprints
+                .contains(&fingerprint)
+            {
+                return Err(TxIngressError::InvalidSignature);
+            }
+        }
         // Early exit if already known in mempool or DB
         {
             if self.is_known_data_tx(&tx.id).await? {
@@ -195,7 +214,8 @@ impl Inner {
     /// Returns Ok(true) if known, Ok(false) if not known.
     async fn is_known_data_tx(&self, tx_id: &H256) -> Result<bool, TxIngressError> {
         let guard = self.mempool_state.read().await;
-        if guard.recent_invalid_tx.contains(tx_id) || guard.recent_valid_tx.contains(tx_id) {
+        // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
+        if guard.recent_valid_tx.contains(tx_id) {
             return Ok(true);
         }
         drop(guard);
@@ -350,9 +370,6 @@ impl Inner {
         {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-            Ok(true)
-        } else if mempool_state_guard.recent_invalid_tx.contains(&txid) {
-            // Still has it, just invalid
             Ok(true)
         } else {
             drop(mempool_state_guard);

@@ -45,6 +45,7 @@ use irys_types::{
 };
 use irys_types::{IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
+use reth::revm::primitives::alloy_primitives;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
@@ -1369,6 +1370,7 @@ impl Inner {
     pub async fn wipe_blacklists(&mut self) {
         let mut write = self.mempool_state.write().await;
         write.recent_invalid_tx.clear();
+        write.recent_invalid_payload_fingerprints.clear();
     }
 
     /// Helper that opens a read-only database transaction from the Irys mempool state.
@@ -1385,7 +1387,7 @@ impl Inner {
 
     // Helper to verify signature
     #[instrument(skip_all, fields(tx_id = %tx.id()))]
-    pub async fn validate_signature<T: IrysTransactionCommon>(
+    pub async fn validate_signature<T: irys_types::versioning::Signable + IrysTransactionCommon>(
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
@@ -1397,20 +1399,24 @@ impl Inner {
             );
             Ok(())
         } else {
-            let mempool_state = &self.mempool_state;
-
-            // TODO: we need to use the hash of the *entire* tx struct (including ID and signature)
-            // to prevent malformed txs from poisoning legitimate transactions
-
-            // re-derive the tx_id to ensure we don't get poisoned
-            // let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
-
-            mempool_state
+            // Record invalid payload fingerprint derived from both the signature and the
+            // signing preimage (prehash). This avoids poisoning legitimate transactions that
+            // share the same signature bytes but differ in signed content.
+            let prehash = tx.signature_hash();
+            let mut buf = Vec::with_capacity(65 + 32);
+            buf.extend_from_slice(&tx.signature().as_bytes());
+            buf.extend_from_slice(&prehash);
+            let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
+            self.mempool_state
                 .write()
                 .await
-                .recent_invalid_tx
-                .put(tx.id(), ());
-            warn!("Tx {} signature is invalid", &tx.id());
+                .recent_invalid_payload_fingerprints
+                .put(fingerprint, ());
+            warn!(
+                "Tx {} signature is invalid (fingerprint {:?})",
+                &tx.id(),
+                fingerprint
+            );
             Err(TxIngressError::InvalidSignature)
         }
     }
@@ -1491,6 +1497,9 @@ pub struct MempoolState {
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     pub recent_invalid_tx: LruCache<H256, ()>,
+    /// Tracks recent invalid payload fingerprints (e.g., keccak(prehash + signature)) for signature-invalid payloads
+    /// Prevents poisoning legitimate txids via mismatched id/signature pairs
+    pub recent_invalid_payload_fingerprints: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
     pub recent_valid_tx: LruCache<H256, ()>,
     /// Tracks recently processed chunk hashes to prevent re-gossip
@@ -1514,6 +1523,9 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
+        recent_invalid_payload_fingerprints: LruCache::new(
+            NonZeroUsize::new(config.max_invalid_items).unwrap(),
+        ),
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
         recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
