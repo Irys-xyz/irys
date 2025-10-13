@@ -1271,7 +1271,7 @@ async fn get_block_index(
                     "Fetched block index from peer {:?}: {:?}",
                     miner_address, index
                 );
-                
+
                 // If the index is empty, try all other peers before returning empty
                 if index.is_empty() {
                     debug!(
@@ -1279,18 +1279,15 @@ async fn get_block_index(
                         miner_address
                     );
                     to_remove = Some(*miner_address);
-                    
+
                     // Try all remaining peers
                     for (other_miner_address, other_peer) in peers_to_fetch_index_from.iter() {
                         if other_miner_address == miner_address {
                             continue; // Skip the peer we just tried
                         }
-                        
-                        debug!(
-                            "Trying to fetch index from peer {:?}",
-                            other_miner_address
-                        );
-                        
+
+                        debug!("Trying to fetch index from peer {:?}", other_miner_address);
+
                         // Check if peer is syncing
                         match api_client.node_info(other_peer.address.api).await {
                             Ok(info) => {
@@ -1310,7 +1307,7 @@ async fn get_block_index(
                                 continue;
                             }
                         }
-                        
+
                         match api_client
                             .get_block_index(
                                 other_peer.address.api,
@@ -1344,12 +1341,12 @@ async fn get_block_index(
                             }
                         }
                     }
-                    
+
                     // All peers returned empty indices, return empty
                     debug!("All peers returned empty indices, returning empty list");
                     return Ok(vec![]);
                 }
-                
+
                 return Ok(index);
             }
             Err(error) => {
