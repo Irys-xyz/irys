@@ -872,25 +872,31 @@ mod tests {
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
 
+        let stake_value = U256::from(100000);
+        let stake_fee = 1000;
+        let pledge_value = U256::from(100000);
+        let pledge_fee = 500;
         let commitments = vec![
-            create_test_commitment(CommitmentType::Stake, U256::from(100000), 1000),
+            create_test_commitment(CommitmentType::Stake, stake_value.clone(), stake_fee),
             create_test_commitment(
                 CommitmentType::Pledge {
                     pledge_count_before_executing: 2,
                 },
-                U256::from(200000),
-                2000,
+                pledge_value.clone(),
+                pledge_fee,
             ),
-            create_test_commitment(CommitmentType::Unstake, U256::from(150000), 500),
+            create_test_commitment(CommitmentType::Unstake, stake_value.clone(), stake_fee),
             create_test_commitment(
                 CommitmentType::Unpledge {
                     pledge_count_before_executing: 1,
                     partition_hash: [0_u8; 32],
                 },
-                U256::from(180000),
-                1500,
+                pledge_value.clone(),
+                pledge_fee,
             ),
         ];
+        let stake_fee = stake_fee as u128;
+        let pledge_fee = pledge_fee as u128;
 
         let publish_ledger = PublishLedgerWithTxs {
             txs: vec![],
@@ -913,27 +919,27 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
-                        amount: U256::from(101000).into(), // 100000 + 1000 fee
+                        amount: stake_value.clone().into(),
                         target: commitments[0].signer,
                         irys_ref: commitments[0].id.into(),
                     }),
                     H256::zero().into(),
                 ),
-                transaction_fee: 1000,
+                transaction_fee: stake_fee.clone(),
             },
             // Pledge
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
-                        amount: U256::from(202000).into(), // 200000 + 2000 fee
+                        amount: pledge_value.into(),
                         target: commitments[1].signer,
                         irys_ref: commitments[1].id.into(),
                     }),
                     H256::zero().into(),
                 ),
-                transaction_fee: 2000,
+                transaction_fee: pledge_fee,
             },
-            // Unstake inclusion: fee-only via priority fee (log-only)
+            // Unstake inclusion: fee-only via priority fee
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
@@ -942,9 +948,9 @@ mod tests {
                     }),
                     H256::zero().into(),
                 ),
-                transaction_fee: 500,
+                transaction_fee: stake_fee,
             },
-            // Unpledge: fee-only via priority fee at inclusion (1500)
+            // Unpledge: fee-only via priority fee
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
@@ -953,7 +959,7 @@ mod tests {
                     }),
                     H256::zero().into(),
                 ),
-                transaction_fee: 1500,
+                transaction_fee: pledge_fee,
             },
         ];
 

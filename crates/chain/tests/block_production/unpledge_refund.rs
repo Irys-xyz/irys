@@ -837,7 +837,7 @@ pub async fn send_unpledge_all(
             break;
         }
         if target.partition_assignment.read().unwrap().is_none() {
-            continue
+            continue;
         };
         let anchor = peer_node.get_anchor().await?;
         tracing::error!(?pledge_count);
@@ -881,9 +881,10 @@ pub(crate) async fn setup_genesis_env(
     Ok((genesis_node, consensus))
 }
 
-pub(crate) async fn setup_env(
+pub(crate) async fn setup_env_with_block_migration_depth(
     num_blocks_in_epoch: u64,
     seconds_to_wait: usize,
+    block_migration_depth: u32,
 ) -> eyre::Result<(
     IrysNodeTest<irys_chain::IrysNodeCtx>,
     IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -893,6 +894,7 @@ pub(crate) async fn setup_env(
 )> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
     genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth;
 
     let peer_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_signer]);
@@ -924,12 +926,38 @@ pub(crate) async fn setup_env(
     Ok((genesis_node, peer_node, peer_addr, capacity_pa, consensus))
 }
 
+pub(crate) async fn setup_env(
+    num_blocks_in_epoch: u64,
+    seconds_to_wait: usize,
+) -> eyre::Result<(
+    IrysNodeTest<irys_chain::IrysNodeCtx>,
+    IrysNodeTest<irys_chain::IrysNodeCtx>,
+    Address,
+    PartitionAssignment,
+    ConsensusConfig,
+)> {
+    setup_env_with_block_migration_depth(num_blocks_in_epoch, seconds_to_wait, 4).await
+}
+
 pub(crate) fn assert_single_log_for(
     receipts: &[reth::primitives::Receipt],
     topic: &[u8; 32],
     addr: Address,
     context: &str,
 ) -> usize {
+    use irys_reth_node_bridge::irys_reth::shadow_tx::shadow_tx_topics::*;
+    tracing::error!(UNSTAKE = ?(*UNSTAKE));
+    tracing::error!(UNSTAKE_DEBIT = ?(*UNSTAKE_DEBIT));
+    tracing::error!(BLOCK_REWARD = ?(*BLOCK_REWARD));
+    tracing::error!(STAKE = ?(*STAKE));
+    tracing::error!(STORAGE_FEES = ?(*STORAGE_FEES));
+    tracing::error!(PLEDGE = ?(*PLEDGE));
+    tracing::error!(UNPLEDGE = ?(*UNPLEDGE));
+    tracing::error!(UNPLEDGE_REFUND = ?(*UNPLEDGE_REFUND));
+    tracing::error!(TERM_FEE_REWARD = ?(*TERM_FEE_REWARD));
+    tracing::error!(INGRESS_PROOF_REWARD = ?(*INGRESS_PROOF_REWARD));
+    tracing::error!(PERM_FEE_REFUND = ?(*PERM_FEE_REFUND));
+
     // Find receipts that contain exactly one matching log for the given topic and address.
     let mut idx: Option<usize> = None;
     let hits: Vec<_> = receipts
@@ -939,6 +967,9 @@ pub(crate) fn assert_single_log_for(
             let has = r
                 .logs
                 .iter()
+                .inspect(|log| {
+                    tracing::warn!(topic = ?log.topics()[0], addrress =?log.address);
+                })
                 .any(|log| log.topics()[0] == *topic && log.address == addr);
             if has {
                 idx = Some(i);

@@ -10,7 +10,7 @@ use irys_types::{
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
 
 use crate::block_production::unpledge_refund::{
-    assert_single_log_for, send_unpledge_all, setup_env,
+    assert_single_log_for, send_unpledge_all, setup_env, setup_env_with_block_migration_depth,
 };
 
 /// Two-node scenario exercising the full unstake flow:
@@ -526,8 +526,14 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 
     let num_blocks_in_epoch = 2_u64;
     let seconds_to_wait = 20_usize;
+    let block_migration_depth = 2_u32;
     let (genesis_node, peer_node, peer_addr, _initial_assignment, consensus) =
-        setup_env(num_blocks_in_epoch, seconds_to_wait).await?;
+        setup_env_with_block_migration_depth(
+            num_blocks_in_epoch,
+            seconds_to_wait,
+            block_migration_depth,
+        )
+        .await?;
     let peer_signer = peer_node.node_ctx.config.irys_signer();
 
     let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
@@ -544,6 +550,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         },
     )
     .await?;
+    genesis_node.mine_until_next_epoch().await?;
     genesis_node.mine_until_next_epoch().await?;
 
     // ------------- Phase 1: Verify peer has no pledges -------------
@@ -623,10 +630,6 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 
     // ------------- Phase 3: Mine block and verify pledge is included, unstake is NOT -------------
     let block = genesis_node.mine_block().await?;
-    genesis_node
-        .wait_until_height(block.height, seconds_to_wait)
-        .await
-        .expect("peer should sync block");
     let block_header = genesis_node.get_block_by_height(block.height).await?;
 
     // Assert PLEDGE IS in the commitment ledger
@@ -636,139 +639,139 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         "Pledge commitment MUST be included (higher priority than unstake)",
     );
 
-    // // Assert UNSTAKE is NOT in the commitment ledger
-    // assert_commitment_not_in_ledger(
-    //     &block_header,
-    //     unstake_tx.id,
-    //     "Unstake commitment must NOT be included when pledge is being added in same block",
-    // );
+    // Assert UNSTAKE is NOT in the commitment ledger
+    assert_commitment_not_in_ledger(
+        &block_header,
+        unstake_tx.id,
+        "Unstake commitment must NOT be included when pledge is being added in same block",
+    );
 
-    // // Verify commitment snapshot: unstake should NOT be present
-    // assert_no_unstake_in_commitment_snapshot(
-    //     &genesis_node,
-    //     block_header.block_hash,
-    //     peer_addr,
-    //     "Unstake must NOT be in commitment snapshot when pledge is being added in same block",
-    // );
+    // Verify commitment snapshot: unstake should NOT be present
+    assert_no_unstake_in_commitment_snapshot(
+        &genesis_node,
+        block_header.block_hash,
+        peer_addr,
+        "Unstake must NOT be in commitment snapshot when pledge is being added in same block",
+    );
 
-    // // ------------- Phase 4: Verify shadow transactions -------------
-    // let receipts = get_block_receipts(&reth_ctx, block_header.evm_block_hash)?;
+    // ------------- Phase 4: Verify shadow transactions -------------
+    let receipts = get_block_receipts(&reth_ctx, block_header.evm_block_hash)?;
 
-    // // Verify PLEDGE shadow transaction exists
-    // let pledge_receipt_idx = assert_single_log_for(
-    //     &receipts,
-    //     &shadow_tx_topics::PLEDGE,
-    //     peer_addr,
-    //     "Block must contain PLEDGE shadow tx for included pledge",
-    // );
-    // let pledge_receipt = &receipts[pledge_receipt_idx];
-    // assert!(
-    //     pledge_receipt.success,
-    //     "Pledge shadow tx must succeed"
-    // );
+    // Verify PLEDGE shadow transaction exists
+    let pledge_receipt_idx = assert_single_log_for(
+        &receipts,
+        &shadow_tx_topics::PLEDGE,
+        peer_addr,
+        "Block must contain PLEDGE shadow tx for included pledge",
+    );
+    let pledge_receipt = &receipts[pledge_receipt_idx];
+    assert!(pledge_receipt.success, "Pledge shadow tx must succeed");
 
-    // // No UNSTAKE_DEBIT or UNSTAKE shadow transactions should exist
-    // assert_no_shadow_tx_log(
-    //     &receipts,
-    //     &shadow_tx_topics::UNSTAKE_DEBIT,
-    //     peer_addr,
-    //     "Block must not contain UNSTAKE_DEBIT when unstake was rejected",
-    // );
-    // assert_no_shadow_tx_log(
-    //     &receipts,
-    //     &shadow_tx_topics::UNSTAKE,
-    //     peer_addr,
-    //     "Block must not contain UNSTAKE refund when unstake was rejected",
-    // );
+    // No UNSTAKE_DEBIT or UNSTAKE shadow transactions should exist
+    assert_no_shadow_tx_log(
+        &receipts,
+        &shadow_tx_topics::UNSTAKE_DEBIT,
+        peer_addr,
+        "Block must not contain UNSTAKE_DEBIT when unstake was rejected",
+    );
+    assert_no_shadow_tx_log(
+        &receipts,
+        &shadow_tx_topics::UNSTAKE,
+        peer_addr,
+        "Block must not contain UNSTAKE refund when unstake was rejected",
+    );
 
-    // // ------------- Phase 5: Verify balance and treasury reflect ONLY pledge processing -------------
-    // // Balance should decrease by pledge value + pledge fee (no unstake fee charged)
-    // let expected_balance = balance_before - pledge_value - U256::from(pledge_fee);
-    // assert_balance(
-    //     &genesis_node,
-    //     peer_addr,
-    //     block_header.evm_block_hash,
-    //     expected_balance,
-    //     "Balance should decrease by pledge value + fee only (unstake was rejected)",
-    // );
+    // ------------- Phase 5: Verify balance and treasury reflect ONLY pledge processing -------------
+    // Treasury should increase by pledge value (no unstake refund)
+    assert_treasury(
+        &block_header,
+        treasury_before + pledge_value,
+        "Treasury should increase by pledge value only (unstake was rejected)",
+    );
 
-    // // Treasury should increase by pledge value (no unstake refund)
-    // assert_treasury(
-    //     &block_header,
-    //     treasury_before + pledge_value,
-    //     "Treasury should increase by pledge value only (unstake was rejected)",
-    // );
+    // Balance should decrease by pledge value + pledge fee (no unstake fee charged)
+    let expected_balance = balance_before - pledge_value - U256::from(pledge_fee);
+    tracing::error!(?balance_before);
+    tracing::error!(?pledge_value);
+    tracing::error!(?pledge_fee);
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        block_header.evm_block_hash,
+        expected_balance,
+        "Balance should decrease by pledge value + fee only (unstake was rejected)",
+    );
 
-    // // ------------- Phase 6: Verify peer state after pledge inclusion -------------
-    // // Peer should still have stake
-    // assert_stake_exists_in_epoch(
-    //     &genesis_node,
-    //     peer_addr,
-    //     "Peer must still be staked after pledge inclusion",
-    // );
+    // ------------- Phase 6: Verify peer state after pledge inclusion -------------
+    // Peer should still have stake
+    assert_stake_exists_in_epoch(
+        &genesis_node,
+        peer_addr,
+        "Peer must still be staked after pledge inclusion",
+    );
 
-    // // The pledge won't be in epoch snapshot yet (still within the same epoch)
-    // // It will be in the block's commitment snapshot instead
-    // let commitment_snapshot = {
-    //     let tree = genesis_node.node_ctx.block_tree_guard.read();
-    //     tree.get_commitment_snapshot(&block_header.block_hash)
-    //         .expect("Block must have commitment snapshot")
-    // };
+    // The pledge won't be in epoch snapshot yet (still within the same epoch)
+    // It will be in the block's commitment snapshot instead
+    let commitment_snapshot = {
+        let tree = genesis_node.node_ctx.block_tree_guard.read();
+        tree.get_commitment_snapshot(&block_header.block_hash)
+            .expect("Block must have commitment snapshot")
+    };
 
-    // let peer_commitments = commitment_snapshot
-    //     .commitments
-    //     .get(&peer_addr)
-    //     .expect("Peer should have commitments in block's commitment snapshot");
+    let peer_commitments = commitment_snapshot
+        .commitments
+        .get(&peer_addr)
+        .expect("Peer should have commitments in block's commitment snapshot");
 
-    // // Verify the pledge is in the commitment snapshot (not unstake)
-    // assert!(
-    //     peer_commitments.unstake.is_none(),
-    //     "Unstake should NOT be in commitment snapshot"
-    // );
-    // assert_eq!(
-    //     peer_commitments.pledges.len(),
-    //     1,
-    //     "Exactly 1 pledge should be in commitment snapshot"
-    // );
+    // Verify the pledge is in the commitment snapshot (not unstake)
+    assert!(
+        peer_commitments.unstake.is_none(),
+        "Unstake should NOT be in commitment snapshot"
+    );
+    assert_eq!(
+        peer_commitments.pledges.len(),
+        1,
+        "Exactly 1 pledge should be in commitment snapshot"
+    );
 
-    // // ------------- Phase 7: Verify unstake remains in mempool -------------
-    // let mempool_unstake = genesis_node
-    //     .get_commitment_tx_from_mempool(&unstake_tx.id)
-    //     .await;
-    // assert!(
-    //     mempool_unstake.is_ok(),
-    //     "Unstake transaction must remain in mempool after being rejected (contextually invalid)"
-    // );
+    // ------------- Phase 7: Verify unstake remains in mempool -------------
+    let mempool_unstake = genesis_node
+        .get_commitment_tx_from_mempool(&unstake_tx.id)
+        .await;
+    assert!(
+        mempool_unstake.is_ok(),
+        "Unstake transaction must remain in mempool after being rejected (contextually invalid)"
+    );
 
-    // // ------------- Phase 8: Verify unstake continues to be rejected in next block -------------
-    // let second_block = genesis_node.mine_block().await?;
-    // let second_block_header = genesis_node
-    //     .get_block_by_height(second_block.height)
-    //     .await?;
+    // ------------- Phase 8: Verify unstake continues to be rejected in next block -------------
+    let second_block = genesis_node.mine_block().await?;
+    let second_block_header = genesis_node
+        .get_block_by_height(second_block.height)
+        .await?;
 
-    // // Unstake should still NOT be included because pledge is now active
-    // assert_commitment_not_in_ledger(
-    //     &second_block_header,
-    //     unstake_tx.id,
-    //     "Unstake must continue to be rejected in subsequent blocks while pledge is active",
-    // );
+    // Unstake should still NOT be included because pledge is now active
+    assert_commitment_not_in_ledger(
+        &second_block_header,
+        unstake_tx.id,
+        "Unstake must continue to be rejected in subsequent blocks while pledge is active",
+    );
 
-    // // Verify unstake is NOT in commitment snapshot of second block either
-    // assert_no_unstake_in_commitment_snapshot(
-    //     &genesis_node,
-    //     second_block_header.block_hash,
-    //     peer_addr,
-    //     "Unstake must NOT be in commitment snapshot of second block while pledge is active",
-    // );
+    // Verify unstake is NOT in commitment snapshot of second block either
+    assert_no_unstake_in_commitment_snapshot(
+        &genesis_node,
+        second_block_header.block_hash,
+        peer_addr,
+        "Unstake must NOT be in commitment snapshot of second block while pledge is active",
+    );
 
-    // // Balance should remain at expected_balance (no additional changes from unstake)
-    // assert_balance(
-    //     &genesis_node,
-    //     peer_addr,
-    //     second_block_header.evm_block_hash,
-    //     expected_balance,
-    //     "Balance should remain unchanged from first block (no unstake processing in second block)",
-    // );
+    // Balance should remain at expected_balance (no additional changes from unstake)
+    assert_balance(
+        &genesis_node,
+        peer_addr,
+        second_block_header.evm_block_hash,
+        expected_balance,
+        "Balance should remain unchanged from first block (no unstake processing in second block)",
+    );
 
     genesis_node.stop().await;
     peer_node.stop().await;
