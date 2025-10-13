@@ -332,7 +332,7 @@ impl PartitionMiningServiceInner {
 pub struct PartitionMiningService {
     shutdown: Shutdown,
     inner: Arc<tokio::sync::Mutex<PartitionMiningServiceInner>>,
-    cmd_rx: UnboundedReceiver<PartitionMiningCommand>,
+    cmd_rx: Option<UnboundedReceiver<PartitionMiningCommand>>,
     broadcast_rx: UnboundedReceiver<MiningBroadcastEvent>,
 }
 
@@ -360,7 +360,7 @@ impl PartitionMiningService {
         let svc = Self {
             shutdown: shutdown_rx,
             inner,
-            cmd_rx,
+            cmd_rx: Some(cmd_rx),
             broadcast_rx,
         };
 
@@ -392,13 +392,20 @@ impl PartitionMiningService {
                 }
 
                 // Control commands
-                cmd = self.cmd_rx.recv() => {
+                cmd = async {
+                    if let Some(rx) = &mut self.cmd_rx {
+                        rx.recv().await
+                    } else {
+                        futures::future::pending().await
+                    }
+                } => {
                     match cmd {
                         Some(PartitionMiningCommand::SetMining(enabled)) => {
                             self.inner.lock().await.set_mining(enabled);
                         }
                         None => {
-                            // Controller dropped. Keep running until shutdown.
+                            // Controller dropped: disable command polling
+                            self.cmd_rx = None;
                         }
                     }
                 }
