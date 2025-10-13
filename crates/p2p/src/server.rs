@@ -469,7 +469,7 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
-            return HttpResponse::Ok().json(RejectionReason::GossipDisabled);
+            return HttpResponse::Ok().json(GossipResponse::Rejected(RejectionReason::GossipDisabled));
         }
         if let Err(error_response) =
             Self::check_peer(&server.peer_list, &req, data_request.miner_address)
