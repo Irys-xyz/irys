@@ -29,7 +29,7 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
-use std::ops::Deref;
+use std::ops::Deref as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;

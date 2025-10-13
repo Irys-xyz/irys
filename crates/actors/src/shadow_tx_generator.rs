@@ -877,21 +877,21 @@ mod tests {
         let pledge_value = U256::from(100000);
         let pledge_fee = 500;
         let commitments = vec![
-            create_test_commitment(CommitmentType::Stake, stake_value.clone(), stake_fee),
+            create_test_commitment(CommitmentType::Stake, stake_value, stake_fee),
             create_test_commitment(
                 CommitmentType::Pledge {
                     pledge_count_before_executing: 2,
                 },
-                pledge_value.clone(),
+                pledge_value,
                 pledge_fee,
             ),
-            create_test_commitment(CommitmentType::Unstake, stake_value.clone(), stake_fee),
+            create_test_commitment(CommitmentType::Unstake, stake_value, stake_fee),
             create_test_commitment(
                 CommitmentType::Unpledge {
                     pledge_count_before_executing: 1,
                     partition_hash: [0_u8; 32],
                 },
-                pledge_value.clone(),
+                pledge_value,
                 pledge_fee,
             ),
         ];
@@ -919,13 +919,13 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
-                        amount: stake_value.clone().into(),
+                        amount: stake_value.into(),
                         target: commitments[0].signer,
                         irys_ref: commitments[0].id.into(),
                     }),
                     H256::zero().into(),
                 ),
-                transaction_fee: stake_fee.clone(),
+                transaction_fee: stake_fee,
             },
             // Pledge
             ShadowMetadata {

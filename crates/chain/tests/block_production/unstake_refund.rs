@@ -600,8 +600,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .expect("sign pledge commitment");
 
     tracing::error!(?pledge_tx.id, ?pledge_tx.commitment_type, ?anchor, "Submitting NEW pledge transaction");
-    let pledge_response = genesis_node.post_commitment_tx(&pledge_tx).await?;
-    tracing::error!(?pledge_response, "Pledge POST response");
+    genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     let pledge_mempool_result = genesis_node
         .wait_for_mempool(pledge_tx.id, seconds_to_wait)
@@ -617,8 +616,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .expect("sign unstake commitment");
 
     tracing::error!(?unstake_tx.id, ?unstake_tx.commitment_type, ?anchor, "Submitting NEW unstake transaction");
-    let unstake_response = genesis_node.post_commitment_tx(&unstake_tx).await?;
-    tracing::error!(?unstake_response, "Unstake POST response");
+    genesis_node.post_commitment_tx(&unstake_tx).await?;
 
     let unstake_mempool_result = genesis_node
         .wait_for_mempool(unstake_tx.id, seconds_to_wait)
