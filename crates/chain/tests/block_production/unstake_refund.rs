@@ -773,7 +773,6 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     Ok(())
 }
 
-
 /// Get receipts for a block
 fn get_block_receipts(
     reth_ctx: &irys_reth_node_bridge::IrysRethNodeAdapter,
