@@ -33,8 +33,12 @@ impl IrysSignature {
     /// Validates this signature by performing signer recovery
     /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
     pub fn validate_signature(&self, prehash: [u8; 32], expected_address: Address) -> bool {
-        recover_signer(&self.0, prehash.into())
+        self.recover_signer(prehash)
             .is_ok_and(|recovered_address| expected_address == recovered_address)
+    }
+
+    pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<Address> {
+        Ok(recover_signer(&self.0, prehash.into())?)
     }
 }
 
@@ -182,10 +186,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x3219accff2a40786e9387ab861649e6b3830e4650bcbb70345d57153a129608b4b585c1a827c2f0ef9cc8355d89c810e0abeb9e781c0e68f8b043c756e70c7311b";
+    const SIG_HEX: &str = "0x2b80b5cb509d4a1b7cad4f68c44cc13b2e985c7101fe5a38668bcfeb1e79f01351e2c570ba367698228b52785b0375e3579d7a9ceef995116a25c565efa820281c";
     // Base58 encoding of the signature (for version=1 signing preimage)
     const SIG_BS58: &str =
-        "5RRj9zESnU7c488x1zP34KhoTY3K9xnEaKDHEMkaYtk3AB5xXZ9JV7jT87jpny1SVXXPBqMpXpBdZnL8D8Pq31RML";
+        "4qfCDRG4yFjuFebpicpPk4baWjw7gtHWoBb9S3HRzLY942sQmwv216dGWPXABWN9s2n8hy1XiLNu1VmarHLDUe8VH";
 
     // spellchecker:on
 
