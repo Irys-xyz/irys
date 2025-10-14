@@ -1,24 +1,26 @@
-use irys_domain::{ChunkType, StorageModule};
+use crate::{
+    block_producer::BlockProducerCommand,
+    broadcast_mining_service::{
+        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
+        BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
+    },
+    packing::PackingRequest,
+    services::ServiceSenders,
+};
+
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-use crate::block_producer::BlockProducerCommand;
-use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
-    BroadcastPartitionsExpiration, Subscribe, Unsubscribe,
-};
-use crate::packing::PackingRequest;
-use crate::services::ServiceSenders;
 use actix::prelude::*;
 use actix::{Actor, Context, Handler, Message};
 use eyre::WrapErr as _;
+use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
-use irys_storage::{ie, ii};
-use irys_types::block_production::Seed;
-use irys_types::{block_production::SolutionContext, H256, U256};
+use irys_storage::ii;
 use irys_types::{
+    block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange,
+    PartitionChunkOffset, PartitionChunkRange, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use tracing::{debug, error, info, warn, Span};
@@ -347,10 +349,28 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(?partition_hash, ?interval, "Expiring partition hash");
                     let sender = self.service_senders.packing_sender();
-                    let _ = sender.try_send(PackingRequest {
+                    match sender.try_send(PackingRequest {
                         storage_module: self.storage_module.clone(),
                         chunk_range: PartitionChunkRange(interval),
-                    });
+                    }) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!(
+                                storage_module_id = %self.storage_module.id,
+                                ?partition_hash,
+                                ?interval,
+                                "Dropping packing request due to saturated channel"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                            error!(
+                                storage_module_id = %self.storage_module.id,
+                                ?partition_hash,
+                                ?interval,
+                                "Packing channel closed; failed to enqueue repacking request"
+                            );
+                        }
+                    }
                 } else {
                     error!(
                         ?partition_hash,
@@ -388,7 +408,7 @@ impl Handler<MiningControl> for PartitionMiningActor {
         let should_mine = control.into_inner();
         debug!(
             "Setting should_mine to {} from {}",
-            &self.should_mine, &should_mine
+            &should_mine, &self.should_mine
         );
         self.should_mine = should_mine
     }
@@ -404,11 +424,12 @@ mod tests {
     use crate::{
         block_producer::BlockProducerCommand,
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-        mining::{PartitionMiningActor, Seed},
+        mining::Seed,
+        partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     };
+
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
-    use irys_storage::ie;
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
     use irys_types::{
         block_production::SolutionContext, chunk::UnpackedChunk, partition::PartitionAssignment,
@@ -424,8 +445,6 @@ mod tests {
     use tokio::time::sleep;
 
     #[test_log::test(actix_rt::test)]
-    #[expect(clippy::await_holding_lock, reason = "test")]
-
     async fn test_solution() {
         let chunk_count = 4;
         let chunk_size = 32;
@@ -523,15 +542,15 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
-        let mining_broadcaster = BroadcastMiningService::new(None);
-        let _mining_broadcaster_addr = mining_broadcaster.start();
-
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let partition_mining_actor = PartitionMiningActor::new(
+        // Ensure broadcaster SystemService is initialized before spawning the miner
+        let _ = BroadcastMiningService::from_registry();
+
+        let inner = PartitionMiningServiceInner::new(
             &config,
             service_senders,
             storage_module,
@@ -539,32 +558,32 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
-            None,
         );
 
+        // Spawn the Tokio partition mining service (subscribes to Actix broadcaster via SubscribeTokio)
+        let (_controller, _handle) =
+            PartitionMiningService::spawn_service(inner, tokio::runtime::Handle::current());
+
+        // Allow time for the miner to subscribe to the broadcaster
+        sleep(Duration::from_millis(200)).await;
+
         let seed: Seed = Seed(H256::random());
-        partition_mining_actor
-            .start()
-            .send(BroadcastMiningSeed {
-                seed,
-                checkpoints: H256List(vec![]),
-                global_step: 1,
-            })
-            .await
-            .unwrap();
+        // Broadcast seed via the Actix broadcaster so the Tokio miner receives it
+        let broadcaster = BroadcastMiningService::from_registry();
+        broadcaster.do_send(BroadcastMiningSeed {
+            seed,
+            checkpoints: H256List(vec![]),
+            global_step: 1,
+        });
 
         // busypoll the solution context rwlock
         let solution = 'outer: loop {
-            match arc_rwlock.try_read() {
-                Ok(lck) => {
-                    if lck.is_none() {
-                        sleep(Duration::from_millis(50)).await;
-                    } else {
-                        break 'outer lck.as_ref().unwrap().clone();
-                    }
+            if let Ok(lck) = arc_rwlock.try_read() {
+                if lck.is_some() {
+                    break 'outer lck.as_ref().unwrap().clone();
                 }
-                Err(_) => sleep(Duration::from_millis(50)).await,
             }
+            sleep(Duration::from_millis(50)).await;
         };
 
         tokio::task::yield_now().await;
@@ -599,7 +618,7 @@ mod tests {
         );
     }
 
-    #[actix_rt::test]
+    #[tokio::test]
     async fn test_recall_range_reinit() {
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();
@@ -663,7 +682,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let mut partition_mining_actor = PartitionMiningActor::new(
+        let mut inner = PartitionMiningServiceInner::new(
             &config,
             service_senders,
             storage_module,
@@ -671,12 +690,9 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
-            None,
         );
 
-        let range = partition_mining_actor
-            .get_recall_range(7, &hash, &partition_hash)
-            .unwrap();
+        let range = inner.test_get_recall_range(7, hash, partition_hash);
 
         let mut ranges = Ranges::new(5);
         ranges.get_recall_range(1, &hash, &partition_hash).unwrap();

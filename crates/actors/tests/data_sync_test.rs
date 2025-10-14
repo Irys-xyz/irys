@@ -8,7 +8,6 @@ use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
-use irys_storage::ie;
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,

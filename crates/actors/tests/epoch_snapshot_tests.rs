@@ -1,18 +1,17 @@
-use actix::Arbiter;
-use actix::{Actor as _, SystemService as _};
-
+use actix::SystemService as _;
 use irys_actors::broadcast_mining_service::{
     BroadcastMiningService, BroadcastPartitionsExpiration,
 };
 use irys_actors::{
-    block_producer::BlockProducerCommand, mining::PartitionMiningActor, services::ServiceSenders,
+    block_producer::BlockProducerCommand,
+    partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
+    services::ServiceSenders,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
-use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
@@ -376,6 +375,34 @@ async fn capacity_projection_tests() {
 }
 
 #[actix::test]
+/*
+Summary:
+Verify that when a Submit ledger slot expires at an epoch boundary,
+miners reset their storage modules and a repacking request is enqueued
+for the full partition, and that ledger slot/partition assignments are
+updated consistently.
+
+High-level steps:
+1) Configure a minimal consensus and build an EpochSnapshot with initial
+   Publish/Submit slots and capacity partitions. Map local
+   StorageModuleInfos to StorageModule instances for the miner.
+2) Spawn a Tokio PartitionMiningService per storage module. The Actix
+   BroadcastMiningService (global event bus) is accessed lazily via
+   from_registry() when broadcasting.
+3) Wire a packing channel in ServiceSenders and forward the first
+   PackingRequest into a oneshot receiver for assertions.
+4) Drive epoch transitions by repeatedly calling perform_epoch_tasks
+   with synthetic epoch blocks (tweaking Submit ledger chunk totals as
+   needed). In each iteration, broadcast any expired partitions reported
+   by the snapshot to the miners.
+5) Assert:
+   - A PackingRequest arrives targeting the Submit partition and the
+     full partition range.
+   - Submit slot 0 is marked expired and emptied; new Submit slots are
+     added and assigned; Publish still has one slot.
+   - Partition assignments for Publish and Submit slots are internally
+     consistent with the ledger state.
+*/
 async fn partition_expiration_and_repacking_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -433,12 +460,13 @@ async fn partition_expiration_and_repacking_test() {
 
     // Wire a Tokio packing handle that captures a single request via oneshot
     let (tx_packing, mut rx_packing) =
-        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(1);
+        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(storage_modules.len());
     let (pack_req_tx, pack_req_rx) =
         tokio::sync::oneshot::channel::<irys_actors::packing::PackingRequest>();
+    //spawn a task that will await rx_packing and send the very first packing request before exiting
     tokio::spawn(async move {
         if let Some(packing_req) = rx_packing.recv().await {
-            let _ = pack_req_tx.send(packing_req);
+            pack_req_tx.send(packing_req).expect("pack_req_rx dropped");
         }
     });
 
@@ -451,36 +479,37 @@ async fn partition_expiration_and_repacking_test() {
         while let Some(cmd) = receivers.block_producer.recv().await {
             if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
                 // Return Ok(None) for the test
-                let _ = response.send(Ok(None));
+                response
+                    .send(Ok(None))
+                    .expect("block producer response receiver dropped");
             }
         }
     });
 
     let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
-    let mut part_actors = Vec::new();
+    let mut mining_service_handles = Vec::new();
+    let mut mining_service_controllers = Vec::new();
 
     let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
+    let should_mine = true;
     for sm in &storage_modules {
-        let partition_mining_actor = PartitionMiningActor::new(
+        let inner = PartitionMiningServiceInner::new(
             &config,
             service_senders.clone(),
             sm.clone(),
-            true, // do not start mining automatically
+            should_mine,
             vdf_steps_guard.clone(),
             atomic_global_step_number.clone(),
             U256::zero(),
-            None,
         );
 
-        let part_arbiter = Arbiter::new();
-        let partition_address =
-            PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
-                partition_mining_actor
-            });
+        let (controller, handle) =
+            PartitionMiningService::spawn_service(inner, tokio::runtime::Handle::current());
         debug!("starting miner partition hash {:?}", sm.partition_hash());
-        part_actors.push(partition_address);
+        mining_service_controllers.push(controller);
+        mining_service_handles.push(handle);
     }
 
     let assign_submit_partition_hash = {
