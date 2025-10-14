@@ -116,10 +116,17 @@ impl Inner {
         self.precheck_commitment_ingress_common(&commitment_tx)
             .await?;
 
-        // Gossip path: check only the transaction shape.
-        // - Validate `value` to reject clearly wrong Stake/Pledge/Unpledge/Unstake txs.
-        // - Do not check fee or account balance here. Those are verified on API ingress
+        // Gossip path: check only static fields from config (shape).
+        // - Validate `fee` and `value` to reject clearly wrong Stake/Pledge/Unpledge/Unstake txs.
+        // - Do not check account balance here. That is verified on API ingress
         //   and again during selection/block validation.
+        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
+            let mut guard = self.mempool_state.write().await;
+            guard.recent_invalid_tx.put(commitment_tx.id, ());
+            drop(guard);
+
+            return Err(e.into());
+        }
         if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
             let mut guard = self.mempool_state.write().await;
             guard.recent_invalid_tx.put(commitment_tx.id, ());
