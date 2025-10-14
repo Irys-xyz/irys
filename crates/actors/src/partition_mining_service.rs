@@ -327,6 +327,20 @@ impl PartitionMiningServiceInner {
     }
 }
 
+#[cfg(test)]
+impl PartitionMiningServiceInner {
+    /// Test-only helper to expose recall-range computation without starting the service.
+    pub fn test_get_recall_range(
+        &mut self,
+        step: u64,
+        seed: irys_types::H256,
+        partition_hash: irys_types::H256,
+    ) -> u64 {
+        self.get_recall_range(step, &seed, &partition_hash)
+            .expect("test_get_recall_range failed")
+    }
+}
+
 /// Tokio service for partition mining
 #[derive(Debug)]
 pub struct PartitionMiningService {
