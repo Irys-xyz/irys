@@ -36,6 +36,7 @@ use tracing::{trace, warn};
 // External crate imports - Other
 
 use super::*;
+use crate::precompile::register_irys_precompiles_if_active;
 use crate::shadow_tx::{self, ShadowTransaction};
 
 /// Constants for shadow transaction processing
@@ -305,7 +306,7 @@ impl EvmFactory for IrysEvmFactory {
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        IrysEvm::new(
+        let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
                 .with_cfg(input.cfg_env)
@@ -315,7 +316,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             false,
-        )
+        );
+
+        // Register Irys custom precompiles depending on active hardfork (Frontier+).
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id);
+
+        evm
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -325,7 +331,7 @@ impl EvmFactory for IrysEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        IrysEvm::new(
+        let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
                 .with_cfg(input.cfg_env)
@@ -335,7 +341,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             true,
-        )
+        );
+
+        // Register Irys custom precompiles depending on active hardfork (Frontier+).
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id);
+
+        evm
     }
 }
 
@@ -1334,4 +1345,5 @@ mod tests {
         let result = res.unwrap().result;
         assert!(result.is_success(), "expected success, got: {:?}", result);
     }
+
 }
