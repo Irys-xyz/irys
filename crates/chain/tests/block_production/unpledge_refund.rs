@@ -609,38 +609,15 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         genesis_node.get_balance(genesis_signer.address(), head_block.evm_block_hash);
 
     let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
-    let mut total_fee = U256::from(0_u64);
-    let mut total_refund = U256::from(0_u64);
-    let mut unpledge_txs = Vec::new();
-
-    let initial_pledge_count = genesis_node
-        .node_ctx
-        .mempool_pledge_provider
-        .as_ref()
-        .pledge_count(genesis_signer.address())
-        .await;
-    for (idx, target) in assigned_partitions.iter().enumerate() {
-        let anchor = peer_node.get_anchor().await?;
-        let mut unsigned = CommitmentTransaction::new_unpledge(
-            &consensus,
-            anchor,
-            &(initial_pledge_count - (idx as u64)),
-            genesis_signer.address(),
-            target.partition_hash().unwrap(),
-        )
-        .await;
-        genesis_signer
-            .sign_commitment(&mut unsigned)
-            .expect("sign multi-unpledge tx");
-        total_fee += U256::from(unsigned.fee);
-        total_refund += unsigned.value;
-
-        peer_node.post_commitment_tx(&unsigned).await?;
-        genesis_node
-            .wait_for_mempool(unsigned.id, seconds_to_wait)
-            .await?;
-        unpledge_txs.push((unsigned, Arc::clone(target)));
-    }
+    let (total_fee, total_refund, unpledge_txs) = send_unpledge_all(
+        seconds_to_wait,
+        &genesis_node,
+        &peer_node,
+        consensus,
+        &genesis_signer,
+        assigned_partitions,
+    )
+    .await?;
 
     let inclusion_block = peer_node.mine_block().await?;
 
@@ -829,7 +806,66 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn setup_genesis_env(
+pub async fn send_unpledge_all(
+    seconds_to_wait: usize,
+    genesis_node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    peer_node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    consensus: ConsensusConfig,
+    signer: &irys_types::irys::IrysSigner,
+    assigned_partitions: Vec<Arc<irys_domain::StorageModule>>,
+) -> Result<
+    (
+        U256,
+        U256,
+        Vec<(CommitmentTransaction, Arc<irys_domain::StorageModule>)>,
+    ),
+    eyre::Error,
+> {
+    let mut total_fee = U256::from(0_u64);
+    let mut total_refund = U256::from(0_u64);
+    let mut unpledge_txs = Vec::new();
+    let initial_pledge_count = genesis_node
+        .node_ctx
+        .mempool_pledge_provider
+        .as_ref()
+        .pledge_count(signer.address())
+        .await;
+    tracing::error!(?initial_pledge_count);
+    for (idx, target) in assigned_partitions.iter().enumerate() {
+        let pledge_count = initial_pledge_count - (idx as u64);
+        if pledge_count == 0 {
+            break;
+        }
+        if target.partition_assignment.read().unwrap().is_none() {
+            continue;
+        };
+        let anchor = peer_node.get_anchor().await?;
+        tracing::error!(?pledge_count);
+        let mut unsigned = CommitmentTransaction::new_unpledge(
+            &consensus,
+            anchor,
+            &pledge_count,
+            signer.address(),
+            target.partition_hash().unwrap(),
+        )
+        .await;
+        tracing::error!(part_hash = ?target.partition_hash());
+        signer
+            .sign_commitment(&mut unsigned)
+            .expect("sign multi-unpledge tx");
+        total_fee += U256::from(unsigned.fee);
+        total_refund += unsigned.value;
+
+        peer_node.post_commitment_tx(&unsigned).await?;
+        genesis_node
+            .wait_for_mempool(unsigned.id, seconds_to_wait)
+            .await?;
+        unpledge_txs.push((unsigned, Arc::clone(target)));
+    }
+    Ok((total_fee, total_refund, unpledge_txs))
+}
+
+pub(crate) async fn setup_genesis_env(
     num_blocks_in_epoch: u64,
     seconds_to_wait: usize,
 ) -> eyre::Result<(IrysNodeTest<irys_chain::IrysNodeCtx>, ConsensusConfig)> {
@@ -845,9 +881,10 @@ async fn setup_genesis_env(
     Ok((genesis_node, consensus))
 }
 
-async fn setup_env(
+pub(crate) async fn setup_env_with_block_migration_depth(
     num_blocks_in_epoch: u64,
     seconds_to_wait: usize,
+    block_migration_depth: u32,
 ) -> eyre::Result<(
     IrysNodeTest<irys_chain::IrysNodeCtx>,
     IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -857,6 +894,7 @@ async fn setup_env(
 )> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch as usize);
     genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth;
 
     let peer_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_signer]);
@@ -888,7 +926,20 @@ async fn setup_env(
     Ok((genesis_node, peer_node, peer_addr, capacity_pa, consensus))
 }
 
-fn assert_single_log_for(
+pub(crate) async fn setup_env(
+    num_blocks_in_epoch: u64,
+    seconds_to_wait: usize,
+) -> eyre::Result<(
+    IrysNodeTest<irys_chain::IrysNodeCtx>,
+    IrysNodeTest<irys_chain::IrysNodeCtx>,
+    Address,
+    PartitionAssignment,
+    ConsensusConfig,
+)> {
+    setup_env_with_block_migration_depth(num_blocks_in_epoch, seconds_to_wait, 4).await
+}
+
+pub(crate) fn assert_single_log_for(
     receipts: &[reth::primitives::Receipt],
     topic: &[u8; 32],
     addr: Address,

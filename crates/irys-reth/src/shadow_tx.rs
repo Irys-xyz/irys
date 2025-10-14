@@ -50,8 +50,8 @@ pub enum ShadowTransaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
 pub enum TransactionPacket {
-    /// Unstake funds to an account (balance increment). Used for unstaking or protocol rewards.
-    Unstake(EitherIncrementOrDecrement),
+    /// Unstake at inclusion: fee-only via priority fee. No amount in packet; log-only.
+    UnstakeDebit(UnstakeDebit),
     /// Block reward payment to the block producer (balance increment). Must be validated by CL.
     BlockReward(BlockRewardIncrement),
     /// Stake funds from an account (balance decrement). Used for staking operations.
@@ -71,6 +71,8 @@ pub enum TransactionPacket {
     IngressProofReward(BalanceIncrement),
     /// Permanent fee refund to users whose transactions were not promoted before ledger expiry (balance increment).
     PermFeeRefund(BalanceIncrement),
+    /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
+    UnstakeRefund(BalanceIncrement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -79,15 +81,34 @@ pub enum EitherIncrementOrDecrement {
     BalanceDecrement(BalanceDecrement),
 }
 
+/// Inclusion-time Unstake record: fee-only via priority fee, no balance change.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct UnstakeDebit {
+    /// Target account address (fee payer for priority fee).
+    pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this shadow tx.
+    pub irys_ref: FixedBytes<32>,
+}
+
 impl TransactionPacket {
     /// Returns the target address for this transaction packet, if any.
     /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
     pub fn fee_payer_address(&self) -> Option<Address> {
         match self {
-            Self::Unstake(either) => match either {
-                EitherIncrementOrDecrement::BalanceIncrement(inc) => Some(inc.target),
-                EitherIncrementOrDecrement::BalanceDecrement(dec) => Some(dec.target),
-            },
+            Self::UnstakeRefund(inc) => Some(inc.target),
+            Self::UnstakeDebit(dec) => Some(dec.target),
             Self::BlockReward(_) => None, // No target, uses beneficiary
             Self::Stake(dec) => Some(dec.target),
             Self::StorageFees(dec) => Some(dec.target),
@@ -110,6 +131,8 @@ pub mod shadow_tx_topics {
     use super::*;
 
     pub static UNSTAKE: LazyLock<FixedBytes<32>> = LazyLock::new(|| keccak256("SHADOW_TX_UNSTAKE"));
+    pub static UNSTAKE_DEBIT: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_UNSTAKE_DEBIT"));
     pub static BLOCK_REWARD: LazyLock<FixedBytes<32>> =
         LazyLock::new(|| keccak256("SHADOW_TX_BLOCK_REWARD"));
     pub static STAKE: LazyLock<FixedBytes<32>> = LazyLock::new(|| keccak256("SHADOW_TX_STAKE"));
@@ -187,7 +210,8 @@ impl TransactionPacket {
     pub fn topic(&self) -> FixedBytes<32> {
         use shadow_tx_topics::*;
         match self {
-            Self::Unstake(_) => *UNSTAKE,
+            Self::UnstakeRefund(_) => *UNSTAKE,
+            Self::UnstakeDebit(_) => *UNSTAKE_DEBIT,
             Self::BlockReward(_) => *BLOCK_REWARD,
             Self::Stake(_) => *STAKE,
             Self::StorageFees(_) => *STORAGE_FEES,
@@ -212,6 +236,7 @@ pub const TERM_FEE_REWARD_ID: u8 = 0x07;
 pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 pub const UNPLEDGE_REFUND_ID: u8 = 0x0A;
+pub const UNSTAKE_DEBIT_ID: u8 = 0x0B;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -259,8 +284,12 @@ impl BorshDeserialize for ShadowTransaction {
 impl BorshSerialize for TransactionPacket {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         match self {
-            Self::Unstake(inner) => {
+            Self::UnstakeRefund(inner) => {
                 writer.write_all(&[UNSTAKE_ID])?;
+                inner.serialize(writer)
+            }
+            Self::UnstakeDebit(inner) => {
+                writer.write_all(&[UNSTAKE_DEBIT_ID])?;
                 inner.serialize(writer)
             }
             Self::BlockReward(inner) => {
@@ -308,7 +337,8 @@ impl BorshDeserialize for TransactionPacket {
         let mut disc = [0_u8; 1];
         reader.read_exact(&mut disc)?;
         Ok(match disc[0] {
-            UNSTAKE_ID => Self::Unstake(EitherIncrementOrDecrement::deserialize_reader(reader)?),
+            UNSTAKE_ID => Self::UnstakeRefund(BalanceIncrement::deserialize_reader(reader)?),
+            UNSTAKE_DEBIT_ID => Self::UnstakeDebit(UnstakeDebit::deserialize_reader(reader)?),
             BLOCK_REWARD_ID => Self::BlockReward(BlockRewardIncrement::deserialize_reader(reader)?),
             STAKE_ID => Self::Stake(BalanceDecrement::deserialize_reader(reader)?),
             STORAGE_FEES_ID => Self::StorageFees(BalanceDecrement::deserialize_reader(reader)?),
@@ -496,6 +526,26 @@ impl BorshSerialize for UnpledgeDebit {
 }
 
 impl BorshDeserialize for UnpledgeDebit {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut addr = [0_u8; 20];
+        reader.read_exact(&mut addr)?;
+        let target = Address::from_slice(&addr);
+        let mut ref_buf = [0_u8; 32];
+        reader.read_exact(&mut ref_buf)?;
+        let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
+        Ok(Self { target, irys_ref })
+    }
+}
+
+impl BorshSerialize for UnstakeDebit {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(self.target.as_slice())?;
+        writer.write_all(self.irys_ref.as_slice())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for UnstakeDebit {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
         let mut addr = [0_u8; 20];
         reader.read_exact(&mut addr)?;
@@ -783,13 +833,15 @@ mod tests {
                 target: test_address,
                 irys_ref: test_ref,
             }),
-            TransactionPacket::Unstake(EitherIncrementOrDecrement::BalanceIncrement(
-                BalanceIncrement {
-                    amount: U256::from(400_u64),
-                    target: test_address,
-                    irys_ref: test_ref,
-                },
-            )),
+            TransactionPacket::UnstakeDebit(UnstakeDebit {
+                target: test_address,
+                irys_ref: test_ref,
+            }),
+            TransactionPacket::UnstakeRefund(BalanceIncrement {
+                amount: U256::from(400_u64),
+                target: test_address,
+                irys_ref: test_ref,
+            }),
             TransactionPacket::Unpledge(UnpledgeDebit {
                 target: test_address,
                 irys_ref: test_ref,

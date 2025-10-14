@@ -56,7 +56,6 @@ impl ApiState {
 
 pub fn routes() -> impl HttpServiceFactory {
     web::scope(API_VERSION)
-        .wrap(middleware::Logger::default())
         .route("/", web::get().to(index::info_route))
         .route("/block/{block_tag}", web::get().to(block::get_block))
         .route(
@@ -183,6 +182,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
             .wrap(Cors::permissive())
+            .wrap(middleware::Logger::default().log_target("api-server"))
     })
     .listen(listener)
     .unwrap()

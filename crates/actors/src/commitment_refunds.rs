@@ -3,7 +3,7 @@ use irys_domain::CommitmentSnapshot;
 use irys_primitives::CommitmentType;
 use irys_types::{CommitmentTransaction, ConsensusConfig};
 
-use crate::block_producer::UnpledgeRefundEvent;
+use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Derive epoch unpledge refund events deterministically from a commitment snapshot.
 ///
@@ -41,6 +41,34 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
             _ => unreachable!("only unpledge expected here"),
         };
         out.push(UnpledgeRefundEvent {
+            account: tx.signer,
+            amount,
+            irys_ref_txid: tx.id,
+        });
+    }
+    Ok(out)
+}
+
+/// Derive epoch unstake refund events deterministically from a commitment snapshot.
+///
+/// Ordering is the same as CommitmentTransaction::Ord for Unstake txs
+pub(crate) fn derive_unstake_refunds_from_snapshot(
+    commit_snapshot: &CommitmentSnapshot,
+    config: &ConsensusConfig,
+) -> Result<Vec<UnstakeRefundEvent>> {
+    // Collect all unstakes from the snapshot
+    let mut unstakes: Vec<CommitmentTransaction> = commit_snapshot
+        .commitments
+        .values()
+        .filter_map(|mc| mc.unstake.clone())
+        .collect();
+
+    unstakes.sort();
+    let mut out = Vec::with_capacity(unstakes.len());
+    for tx in unstakes {
+        // Refund equals the staked value (from config); inclusion was fee-only
+        let amount = config.stake_value.amount;
+        out.push(UnstakeRefundEvent {
             account: tx.signer,
             amount,
             irys_ref_txid: tx.id,

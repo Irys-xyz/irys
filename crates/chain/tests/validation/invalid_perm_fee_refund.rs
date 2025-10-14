@@ -51,6 +51,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                     user_perm_fee_refunds,
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
@@ -179,6 +180,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                     user_perm_fee_refunds, // But we have a refund!
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }

@@ -1878,6 +1878,54 @@ mod tests {
         Ok(())
     }
 
+    /// Test unstake-debit transaction (priority-fee-only at inclusion)
+    #[test_log::test(tokio::test)]
+    async fn test_unstake_debit_fee_only() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
+
+        let balance_after_initial_funding = get_balance(&node.inner, target_address);
+        assert!(
+            balance_after_initial_funding > U256::ZERO,
+            "Target account should have initial balance"
+        );
+
+        // Create unstake-debit transaction: fee-only via priority fee
+        let unstake_debit_tx = unstake_debit(target_address);
+        let unstake_debit_tx = sign_shadow_tx(
+            unstake_debit_tx,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+        let unstake_debit_tx_hash = *unstake_debit_tx.hash();
+
+        // Mine block with unstake-debit transaction
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unstake_debit_tx]).await?;
+
+        // Verify transaction is included in block
+        assert_txs_in_block(
+            &block_payload,
+            &[unstake_debit_tx_hash],
+            "UnstakeDebit transaction",
+        );
+
+        // Verify balance decreased by exactly the priority fee
+        assert_balance_change(
+            &node,
+            target_address,
+            balance_after_initial_funding,
+            U256::from(DEFAULT_PRIORITY_FEE),
+            false,
+            "Target balance should decrease by priority fee only on UnstakeDebit",
+        );
+
+        Ok(())
+    }
+
     /// Test pledge and unpledge transaction ordering
     #[test_log::test(tokio::test)]
     async fn test_pledge_unpledge_ordering() -> eyre::Result<()> {
@@ -3049,13 +3097,22 @@ pub mod test_utils {
     /// Compose a shadow tx for unstaking.
     pub fn unstake(address: Address) -> ShadowTransaction {
         ShadowTransaction::new_v1(
-            TransactionPacket::Unstake(shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(
-                shadow_tx::BalanceIncrement {
-                    amount: U256::ONE,
-                    target: address,
-                    irys_ref: alloy_primitives::FixedBytes::ZERO,
-                },
-            )),
+            TransactionPacket::UnstakeRefund(shadow_tx::BalanceIncrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unstake-debit (fee-only via priority fee).
+    pub fn unstake_debit(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::UnstakeDebit(shadow_tx::UnstakeDebit {
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
             alloy_primitives::FixedBytes::ZERO,
         )
     }
