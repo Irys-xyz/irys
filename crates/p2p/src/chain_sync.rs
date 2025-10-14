@@ -1271,6 +1271,81 @@ async fn get_block_index(
                     "Fetched block index from peer {:?}: {:?}",
                     miner_address, index
                 );
+
+                // If the index is empty, try all other peers before returning empty
+                if index.is_empty() {
+                    debug!(
+                        "Peer {:?} returned an empty index, trying all other peers",
+                        miner_address
+                    );
+
+                    // Try all remaining peers
+                    for (other_miner_address, other_peer) in peers_to_fetch_index_from.iter() {
+                        if other_miner_address == miner_address {
+                            continue; // Skip the peer we just tried
+                        }
+
+                        debug!("Trying to fetch index from peer {:?}", other_miner_address);
+
+                        // Check if peer is syncing
+                        match api_client.node_info(other_peer.address.api).await {
+                            Ok(info) => {
+                                if info.is_syncing {
+                                    info!(
+                                        "Peer {} is syncing, skipping for block index fetch",
+                                        other_miner_address
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(error) => {
+                                error!(
+                                    "Failed to fetch node info from peer {:?}: {:?}",
+                                    other_miner_address, error
+                                );
+                                continue;
+                            }
+                        }
+
+                        match api_client
+                            .get_block_index(
+                                other_peer.address.api,
+                                BlockIndexQuery {
+                                    height: start,
+                                    limit,
+                                },
+                            )
+                            .await
+                        {
+                            Ok(other_index) => {
+                                if !other_index.is_empty() {
+                                    debug!(
+                                        "Peer {:?} returned a non-empty index: {:?}",
+                                        other_miner_address, other_index
+                                    );
+                                    return Ok(other_index);
+                                } else {
+                                    debug!(
+                                        "Peer {:?} also returned an empty index",
+                                        other_miner_address
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                error!(
+                                    "Failed to fetch a block index from peer {:?}: {:?}",
+                                    other_miner_address, error
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    // All peers returned empty indices, return empty
+                    debug!("All peers returned empty indices, returning empty list");
+                    return Ok(vec![]);
+                }
+
                 return Ok(index);
             }
             Err(error) => {
