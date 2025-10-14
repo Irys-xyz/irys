@@ -406,8 +406,10 @@ mod tests {
     use crate::{
         block_producer::BlockProducerCommand,
         broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
-        mining::{PartitionMiningActor, Seed},
+        mining::Seed,
+        partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     };
+
     use irys_database::{open_or_create_db, tables::IrysTables};
     use irys_domain::{PackingParams, StorageModuleInfo};
     use irys_testing_utils::utils::{setup_tracing_and_temp_dir, temporary_directory};
@@ -524,15 +526,15 @@ mod tests {
 
         let _ = storage_module.sync_pending_chunks();
 
-        let mining_broadcaster = BroadcastMiningService::new(None);
-        let _mining_broadcaster_addr = mining_broadcaster.start();
-
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let partition_mining_actor = PartitionMiningActor::new(
+        // Ensure broadcaster SystemService is initialized before spawning the miner
+        let _ = BroadcastMiningService::from_registry();
+
+        let inner = PartitionMiningServiceInner::new(
             &config,
             service_senders,
             storage_module,
@@ -540,32 +542,32 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
-            None,
         );
 
+        // Spawn the Tokio partition mining service (subscribes to Actix broadcaster via SubscribeTokio)
+        let (_controller, _handle) =
+            PartitionMiningService::spawn_service(inner, tokio::runtime::Handle::current());
+
+        // Allow time for the miner to subscribe to the broadcaster
+        sleep(Duration::from_millis(200)).await;
+
         let seed: Seed = Seed(H256::random());
-        partition_mining_actor
-            .start()
-            .send(BroadcastMiningSeed {
-                seed,
-                checkpoints: H256List(vec![]),
-                global_step: 1,
-            })
-            .await
-            .unwrap();
+        // Broadcast seed via the Actix broadcaster so the Tokio miner receives it
+        let broadcaster = BroadcastMiningService::from_registry();
+        broadcaster.do_send(BroadcastMiningSeed {
+            seed,
+            checkpoints: H256List(vec![]),
+            global_step: 1,
+        });
 
         // busypoll the solution context rwlock
         let solution = 'outer: loop {
-            match arc_rwlock.try_read() {
-                Ok(lck) => {
-                    if lck.is_none() {
-                        sleep(Duration::from_millis(50)).await;
-                    } else {
-                        break 'outer lck.as_ref().unwrap().clone();
-                    }
+            if let Ok(lck) = arc_rwlock.try_read() {
+                if lck.is_some() {
+                    break 'outer lck.as_ref().unwrap().clone();
                 }
-                Err(_) => sleep(Duration::from_millis(50)).await,
             }
+            sleep(Duration::from_millis(50)).await;
         };
 
         tokio::task::yield_now().await;
