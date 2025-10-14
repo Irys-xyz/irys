@@ -489,6 +489,7 @@ async fn partition_expiration_and_repacking_test() {
     let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
     let mut mining_service_handles = Vec::new();
+    let mut mining_service_controllers = Vec::new();
 
     let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -504,9 +505,10 @@ async fn partition_expiration_and_repacking_test() {
             U256::zero(),
         );
 
-        let (_controller, handle) =
+        let (controller, handle) =
             PartitionMiningService::spawn_service(inner, tokio::runtime::Handle::current());
         debug!("starting miner partition hash {:?}", sm.partition_hash());
+        mining_service_controllers.push(controller);
         mining_service_handles.push(handle);
     }
 
