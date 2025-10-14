@@ -19,11 +19,8 @@ use irys_types::{
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
-use std::{sync::Arc, time::Duration};
-use tokio::{
-    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    time::sleep,
-};
+use std::sync::Arc;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 /// Commands that control the partition mining service
@@ -363,8 +360,8 @@ impl PartitionMiningServiceInner {
 #[derive(Debug)]
 pub struct PartitionMiningService {
     shutdown: Shutdown,
-    inner: Arc<tokio::sync::Mutex<PartitionMiningServiceInner>>,
-    cmd_rx: Option<UnboundedReceiver<PartitionMiningCommand>>,
+    state: PartitionMiningServiceInner,
+    cmd_rx: UnboundedReceiver<PartitionMiningCommand>,
     broadcast_rx: UnboundedReceiver<MiningBroadcastEvent>,
 }
 
@@ -374,8 +371,6 @@ impl PartitionMiningService {
         inner: PartitionMiningServiceInner,
         runtime_handle: tokio::runtime::Handle,
     ) -> (PartitionMiningController, TokioServiceHandle) {
-        let inner = Arc::new(tokio::sync::Mutex::new(inner));
-
         // Control channel
         let (cmd_tx, cmd_rx) = unbounded_channel();
 
@@ -391,8 +386,8 @@ impl PartitionMiningService {
 
         let svc = Self {
             shutdown: shutdown_rx,
-            inner,
-            cmd_rx: Some(cmd_rx),
+            state: inner,
+            cmd_rx,
             broadcast_rx,
         };
 
@@ -415,8 +410,6 @@ impl PartitionMiningService {
         info!("Starting partition mining service");
         loop {
             tokio::select! {
-                biased;
-
                 // Shutdown
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for partition mining service");
@@ -424,20 +417,14 @@ impl PartitionMiningService {
                 }
 
                 // Control commands
-                cmd = async {
-                    if let Some(rx) = &mut self.cmd_rx {
-                        rx.recv().await
-                    } else {
-                        futures::future::pending().await
-                    }
-                } => {
+                cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(PartitionMiningCommand::SetMining(enabled)) => {
-                            self.inner.lock().await.set_mining(enabled);
+                            self.state.set_mining(enabled);
                         }
                         None => {
-                            warn!("PartitionMiningService controller dropped; disabling command polling");
-                            self.cmd_rx = None;
+                            warn!("PartitionMiningService controller channel closed; stopping service");
+                            break;
                         }
                     }
                 }
@@ -446,18 +433,17 @@ impl PartitionMiningService {
                 evt = self.broadcast_rx.recv() => {
                     match evt {
                         Some(MiningBroadcastEvent::Seed(msg)) => {
-                            self.inner.lock().await.handle_seed(msg);
+                            self.state.handle_seed(msg);
                         }
                         Some(MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h))) => {
-                            self.inner.lock().await.update_difficulty(h.diff);
+                            self.state.update_difficulty(h.diff);
                         }
                         Some(MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list))) => {
-                            self.inner.lock().await.handle_partitions_expiration(&list);
+                            self.state.handle_partitions_expiration(&list);
                         }
                         None => {
-                            // Broadcaster disappeared - most likely on shutdown; add a short delay to avoid busy loop.
-                            warn!("Mining broadcaster channel closed");
-                            sleep(Duration::from_millis(50)).await;
+                            warn!("Mining broadcaster channel closed; stopping service");
+                            break;
                         }
                     }
                 }
