@@ -2,6 +2,7 @@ mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
 mod unpledge_partition;
+mod unstake_edge_cases;
 
 use std::sync::Arc;
 
@@ -78,6 +79,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
@@ -173,6 +175,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
@@ -268,6 +271,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
@@ -375,6 +379,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
@@ -602,6 +607,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }
@@ -779,6 +785,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
             })
         }
     }

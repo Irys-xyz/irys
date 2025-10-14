@@ -166,6 +166,28 @@ impl PartialOrd for UnpledgeRefundEvent {
     }
 }
 
+/// Event emitted on epoch blocks to refund Unstake commitments (fee charged at inclusion; value refunded at epoch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnstakeRefundEvent {
+    pub account: Address,
+    pub amount: U256,
+    pub irys_ref_txid: H256,
+}
+
+impl Ord for UnstakeRefundEvent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.amount
+            .cmp(&other.amount)
+            .then(self.irys_ref_txid.cmp(&other.irys_ref_txid))
+    }
+}
+
+impl PartialOrd for UnstakeRefundEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Named result bundle for mempool-derived inputs to block production.
 #[derive(Debug, Clone)]
 pub struct MempoolTxsBundle {
@@ -182,6 +204,8 @@ pub struct MempoolTxsBundle {
 
     /// Unpledge refund events to emit on epoch blocks; empty on non-epoch blocks
     pub commitment_refund_events: Vec<UnpledgeRefundEvent>,
+    /// Unstake refund events to emit on epoch blocks; empty on non-epoch blocks
+    pub unstake_refund_events: Vec<UnstakeRefundEvent>,
 }
 
 impl BlockProducerService {
@@ -677,6 +701,7 @@ pub trait BlockProdStrategy {
             initial_treasury_balance,
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
+            &mempool.unstake_refund_events,
         )?;
 
         let mut shadow_txs = Vec::new();
@@ -1160,6 +1185,11 @@ pub trait BlockProdStrategy {
             .await?;
 
         let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
+        let unstake_refund_events =
+            crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &self.inner().config.consensus,
+            )?;
 
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user
@@ -1169,6 +1199,7 @@ pub trait BlockProdStrategy {
             publish_txs: mempool_txs.publish_tx,
             aggregated_miner_fees,
             commitment_refund_events,
+            unstake_refund_events,
         })
     }
 
@@ -1252,6 +1283,7 @@ pub trait BlockProdStrategy {
             publish_txs: mempool_txs.publish_tx,
             aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
             commitment_refund_events: Vec::new(),
+            unstake_refund_events: Vec::new(),
         }
     }
 

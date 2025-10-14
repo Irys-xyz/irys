@@ -469,7 +469,9 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
-            return HttpResponse::Ok().json(RejectionReason::GossipDisabled);
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
         }
         if let Err(error_response) =
             Self::check_peer(&server.peer_list, &req, data_request.miner_address)
@@ -504,7 +506,7 @@ where
             App::new()
                 .app_data(Data::new(server.clone()))
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
-                .wrap(middleware::Logger::default()) // TODO: use tracing_actix_web TracingLogger
+                .wrap(middleware::Logger::default().log_target("gossip-server")) // TODO: use tracing_actix_web TracingLogger
                 .service(
                     web::scope("/gossip")
                         .route("/transaction", web::post().to(Self::handle_transaction))

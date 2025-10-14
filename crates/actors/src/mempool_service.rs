@@ -607,18 +607,7 @@ impl Inner {
         let mut sorted_commitments = mempool_state_guard
             .valid_commitment_tx
             .values()
-            .flat_map(|txs| {
-                txs.iter()
-                    .filter(|tx| {
-                        matches!(
-                            tx.commitment_type,
-                            CommitmentType::Stake
-                                | CommitmentType::Pledge { .. }
-                                | CommitmentType::Unpledge { .. }
-                        )
-                    })
-                    .cloned()
-            })
+            .flat_map(|txs| txs.iter().cloned())
             .collect::<Vec<_>>();
 
         // Sort all commitments according to our priority rules
@@ -639,14 +628,13 @@ impl Inner {
             }
 
             // Full validation (fee, funding at parent block, value) before simulation
-            if validate_commitment_transaction(
+            if let Err(error) = validate_commitment_transaction(
                 &self.reth_node_adapter,
                 &self.config.consensus,
                 tx,
                 parent_evm_block_id,
-            )
-            .is_err()
-            {
+            ) {
+                tracing::warn!(?error, "rejecting commitment tx");
                 continue;
             }
 

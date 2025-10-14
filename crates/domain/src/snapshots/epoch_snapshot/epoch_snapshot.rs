@@ -98,6 +98,12 @@ pub enum EpochSnapshotError {
     /// Inconsistent state: partition appears in both capacity and data maps
     #[error("partition {partition_hash:?} present in both capacity and data assignments")]
     UnpledgeTargetInBothMaps { partition_hash: H256 },
+    /// Unstake signer does not have an active stake
+    #[error("unstake signer {signer:?} is not currently staked")]
+    UnstakeSignerNotStaked { signer: Address },
+    /// Unstake attempted while pledges still active
+    #[error("unstake for signer {signer:?} has active pledges: {remaining}")]
+    UnstakeHasActivePledges { signer: Address, remaining: u64 },
 }
 
 impl EpochSnapshot {
@@ -285,12 +291,52 @@ impl EpochSnapshot {
 
         // Apply any unpledge operations contained in this epoch
         self.apply_unpledges(&new_epoch_commitments)?;
+        // Apply unstake operations after unpledges
+        self.apply_unstakes(&new_epoch_commitments)?;
         self.backfill_missing_partitions();
 
         self.allocate_additional_capacity();
 
         self.assign_partition_hashes_to_pledges();
 
+        Ok(())
+    }
+
+    /// Applies unstake operations found in a set of epoch commitments.
+    ///
+    /// Behavior:
+    /// - For each Unstake commitment, verify the signer has no remaining pledges
+    ///   (after unpledges were applied). If any remain, return an error to invalidate the epoch.
+    /// - Remove the signer's stake from the commitment state; failure to find a stake is an error.
+    pub fn apply_unstakes(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> Result<(), EpochSnapshotError> {
+        for commitment in commitments {
+            let irys_primitives::CommitmentType::Unstake = &commitment.commitment_type else {
+                continue;
+            };
+            let signer = commitment.signer;
+
+            // Effective pledges after unpledges applied
+            let remaining = self
+                .commitment_state
+                .pledge_commitments
+                .get(&signer)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+            if remaining > 0 {
+                return Err(EpochSnapshotError::UnstakeHasActivePledges { signer, remaining });
+            }
+
+            // Remove stake entry; error if not found
+            let existed = self.commitment_state.stake_commitments.remove(&signer);
+            if existed.is_none() {
+                return Err(EpochSnapshotError::UnstakeSignerNotStaked { signer });
+            }
+
+            debug!(signer = %signer, "unstake_applied");
+        }
         Ok(())
     }
 
@@ -692,8 +738,6 @@ impl EpochSnapshot {
     /// This function processes stake and pledge commitments to build a complete
     /// commitment state representation. It validates that all commitment references
     /// in the ledger have corresponding transaction data.
-    ///
-    /// TODO: Support unstaking
     pub fn compute_commitment_state(&mut self, commitments: &[CommitmentTransaction]) {
         // Categorize commitments by their type for separate processing
         let mut stake_commitments: Vec<&CommitmentTransaction> = Vec::new();
@@ -706,7 +750,8 @@ impl EpochSnapshot {
                 }
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
                 irys_primitives::CommitmentType::Unpledge { .. } => {}
-                _ => unimplemented!(),
+                // Unstakes are applied in `apply_unstakes()` after pledges have been processed
+                irys_primitives::CommitmentType::Unstake => {}
             }
         }
 

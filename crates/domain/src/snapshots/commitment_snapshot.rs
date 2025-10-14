@@ -10,13 +10,14 @@ use super::EpochSnapshot;
 
 #[derive(Debug, PartialEq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,                        // The commitment is valid and was added to the snapshot
-    Unknown,                         // The commitment has no status in the snapshot
-    Unsupported,                     // The commitment is an unsupported type (unstake)
-    Unstaked,                        // The pledge commitment doesn't have a corresponding stake
-    InvalidPledgeCount,              // The pledge count doesn't match the actual number of pledges
-    PartitionNotOwned,               // Target capacity partition is not owned by signer
-    PartitionAlreadyPendingUnpledge, // Duplicate unpledge for same partition in this snapshot
+    Accepted,           // The commitment is valid and was added to the snapshot
+    Unknown,            // The commitment has no status in the snapshot
+    Unstaked,           // The pledge commitment doesn't have a corresponding stake
+    InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
+    Unowned,            // Target capacity partition is not owned by signer
+    UnpledgePending,    // Duplicate unpledge for same partition in this snapshot
+    UnstakePending,     // Duplicate unstake for the signer within this snapshot
+    HasActivePledges,   // Unstake not allowed because signer still has pledges
 }
 
 #[derive(Debug, Default, Clone, Hash)]
@@ -29,6 +30,7 @@ pub struct MinerCommitments {
     pub stake: Option<CommitmentTransaction>,
     pub pledges: Vec<CommitmentTransaction>,
     pub unpledges: Vec<CommitmentTransaction>,
+    pub unstake: Option<CommitmentTransaction>,
 }
 
 impl CommitmentSnapshot {
@@ -82,6 +84,10 @@ impl CommitmentSnapshot {
                 if epoch_snapshot.is_staked(*signer) {
                     // Has stake in current epoch, check for duplicate pledge locally
                     if let Some(commitments) = self.commitments.get(signer) {
+                        // If unstake is pending for this signer, pledges are not allowed
+                        if commitments.unstake.is_some() {
+                            return CommitmentSnapshotStatus::UnstakePending;
+                        }
                         if commitments.pledges.iter().any(|p| p.id == txid) {
                             CommitmentSnapshotStatus::Accepted
                         } else {
@@ -94,9 +100,11 @@ impl CommitmentSnapshot {
                 } else {
                     // Not staked in current epoch, check local commitments
                     if let Some(commitments) = self.commitments.get(signer) {
-                        // Check for duplicate pledge transaction
+                        // Check for duplicate pledge transaction and unstake gating
                         if commitments.pledges.iter().any(|p| p.id == txid) {
                             CommitmentSnapshotStatus::Accepted
+                        } else if commitments.unstake.is_some() {
+                            CommitmentSnapshotStatus::UnstakePending
                         } else if commitments.stake.is_none() {
                             // No local stake and not staked in current epoch
                             CommitmentSnapshotStatus::Unstaked
@@ -110,11 +118,28 @@ impl CommitmentSnapshot {
                 }
             }
             CommitmentType::Unstake => {
-                debug!(
-                    "CommitmentStatus is Rejected: unsupported type: {:?}",
-                    commitment_type
-                );
-                return CommitmentSnapshotStatus::Unsupported;
+                // Unstake requires signer to be staked (epoch or local) and not already pending unstake
+                let has_stake = if epoch_snapshot.is_staked(*signer) {
+                    true
+                } else {
+                    self.commitments
+                        .get(signer)
+                        .is_some_and(|mc| mc.stake.is_some())
+                };
+                if !has_stake {
+                    return CommitmentSnapshotStatus::Unstaked;
+                }
+                if let Some(commitments) = self.commitments.get(signer) {
+                    if commitments.unstake.as_ref().is_some_and(|u| u.id == txid) {
+                        CommitmentSnapshotStatus::Accepted
+                    } else if commitments.unstake.is_some() {
+                        CommitmentSnapshotStatus::UnstakePending
+                    } else {
+                        CommitmentSnapshotStatus::Unknown
+                    }
+                } else {
+                    CommitmentSnapshotStatus::Unknown
+                }
             }
         };
 
@@ -188,6 +213,11 @@ impl CommitmentSnapshot {
                 // Get or create miner commitments
                 let miner_commitments = self.commitments.entry(*signer).or_default();
 
+                // Disallow pledges while an unstake is in progress
+                if miner_commitments.unstake.is_some() {
+                    return CommitmentSnapshotStatus::UnstakePending;
+                }
+
                 // Check for duplicate pledge first
                 let existing = miner_commitments
                     .pledges
@@ -252,7 +282,7 @@ impl CommitmentSnapshot {
                     .get_assignment(irys_types::H256::from(*partition_hash))
                     .is_some_and(|pa| pa.miner_address == *signer);
                 if !owned {
-                    return CommitmentSnapshotStatus::PartitionNotOwned;
+                    return CommitmentSnapshotStatus::Unowned;
                 }
 
                 // Duplicate check
@@ -262,13 +292,40 @@ impl CommitmentSnapshot {
                         CommitmentType::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
                     )
                 }) {
-                    return CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge;
+                    return CommitmentSnapshotStatus::UnpledgePending;
                 }
 
                 miner_commitments.unpledges.push(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentType::Unstake => CommitmentSnapshotStatus::Unsupported,
+            CommitmentType::Unstake => {
+                // Require staked or pending local stake
+                let has_stake = if is_staked_in_current_epoch {
+                    true
+                } else {
+                    self.commitments
+                        .get(signer)
+                        .is_some_and(|mc| mc.stake.is_some())
+                };
+                if !has_stake {
+                    return CommitmentSnapshotStatus::Unstaked;
+                }
+
+                // Compute effective pledge count (epoch + local - local unpledges)
+                let miner_commitments = self.commitments.entry(*signer).or_default();
+                let current_pledge_count =
+                    Self::active_pledge_count(miner_commitments, pledges_in_epoch);
+                if current_pledge_count > 0 {
+                    return CommitmentSnapshotStatus::HasActivePledges;
+                }
+
+                if miner_commitments.unstake.is_some() {
+                    return CommitmentSnapshotStatus::UnstakePending;
+                }
+
+                miner_commitments.unstake = Some(commitment_tx.clone());
+                CommitmentSnapshotStatus::Accepted
+            }
         }
     }
 
@@ -288,6 +345,10 @@ impl CommitmentSnapshot {
 
             for unpledge in &miner_commitments.unpledges {
                 all_commitments.push(unpledge.clone());
+            }
+
+            if let Some(unstake) = &miner_commitments.unstake {
+                all_commitments.push(unstake.clone());
             }
         }
 
@@ -661,14 +722,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_commitment_types() {
+    fn test_unstake_without_existing_stake_is_rejected() {
         let mut snapshot = CommitmentSnapshot::default();
         let signer = Address::random();
 
         // Try to add unstake
         let unstake = create_test_commitment(signer, CommitmentType::Unstake, U256::from(1000));
         let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
-        assert_eq!(status, CommitmentSnapshotStatus::Unsupported);
+        assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
 
     #[test]

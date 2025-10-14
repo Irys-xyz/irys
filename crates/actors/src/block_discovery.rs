@@ -604,11 +604,6 @@ impl BlockDiscoveryServiceInner {
                                     ),
                                 ));
                             }
-                            CommitmentSnapshotStatus::Unsupported => {
-                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                    "Commitment tx of unsupported type".to_string(),
-                                ));
-                            }
                             CommitmentSnapshotStatus::Unstaked => {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     format!(
@@ -622,15 +617,25 @@ impl BlockDiscoveryServiceInner {
                                     "Invalid pledge count in commitment transaction".to_string(),
                                 ));
                             }
-                            CommitmentSnapshotStatus::PartitionNotOwned => {
+                            CommitmentSnapshotStatus::Unowned => {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     "Unpledge target capacity partition not owned by signer"
                                         .to_string(),
                                 ));
                             }
-                            CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge => {
+                            CommitmentSnapshotStatus::UnpledgePending => {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     "Duplicate unpledge for the same capacity partition in snapshot".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::UnstakePending => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unstake already pending for signer".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::HasActivePledges => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unstake not allowed while pledges are active".to_string(),
                                 ));
                             }
                             CommitmentSnapshotStatus::Unknown => {} // Success case
