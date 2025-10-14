@@ -26,7 +26,12 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
 
     cc.flag("-fPIC");
     cc.flag("-g0");
-    cc.flag("-march=native");
+    let nix_disables_native = env::var("NIX_ENFORCE_NO_NATIVE")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    if !nix_disables_native {
+        cc.flag_if_supported("-march=native");
+    }
     cc.file(c_src.join("capacity_single.c"));
     cc.compile("capacity_single");
 }
