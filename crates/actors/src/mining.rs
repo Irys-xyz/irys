@@ -427,8 +427,6 @@ mod tests {
     use tokio::time::sleep;
 
     #[test_log::test(actix_rt::test)]
-    #[expect(clippy::await_holding_lock, reason = "test")]
-
     async fn test_solution() {
         let chunk_count = 4;
         let chunk_size = 32;
