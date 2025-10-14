@@ -739,8 +739,6 @@ impl EpochSnapshot {
     /// This function processes stake and pledge commitments to build a complete
     /// commitment state representation. It validates that all commitment references
     /// in the ledger have corresponding transaction data.
-    ///
-    /// TODO: Support unstaking
     pub fn compute_commitment_state(&mut self, commitments: &[CommitmentTransaction]) {
         // Categorize commitments by their type for separate processing
         let mut stake_commitments: Vec<&CommitmentTransaction> = Vec::new();

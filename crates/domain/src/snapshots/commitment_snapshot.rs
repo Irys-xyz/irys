@@ -10,15 +10,14 @@ use super::EpochSnapshot;
 
 #[derive(Debug, PartialEq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,                        // The commitment is valid and was added to the snapshot
-    Unknown,                         // The commitment has no status in the snapshot
-    Unsupported,                     // The commitment type is unknown to the snapshot
-    Unstaked,                        // The pledge commitment doesn't have a corresponding stake
-    InvalidPledgeCount,              // The pledge count doesn't match the actual number of pledges
-    PartitionNotOwned,               // Target capacity partition is not owned by signer
-    PartitionAlreadyPendingUnpledge, // Duplicate unpledge for same partition in this snapshot
-    AlreadyPendingUnstake,           // Duplicate unstake for the signer within this snapshot
-    HasActivePledges,                // Unstake not allowed because signer still has pledges
+    Accepted,           // The commitment is valid and was added to the snapshot
+    Unknown,            // The commitment has no status in the snapshot
+    Unstaked,           // The pledge commitment doesn't have a corresponding stake
+    InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
+    Unowned,            // Target capacity partition is not owned by signer
+    UnpledgePending,    // Duplicate unpledge for same partition in this snapshot
+    UnstakePending,     // Duplicate unstake for the signer within this snapshot
+    HasActivePledges,   // Unstake not allowed because signer still has pledges
 }
 
 #[derive(Debug, Default, Clone, Hash)]
@@ -87,7 +86,7 @@ impl CommitmentSnapshot {
                     if let Some(commitments) = self.commitments.get(signer) {
                         // If unstake is pending for this signer, pledges are not allowed
                         if commitments.unstake.is_some() {
-                            return CommitmentSnapshotStatus::AlreadyPendingUnstake;
+                            return CommitmentSnapshotStatus::UnstakePending;
                         }
                         if commitments.pledges.iter().any(|p| p.id == txid) {
                             CommitmentSnapshotStatus::Accepted
@@ -105,7 +104,7 @@ impl CommitmentSnapshot {
                         if commitments.pledges.iter().any(|p| p.id == txid) {
                             CommitmentSnapshotStatus::Accepted
                         } else if commitments.unstake.is_some() {
-                            CommitmentSnapshotStatus::AlreadyPendingUnstake
+                            CommitmentSnapshotStatus::UnstakePending
                         } else if commitments.stake.is_none() {
                             // No local stake and not staked in current epoch
                             CommitmentSnapshotStatus::Unstaked
@@ -134,7 +133,7 @@ impl CommitmentSnapshot {
                     if commitments.unstake.as_ref().is_some_and(|u| u.id == txid) {
                         CommitmentSnapshotStatus::Accepted
                     } else if commitments.unstake.is_some() {
-                        CommitmentSnapshotStatus::AlreadyPendingUnstake
+                        CommitmentSnapshotStatus::UnstakePending
                     } else {
                         CommitmentSnapshotStatus::Unknown
                     }
@@ -216,7 +215,7 @@ impl CommitmentSnapshot {
 
                 // Disallow pledges while an unstake is in progress
                 if miner_commitments.unstake.is_some() {
-                    return CommitmentSnapshotStatus::AlreadyPendingUnstake;
+                    return CommitmentSnapshotStatus::UnstakePending;
                 }
 
                 // Check for duplicate pledge first
@@ -283,7 +282,7 @@ impl CommitmentSnapshot {
                     .get_assignment(irys_types::H256::from(*partition_hash))
                     .is_some_and(|pa| pa.miner_address == *signer);
                 if !owned {
-                    return CommitmentSnapshotStatus::PartitionNotOwned;
+                    return CommitmentSnapshotStatus::Unowned;
                 }
 
                 // Duplicate check
@@ -293,7 +292,7 @@ impl CommitmentSnapshot {
                         CommitmentType::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
                     )
                 }) {
-                    return CommitmentSnapshotStatus::PartitionAlreadyPendingUnpledge;
+                    return CommitmentSnapshotStatus::UnpledgePending;
                 }
 
                 miner_commitments.unpledges.push(commitment_tx.clone());
@@ -321,7 +320,7 @@ impl CommitmentSnapshot {
                 }
 
                 if miner_commitments.unstake.is_some() {
-                    return CommitmentSnapshotStatus::AlreadyPendingUnstake;
+                    return CommitmentSnapshotStatus::UnstakePending;
                 }
 
                 miner_commitments.unstake = Some(commitment_tx.clone());
