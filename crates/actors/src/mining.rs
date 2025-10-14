@@ -349,10 +349,28 @@ impl Handler<BroadcastPartitionsExpiration> for PartitionMiningActor {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(?partition_hash, ?interval, "Expiring partition hash");
                     let sender = self.service_senders.packing_sender();
-                    let _ = sender.try_send(PackingRequest {
+                    match sender.try_send(PackingRequest {
                         storage_module: self.storage_module.clone(),
                         chunk_range: PartitionChunkRange(interval),
-                    });
+                    }) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!(
+                                storage_module_id = %self.storage_module.id,
+                                ?partition_hash,
+                                ?interval,
+                                "Dropping packing request due to saturated channel"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                            error!(
+                                storage_module_id = %self.storage_module.id,
+                                ?partition_hash,
+                                ?interval,
+                                "Packing channel closed; failed to enqueue repacking request"
+                            );
+                        }
+                    }
                 } else {
                     error!(
                         ?partition_hash,

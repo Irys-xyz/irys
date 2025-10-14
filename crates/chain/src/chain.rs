@@ -895,7 +895,15 @@ impl IrysNode {
                         .inspect_err(|e| error!("Reth thread error: {:?}", &e));
 
                     debug!("Sending shutdown signal to the main actor thread");
-                    let _ = main_actor_thread_shutdown_tx.try_send(());
+                    match main_actor_thread_shutdown_tx.try_send(()) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!("Failed to send shutdown signal to main actor thread: channel full");
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            error!("Failed to send shutdown signal to main actor thread: channel closed");
+                        }
+                    }
 
                     debug!("Waiting for the main actor thread to finish");
 
@@ -1559,10 +1567,28 @@ impl IrysNode {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 let sender = service_senders.packing_sender();
-                let _ = sender.try_send(PackingRequest {
+                match sender.try_send(PackingRequest {
                     storage_module: sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            target: "irys::packing",
+                            storage_module_id = %sm.id,
+                            ?interval,
+                            "Dropping packing request due to saturated channel"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                        tracing::error!(
+                            target: "irys::packing",
+                            storage_module_id = %sm.id,
+                            ?interval,
+                            "Packing channel closed; failed to enqueue repacking request"
+                        );
+                    }
+                }
             }
         }
         (controllers, handles)
