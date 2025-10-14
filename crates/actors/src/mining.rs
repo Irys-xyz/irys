@@ -664,7 +664,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        let mut partition_mining_actor = PartitionMiningActor::new(
+        let mut inner = PartitionMiningServiceInner::new(
             &config,
             service_senders,
             storage_module,
@@ -672,12 +672,9 @@ mod tests {
             vdf_steps_guard.clone(),
             atomic_global_step_number,
             U256::zero(),
-            None,
         );
 
-        let range = partition_mining_actor
-            .get_recall_range(7, &hash, &partition_hash)
-            .unwrap();
+        let range = inner.test_get_recall_range(7, hash, partition_hash);
 
         let mut ranges = Ranges::new(5);
         ranges.get_recall_range(1, &hash, &partition_hash).unwrap();
