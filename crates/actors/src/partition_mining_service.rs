@@ -89,7 +89,7 @@ impl PartitionMiningServiceInner {
     fn set_mining(&mut self, should_mine: bool) {
         debug!(
             "Setting should_mine to {} from {}",
-            self.should_mine, should_mine
+            should_mine, self.should_mine
         );
         self.should_mine = should_mine;
     }

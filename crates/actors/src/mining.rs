@@ -390,7 +390,7 @@ impl Handler<MiningControl> for PartitionMiningActor {
         let should_mine = control.into_inner();
         debug!(
             "Setting should_mine to {} from {}",
-            &self.should_mine, &should_mine
+            &should_mine, &self.should_mine
         );
         self.should_mine = should_mine
     }
