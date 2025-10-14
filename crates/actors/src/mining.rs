@@ -600,7 +600,7 @@ mod tests {
         );
     }
 
-    #[actix_rt::test]
+    #[tokio::test]
     async fn test_recall_range_reinit() {
         let tmp_dir = setup_tracing_and_temp_dir(Some("get_by_data_tx_offset_test"), false);
         let base_path = tmp_dir.path().to_path_buf();

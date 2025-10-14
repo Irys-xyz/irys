@@ -1,9 +1,9 @@
-#[cfg(test)]
-use actix_rt::test;
 use irys_actors::peer_stats::{BandwidthRating, BandwidthWindow, PeerStats};
 use irys_domain::ChunkTimeRecord;
 use irys_types::PartitionChunkOffset;
 use std::time::{Duration, Instant};
+#[cfg(test)]
+use tokio::test;
 
 // Configurable chunk size for tests
 const CHUNK_SIZE: u64 = 32; // 32 bytes for sanity checks (normally 256KiB)
