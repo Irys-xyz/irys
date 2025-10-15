@@ -555,7 +555,7 @@ async fn poll_until_fetch_at_block_index_height(
     node_ctx: &IrysNodeCtx,
     required_blocks_height: u64,
     max_attempts: u64,
-) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
+) -> Option<reqwest::Response> {
     let mut attempts = 0;
     let mut result_peer = None;
     let max_attempts = max_attempts * 10;
@@ -594,7 +594,7 @@ async fn poll_until_fetch_at_block_index_height(
             //wait one second and try again
             sleep(Duration::from_millis(100)).await;
         } else {
-            result_peer = Some(
+            return Some(
                 block_index_endpoint_request(
                     &local_test_url(&node_ctx.config.node_config.http.bind_port),
                     0,
@@ -602,7 +602,6 @@ async fn poll_until_fetch_at_block_index_height(
                 )
                 .await,
             );
-            break;
         }
     }
     result_peer

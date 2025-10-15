@@ -488,8 +488,8 @@ impl IrysNode {
         info!("Fetching genesis block from trusted peer: {}", trusted_peer);
 
         // Create HTTP client and fetch genesis block
-        let awc_client = awc::Client::new();
-        let genesis_block = fetch_genesis_block(trusted_peer, &awc_client)
+        let http_client = reqwest::Client::new();
+        let genesis_block = fetch_genesis_block(trusted_peer, &http_client)
             .await
             .expect("expected genesis block from http api");
 
