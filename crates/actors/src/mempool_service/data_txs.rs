@@ -7,10 +7,9 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, Signable as _,
-    H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
+    IrysTransactionId, H256,
 };
-use reth::revm::primitives::alloy_primitives;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
@@ -27,12 +26,7 @@ impl Inner {
     ) -> Result<(DataLedger, u64), TxIngressError> {
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
-            // Compute composite fingerprint: keccak(signature + prehash)
-            let prehash = tx.signature_hash();
-            let mut buf = Vec::with_capacity(65 + 32);
-            buf.extend_from_slice(&tx.signature.as_bytes());
-            buf.extend_from_slice(&prehash);
-            let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
+            let fingerprint = tx.fingerprint();
             if self
                 .mempool_state
                 .read()

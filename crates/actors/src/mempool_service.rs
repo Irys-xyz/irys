@@ -45,7 +45,6 @@ use irys_types::{
 };
 use irys_types::{IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
-use reth::revm::primitives::alloy_primitives;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
@@ -1390,11 +1389,7 @@ impl Inner {
             // Record invalid payload fingerprint derived from both the signature and the
             // signing preimage (prehash). This avoids poisoning legitimate transactions that
             // share the same signature bytes but differ in signed content.
-            let prehash = tx.signature_hash();
-            let mut buf = Vec::with_capacity(65 + 32);
-            buf.extend_from_slice(&tx.signature().as_bytes());
-            buf.extend_from_slice(&prehash);
-            let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
+            let fingerprint = tx.fingerprint();
             self.mempool_state
                 .write()
                 .await

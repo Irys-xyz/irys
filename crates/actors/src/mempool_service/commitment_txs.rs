@@ -6,11 +6,10 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionId, Signable as _, H256,
+    IrysTransactionCommon as _, IrysTransactionId, H256,
 };
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
-use reth::revm::primitives::alloy_primitives;
 use std::{collections::HashMap, num::NonZeroUsize};
 use tracing::{debug, instrument, warn};
 
@@ -25,11 +24,7 @@ impl Inner {
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
             // Compute composite fingerprint: keccak(signature + prehash)
-            let prehash = commitment_tx.signature_hash();
-            let mut buf = Vec::with_capacity(65 + 32);
-            buf.extend_from_slice(&commitment_tx.signature.as_bytes());
-            buf.extend_from_slice(&prehash);
-            let fingerprint = H256::from(alloy_primitives::keccak256(&buf).0);
+            let fingerprint = commitment_tx.fingerprint();
             if self
                 .mempool_state
                 .read()
