@@ -80,16 +80,13 @@ impl ServiceSenders {
         let _ = self.0.mining_bus.send_seed(seed, checkpoints, global_step);
     }
 
-    pub fn send_mining_difficulty(
-        &self,
-        msg: crate::broadcast_mining_service::BroadcastDifficultyUpdate,
-    ) {
+    pub fn send_mining_difficulty(&self, msg: crate::mining_bus::BroadcastDifficultyUpdate) {
         let _ = self.0.mining_bus.send_difficulty(msg);
     }
 
     pub fn send_partitions_expiration(
         &self,
-        msg: crate::broadcast_mining_service::BroadcastPartitionsExpiration,
+        msg: crate::mining_bus::BroadcastPartitionsExpiration,
     ) {
         let _ = self.0.mining_bus.send_partitions_expiration(msg);
     }

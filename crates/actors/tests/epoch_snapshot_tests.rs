@@ -1,6 +1,6 @@
 use irys_actors::{
     block_producer::BlockProducerCommand,
-    broadcast_mining_service::BroadcastPartitionsExpiration,
+    mining_bus::BroadcastPartitionsExpiration,
     partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     services::ServiceSenders,
 };
@@ -24,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use std::{sync::atomic::AtomicU64, time::Duration};
 use tracing::{debug, error};
 
-#[actix::test]
+#[tokio::test]
 async fn genesis_test() {
     // setup temp dir
     let mut config = NodeConfig::testing();

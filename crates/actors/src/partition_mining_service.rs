@@ -1,9 +1,9 @@
 use crate::{
     block_producer::BlockProducerCommand,
-    broadcast_mining_service::{
+    mining_bus::{
         BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
+        MiningBroadcastEvent,
     },
-    mining_bus::MiningBroadcastEvent,
     packing::PackingRequest,
     services::ServiceSenders,
 };

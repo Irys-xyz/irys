@@ -3,7 +3,6 @@ use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
-    mining::hash_to_number,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -219,6 +218,10 @@ pub enum PreValidationError {
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
     InvalidEpochSnapshot { error: String },
+}
+
+fn hash_to_number(hash: &[u8]) -> U256 {
+    U256::from_little_endian(hash)
 }
 
 /// Full pre-validation steps for a block

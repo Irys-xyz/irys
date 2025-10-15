@@ -1,15 +1,25 @@
 use std::sync::{Arc, Mutex};
 
-use crate::broadcast_mining_service::{
-    BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
-};
-use irys_types::{block_production::Seed, H256List};
+// broadcast message types are defined locally in this module
+use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
 use irys_vdf::MiningBroadcaster;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, Span};
 
 /// Tokio-native broadcast envelope for mining events.
-/// This mirrors the existing Actix variants but is transport-agnostic and Clone-friendly.
+#[derive(Debug, Clone)]
+pub struct BroadcastMiningSeed {
+    pub seed: Seed,
+    pub checkpoints: H256List,
+    pub global_step: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
+
+#[derive(Debug, Clone)]
+pub struct BroadcastPartitionsExpiration(pub H256List);
+
 #[derive(Debug, Clone)]
 pub enum MiningBroadcastEvent {
     Seed(BroadcastMiningSeed),

@@ -1,9 +1,9 @@
 use crate::{
     block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
+    mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,

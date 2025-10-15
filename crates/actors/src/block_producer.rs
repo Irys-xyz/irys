@@ -1,8 +1,7 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
-    broadcast_mining_service::BroadcastDifficultyUpdate,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
-    mining_bus::MiningBus,
+    mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
