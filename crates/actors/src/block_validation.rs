@@ -1,4 +1,4 @@
-use crate::block_tree_service::ValidationResult;
+use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
@@ -2270,10 +2270,10 @@ async fn get_previous_tx_inclusions(
     // Get mempool data and release lock quickly
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetState(tx))?;
-    let mempool_state = rx.await?;
-    let mempool_guard = mempool_state.read().await;
+        .block_tree
+        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+    let block_tree_guard = rx.await?;
+    let block_tree_guard = block_tree_guard.read();
 
     let min_anchor_height = block_under_validation
         .height
@@ -2297,7 +2297,7 @@ async fn get_previous_tx_inclusions(
             process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
         };
         // Move to the parent block and continue the traversal backwards
-        block = match mempool_guard.prevalidated_blocks.get(&block.0) {
+        block = match block_tree_guard.get_block(&block.0) {
             Some(header) => {
                 update_states(header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
