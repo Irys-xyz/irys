@@ -1623,12 +1623,12 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> Result<(), PreValidationError> {
-    // Get the block's EMA snapshot for fee calculations
+    // Get the parent block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
         .read()
-        .get_ema_snapshot(&block.block_hash)
+        .get_ema_snapshot(&block.previous_block_hash)
         .ok_or(PreValidationError::BlockEmaSnapshotNotFound {
-            block_hash: block.block_hash,
+            block_hash: block.previous_block_hash,
         })?;
 
     // Extract data transactions from both ledgers
