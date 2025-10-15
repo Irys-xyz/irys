@@ -267,10 +267,28 @@ impl StorageModuleServiceInner {
             if let Ok(interval) = packing_sm.reset() {
                 // Message packing service to fill up fresh entropy chunks on the drive
                 let sender = self.service_senders.packing_sender();
-                let _ = sender.try_send(PackingRequest {
+                match sender.try_send(PackingRequest {
                     storage_module: packing_sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            target: "irys::packing",
+                            storage_module_id = %packing_sm.id,
+                            ?interval,
+                            "Dropping packing request due to saturated channel"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                        tracing::error!(
+                            target: "irys::packing",
+                            storage_module_id = %packing_sm.id,
+                            ?interval,
+                            "Packing channel closed; failed to enqueue repacking request"
+                        );
+                    }
+                }
             }
         }
 

@@ -546,7 +546,6 @@ impl PackingIdleWaiter {
     }
 }
 
-/// waits for any pending & active packing tasks to complete
 /// A lightweight, Tokio-native handle for enqueueing packing requests and introspecting service state.
 #[derive(Debug, Clone)]
 pub struct PackingHandle {

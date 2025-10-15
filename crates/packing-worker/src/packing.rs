@@ -9,8 +9,6 @@ use tracing::trace;
 use irys_packing::capacity_pack_range_cuda_c;
 #[cfg(feature = "nvidia")]
 use irys_types::split_interval;
-#[cfg(feature = "nvidia")]
-use tracing::debug;
 
 use crate::types::RemotePackingRequest;
 use crate::worker::{PackingWorkerState, PACKING_TYPE};
@@ -103,7 +101,7 @@ impl PackingWorkerState {
 
                         let num_chunks = end - start + 1;
 
-                        debug!(
+                        tracing::debug!(
                             "Packing using CUDA C implementation, start:{} end:{} (len: {})",
                             &start, &end, &num_chunks
                         );
@@ -126,7 +124,7 @@ impl PackingWorkerState {
                                 out
                             })
                             .await?;
-                        debug!(
+                        tracing::debug!(
                             target: "irys::packing::update",
                             ?chunk_range, ?partition_hash, ?mining_address, ?entropy_packing_iterations,
                             "CUDA Packed chunks"
