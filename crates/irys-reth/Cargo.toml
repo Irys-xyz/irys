@@ -56,6 +56,10 @@ arbitrary.workspace = true
 bytes.workspace = true
 lru.workspace = true
 thiserror.workspace = true
+jsonrpsee = { workspace = true, features = ["macros", "server"] }
+jsonrpsee-core.workspace = true
+jsonrpsee-proc-macros = { workspace = true }
+jsonrpsee-types.workspace = true
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }
