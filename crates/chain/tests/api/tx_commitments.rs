@@ -21,7 +21,7 @@ macro_rules! assert_ok {
     };
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
@@ -342,7 +342,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
@@ -394,7 +394,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // tracing
     // ===== TEST SETUP =====

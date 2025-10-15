@@ -788,7 +788,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
@@ -1039,7 +1039,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 }
 
 // This test produces a block with invalid tx ordering.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
@@ -1183,7 +1183,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 // This test verifies that block production fails when a shadow transaction
 // attempts to deduct storage fees from a user with insufficient balance.
 // irys-reth should reject even building such a block.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
     use irys_types::DataLedger;
 

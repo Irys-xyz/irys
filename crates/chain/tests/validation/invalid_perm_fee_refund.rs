@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
 // for a transaction that was successfully promoted (and thus shouldn't get a refund).
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -148,7 +148,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
 // for a transaction that doesn't exist in the ledger.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> eyre::Result<()> {
     struct PhantomRefundStrategy {
         pub prod: ProductionStrategy,

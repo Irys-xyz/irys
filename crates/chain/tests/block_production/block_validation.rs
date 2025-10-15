@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
 /// too far in the future, the node rejects it during block prevalidation.
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     // 0. Create an evil block producer
@@ -179,7 +179,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     use crate::utils::solution_context;
     use irys_actors::{BlockProdStrategy as _, ProductionStrategy};

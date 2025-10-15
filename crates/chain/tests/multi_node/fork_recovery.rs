@@ -6,7 +6,7 @@ use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var(
@@ -342,7 +342,7 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 /// - Block index alignment with reth FCU state.
 /// - Reth FCU propagation (`Latest`, `Safe`, `Finalized`) matching the canonical/migrated blocks.
 /// - Reth latest tags on both nodes reflect their respective fork tips before the reorg.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let num_blocks_in_epoch = 3;
@@ -561,7 +561,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 ///    - all canonical blocks move to all peers
 ///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - TODO: new balance changes are applied based on the new canonical branch
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
@@ -879,7 +879,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 #[rstest::rstest]
 #[case::full_validation(true)]
 #[case::default(false)]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
@@ -1474,7 +1474,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
 /// while peer B mines one block short. This creates the longest possible
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables

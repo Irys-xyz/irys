@@ -13,7 +13,7 @@ use reth_db::Database as _;
 use tokio::time::Duration;
 use tracing::{error, info};
 
-#[actix_web::test]
+#[tokio::test]
 async fn test_get_tx() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let signer = IrysSigner::random_signer(&config.consensus_config());

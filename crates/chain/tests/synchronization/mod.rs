@@ -12,7 +12,7 @@ use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // settings
     let max_seconds = 10;
@@ -211,7 +211,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()>
 {
     // settings

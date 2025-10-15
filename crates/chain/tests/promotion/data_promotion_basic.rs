@@ -10,7 +10,7 @@ use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
 use tracing::debug;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;

@@ -4,7 +4,7 @@ use irys_types::{CommitmentTransaction, NodeConfig};
 use tokio::sync::oneshot;
 
 // Validate that gossip ingress rejects commitments with wrong value and marks them invalid.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Result<()> {
     // Setup a single node
     let mut genesis_config = NodeConfig::testing();
@@ -56,7 +56,7 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
 }
 
 // Validate that gossip ingress rejects commitments with insufficient fee and marks them invalid.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result<()> {
     // Setup a single node
     let mut genesis_config = NodeConfig::testing();

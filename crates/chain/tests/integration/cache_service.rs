@@ -15,7 +15,7 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tracing::info;
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();

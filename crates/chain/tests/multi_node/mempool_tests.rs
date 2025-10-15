@@ -420,7 +420,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
@@ -796,7 +796,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 #[rstest::rstest]
 #[case::full_validation(true)]
 #[case::default(false)]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_mempool_publish_fork_recovery_test(
     #[case] enable_full_validation: bool,
 ) -> eyre::Result<()> {
@@ -1211,7 +1211,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 /// mine a block on B, assert A's tx is included correctly
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
-#[actix_web::test]
+#[tokio::test]
 async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
@@ -1469,7 +1469,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 // 3.) re-connecting the peers and ensuring that the correct fork was selected, and the account cannot afford the storage transaction (the funding tx was on the shorter fork)
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
-#[actix_web::test]
+#[tokio::test]
 async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
@@ -1826,7 +1826,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
@@ -2011,7 +2011,7 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 /// send (staked) invalid pledge commitment txs where tx id has been tampered with
 /// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
@@ -2102,7 +2102,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 /// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
@@ -2145,7 +2145,7 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 /// try ingress invalid data tx where tx id has been tampered with
 /// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
@@ -2219,7 +2219,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
         tx.value = required_value + irys_types::U256::from(10000); // 30000 instead of 20000
     },
 )]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
@@ -2290,7 +2290,7 @@ async fn stake_tx_fee_and_value_validation_test(
         tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
     },
 )]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
     #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
@@ -2341,7 +2341,7 @@ async fn pledge_tx_fee_validation_test(
 #[case::pledge_double_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 2)] // First pledge, 200 instead of 100
 #[case::pledge_triple_fee(CommitmentType::Pledge {pledge_count_before_executing: 1 }, 3)] // Second pledge, 300 instead of 100
 #[case::pledge_exact_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 1)] // First pledge, 100 (exact required fee)
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn commitment_tx_valid_higher_fee_test(
     #[case] commitment_type: CommitmentType,
     #[case] fee_multiplier: u64,
