@@ -19,7 +19,7 @@ use crate::{
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
-use actix::MessageResponse;
+
 use alloy_primitives::{keccak256, Address, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
@@ -939,7 +939,7 @@ pub struct BlockIndexQuery {
 /// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
 /// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
 /// for a ledger at a particular byte offset in the ledger.
-#[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockIndexItem {
     /// The hash of the block
     pub block_hash: H256, // 32 bytes
