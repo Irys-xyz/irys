@@ -383,9 +383,9 @@ High-level steps:
 1) Configure a minimal consensus and build an EpochSnapshot with initial
    Publish/Submit slots and capacity partitions. Map local
    StorageModuleInfos to StorageModule instances for the miner.
-2) Spawn a Tokio PartitionMiningService per storage module. The Actix
-   BroadcastMiningService (global event bus) is accessed lazily via
-   from_registry() when broadcasting.
+2) Spawn a Tokio PartitionMiningService per storage module.
+   Subscribe to the MiningBus via ServiceSenders; publish events
+   using ServiceSenders send_* helpers. No Actix registry is involved.
 3) Wire a packing channel in ServiceSenders and forward the first
    PackingRequest into a oneshot receiver for assertions.
 4) Drive epoch transitions by repeatedly calling perform_epoch_tasks

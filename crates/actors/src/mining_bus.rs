@@ -113,8 +113,7 @@ impl MiningBus {
 
 /// A MiningBroadcaster implementation backed by the Tokio-native MiningBus.
 ///
-/// This is used by the VDF thread to publish new seeds/checkpoints without
-/// depending on the Actix system.
+/// This is used by the VDF thread to publish new seeds/checkpoints
 #[derive(Debug, Clone)]
 pub struct MiningBusBroadcaster {
     bus: MiningBus,
