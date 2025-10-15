@@ -161,7 +161,7 @@ async fn genesis_test() {
     // println!("{:#?}", infos);
 }
 
-#[actix::test]
+#[tokio::test]
 async fn add_slots_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -251,7 +251,7 @@ async fn add_slots_test() {
     println!("Ledger State: {:#?}", epoch_snapshot.ledgers);
 }
 
-#[actix::test]
+#[tokio::test]
 async fn unique_addresses_per_slot_test() {
     std::env::set_var("RUST_LOG", "debug");
 
@@ -355,7 +355,7 @@ async fn unique_addresses_per_slot_test() {
     assert!(submit_addresses_set.contains(&signer2.address()));
 }
 
-#[actix::test]
+#[tokio::test]
 async fn capacity_projection_tests() {
     let max_data_parts = 1000;
     let config = ConsensusConfig::testing();
@@ -371,7 +371,7 @@ async fn capacity_projection_tests() {
     }
 }
 
-#[actix::test]
+#[tokio::test]
 /*
 Summary:
 Verify that when a Submit ledger slot expires at an epoch boundary,
@@ -739,7 +739,7 @@ async fn partition_expiration_and_repacking_test() {
     );
 }
 
-#[actix::test]
+#[tokio::test]
 async fn epoch_blocks_reinitialization_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -935,7 +935,7 @@ async fn epoch_blocks_reinitialization_test() {
     }
 }
 
-#[actix::test]
+#[tokio::test]
 async fn partitions_assignment_determinism_test() {
     std::env::set_var("RUST_LOG", "debug");
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);

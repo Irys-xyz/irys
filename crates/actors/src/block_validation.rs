@@ -2688,7 +2688,7 @@ mod tests {
         )
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_test_3_complete_txs() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
@@ -2734,7 +2734,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
         let (_tmp, context) = init().await;
 
@@ -2770,7 +2770,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn is_seed_data_valid_should_validate_seeds() {
         let reset_frequency = 2;
 
@@ -2980,7 +2980,7 @@ mod tests {
         assert!(poa_valid.is_ok(), "PoA should be valid");
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
