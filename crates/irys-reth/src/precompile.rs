@@ -71,9 +71,10 @@ fn pd_precompile() -> DynPrecompile {
                 length as usize
             }
             _ => {
-                return Err(revm::precompile::PrecompileError::Other(
-                    format!("PD precompile: unknown operation type: {}", operation),
-                ));
+                return Err(revm::precompile::PrecompileError::Other(format!(
+                    "PD precompile: unknown operation type: {}",
+                    operation
+                )));
             }
         };
 
