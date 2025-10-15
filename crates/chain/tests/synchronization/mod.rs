@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
 
@@ -56,7 +55,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -89,13 +88,13 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let tx = account1.sign_transaction(tx).unwrap();
 
     // post tx header
-    let mut resp = client
+    let resp = client
         .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
+        .json(&tx.header)
+        .send()
         .await
         .unwrap();
-    println!("Response: {:?}", resp.body().await);
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), 200);
 
     // Check that tx has been sent
     node.wait_for_mempool(tx.header.id, max_seconds).await?;

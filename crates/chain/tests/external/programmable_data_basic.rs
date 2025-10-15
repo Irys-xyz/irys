@@ -1,4 +1,3 @@
-use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
@@ -120,7 +119,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -181,7 +180,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
 
         for attempt in 1..20 {
-            let mut response = client
+            let response = client
                 .get(format!(
                     "{}/v1/tx/{}/local/data_start_offset",
                     http_url, &id
@@ -190,7 +189,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
                 .await
                 .unwrap();
 
-            if response.status() == StatusCode::OK {
+            if response.status() == 200 {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

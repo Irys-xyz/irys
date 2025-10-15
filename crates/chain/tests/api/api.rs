@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
+use actix_web::http::StatusCode;
 use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await?;
@@ -23,7 +23,7 @@ async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
     api_end_to_end_test(256 * 1024).await?;
     Ok(())

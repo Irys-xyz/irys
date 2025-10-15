@@ -1,14 +1,14 @@
 //! endpoint tests
 
 use crate::{api::price_endpoint_request, utils::IrysNodeTest};
-use actix_web::{http::header::ContentType, HttpMessage as _};
+use actix_web::http::header::ContentType;
 use irys_api_server::routes::price::PriceInfo;
 use irys_types::{
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config},
     DataLedger, U256,
 };
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
@@ -34,11 +34,14 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     )?;
 
     // action
-    let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
+    let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
     // assert
     assert_eq!(response.status(), 200);
-    assert_eq!(response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
@@ -55,7 +58,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
@@ -112,11 +115,14 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     )?;
 
     // action
-    let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
+    let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
     // assert
     assert_eq!(response.status(), 200);
-    assert_eq!(response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
@@ -133,7 +139,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
@@ -144,19 +150,18 @@ async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
 
     // action - try to get price for Submit ledger
-    let mut response = price_endpoint_request(&address, DataLedger::Submit, data_size_bytes).await;
+    let response = price_endpoint_request(&address, DataLedger::Submit, data_size_bytes).await;
 
     // assert - should return 400 error for Submit ledger
     assert_eq!(response.status(), 400);
-    let body = response.body().await?;
-    let body_str = std::str::from_utf8(&body)?;
+    let body_str = response.text().await?;
     assert!(body_str.contains("Term ledger not supported"));
 
     ctx.node_ctx.stop().await;
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
@@ -213,11 +218,14 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     )?;
 
     // action
-    let mut response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
+    let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
     // assert
     assert_eq!(response.status(), 200);
-    assert_eq!(response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
     assert_eq!(price_info.perm_fee, expected_perm_fee.amount);

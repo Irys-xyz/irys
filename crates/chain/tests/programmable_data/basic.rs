@@ -1,4 +1,3 @@
-use actix_http::StatusCode;
 use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_eips::eip2930::AccessListItem;
@@ -119,7 +118,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     // Waiting for the server to start
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -156,11 +155,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     // post tx header
     let resp = client
         .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
+        .json(&tx.header)
+        .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), 200);
 
     let id: String = tx.header.id.to_string();
     let mut tx_header_fut = Box::pin(async {
@@ -173,12 +173,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
                 .send()
                 .await;
 
-            let Some(mut response) = response.ok() else {
+            let Some(response) = response.ok() else {
                 sleep(delay).await;
                 continue;
             };
 
-            if response.status() == StatusCode::OK {
+            if response.status() == 200 {
                 let result: DataTransactionHeader = response.json().await.unwrap();
                 assert_eq!(&tx.header, &result);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
@@ -217,11 +217,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
         let resp = client
             .post(format!("{}/v1/chunk", http_url))
-            .send_json(&chunk)
+            .json(&chunk)
+            .send()
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), 200);
     }
 
     // wait for the chunks to migrate
@@ -237,12 +238,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
                 .send()
                 .await;
 
-            let Some(mut response) = response.ok() else {
+            let Some(response) = response.ok() else {
                 sleep(delay).await;
                 continue;
             };
 
-            if response.status() == StatusCode::OK {
+            if response.status() == 200 {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

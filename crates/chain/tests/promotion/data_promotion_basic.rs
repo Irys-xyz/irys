@@ -1,9 +1,9 @@
 use crate::utils::IrysNodeTest;
 use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
+use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use awc::http::StatusCode;
 
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};

@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
@@ -61,7 +60,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -102,10 +101,11 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     // post data tx
     let resp = client
         .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
+        .json(&tx.header)
+        .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), 200);
 
     node.mine_block().await?;
     assert_eq!(node.get_canonical_chain_height().await, 2_u64);
@@ -131,11 +131,12 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         // Make a POST request with JSON payload
         let resp = client
             .post(format!("{}/v1/chunk", http_url))
-            .send_json(&chunk)
+            .json(&chunk)
+            .send()
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), 200);
     }
 
     // confirm that we have the right number of CachedChunks in mdbx table
@@ -210,7 +211,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(chunk_res.status(), StatusCode::OK);
+    assert_eq!(chunk_res.status(), 200);
 
     node.stop().await;
 

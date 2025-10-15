@@ -1,6 +1,6 @@
 //! endpoint tests
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
+use actix_web::http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 

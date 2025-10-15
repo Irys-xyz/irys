@@ -1,4 +1,3 @@
-use actix_http::StatusCode;
 use alloy_core::primitives::{ruint::aliases::U256, Bytes, TxKind};
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_genesis::GenesisAccount;
@@ -11,7 +10,6 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
 use reth::rpc::types::TransactionRequest;
-use std::str::from_utf8;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
@@ -25,7 +23,7 @@ use crate::utils::IrysNodeTest;
 
 // network simulation test for analytics
 #[ignore]
-#[actix_web::test]
+#[tokio::test]
 async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
 
@@ -72,9 +70,10 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10_000))
-        .finish();
+        .build()
+        .expect("failed to build reqwest client");
 
     let _response = client
         .get(format!("{}/v1/info", http_url))
@@ -100,7 +99,8 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let upload_header = |tx: &DataTransaction| {
         client
             .post(format!("{}/v1/tx", http_url))
-            .send_json(&tx.header)
+            .json(&tx.header)
+            .send()
     };
 
     // Generate initial transactions with correct pricing
@@ -203,16 +203,13 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                 };
 
                 // Make a POST request with JSON payload
-
-                let mut resp = client
+                let resp = client
                     .post(format!("{}/v1/chunk", http_url))
-                    .send_json(&chunk)
+                    .json(&chunk)
+                    .send()
                     .await
                     .unwrap();
-                let body = resp.body().await?;
-                let body_str = from_utf8(&body)?;
-                dbg!(body_str);
-                assert_eq!(resp.status(), StatusCode::OK);
+                assert_eq!(resp.status(), 200);
             }
 
             // create a new tx, upload *some* of it's chunks
@@ -255,11 +252,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
                 let resp = client
                     .post(format!("{}/v1/chunk", http_url))
-                    .send_json(&chunk)
+                    .json(&chunk)
+                    .send()
                     .await
                     .unwrap();
 
-                assert_eq!(resp.status(), StatusCode::OK);
+                assert_eq!(resp.status(), 200);
             }
         }
 

@@ -31,7 +31,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 use tracing::debug;
 
-#[actix::test]
+#[tokio::test]
 async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var("RUST_LOG", "debug");
@@ -110,7 +110,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
@@ -170,7 +170,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
@@ -225,7 +225,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
@@ -280,7 +280,7 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
@@ -330,7 +330,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 /// Test mempool persists to disk during shutdown
 ///
 /// FIXME: This test will not be effective until mempool tree/index separation work is complete

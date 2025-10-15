@@ -6,12 +6,12 @@ use crate::{
     },
     utils::IrysNodeTest,
 };
-use actix_web::{http::header::ContentType, HttpMessage as _};
+use actix_web::http::header::ContentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{BlockIndexItem, NodeInfo};
 use tracing::info;
 
-#[actix::test]
+#[tokio::test]
 async fn heavy_external_api() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -33,24 +33,33 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     let mut _response = network_config_endpoint_request(&address).await;
     assert_eq!(_response.status(), 200);
-    assert_eq!(_response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        _response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
 
     let mut _response = peer_list_endpoint_request(&address).await;
     assert_eq!(_response.status(), 200);
-    assert_eq!(_response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        _response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = version_endpoint_request(&address).await;
     //assert_eq!(response.status(), 200);
     //assert_eq!(response.content_type(), ContentType::json());
 
-    let mut response = info_endpoint_request(&address).await;
+    let response = info_endpoint_request(&address).await;
 
     assert_eq!(response.status(), 200);
     info!("HTTP server started");
 
     // confirm we are receiving the correct content type
-    assert_eq!(response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
@@ -65,7 +74,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
         panic!("Error waiting for block height on chain. Error: {:?}", e);
     }
 
-    let mut response = info_endpoint_request(&address).await;
+    let response = info_endpoint_request(&address).await;
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
@@ -93,9 +102,12 @@ async fn heavy_external_api() -> eyre::Result<()> {
     // tests should check total number of json objects returned are equal to the expected number.
     for limit in 0..2 {
         for height in 0..2 {
-            let mut response = block_index_endpoint_request(&address, height, limit).await;
+            let response = block_index_endpoint_request(&address, height, limit).await;
             assert_eq!(response.status(), 200);
-            assert_eq!(response.content_type(), ContentType::json().to_string());
+            assert_eq!(
+                response.headers().get("content-type").unwrap(),
+                &ContentType::json().to_string()
+            );
             let items: Vec<BlockIndexItem> = response.json().await.expect("valid BlockIndexItem");
             let expected = expected_count(total_entries, height, limit);
             assert_eq!(
