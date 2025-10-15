@@ -411,6 +411,14 @@ pub struct IrysBlockHeaderV1 {
 
     /// Treasury balance tracking
     pub treasury: U256,
+
+    /// Total number of PD chunks referenced by access lists in the corresponding EVM block's transactions.
+    #[serde(with = "string_u64")]
+    pub pd_chunks_used_total: u64,
+
+    /// Base rate in USD per MB used for PD fee calculation, scaled as 1e18 decimal.
+    /// This enables deterministic replay of PD pricing across nodes.
+    pub pd_base_rate_usd_per_mb_scaled: U256,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
