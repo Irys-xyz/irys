@@ -40,7 +40,7 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, Base64, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{IngressProofsList, TokioServiceHandle};
@@ -196,10 +196,7 @@ pub enum MempoolServiceMessage {
     ),
     IngestChunkFireAndForget(UnpackedChunk),
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
-    /// Ingress Pre-validated Block
-    IngestBlocks {
-        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
-    },
+
     /// Confirm commitment tx exists in mempool
     CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool (from API)
@@ -248,7 +245,6 @@ pub enum MempoolServiceMessage {
     ),
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
-    InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
@@ -275,13 +271,6 @@ impl Inner {
                 }
                 MempoolServiceMessage::BlockConfirmed(block) => {
                     let _unused_response_message = self.handle_block_confirmed_message(block).await;
-                }
-                MempoolServiceMessage::IngestBlocks {
-                    prevalidated_blocks,
-                } => {
-                    let _unused_response_message = self
-                        .handle_ingress_blocks_message(prevalidated_blocks)
-                        .await;
                 }
                 MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                     let response_message = self
@@ -365,16 +354,7 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::InsertPoAChunk(block_hash, chunk_data, response) => {
-                    self.mempool_state
-                        .write()
-                        .await
-                        .prevalidated_blocks_poa
-                        .insert(block_hash, chunk_data);
-                    if let Err(e) = response.send(()) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
+
                 MempoolServiceMessage::GetState(response) => {
                     if let Err(e) = response
                         .send(Arc::clone(&self.mempool_state))
@@ -1152,23 +1132,21 @@ impl Inner {
     }
 
     /// return block header from mempool, if found
+    /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
+    #[expect(clippy::unused_async)]
     pub async fn handle_get_block_header_message(
         &self,
         block_hash: H256,
         include_chunk: bool,
     ) -> Option<IrysBlockHeader> {
-        let guard = self.mempool_state.read().await;
+        let guard = self.block_tree_read_guard.read();
+        let mut block = guard.get_block(&block_hash).cloned();
 
-        //read block from mempool
-        let mut block = guard.prevalidated_blocks.get(&block_hash).cloned();
-
-        // retrieve poa from mempool and include in returned block
-        if include_chunk {
+        if !include_chunk {
             if let Some(ref mut b) = block {
-                b.poa.chunk = guard.prevalidated_blocks_poa.get(&block_hash).cloned();
+                b.poa.chunk = None
             }
         }
-
         block
     }
 
@@ -1181,11 +1159,6 @@ impl Inner {
         // check the mempool, then block tree, then DB
         Ok(
             if let Some(height) = {
-                let guard = self.mempool_state.read().await;
-                guard.prevalidated_blocks.get(&anchor).map(|h| h.height)
-            } {
-                height
-            } else if let Some(height) = {
                 // in a block so rust doesn't complain about it being held across an await point
                 // I suspect if let Some desugars to something that lint doesn't like
                 let guard = self.block_tree_read_guard.read();
@@ -1240,28 +1213,6 @@ impl Inner {
             );
 
             return Err(TxIngressError::InvalidAnchor);
-        }
-    }
-
-    /// ingest a block into the mempool
-    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<IrysBlockHeader>>) {
-        let mut mempool_state_guard = self.mempool_state.write().await;
-        for block in prevalidated_blocks {
-            // insert poa into mempool
-            if let Some(chunk) = &block.poa.chunk {
-                mempool_state_guard
-                    .prevalidated_blocks_poa
-                    .insert(block.block_hash, chunk.clone());
-            };
-
-            // insert block into mempool without poa
-            let mut block_without_chunk = (*block).clone();
-            // todo: would there be any harm in leaving the PoA chunk in,
-            // and storing Arc<IrysBlockHeader> in the `prevalidated_blocks`?
-            block_without_chunk.poa.chunk = None;
-            mempool_state_guard
-                .prevalidated_blocks
-                .insert(block.block_hash, (block_without_chunk).clone());
         }
     }
 
@@ -1486,9 +1437,6 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
-    /// pre-validated blocks that have passed pre-validation in discovery service
-    pub prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
-    pub prevalidated_blocks_poa: HashMap<H256, Base64>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
@@ -1497,8 +1445,6 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
-        prevalidated_blocks: HashMap::new(),
-        prevalidated_blocks_poa: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
