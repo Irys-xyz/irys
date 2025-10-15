@@ -26,6 +26,10 @@ use tracing::{warn, Instrument as _};
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
 
+// PD pricing RPC namespace from irys-reth
+use irys_reth::pd_pricing::state::{PdPricingHandle, PdPricingState};
+use irys_reth::rpc::pd::{PdApiServer as _, PdRpc};
+
 type NodeTypesAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;
 
 /// Type alias for a `NodeAdapter`
@@ -88,7 +92,7 @@ pub async fn run_node(
     latest_block: u64,
     random_ports: bool,
     shadow_tx_store: ShadowTxStore,
-) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
+) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter, PdPricingHandle)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
     if let Err(e) = unwind_to(&node_config, chainspec.clone(), latest_block).await {
@@ -150,9 +154,25 @@ pub async fn run_node(
         .with_database(database.clone())
         .with_launch_context(task_executor.clone());
 
+    // Configure custom RPC namespace for Programmable Data pricing
+    let consensus_cfg_snapshot = node_config.consensus_config();
+
+    // Configure custom RPC namespace for Programmable Data pricing
+    let consensus_cfg_snapshot = node_config.consensus_config();
+    let price_scaled: alloy_primitives::U256 =
+        consensus_cfg_snapshot.genesis.genesis_price.amount.into();
+    let (pd_state, pd_handle) =
+        PdPricingState::new_from_params(consensus_cfg_snapshot.chunk_size, price_scaled);
+
     let handle = builder
         .node(IrysEthereumNode {
             shadow_tx_store: shadow_tx_store.clone(),
+        })
+        .extend_rpc_modules(move |ctx| {
+            // Merge PD RPC namespace into all configured transports using the trait-based API
+            let pd = PdRpc::new_with_state(pd_state.clone());
+            ctx.modules.merge_configured(pd.into_rpc())?;
+            Ok(())
         })
         .launch_with_debug_capabilities()
         .in_current_span()
@@ -178,5 +198,5 @@ pub async fn run_node(
         )
     }
 
-    Ok((handle, context))
+    Ok((handle, context, pd_handle))
 }

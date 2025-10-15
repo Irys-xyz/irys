@@ -28,6 +28,7 @@ reth-cli-commands.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 alloy-genesis.workspace = true
+jsonrpsee = { workspace = true, features = ["server"] }
 
 [lints]
 workspace = true
