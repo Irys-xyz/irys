@@ -1,11 +1,11 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
+    broadcast_mining_service::BroadcastDifficultyUpdate,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
+    mining_bus::MiningBus,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
-use actix::prelude::*;
 use alloy_consensus::{
     transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
 };
@@ -119,7 +119,7 @@ pub struct BlockProducerInner {
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery: BlockDiscoveryFacadeImpl,
     /// Mining broadcast service
-    pub mining_broadcaster: Addr<BroadcastMiningService>,
+    pub mining_broadcaster: MiningBus,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     /// Global config
@@ -1110,7 +1110,7 @@ pub trait BlockProdStrategy {
         if is_difficulty_updated {
             self.inner()
                 .mining_broadcaster
-                .do_send(BroadcastDifficultyUpdate(block.clone()));
+                .send_difficulty(BroadcastDifficultyUpdate(block.clone()));
         }
 
         info!(
@@ -1420,8 +1420,7 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 /// confirmed blocks and produce migrated blocks for the canonical chain when
 /// enough confirmations have occurred. Chunks are moved from the in-memory
 /// index to the storage modules when a block is migrated.
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "eyre::Result<()>")]
+#[derive(Debug, Clone)]
 pub struct BlockMigrationMessage {
     /// Block being migrated
     pub block_header: Arc<IrysBlockHeader>,

@@ -1,9 +1,6 @@
-use actix::SystemService as _;
-use irys_actors::broadcast_mining_service::{
-    BroadcastMiningService, BroadcastPartitionsExpiration,
-};
 use irys_actors::{
     block_producer::BlockProducerCommand,
+    broadcast_mining_service::BroadcastPartitionsExpiration,
     partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     services::ServiceSenders,
 };
@@ -596,8 +593,7 @@ async fn partition_expiration_and_repacking_test() {
                 infos.iter().map(|info| info.partition_hash).collect()
             });
 
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
             expired_partition_hashes,
         )));
 

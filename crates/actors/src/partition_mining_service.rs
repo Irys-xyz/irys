@@ -1,13 +1,12 @@
 use crate::{
     block_producer::BlockProducerCommand,
     broadcast_mining_service::{
-        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
-        BroadcastPartitionsExpiration, MiningBroadcastEvent, SubscribeTokio,
+        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
     },
+    mining_bus::MiningBroadcastEvent,
     packing::PackingRequest,
     services::ServiceSenders,
 };
-use actix::prelude::*;
 use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
@@ -375,12 +374,7 @@ impl PartitionMiningService {
         let (cmd_tx, cmd_rx) = unbounded_channel();
 
         // Broadcast subscription channel
-        let (broadcast_tx, broadcast_rx) = unbounded_channel::<MiningBroadcastEvent>();
-        // Subscribe to the Actix broadcaster (we are in the Actix system initialization context here)
-        {
-            let addr = BroadcastMiningService::from_registry();
-            addr.do_send(SubscribeTokio(broadcast_tx));
-        }
+        let broadcast_rx = inner.service_senders.subscribe_mining_broadcast();
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 

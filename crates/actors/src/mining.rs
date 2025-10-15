@@ -423,7 +423,6 @@ mod tests {
     use super::*;
     use crate::{
         block_producer::BlockProducerCommand,
-        broadcast_mining_service::{BroadcastMiningSeed, BroadcastMiningService},
         mining::Seed,
         partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     };
@@ -547,12 +546,9 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(1));
 
-        // Ensure broadcaster SystemService is initialized before spawning the miner
-        let _ = BroadcastMiningService::from_registry();
-
         let inner = PartitionMiningServiceInner::new(
             &config,
-            service_senders,
+            service_senders.clone(),
             storage_module,
             true,
             vdf_steps_guard.clone(),
@@ -568,13 +564,8 @@ mod tests {
         sleep(Duration::from_millis(200)).await;
 
         let seed: Seed = Seed(H256::random());
-        // Broadcast seed via the Actix broadcaster so the Tokio miner receives it
-        let broadcaster = BroadcastMiningService::from_registry();
-        broadcaster.do_send(BroadcastMiningSeed {
-            seed,
-            checkpoints: H256List(vec![]),
-            global_step: 1,
-        });
+        // Broadcast seed via the Tokio mining bus (ServiceSenders)
+        service_senders.send_mining_seed(seed, H256List(vec![]), 1);
 
         // busypoll the solution context rwlock
         let solution = 'outer: loop {

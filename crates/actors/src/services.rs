@@ -1,3 +1,4 @@
+use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
     block_index_service::BlockIndexServiceMessage,
@@ -61,6 +62,37 @@ impl ServiceSenders {
     pub fn packing_sender(&self) -> PackingSender {
         self.0.packing_sender.clone()
     }
+
+    pub fn mining_bus(&self) -> MiningBus {
+        self.0.mining_bus.clone()
+    }
+
+    pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<MiningBroadcastEvent> {
+        self.0.subscribe_mining_broadcast()
+    }
+
+    pub fn send_mining_seed(
+        &self,
+        seed: irys_types::block_production::Seed,
+        checkpoints: irys_types::H256List,
+        global_step: u64,
+    ) {
+        let _ = self.0.mining_bus.send_seed(seed, checkpoints, global_step);
+    }
+
+    pub fn send_mining_difficulty(
+        &self,
+        msg: crate::broadcast_mining_service::BroadcastDifficultyUpdate,
+    ) {
+        let _ = self.0.mining_bus.send_difficulty(msg);
+    }
+
+    pub fn send_partitions_expiration(
+        &self,
+        msg: crate::broadcast_mining_service::BroadcastPartitionsExpiration,
+    ) {
+        let _ = self.0.mining_bus.send_partitions_expiration(msg);
+    }
 }
 
 #[derive(Debug)]
@@ -105,6 +137,7 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
+    pub mining_bus: MiningBus,
     pub packing_sender: PackingSender,
 }
 
@@ -141,6 +174,7 @@ impl ServiceSendersInner {
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
 
+        let mining_bus = MiningBus::new(None);
         let senders = Self {
             chunk_cache: chunk_cache_sender,
             chunk_migration: chunk_migration_sender,
@@ -160,6 +194,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
+            mining_bus,
             packing_sender: sender,
         };
         let receivers = ServiceReceivers {
@@ -192,6 +227,10 @@ impl ServiceSendersInner {
 
     pub fn subscribe_block_migrated(&self) -> broadcast::Receiver<BlockMigratedEvent> {
         self.block_migrated_events.subscribe()
+    }
+
+    pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<MiningBroadcastEvent> {
+        self.mining_bus.subscribe()
     }
 }
 
