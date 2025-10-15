@@ -588,7 +588,7 @@ mod tests {
         );
     }
 
-    /// Helper function to setup a canonical chain scenario with n blocks  
+    /// Helper function to setup a canonical chain scenario with n blocks
     fn setup_canonical_chain_scenario(
         max_height: u64,
     ) -> (BlockTreeReadGuard, Vec<Arc<IrysBlockHeader>>) {
