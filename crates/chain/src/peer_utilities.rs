@@ -5,7 +5,7 @@ use irys_types::{
     BlockIndexItem, CommitmentTransaction, IrysBlockHeader, IrysTransactionResponse, H256,
 };
 use std::net::SocketAddr;
-use tracing::{info, warn};
+use tracing::warn;
 
 pub async fn client_request(url: &str) -> reqwest::Response {
     let client = reqwest::Client::new();
