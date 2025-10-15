@@ -81,7 +81,6 @@ thiserror.workspace = true
 itertools.workspace = true
 alloy-rpc-types-trace.workspace = true
 serde = { workspace = true, features = ["derive"] }
-reqwest = { workspace = true, features = ["json"] }
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 

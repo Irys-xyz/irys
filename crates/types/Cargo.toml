@@ -27,8 +27,6 @@ borsh = "1.3.0"
 borsh-derive = "1.3.0"
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 tokio.workspace = true
-actix.workspace = true
-actix-rt.workspace = true
 openssl.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
