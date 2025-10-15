@@ -600,7 +600,7 @@ impl LedgerExpiryTestContext {
                     )
                 {
                     if let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
-                        info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}", 
+                        info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}",
                             block.height, reward.target, reward.amount, reward.irys_ref);
                         if reward.target == self.miner_address {
                             let amount = U256::from_le_bytes(reward.amount.to_le_bytes());
