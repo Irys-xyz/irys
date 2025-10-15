@@ -102,6 +102,11 @@ pub struct BlockStateUpdated {
     pub discarded: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PdCanonicalUpdate {
+    pub head: Arc<IrysBlockHeader>,
+}
+
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
@@ -324,7 +329,14 @@ impl BlockTreeServiceInner {
             .expect("Unable to send confirmation FCU message to reth");
 
         rx.await
-            .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
+            .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))?;
+
+        // Also notify PD pricing subscribers with the same canonical update.
+        let update = PdCanonicalUpdate {
+            head: Arc::clone(&markers.head),
+        };
+        let _ = self.service_senders.pd_canonical_events.send(update);
+        Ok(())
     }
 
     fn emit_block_confirmed(&self, markers: &ForkChoiceMarkers) {

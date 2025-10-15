@@ -1042,6 +1042,12 @@ pub async fn shadow_transactions_are_valid(
     // 4. Validate they match
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
 
+    // TODO(pd): ensure that `pd_chunks_used_total` and `pd_base_rate_usd_per_mb_scaled`
+    // present in the Irys block header are correctly computed from the corresponding
+    // EVM block's transactions and access lists. This should verify that the
+    // block producer populated these fields consistently with the PD access-list
+    // usage and the EIP-1559-style base-rate adjustment logic.
+
     // 5. Return the execution data for reuse
     Ok(execution_data)
 }
