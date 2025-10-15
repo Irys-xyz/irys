@@ -14,7 +14,6 @@ use crate::{
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
 };
-use actix::Message;
 use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
@@ -230,8 +229,3 @@ impl ServiceSendersInner {
         self.mining_bus.subscribe()
     }
 }
-
-/// Stop the actor
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct Stop;
