@@ -234,12 +234,12 @@ async fn start_reth_node(
     task_executor: TaskExecutor,
     chainspec: Arc<ChainSpec>,
     config: Config,
-    sender: oneshot::Sender<RethNode>,
+    sender: oneshot::Sender<(RethNode, irys_reth::pd_pricing::state::PdPricingHandle)>,
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
-    let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
+    let (node_handle, _reth_node_adapter, pd_handle) = irys_reth_node_bridge::node::run_node(
         chainspec.clone(),
         task_executor.clone(),
         config.node_config.clone(),
@@ -252,13 +252,15 @@ async fn start_reth_node(
 
     debug!("Reth node started");
 
-    sender.send(node_handle.node.clone()).map_err(|e| {
-        eyre::eyre!(
-            "Failed to send reth node handle to main actor thread: {:?}",
-            &e
-        )
-    })?;
-
+    // Send RethNode and PdPricingHandle to init_services thread
+    let _ = sender
+        .send((node_handle.node.clone(), pd_handle))
+        .map_err(|e| {
+            eyre::eyre!(
+                "Failed to send reth node handle to main actor thread: {:?}",
+                &e
+            )
+        })?;
     Ok(node_handle)
 }
 
@@ -620,7 +622,8 @@ impl IrysNode {
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
             tokio::sync::mpsc::channel::<()>(1);
         let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
-        let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
+        let (reth_handle_sender, reth_handle_receiver) =
+            oneshot::channel::<(RethNode, irys_reth::pd_pricing::state::PdPricingHandle)>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
         let (shadow_tx_store, _shadow_tx_notification_stream) =
@@ -755,7 +758,10 @@ impl IrysNode {
         mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
         vdf_shutdown_sender: mpsc::Sender<()>,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        reth_handle_receiver: oneshot::Receiver<RethNode>,
+        reth_handle_receiver: oneshot::Receiver<(
+            RethNode,
+            irys_reth::pd_pricing::state::PdPricingHandle,
+        )>,
         service_set_sender: oneshot::Sender<ServiceSet>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
         irys_provider: &Arc<RwLock<Option<IrysRethProviderInner>>>,
@@ -841,7 +847,10 @@ impl IrysNode {
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
         shadow_tx_store: ShadowTxStore,
-        reth_handle_sender: oneshot::Sender<RethNode>,
+        reth_handle_sender: oneshot::Sender<(
+            RethNode,
+            irys_reth::pd_pricing::state::PdPricingHandle,
+        )>,
         actor_main_thread_handle: JoinHandle<()>,
         irys_provider: IrysRethProvider,
         reth_chainspec: Arc<ChainSpec>,
@@ -925,7 +934,10 @@ impl IrysNode {
         genesis_hash: H256,
         reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
         vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
-        reth_handle_receiver: oneshot::Receiver<RethNode>,
+        reth_handle_receiver: oneshot::Receiver<(
+            RethNode,
+            irys_reth::pd_pricing::state::PdPricingHandle,
+        )>,
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
         irys_provider: IrysRethProvider,
@@ -943,7 +955,7 @@ impl IrysNode {
         ServiceSet,
     )> {
         // initialize the databases
-        let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
+        let (reth_node, reth_db, pd_pricing_handle) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
         let reth_node_adapter =
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
@@ -1041,6 +1053,18 @@ impl IrysNode {
             &service_senders,
             runtime_handle.clone(),
         );
+
+        // start PD Pricing service (after Reth + BlockTree are ready)
+        let pd_pricing_service_handle =
+            irys_actors::pd_pricing_service::PdPricingService::spawn_service(
+                service_senders.clone(),
+                reth_node_adapter.clone(),
+                pd_pricing_handle,
+                irys_db.clone(),
+                service_senders.mempool.clone(),
+                config.consensus.clone(),
+                runtime_handle.clone(),
+            );
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
@@ -1414,6 +1438,7 @@ impl IrysNode {
             // 8. Core infrastructure (shutdown last)
             services.push(ArbiterEnum::TokioService(peer_network_handle));
             services.push(ArbiterEnum::TokioService(reth_service_task));
+            services.push(ArbiterEnum::TokioService(pd_pricing_service_handle));
         }
 
         let server = run_server(
@@ -1606,6 +1631,7 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
+            reth_adapter: reth_node_adapter.clone(),
             shadow_tx_store,
             beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
@@ -1818,14 +1844,25 @@ fn init_reth_service(
 }
 
 async fn init_reth_db(
-    reth_handle_receiver: oneshot::Receiver<RethNode>,
-) -> Result<(RethNodeProvider, irys_database::db::RethDbWrapper), eyre::Error> {
-    let reth_node = RethNodeProvider(Arc::new(reth_handle_receiver.await?));
+    reth_handle_receiver: oneshot::Receiver<(
+        RethNode,
+        irys_reth::pd_pricing::state::PdPricingHandle,
+    )>,
+) -> Result<
+    (
+        RethNodeProvider,
+        irys_database::db::RethDbWrapper,
+        irys_reth::pd_pricing::state::PdPricingHandle,
+    ),
+    eyre::Error,
+> {
+    let (reth_node_val, pd_handle) = reth_handle_receiver.await?;
+    let reth_node = RethNodeProvider(Arc::new(reth_node_val));
     let reth_db = reth_node.provider.database.db.clone();
     // TODO: fix this so we can migrate the consensus/irys DB
     // we no longer extend the reth database with our own tables/metadata
     // check_db_version_and_run_migrations_if_needed(&reth_db, irys_db)?;
-    Ok((reth_node, reth_db))
+    Ok((reth_node, reth_db, pd_handle))
 }
 
 fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {

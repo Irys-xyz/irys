@@ -70,5 +70,7 @@ pub fn build_unsigned_irys_genesis_block(
         oracle_irys_price: config.genesis_price,
         ema_irys_price: config.genesis_price,
         treasury: U256::zero(), // Treasury will be set when genesis commitments are added
+        pd_chunks_used_total: 0,
+        pd_base_rate_usd_per_mb_scaled: U256::from(10_000_000_000_000_000u64),
     })
 }
