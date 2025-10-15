@@ -16,8 +16,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{interval, timeout},
+};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Sync service errors

@@ -11,8 +11,7 @@ use irys_types::{
 use irys_types::{Address, IngressProof};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{broadcast, mpsc::UnboundedSender};
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {

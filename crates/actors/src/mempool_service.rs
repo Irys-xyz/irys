@@ -60,8 +60,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::broadcast;
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
