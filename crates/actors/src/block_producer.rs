@@ -136,6 +136,7 @@ pub struct BlockProducerInner {
     pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
     /// Reth blockchain provider
     pub reth_provider: NodeProvider,
+    pub reth_adapter: irys_reth_node_bridge::IrysRethNodeAdapter,
     /// Shadow tx store
     pub shadow_tx_store: ShadowTxStore,
     /// Reth beacon engine handle
@@ -951,6 +952,29 @@ pub trait BlockProdStrategy {
             vec![]
         };
 
+        // Compute PD chunks used by scanning access lists from the built EVM block
+        // We sum chunk_count values for storage keys under PD precompile, no deduplication
+        let pd_chunks_used_total: u64 = {
+            use alloy_consensus::transaction::Transaction as _;
+            eth_built_payload
+                .body()
+                .transactions()
+                .filter_map(|tx| tx.access_list())
+                .map(irys_reth::pd_tx::sum_pd_chunks_in_access_list)
+                .sum()
+        };
+
+        // Compute next base rate from previous header (fallback to $0.01 if prev missing)
+        let prev_base_rate_irys =
+            if prev_block_header.pd_base_rate_usd_per_mb_scaled > U256::from(0u8) {
+                prev_block_header.pd_base_rate_usd_per_mb_scaled
+            } else {
+                irys_reth::constants::USD_CENT_SCALED_ALLOY.into()
+            };
+        let pd_base_rate_usd_per_mb_scaled: irys_types::U256 =
+            irys_reth::pd_tx::step_base_rate_u256(prev_base_rate_irys.into(), pd_chunks_used_total)
+                .into();
+
         // build a new block header
         let mut irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             block_hash: H256::zero(), // block_hash is initialized after signing
@@ -1031,6 +1055,8 @@ pub trait BlockProdStrategy {
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
+            pd_chunks_used_total,
+            pd_base_rate_usd_per_mb_scaled,
         });
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash

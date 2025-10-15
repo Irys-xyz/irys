@@ -12,6 +12,7 @@ pub mod data_sync_service;
 pub mod mempool_service;
 pub mod mining;
 pub mod packing;
+pub mod pd_pricing_service;
 pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
