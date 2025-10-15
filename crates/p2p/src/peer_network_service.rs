@@ -963,7 +963,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_rt::test;
     use async_trait::async_trait;
     use eyre::eyre;
     use futures::FutureExt as _;
@@ -982,6 +981,7 @@ mod tests {
     use std::str::FromStr as _;
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
+    use tokio::test;
     use tokio::time::{sleep, timeout, Duration};
 
     fn create_test_peer(
