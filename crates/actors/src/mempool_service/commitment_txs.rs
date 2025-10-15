@@ -122,10 +122,24 @@ impl Inner {
         self.precheck_commitment_ingress_common(&commitment_tx)
             .await?;
 
-        // Validate economic constraints only for API-submitted transactions
-        // Gossip-submitted transactions skip these to avoid rejecting txs from other forks
-        // while still being able to process them when building blocks.
-        // Gossip path: skip fee/value/funding checks
+        // Gossip path: check only static fields from config (shape).
+        // - Validate `fee` and `value` to reject clearly wrong Stake/Pledge/Unpledge/Unstake txs.
+        // - Do not check account balance here. That is verified on API ingress
+        //   and again during selection/block validation.
+        if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
+            let mut guard = self.mempool_state.write().await;
+            guard.recent_invalid_tx.put(commitment_tx.id, ());
+            drop(guard);
+
+            return Err(e.into());
+        }
+        if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
+            let mut guard = self.mempool_state.write().await;
+            guard.recent_invalid_tx.put(commitment_tx.id, ());
+            drop(guard);
+
+            return Err(e.into());
+        }
 
         // Post-processing shared with API path (trace-level status, no warn on unstaked)
         self.process_commitment_after_prechecks(&commitment_tx)
