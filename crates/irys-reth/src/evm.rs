@@ -1345,5 +1345,4 @@ mod tests {
         let result = res.unwrap().result;
         assert!(result.is_success(), "expected success, got: {:?}", result);
     }
-
 }
