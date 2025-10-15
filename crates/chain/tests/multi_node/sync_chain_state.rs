@@ -339,7 +339,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         )
         .await;
 
-        let mut result_genesis = block_index_endpoint_request(
+        let result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             required_index_blocks_height.try_into()?,
@@ -456,7 +456,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
             .wait_until_block_index_height(genesis_starting_index_height + 1, max_seconds)
             .await?;
 
-        let mut result_genesis = block_index_endpoint_request(
+        let result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             genesis_starting_index_height + 1,
@@ -557,11 +557,10 @@ async fn poll_until_fetch_at_block_index_height(
     max_attempts: u64,
 ) -> Option<reqwest::Response> {
     let mut attempts = 0;
-    let mut result_peer = None;
     let max_attempts = max_attempts * 10;
     let url = local_test_url(&node_ctx.config.node_config.http.bind_port);
     loop {
-        let mut response = info_endpoint_request(&url).await;
+        let response = info_endpoint_request(&url).await;
 
         if max_attempts < attempts {
             error!(
@@ -604,5 +603,5 @@ async fn poll_until_fetch_at_block_index_height(
             );
         }
     }
-    result_peer
+    None
 }
