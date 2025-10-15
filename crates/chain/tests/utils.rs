@@ -172,7 +172,7 @@ pub async fn capacity_chunk_solution(
             let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
             // Check difficulty: interpret hash as little-endian number
-            let solution_val = U256::from_little_endian(&solution_hash.0);
+            let solution_val = irys_types::u256_from_le_bytes(&solution_hash.0);
             if solution_val >= difficulty {
                 return SolutionContext {
                     partition_hash,

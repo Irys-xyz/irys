@@ -13,8 +13,8 @@ use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
 use irys_storage::ii;
 use irys_types::{
     block_production::{Seed, SolutionContext},
-    partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, U256,
+    partition_chunk_offset_ie, u256_from_le_bytes, AtomicVdfStepNumber, Config, H256List,
+    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -185,10 +185,6 @@ impl PartitionMiningServiceInner {
             .wrap_err("recall range larger than u64")
     }
 
-    fn hash_to_number(hash: &[u8]) -> U256 {
-        U256::from_little_endian(hash)
-    }
-
     fn mine_partition_with_seed(
         &mut self,
         mining_seed: irys_types::H256,
@@ -249,7 +245,7 @@ impl PartitionMiningServiceInner {
                 *partition_chunk_offset,
                 &mining_seed,
             );
-            let test_solution = Self::hash_to_number(&solution_hash.0);
+            let test_solution = u256_from_le_bytes(&solution_hash.0);
 
             if test_solution >= self.difficulty {
                 info!(

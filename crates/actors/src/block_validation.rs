@@ -25,6 +25,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::u256_from_le_bytes as hash_to_number;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -218,10 +219,6 @@ pub enum PreValidationError {
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
     InvalidEpochSnapshot { error: String },
-}
-
-fn hash_to_number(hash: &[u8]) -> U256 {
-    U256::from_little_endian(hash)
 }
 
 /// Full pre-validation steps for a block
