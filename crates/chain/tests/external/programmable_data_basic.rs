@@ -127,7 +127,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     info!("waiting for tx header...");
@@ -189,7 +189,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
                 .await
                 .unwrap();
 
-            if response.status() == 200 {
+            if response.status() == reqwest::StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

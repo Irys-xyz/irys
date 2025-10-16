@@ -209,7 +209,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .send()
                     .await
                     .unwrap();
-                assert_eq!(resp.status(), 200);
+                assert_eq!(resp.status(), reqwest::StatusCode::OK);
             }
 
             // create a new tx, upload *some* of it's chunks
@@ -257,7 +257,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
                     .await
                     .unwrap();
 
-                assert_eq!(resp.status(), 200);
+                assert_eq!(resp.status(), reqwest::StatusCode::OK);
             }
         }
 

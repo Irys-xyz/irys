@@ -9,6 +9,7 @@ use crate::{
 use actix_web::http::header::ContentType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{BlockIndexItem, NodeInfo};
+use reqwest::StatusCode;
 use tracing::info;
 
 #[tokio::test]
@@ -32,14 +33,14 @@ async fn heavy_external_api() -> eyre::Result<()> {
     //assert_eq!(_response.content_type(), ContentType::json());
 
     let mut _response = network_config_endpoint_request(&address).await;
-    assert_eq!(_response.status(), 200);
+    assert_eq!(_response.status(), StatusCode::OK);
     assert_eq!(
         _response.headers().get("content-type").unwrap(),
         &ContentType::json().to_string()
     );
 
     let mut _response = peer_list_endpoint_request(&address).await;
-    assert_eq!(_response.status(), 200);
+    assert_eq!(_response.status(), StatusCode::OK);
     assert_eq!(
         _response.headers().get("content-type").unwrap(),
         &ContentType::json().to_string()
@@ -52,7 +53,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
 
     let response = info_endpoint_request(&address).await;
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), StatusCode::OK);
     info!("HTTP server started");
 
     // confirm we are receiving the correct content type
@@ -103,7 +104,7 @@ async fn heavy_external_api() -> eyre::Result<()> {
     for limit in 0..2 {
         for height in 0..2 {
             let response = block_index_endpoint_request(&address, height, limit).await;
-            assert_eq!(response.status(), 200);
+            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
                 response.headers().get("content-type").unwrap(),
                 &ContentType::json().to_string()

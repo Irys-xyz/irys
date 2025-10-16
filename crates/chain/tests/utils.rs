@@ -2105,7 +2105,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .expect("client post failed");
 
         debug!("chunk_index: {:?}", chunk_index);
-        assert_eq!(response.status(), 200);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {

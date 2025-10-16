@@ -67,7 +67,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     // mine block 1 and confirm height is exactly what we need
@@ -105,7 +105,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     node.mine_block().await?;
     assert_eq!(node.get_canonical_chain_height().await, 2_u64);
@@ -136,7 +136,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
     // confirm that we have the right number of CachedChunks in mdbx table
@@ -211,7 +211,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(chunk_res.status(), 200);
+    assert_eq!(chunk_res.status(), reqwest::StatusCode::OK);
 
     node.stop().await;
 

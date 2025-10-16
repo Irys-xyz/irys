@@ -63,7 +63,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     let message = "Hirys, world!";
@@ -94,7 +94,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     // Check that tx has been sent
     node.wait_for_mempool(tx.header.id, max_seconds).await?;

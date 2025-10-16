@@ -81,7 +81,7 @@ async fn external_api() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started {}", http_url);
 
     info!("waiting for tx header...");
@@ -129,7 +129,7 @@ async fn external_api() -> eyre::Result<()> {
                 .await
                 .unwrap();
 
-            if response.status() == 200 {
+            if response.status() == reqwest::StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

@@ -129,7 +129,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     let message = "Hirys, world!";
@@ -160,7 +160,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     let id: String = tx.header.id.to_string();
     let mut tx_header_fut = Box::pin(async {
@@ -178,7 +178,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
                 continue;
             };
 
-            if response.status() == 200 {
+            if response.status() == reqwest::StatusCode::OK {
                 let result: DataTransactionHeader = response.json().await.unwrap();
                 assert_eq!(&tx.header, &result);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
@@ -222,7 +222,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
     // wait for the chunks to migrate
@@ -243,7 +243,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
                 continue;
             };
 
-            if response.status() == 200 {
+            if response.status() == reqwest::StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

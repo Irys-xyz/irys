@@ -37,7 +37,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
     // assert
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").unwrap(),
         &ContentType::json().to_string()
@@ -118,7 +118,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
     // assert
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").unwrap(),
         &ContentType::json().to_string()
@@ -221,7 +221,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
 
     // assert
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").unwrap(),
         &ContentType::json().to_string()
