@@ -81,6 +81,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
         packing: irys_types::PackingConfig {
             local: irys_types::LocalPackingConfig {
                 cpu_packing_concurrency: 0,
+                cpu_unpacking_concurrency: 0,
                 gpu_packing_batch_size: 0,
             },
             remote: vec![RemotePackingConfig {

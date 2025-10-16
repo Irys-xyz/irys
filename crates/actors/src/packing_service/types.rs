@@ -1,12 +1,41 @@
-use std::sync::{atomic::AtomicUsize, Arc};
-use std::time::Duration;
-
 use dashmap::DashMap;
 use irys_domain::StorageModule;
 use irys_types::PartitionChunkRange;
+use irys_types::{PackedChunk, UnpackedChunk};
+use std::sync::{atomic::AtomicUsize, Arc};
+use std::time::Duration;
+use std::time::Instant;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
+use super::errors::UnpackingError;
 use super::{config::PackingConfig, PackingError, PackingResult};
+
+/// A validated unpacking request
+#[derive(Debug)]
+pub struct UnpackingRequest {
+    pub packed_chunk: Arc<PackedChunk>,
+    pub created_at: Instant,
+    pub response_tx: oneshot::Sender<Result<UnpackedChunk, UnpackingError>>,
+}
+
+impl UnpackingRequest {
+    /// Create a new unpacking request and return it with its response receiver
+    pub fn new(
+        packed_chunk: Arc<PackedChunk>,
+    ) -> (
+        Self,
+        oneshot::Receiver<Result<UnpackedChunk, UnpackingError>>,
+    ) {
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = Self {
+            packed_chunk,
+            created_at: Instant::now(),
+            response_tx,
+        };
+        (request, response_rx)
+    }
+}
 
 /// A validated packing request for a specific storage module and chunk range
 #[derive(Debug, Clone)]
