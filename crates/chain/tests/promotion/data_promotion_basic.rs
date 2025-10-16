@@ -1,10 +1,12 @@
-use crate::utils::IrysNodeTest;
 use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
+use crate::utils::{AddTxError, IrysNodeTest};
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
+use assert_matches::assert_matches;
 use awc::http::StatusCode;
-
+use irys_actors::MempoolServiceMessage;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
@@ -258,6 +260,139 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     .await;
 
     node.node_ctx.stop().await;
+
+    Ok(())
+}
+
+// This test simulates a case encountered on testnet, where a submit tx was not able to be included in a block, but it was a promotion candidate.
+#[actix_web::test]
+async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+    );
+    initialize_tracing();
+
+    let seconds_to_wait = 30;
+
+    // Set up consensus to require 3 ingress proofs to promote
+    let mut config = NodeConfig::testing()
+        .with_consensus(|consensus| {
+            consensus.chunk_size = 32;
+            // Set the total number of proofs required to promote above the number of nodes (3)
+            // to validate the clamping to 3 proofs to promote.
+            consensus.number_of_ingress_proofs_total = 5;
+            consensus.number_of_ingress_proofs_from_assignees = 2;
+            consensus.num_partitions_per_slot = 3;
+            consensus.epoch.num_blocks_in_epoch = 3;
+            consensus.block_migration_depth = 1;
+        })
+        .with_genesis_peer_discovery_timeout(1000);
+
+    config.consensus.get_mut().number_of_ingress_proofs_total = 3;
+    config.consensus.get_mut().chunk_size = 32;
+
+    // Create a signer (keypair) for the peer and fund it
+    let peer1_signer = config.new_random_signer();
+    let peer2_signer = config.new_random_signer();
+    let genesis_signer = config.signer();
+    config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
+
+    // Start the genesis node and wait for packing
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // mine some blocks
+    genesis_node.mine_blocks(5).await?;
+    let blk5 = genesis_node.get_block_by_height(5).await?;
+
+    // Post a transaction and it's chunks to all 3
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let mut data: Vec<u8> = Vec::new();
+    for chunk in &chunks {
+        data.extend_from_slice(chunk);
+    }
+
+    // we create a transaction with an anchor that is too new for inclusion in a block
+    let data_tx = {
+        // Get data size before moving data
+        let data_size = data.len() as u64;
+
+        // Query the price endpoint to get required fees for Publish ledger
+        let price_info = genesis_node
+            .get_data_price(DataLedger::Publish, data_size)
+            .await
+            .map_err(AddTxError::CreateTx)?;
+
+        // Create transaction with proper fees
+        let tx = genesis_signer
+            .create_publish_transaction(
+                data,
+                blk5.block_hash, // anchor
+                price_info.perm_fee,
+                price_info.term_fee,
+            )
+            .map_err(AddTxError::CreateTx)?;
+
+        genesis_signer
+            .sign_transaction(tx)
+            .map_err(AddTxError::CreateTx)
+    }?;
+
+    // we then submit it as gossip so it bypasses the at-ingress check for anchor maturity
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // ingest as gossip
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+            data_tx.header.clone(),
+            tx,
+        ))
+        .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+    // Ignore possible ingestion errors in tests
+    let _ = rx.await?;
+
+    // the tx should now be in the mempool - it should not be included in the submit ledger, but it should be a publish candidate
+    genesis_node
+        .wait_for_mempool(data_tx.header.id, seconds_to_wait)
+        .await?;
+
+    genesis_node.post_chunk_32b(&data_tx, 0, &chunks).await;
+    genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
+    genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
+
+    let res = genesis_node
+        .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
+        .await;
+
+    assert_matches!(res, Ok(()));
+
+    let height = genesis_node.get_canonical_chain_height().await;
+    genesis_node.start_mining();
+    genesis_node
+        .wait_until_height_confirmed(height + 1, seconds_to_wait)
+        .await?;
+
+    // Check is promoted state of tx in the mempool
+    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
+    assert!(!is_promoted);
+
+    genesis_node
+        .wait_until_height_confirmed(
+            height + config.consensus_config().block_migration_depth as u64,
+            seconds_to_wait,
+        )
+        .await?;
+
+    // Check is promoted state of tx after it migrates to DB
+    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
+    assert!(!is_promoted);
+
+    // Wind down test
+    genesis_node.stop().await;
 
     Ok(())
 }
