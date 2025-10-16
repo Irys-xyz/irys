@@ -357,7 +357,7 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
 
     assert_matches!(res, Ok(()));
 
-    // asser the tx is not promoted and wasn't included in any blocks
+    // assert that the tx is not promoted and wasn't included in any blocks
     let block = genesis_node.mine_block().await?;
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
     assert!(!is_promoted);
