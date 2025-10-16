@@ -173,10 +173,6 @@ impl MempoolFacade for MempoolStub {
         Ok(1)
     }
 
-    async fn insert_poa_chunk(&self, _block_hash: H256, _chunk_data: Base64) -> Result<()> {
-        Ok(())
-    }
-
     async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {
         Ok(())
     }

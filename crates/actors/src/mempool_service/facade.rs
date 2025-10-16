@@ -5,8 +5,7 @@ use crate::mempool_service::{
 use crate::services::ServiceSenders;
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    H256,
+    chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
 };
 use irys_types::{Address, IngressProof};
 use std::collections::HashSet;
@@ -46,8 +45,6 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         irys_block_header: Arc<IrysBlockHeader>,
     ) -> Result<usize, TxIngressError>;
-
-    async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()>;
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
 
@@ -220,17 +217,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 block: irys_block_header,
             })
             .map_err(|e| TxIngressError::Other(format!("Failed to send BlockMigratedEvent: {}", e)))
-    }
-
-    async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service
-            .send(MempoolServiceMessage::InsertPoAChunk(
-                block_hash, chunk_data, tx,
-            ))
-            .map_err(|send_error| eyre!("{send_error:?}"))?;
-
-        rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
     }
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {
