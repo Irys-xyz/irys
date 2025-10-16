@@ -127,7 +127,7 @@ impl NodeAlias {
         &self.0
     }
 
-    /// Returns a clone of the inner Arc<str>
+    /// Returns a clone of the inner `Arc<str>`
     pub fn arc_clone(&self) -> Arc<str> {
         Arc::clone(&self.0)
     }

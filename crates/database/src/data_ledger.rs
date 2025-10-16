@@ -246,7 +246,7 @@ impl LedgerCore for TermLedger {
 }
 
 /// A container for managing permanent and term ledgers with type-safe access
-/// through the [Ledger] enum.
+/// through the \[Ledger\] enum.
 ///
 /// The permanent and term ledgers are intentionally given different types to
 /// prevent runtime errors:

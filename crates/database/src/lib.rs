@@ -1,4 +1,4 @@
-//! This crate is a dependency for both [chain] and [actors] crates. It exposes
+//! This crate is a dependency for both chain and actors crates. It exposes
 //! database methods for reading and writing from the database as well as some
 //! database value types.
 pub mod data_ledger;
