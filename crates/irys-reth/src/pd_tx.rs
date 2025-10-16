@@ -155,8 +155,6 @@ pub const PD_HEADER_VERSION_V1: u16 = 1;
 /// Manual Borsh impls to keep a stable, fixed-size encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdHeaderV1 {
-    /// Declared total PD chunks to be accessed by this tx (must match access list sum).
-    pub chunks_declared: u64,
     /// User-offered PD priority fee per chunk (scaled 1e18 tokens).
     pub max_priority_fee_per_chunk: U256,
     /// User-accepted maximum PD base fee per chunk (scaled 1e18 tokens).
@@ -166,8 +164,6 @@ pub struct PdHeaderV1 {
 
 impl BorshSerialize for PdHeaderV1 {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        // u64 be
-        writer.write_all(&self.chunks_declared.to_be_bytes())?;
         // U256 be (32 bytes) priority per chunk
         writer.write_all(&self.max_priority_fee_per_chunk.to_be_bytes::<32>())?;
         // U256 be (32 bytes) max base per chunk
@@ -178,10 +174,6 @@ impl BorshSerialize for PdHeaderV1 {
 
 impl BorshDeserialize for PdHeaderV1 {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let mut chunks_buf = [0u8; 8];
-        reader.read_exact(&mut chunks_buf)?;
-        let chunks_declared = u64::from_be_bytes(chunks_buf);
-
         let mut prio_buf = [0u8; 32];
         reader.read_exact(&mut prio_buf)?;
         let max_priority_fee_per_chunk = U256::from_be_bytes(prio_buf);
@@ -190,17 +182,17 @@ impl BorshDeserialize for PdHeaderV1 {
         reader.read_exact(&mut base_buf)?;
         let max_base_fee_per_chunk = U256::from_be_bytes(base_buf);
 
-        Ok(Self { chunks_declared, max_priority_fee_per_chunk, max_base_fee_per_chunk })
+        Ok(Self { max_priority_fee_per_chunk, max_base_fee_per_chunk })
     }
 }
 
 /// Encodes a PD header and prepends it to the provided calldata bytes.
 /// Result layout: [magic][version:u16 be][borsh(header)][rest]
 pub fn prepend_pd_header_v1_to_calldata(header: &PdHeaderV1, rest: &[u8]) -> Bytes {
-    let mut out = Vec::with_capacity(IRYS_PD_HEADER_MAGIC.len() + 2 + 8 + 32 + 32 + rest.len());
+    let mut out = Vec::with_capacity(IRYS_PD_HEADER_MAGIC.len() + 2 + 32 + 32 + rest.len());
     out.extend_from_slice(IRYS_PD_HEADER_MAGIC);
     out.extend_from_slice(&PD_HEADER_VERSION_V1.to_be_bytes());
-    let mut buf = Vec::with_capacity(8 + 32 + 32);
+    let mut buf = Vec::with_capacity(32 + 32);
     header.serialize(&mut buf).expect("borsh serialize PdHeaderV1");
     out.extend_from_slice(&buf);
     out.extend_from_slice(rest);

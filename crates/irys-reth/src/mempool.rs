@@ -240,19 +240,15 @@ where
             .unwrap_or_default();
 
         // PD header max priority fee per chunk and chunk count, if present
-        let (pd_tip_per_chunk, chunks_declared_u64) = match crate::pd_tx::detect_and_decode_pd_header(transaction.input()) {
-            Ok(Some((hdr, _))) => (hdr.max_priority_fee_per_chunk, hdr.chunks_declared),
-            _ => (alloy_primitives::U256::ZERO, 0u64),
+        let pd_tip_per_chunk = match crate::pd_tx::detect_and_decode_pd_header(transaction.input()) {
+            Ok(Some((hdr, _))) => hdr.max_priority_fee_per_chunk,
+            _ => alloy_primitives::U256::ZERO,
         };
-        // If header is absent, optionally infer chunk count from access list to bias ordering by PD size.
-        let chunks_u64 = if chunks_declared_u64 == 0 {
-            transaction
-                .access_list()
-                .map(sum_pd_chunks_in_access_list)
-                .unwrap_or(0u64)
-        } else {
-            chunks_declared_u64
-        };
+        // Always infer PD chunk count from the access list.
+        let chunks_u64 = transaction
+            .access_list()
+            .map(sum_pd_chunks_in_access_list)
+            .unwrap_or(0u64);
         let pd_total_tip = alloy_primitives::U256::from(chunks_u64).saturating_mul(pd_tip_per_chunk);
 
         // Effective priority: gas tip + total PD tip (per-chunk tip * chunk count).

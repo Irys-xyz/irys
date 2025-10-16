@@ -501,14 +501,9 @@ where
         if let Some((pd_header, consumed)) =
             crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
         {
-            // todo: verify the `chunks_declared` in the header vs actual amountf from the access list
-
-            // Compute PD fees based on header values. For now, we treat the base fee per chunk
-            // as the user's max base fee per chunk; this will be reconciled with dynamic pricing
-            // in a follow-up by comparing against current base and enforcing caps.
-            let chunks = U256::from(pd_header.chunks_declared);
-            // TODO: We shoud access the `pd base fee` and use that instead, otherwise
-            // the user could be overpaying if we use their provided max_base_fee_per_chunk
+            // Compute PD fees based on header values. Always derive PD chunk count from access list.
+            let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
+            let chunks = U256::from(chunks_u64);
             let base_per_chunk = pd_header.max_base_fee_per_chunk;
             let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
 
@@ -1452,14 +1447,23 @@ mod tests {
         ben_acc.info.balance = U256::ZERO;
         evm.commit_account_change(beneficiary, ben_acc);
 
-        // Construct PD header: 3 chunks, 10 tip per chunk, 7 base per chunk
+        // Construct PD header: 10 tip per chunk, 7 base per chunk
         let header = PdHeaderV1 {
-            chunks_declared: 3,
             max_priority_fee_per_chunk: U256::from(10u64),
             max_base_fee_per_chunk: U256::from(7u64),
         };
         let user_calldata = Bytes::from(vec![0xAA, 0xBB]); // arbitrary payload seen by contract after strip
         let data = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
+
+        // Build access list with 3 PD chunks
+        use alloy_eips::eip2930::AccessListItem as AlItem;
+        let key1 = crate::pd_tx::encode_pd_storage_key([0u8; 26], 0, 1);
+        let key2 = crate::pd_tx::encode_pd_storage_key([0u8; 26], 1, 1);
+        let key3 = crate::pd_tx::encode_pd_storage_key([0u8; 26], 2, 1);
+        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_primitives::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![key1, key2, key3],
+        }]);
 
         let tx = TxEnv {
             caller: payer,
@@ -1471,7 +1475,7 @@ mod tests {
             gas_price: 0,
             chain_id: Some(1),
             gas_priority_fee: None,
-            access_list: Default::default(),
+            access_list,
             blob_hashes: Vec::new(),
             max_fee_per_blob_gas: 0,
             tx_type: 0,
