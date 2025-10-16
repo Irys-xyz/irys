@@ -1413,16 +1413,3 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 
     bytes_added / chunk_size
 }
-
-/// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
-/// acts as a placeholder for when the node will maintain a block tree of
-/// confirmed blocks and produce migrated blocks for the canonical chain when
-/// enough confirmations have occurred. Chunks are moved from the in-memory
-/// index to the storage modules when a block is migrated.
-#[derive(Debug, Clone)]
-pub struct BlockMigrationMessage {
-    /// Block being migrated
-    pub block_header: Arc<IrysBlockHeader>,
-    /// Include all the blocks transaction headers [Submit, Publish]
-    pub all_txs: Arc<Vec<DataTransactionHeader>>,
-}

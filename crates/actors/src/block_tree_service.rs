@@ -236,7 +236,7 @@ impl BlockTreeServiceInner {
     /// This method:
     /// - Resolves the full `IrysBlockHeader` for the provided `block_hash` from the mempool or the database
     /// - Fetches the Submit and Publish data-transaction headers from the mempool
-    /// - Emits a `BlockMigrationMessage` to the `BlockIndexService` and `ChunkMigrationService`
+    /// - Emits a block migration message to the `BlockIndexService` and `ChunkMigrationService`
     ///
     /// Errors
     /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
