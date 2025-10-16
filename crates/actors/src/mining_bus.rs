@@ -36,12 +36,13 @@ struct MiningBusInner {
 /// Tokio-native mining bus that supports fan-out to multiple subscribers.
 ///
 /// - subscribe() returns an UnboundedReceiver that yields MiningBroadcastEvent items
+///   - Why not a tokio broadcast::channel? PartitionsExpiration may not like a bounded channel. Todo: Investigate
 /// - send_* helpers fan-out events to all current subscribers
-///
-/// This provides a central event hub for:
-/// - VDF thread broadcasting new seeds/checkpoints
-/// - Block tree broadcasting difficulty updates and partition expirations
-/// - Partition mining services consuming the stream of events
+/// - Used by:
+///   - VDF thread via `MiningBusBroadcaster` broadcasting new Seeds
+///   - `BlockTreeService` broadcasting PartitionsExpiration events
+///   - `BlockTreeService` and `BlockProducerService` broadcasting Difficulty updates
+///   - `PartitionMiningService` consuming `Seed`, `Difficulty`, and `PartitionsExpiration` events
 #[derive(Debug, Clone)]
 pub struct MiningBus(Arc<MiningBusInner>);
 
