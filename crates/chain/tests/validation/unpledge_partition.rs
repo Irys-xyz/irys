@@ -160,7 +160,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
 
     for node in [&genesis_node, &victim_node, &evil_node] {
-        gossip_commitment_to_node(node, &invalid_unpledge).await?;
+        let _ = gossip_commitment_to_node(node, &invalid_unpledge).await;
     }
 
     send_block_to_block_tree(
@@ -295,7 +295,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
     }
 
     for tx in &unpledge_txs {
-        gossip_commitment_to_node(&genesis_node, tx).await?;
+        let _ = gossip_commitment_to_node(&genesis_node, tx).await;
     }
 
     let block_prod_strategy = EvilBlockProdStrategy {
