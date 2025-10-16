@@ -1233,6 +1233,8 @@ impl IrysNode {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let packing_controller_handles =
             packing_service.spawn_packing_controllers(runtime_handle.clone());
+        let unpacking_controller_handles =
+            packing_service.spawn_unpacking_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
@@ -1387,6 +1389,12 @@ impl IrysNode {
             // Add packing controllers to services
             services.extend(
                 packing_controller_handles
+                    .into_iter()
+                    .map(ArbiterEnum::TokioService),
+            );
+            // Add unpacking controllers to services
+            services.extend(
+                unpacking_controller_handles
                     .into_iter()
                     .map(ArbiterEnum::TokioService),
             );
