@@ -5,20 +5,6 @@
 //! - Control concurrency with semaphores and worker coordination
 //! - Support graceful shutdown and idle detection
 
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum PackingError {
-    #[error("Invalid partition assignment for SM {sm_id}")]
-    InvalidAssignment { sm_id: usize },
-
-    #[error("Invalid chunk range: {requested:?} exceeds max {max}")]
-    InvalidRange {
-        requested: irys_types::PartitionChunkRange,
-        max: u64,
-    },
-}
-
 pub type PackingResult<T> = Result<T, PackingError>;
 
 /// Log progress every N chunks to balance visibility vs log volume
@@ -74,18 +60,22 @@ pub(crate) fn log_packing_progress(
 
 mod client_pool;
 mod config;
+mod errors;
 mod guard;
 mod strategies;
 mod types;
+mod unpacking;
 
 pub use config::PackingConfig;
+use errors::PackingError;
+pub use errors::UnpackingError;
 use guard::ActiveWorkerGuard;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
 pub use types::{Internals, PackingQueues, PackingReceiver, PackingSemaphore, PackingSender};
-pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest};
+pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest, UnpackingRequest};
 
 use dashmap::DashMap;
 use irys_packing::{PackingType, PACKING_TYPE};
@@ -512,6 +502,7 @@ mod tests {
             packing: irys_types::PackingConfig {
                 local: irys_types::LocalPackingConfig {
                     cpu_packing_concurrency: 1,
+                    cpu_unpacking_concurrency: 1,
                     gpu_packing_batch_size: 1,
                 },
                 remote: Default::default(),
@@ -866,6 +857,8 @@ mod tests {
                     #[cfg(feature = "nvidia")]
                     max_chunks: 100,
                     remotes: vec![],
+                    unpacking_concurrency: concurrency,
+                    unpacking_queue_capacity: 1000,
                 },
             };
 
@@ -902,6 +895,7 @@ mod tests {
             packing: irys_types::PackingConfig {
                 local: irys_types::LocalPackingConfig {
                     cpu_packing_concurrency: concurrency,
+                    cpu_unpacking_concurrency: concurrency,
                     gpu_packing_batch_size: 10,
                 },
                 remote: Default::default(),
