@@ -455,21 +455,19 @@ async fn partition_expiration_and_repacking_test() {
         storage_modules.push(arc_module.clone());
     }
 
-    // Wire a Tokio packing handle that captures a single request via oneshot
-    let (tx_packing, mut rx_packing) =
-        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(storage_modules.len());
+    // Wire a Tokio packing handle that captures a single request via oneshot (using internal receiver)
     let (pack_req_tx, pack_req_rx) =
         tokio::sync::oneshot::channel::<irys_actors::packing::PackingRequest>();
-    //spawn a task that will await rx_packing and send the very first packing request before exiting
+
+    // Create ServiceSenders for testing
+    let (service_senders, mut receivers) = ServiceSenders::new();
+    // Spawn a task that will await the first packing request from the internal receiver
+    let mut packing_rx = receivers.packing;
     tokio::spawn(async move {
-        if let Some(packing_req) = rx_packing.recv().await {
+        if let Some(packing_req) = packing_rx.recv().await {
             pack_req_tx.send(packing_req).expect("pack_req_rx dropped");
         }
     });
-
-    // Create ServiceSenders for testing (channel-first)
-    let (service_senders, mut receivers) =
-        ServiceSenders::new_with_packing_sender(tx_packing.clone());
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {

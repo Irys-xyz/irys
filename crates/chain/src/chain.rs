@@ -960,16 +960,13 @@ impl IrysNode {
 
         // initialize packing service early
         let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
-        // channel-first: create sender/receiver before attaching the service loop
-        let (packing_tx, packing_rx) = irys_actors::packing::PackingService::channel(5_000);
         // start service senders/receivers with packing sender
-        let (service_senders, receivers) =
-            ServiceSenders::new_with_packing_sender(packing_tx.clone());
+        let (service_senders, receivers) = ServiceSenders::new();
         // attach the receiver loop and obtain a handle for waiters/tests
         let packing_handle = packing_service.attach_receiver_loop(
             runtime_handle.clone(),
-            packing_rx,
-            packing_tx.clone(),
+            receivers.packing,
+            service_senders.packing_sender.clone(),
         );
 
         // start block index service (tokio)

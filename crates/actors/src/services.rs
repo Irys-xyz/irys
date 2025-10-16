@@ -9,7 +9,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    packing::PackingSender,
+    packing::{PackingRequest, PackingSender, PackingService},
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
@@ -53,8 +53,8 @@ impl ServiceSenders {
         self.0.peer_events.subscribe()
     }
 
-    pub fn new_with_packing_sender(sender: PackingSender) -> (Self, ServiceReceivers) {
-        let (senders, receivers) = ServiceSendersInner::init_with_sender(sender);
+    pub fn new() -> (Self, ServiceReceivers) {
+        let (senders, receivers) = ServiceSendersInner::init();
         (Self(Arc::new(senders)), receivers)
     }
 
@@ -111,6 +111,7 @@ pub struct ServiceReceivers {
     pub peer_events: broadcast::Receiver<PeerEvent>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
     pub block_discovery: UnboundedReceiver<BlockDiscoveryMessage>,
+    pub packing: tokio::sync::mpsc::Receiver<PackingRequest>,
 }
 
 #[derive(Debug)]
@@ -138,7 +139,7 @@ pub struct ServiceSendersInner {
 }
 
 impl ServiceSendersInner {
-    pub fn init_with_sender(sender: PackingSender) -> (Self, ServiceReceivers) {
+    pub fn init() -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
@@ -169,6 +170,7 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
+        let (packing_sender, packing_receiver) = PackingService::channel(5_000);
 
         let mining_bus = MiningBus::new(None);
         let senders = Self {
@@ -191,7 +193,7 @@ impl ServiceSendersInner {
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
             mining_bus,
-            packing_sender: sender,
+            packing_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
@@ -212,6 +214,7 @@ impl ServiceSendersInner {
             peer_events: peer_events_receiver,
             peer_network: peer_network_receiver,
             block_discovery: block_discovery_receiver,
+            packing: packing_receiver,
         };
         (senders, receivers)
     }
