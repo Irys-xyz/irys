@@ -398,8 +398,6 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
     genesis_signer.sign_commitment(&mut unpledge_tx)?;
     let invalid_unpledge = unpledge_tx;
 
-    gossip_commitment_to_node(&genesis_node, &invalid_unpledge).await?;
-
     let block_prod_strategy = EvilBlockProdStrategy {
         commitment: invalid_unpledge.clone(),
         prod: ProductionStrategy {
