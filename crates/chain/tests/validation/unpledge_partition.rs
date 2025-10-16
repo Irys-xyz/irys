@@ -11,11 +11,13 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
-use irys_types::{CommitmentTransaction, IrysBlockHeader, NodeConfig, U256};
+use irys_types::{
+    CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, NodeConfig,
+    U256,
+};
 use tokio::sync::oneshot;
-use tracing::debug;
 
-async fn gossip_commitment_to_node(
+pub(super) async fn gossip_commitment_to_node(
     node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     commitment: &CommitmentTransaction,
 ) -> eyre::Result<()> {
@@ -24,23 +26,24 @@ async fn gossip_commitment_to_node(
         MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
     )?;
 
-    match resp_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            debug!(
-                tx_id = ?commitment.id,
-                ?err,
-                "Commitment gossip rejected by mempool"
-            );
-        }
-        Err(recv_err) => {
-            debug!(
-                tx_id = ?commitment.id,
-                ?recv_err,
-                "Commitment gossip channel dropped"
-            );
-        }
-    }
+    resp_rx.await??;
+    Ok(())
+}
+
+pub(super) async fn gossip_data_tx_to_node(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    tx: &DataTransactionHeader,
+) -> eyre::Result<()> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    node.node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+            tx.clone(),
+            resp_tx,
+        ))?;
+
+    resp_rx.await??;
     Ok(())
 }
 
