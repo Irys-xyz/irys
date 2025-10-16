@@ -11,10 +11,7 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_primitives::CommitmentType;
-use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    U256,
-};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, NodeConfig, U256};
 use tokio::sync::oneshot;
 
 pub(super) async fn gossip_commitment_to_node(

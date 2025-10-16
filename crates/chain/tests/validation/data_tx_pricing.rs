@@ -6,9 +6,11 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
+use irys_domain::ChainState;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, U256,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
+    U256,
 };
 use std::sync::Arc;
 
@@ -70,7 +72,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     // Configure a test network
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
-    genesis_config.consensus.get_mut().chunk_size = 256;
+    genesis_config.consensus.get_mut().chunk_size = 32;
 
     let test_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&test_signer]);
@@ -185,7 +187,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
     // Configure a test network
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
-    genesis_config.consensus.get_mut().chunk_size = 256;
+    genesis_config.consensus.get_mut().chunk_size = 32;
 
     let test_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&test_signer]);
@@ -262,5 +264,73 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
 
     genesis_node.stop().await;
 
+    Ok(())
+}
+
+// Happy path: adjust EMA interval, mine enough blocks so pricing EMA differs from genesis,
+// submit a valid data tx priced via API, and expect the block to be fully validated.
+#[test_log::test(actix_web::test)]
+async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()> {
+    // No custom strategy needed for happy path; use default ProductionStrategy
+
+    // Configure network with small EMA interval so pricing EMA diverges from genesis quickly
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    // Make EMA recalc frequent to speed up test
+    let price_adjustment_interval = 3_u64;
+    genesis_config
+        .consensus
+        .get_mut()
+        .ema
+        .price_adjustment_interval = price_adjustment_interval;
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Mine 2 intervals worth of blocks so pricing EMA switches away from genesis
+    for _ in 0..(price_adjustment_interval * 2) {
+        genesis_node.mine_block().await?;
+    }
+
+    // Verify EMA used for public pricing diverged from genesis price
+    let tip_hash = genesis_node.node_ctx.block_tree_guard.read().tip;
+    let ema_snapshot = genesis_node
+        .get_ema_snapshot(&tip_hash)
+        .expect("EMA snapshot for tip must exist");
+    let ema_for_pricing = ema_snapshot.ema_for_public_pricing();
+    assert_ne!(
+        ema_for_pricing, genesis_node.node_ctx.config.consensus.genesis.genesis_price,
+        "EMA for pricing should differ from genesis after two intervals"
+    );
+
+    // Create and broadcast a valid data transaction using API pricing (uses tip's EMA for next block)
+    let data = vec![1_u8; 1024];
+    let _tx = genesis_node
+        .post_publish_data_tx(&test_signer, data)
+        .await?;
+
+    // Produce a block using the standard production strategy which will pick the tx from mempool
+    let block_prod_strategy = ProductionStrategy {
+        inner: genesis_node.node_ctx.block_producer_inner.clone(),
+    };
+
+    let (block, _stats, _payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
+
+    // Send for validation and expect the block to be stored (accepted)
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert!(matches!(
+        outcome,
+        BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
+    ));
+
+    genesis_node.stop().await;
     Ok(())
 }
