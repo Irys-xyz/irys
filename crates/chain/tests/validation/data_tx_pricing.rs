@@ -35,8 +35,7 @@ async fn send_block_to_block_tree(
     Ok(response_rx.await??)
 }
 
-// This test creates a malicious block producer that includes a data transaction with insufficient perm_fee.
-// The block must be discarded because data transactions must have perm_fee >= expected amount.
+// This test ensures that during full block validation, data transaction pricing validates the perm fee
 #[test_log::test(actix_web::test)]
 async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
@@ -148,10 +147,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     Ok(())
 }
 
-// This test ensures that during full block validation, data transaction pricing uses the EMA
-// registered on the parent block. We craft a tx that underpays the TERM fee (priced using a
-// deliberately different EMA), while keeping the PERM fee correct for the parent EMA.
-// The block must be rejected due to insufficient term fee.
+// This test ensures that during full block validation, data transaction pricing validates the term fee
 #[test_log::test(actix_web::test)]
 async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
@@ -271,8 +267,6 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
 // submit a valid data tx priced via API, and expect the block to be fully validated.
 #[test_log::test(actix_web::test)]
 async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()> {
-    // No custom strategy needed for happy path; use default ProductionStrategy
-
     // Configure network with small EMA interval so pricing EMA diverges from genesis quickly
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -314,14 +308,8 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
         .await?;
 
     // Produce a block using the standard production strategy which will pick the tx from mempool
-    let block_prod_strategy = ProductionStrategy {
-        inner: genesis_node.node_ctx.block_producer_inner.clone(),
-    };
-
-    let (block, _stats, _payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
-        .await?
-        .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
+    let block = genesis_node.mine_block().await?;
+    let block = Arc::new(block);
 
     // Send for validation and expect the block to be stored (accepted)
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
