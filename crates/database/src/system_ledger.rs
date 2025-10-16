@@ -129,7 +129,7 @@ async fn create_pledge_commitment_transaction(
 /// A vector of commitment transactions (one stake + multiple pledges)
 ///
 /// # Note
-/// This function has the same configuration dependency as [`EpochServiceActor::map_storage_modules_to_partition_assignments`].
+/// This function has the same configuration dependency as EpochSnapshot::map_storage_modules_to_partition_assignments.
 /// When updating configuration related to StorageModule/submodule functionality, both functions
 /// will need corresponding updates.
 ///

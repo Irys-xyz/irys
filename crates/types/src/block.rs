@@ -261,12 +261,12 @@ impl IrysBlockHeader {
         Self::V1(IrysBlockHeaderV1::new_mock_header())
     }
 
-    /// Get the block hash (convenience method for Arc<IrysBlockHeader>)
+    /// Get the block hash (convenience method for `Arc<IrysBlockHeader>`)
     pub fn block_hash(&self) -> BlockHash {
         self.block_hash
     }
 
-    /// Get the block height (convenience method for Arc<IrysBlockHeader>)
+    /// Get the block height (convenience method for `Arc<IrysBlockHeader>`)
     pub fn height(&self) -> u64 {
         self.height
     }
@@ -936,7 +936,7 @@ pub struct BlockIndexQuery {
     pub limit: usize,
 }
 
-/// Core metadata of the [`BlockIndex`] this struct tracks the ledger size and
+/// Core metadata of the BlockIndex this struct tracks the ledger size and
 /// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
 /// for a ledger at a particular byte offset in the ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq, MessageResponse, Serialize, Deserialize)]

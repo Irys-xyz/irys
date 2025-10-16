@@ -73,7 +73,7 @@ pub fn unpack_with_entropy(
 }
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
-/// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
+/// returns the computed entropy chunk by overwriting the out_entropy_chunk parameter.
 /// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(

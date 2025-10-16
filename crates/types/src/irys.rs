@@ -37,7 +37,7 @@ impl IrysSigner {
     }
 
     /// Creates a transaction from a data iterator (which can yield any size Vec), with an optional anchor and flag for if the input data should be stored in the `data` field.
-    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    /// The txid will not be set until the transaction is signed with [`IrysSigner::sign_transaction`]
     pub fn create_transaction_from_iter(
         &self,
         data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
@@ -57,13 +57,13 @@ impl IrysSigner {
     }
 
     /// Creates a transaction from a data buffer - which it stores in .data -  with an optional anchor.
-    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    /// The txid will not be set until the transaction is signed with [`IrysSigner::sign_transaction`]
     pub fn create_transaction(&self, data: Vec<u8>, anchor: H256) -> Result<DataTransaction> {
         self.create_transaction_from_iter(vec_to_chunk_iter(data), anchor, true)
     }
 
     /// Creates a transaction from a data buffer - which it DOES NOT store in .data - with an optional anchor.
-    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    /// The txid will not be set until the transaction is signed with [`IrysSigner::sign_transaction`]
     pub fn create_transaction_discard_data(
         &self,
         data: Vec<u8>,

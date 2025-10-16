@@ -10,7 +10,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 // IrysSignature
 //------------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary, Hash)]
-/// Wrapper newtype around [`Signature`], with enforced [`Parity::NonEip155`] parity
+/// Wrapper newtype around [`Signature`], with enforced boolean parity
 pub struct IrysSignature(Signature);
 
 // TODO: eventually implement ERC-2098 to save a byte

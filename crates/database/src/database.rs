@@ -187,7 +187,7 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
 
 type IsDuplicate = bool;
 
-/// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
+/// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
@@ -213,7 +213,7 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
     Ok(false)
 }
 
-/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxRelativeChunkOffset`]
+/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
@@ -226,7 +226,7 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
 }
-/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxRelativeChunkOffset`]
+/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,

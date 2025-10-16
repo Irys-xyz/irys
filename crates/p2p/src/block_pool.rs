@@ -936,7 +936,7 @@ where
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
-    /// retrieved by the [`ExecutionPayloadProvider`].
+    /// retrieved by the [`irys_domain::execution_payload_cache::RethBlockProvider`].
     pub async fn add_execution_payload_to_cache(
         &self,
         sealed_block: reth::primitives::SealedBlock<reth::primitives::Block>,

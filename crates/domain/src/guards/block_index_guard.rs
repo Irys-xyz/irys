@@ -25,7 +25,7 @@ impl BlockIndexReadGuard {
         self.block_index_data.read().unwrap()
     }
 
-    /// Get the inner Arc<RwLock<BlockIndex>>
+    /// Get the inner `Arc<RwLock<BlockIndex>>`
     pub fn inner(&self) -> Arc<RwLock<BlockIndex>> {
         self.block_index_data.clone()
     }

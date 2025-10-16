@@ -28,7 +28,7 @@ pub fn initialize_tracing() {
 }
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.
-/// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
+/// The temp directory is prefixed by `<name>` (default: "irys-test-"), and automatically deletes itself on test completion -
 /// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.
 pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     initialize_tracing();

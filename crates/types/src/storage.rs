@@ -356,7 +356,7 @@ impl From<Interval<LedgerChunkOffset>> for LedgerChunkRange {
     }
 }
 
-/// Add impl Into<Interval<u64>> for owned conversion
+/// Add impl `Into<Interval<u64>>` for owned conversion
 impl From<LedgerChunkRange> for Interval<LedgerChunkOffset> {
     fn from(range: LedgerChunkRange) -> Self {
         range.0

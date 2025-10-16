@@ -1044,7 +1044,7 @@ impl EpochSnapshot {
     /// within each category, ensuring consistent mapping across node restarts.
     ///
     /// # Note
-    /// This function has the same configuration dependency as [`system_ledger::get_genesis_commitments()`].
+    /// This function has the same configuration dependency as [`irys_database::system_ledger::get_genesis_commitments`].
     /// When updating configuration related to StorageModule/submodule functionality, both functions
     /// will need corresponding updates.
     ///

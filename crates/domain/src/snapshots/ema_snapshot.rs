@@ -44,7 +44,7 @@
 //! - **Block 10-19**: Still uses genesis price, EMA calculated each block
 //! - **Block 19**: Records EMA (E19) in header
 //! - **Block 20-29**: NOW uses E9 for fees (recorded 2 intervals ago)
-//! - **Block 29**: Records EMA (E29) using oracle[18] + ema[19]
+//! - **Block 29**: Records EMA (E29) using oracle\[18\] + ema\[19\]
 //! - **Block 30-39**: Uses E19 for fees
 //! - **Block 40-49**: Uses E29 for fees
 

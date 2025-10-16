@@ -787,7 +787,7 @@ pub mod string_u64 {
     }
 }
 
-/// Module containing serialization/deserialization for Option<u64> to/from a string
+/// Module containing serialization/deserialization for `Option<u64>` to/from a string
 pub mod optional_string_u64 {
     use super::*;
 
