@@ -16,6 +16,9 @@ use reth_transaction_pool::{
     CoinbaseTipOrdering, EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool,
     TransactionOrigin, TransactionValidator, TransactionValidationOutcome,
 };
+use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
+use crate::pd_tx::sum_pd_chunks_in_access_list;
+use std::marker::PhantomData;
 use tracing::info;
 
 use crate::IrysEthereumNode;
@@ -41,7 +44,7 @@ where
         TransactionValidationTaskExecutor<
             IrysShadowTxValidator<Node::Provider, EthPooledTransaction>,
         >,
-        CoinbaseTipOrdering<EthPooledTransaction>,
+        PdAwareCoinbaseTipOrdering<EthPooledTransaction>,
         DiskFileBlobStore,
     >;
 
@@ -89,7 +92,7 @@ where
             to_validation_task: validator.to_validation_task,
         };
 
-        let ordering = CoinbaseTipOrdering::default();
+        let ordering = PdAwareCoinbaseTipOrdering::default();
         let transaction_pool =
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
@@ -198,6 +201,63 @@ where
         }
 
         Ok(tx)
+    }
+}
+
+/// PD-aware ordering that ranks transactions by effective fee rate, combining the regular gas
+/// priority fee per gas and the PD priority fee per chunk (if a PD header is present).
+#[derive(Debug)]
+pub struct PdAwareCoinbaseTipOrdering<T>(PhantomData<T>);
+
+impl<T> Default for PdAwareCoinbaseTipOrdering<T> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T> Clone for PdAwareCoinbaseTipOrdering<T> {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl<T> TransactionOrdering for PdAwareCoinbaseTipOrdering<T>
+where
+    T: EthPoolTransaction + 'static,
+{
+    type PriorityValue = alloy_primitives::U256;
+    type Transaction = T;
+
+    fn priority(
+        &self,
+        transaction: &Self::Transaction,
+        base_fee: u64,
+    ) -> PoolPriority<Self::PriorityValue> {
+        // Base gas tip per gas
+        let gas_tip = transaction
+            .effective_tip_per_gas(base_fee)
+            .map(alloy_primitives::U256::from)
+            .unwrap_or_default();
+
+        // PD header max priority fee per chunk and chunk count, if present
+        let (pd_tip_per_chunk, chunks_declared_u64) = match crate::pd_tx::detect_and_decode_pd_header(transaction.input()) {
+            Ok(Some((hdr, _))) => (hdr.max_priority_fee_per_chunk, hdr.chunks_declared),
+            _ => (alloy_primitives::U256::ZERO, 0u64),
+        };
+        // If header is absent, optionally infer chunk count from access list to bias ordering by PD size.
+        let chunks_u64 = if chunks_declared_u64 == 0 {
+            transaction
+                .access_list()
+                .map(sum_pd_chunks_in_access_list)
+                .unwrap_or(0u64)
+        } else {
+            chunks_declared_u64
+        };
+        let pd_total_tip = alloy_primitives::U256::from(chunks_u64).saturating_mul(pd_tip_per_chunk);
+
+        // Effective priority: gas tip + total PD tip (per-chunk tip * chunk count).
+        let effective = gas_tip.saturating_add(pd_total_tip);
+        PoolPriority::Value(effective)
     }
 }
 

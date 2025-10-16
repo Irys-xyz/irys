@@ -233,12 +233,6 @@ where
 
         let spec = ctx.chain_spec();
         let evm_factory = IrysEvmFactory::new();
-        // Provide a default PD pricing state for the executor. Higher layers may replace it via custom wiring.
-        let pd_state = {
-            use crate::pd_pricing::state::PdPricingState as _PdPricingState;
-            let (state, _handle) = _PdPricingState::new_from_params(32, crate::constants::ONE_TOKEN_SCALE_ALLOY);
-            state
-        };
 
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
@@ -247,7 +241,6 @@ where
                 RethReceiptBuilder::default(),
                 spec,
                 evm_factory,
-                pd_state,
             ),
         };
         Ok(evm_config)
