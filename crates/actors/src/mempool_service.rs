@@ -21,9 +21,12 @@ use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
-use irys_database::{cached_data_root_by_data_root, ingress_proofs_by_data_root, SystemLedger};
+use irys_database::{
+    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
+};
 use irys_domain::{
-    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
+    get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
+    StorageModulesReadGuard,
 };
 use irys_primitives::CommitmentType;
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
@@ -43,7 +46,7 @@ use irys_types::{
     Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{IngressProofsList, TokioServiceHandle};
+use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
@@ -850,7 +853,9 @@ impl Inner {
         }
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
-        let publish_txs_and_proofs = self.get_publish_txs_and_proofs().await?;
+        let publish_txs_and_proofs = self
+            .get_publish_txs_and_proofs(&canonical, &submit_tx)
+            .await?;
 
         // Calculate total fees and log final summary
         let total_fee_collected: U256 = submit_tx
@@ -904,7 +909,11 @@ impl Inner {
         })
     }
 
-    pub async fn get_publish_txs_and_proofs(&self) -> Result<PublishLedgerWithTxs, eyre::Error> {
+    pub async fn get_publish_txs_and_proofs(
+        &self,
+        canonical: &[BlockTreeEntry],
+        submit_tx: &[DataTransactionHeader],
+    ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
@@ -961,9 +970,16 @@ impl Inner {
             // Sort the resulting publish_txs & proofs
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
 
+            // reduce down the canonical chain to the txs in the submit ledger
+            let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
+                acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
+                acc
+            });
+            let ro_tx = self.irys_db.tx()?;
+
             for tx_header in &tx_headers {
                 debug!(
-                    "Processing candidate tx {} {:#?}",
+                    "Processing publish candidate tx {} {:#?}",
                     &tx_header.id, &tx_header
                 );
                 let is_promoted = tx_header.promoted_height.is_some();
@@ -974,145 +990,162 @@ impl Inner {
                         "Publish candidate {} is already promoted? {}",
                         &tx_header.id, &is_promoted
                     );
-                } else {
-                    // If it's not promoted, validate the proofs
-
-                    // Get all the proofs for this tx
-                    let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
-
-                    // Check for minimum number of ingress proofs
-                    let total_miners = self
-                        .block_tree_read_guard
-                        .read()
-                        .canonical_epoch_snapshot()
-                        .commitment_state
-                        .stake_commitments
-                        .len();
-
-                    // Take the smallest value, the configured total proofs count or the number
-                    // of staked miners that can produce a valid proof.
-                    let proofs_per_tx = std::cmp::min(
-                        self.config.consensus.number_of_ingress_proofs_total as usize,
-                        total_miners,
-                    );
-
-                    if all_proofs.len() < proofs_per_tx {
-                        info!(
-                            "Not promoting tx {} - insufficient proofs (got {} wanted {})",
-                            &tx_header.id,
-                            &all_proofs.len(),
-                            proofs_per_tx
-                        );
-                        continue;
-                    }
-
-                    // Convert to IngressProof vector for assignment checking
-                    let all_tx_proofs: Vec<IngressProof> = all_proofs
-                        .iter()
-                        .map(|(_, proof_entry)| proof_entry.proof.clone())
-                        .collect();
-
-                    // Get assigned and unassigned proofs using the existing utility function
-                    let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
-                        &all_tx_proofs,
-                        tx_header,
-                        |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
-                        &self.block_tree_read_guard,
-                        &self.irys_db,
-                        &self.config,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
+                    continue;
+                }
+                // check for previous submit inclusion
+                // we do this by checking if the tx is in the block tree or database.
+                // if it is, we know it could've only gotten there by being included in the submit ledger.
+                // if it's not, we also check if the submit ledger for this block contains the tx. if it does, we also promote it.
+                if !submit_txs_from_canonical.contains(&tx_header.id) {
+                    // check for double promotion
+                    if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
+                        // check database
+                        if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
+                            // no previous inclusion
                             warn!(
-                                "Failed to get assigned proofs for tx {}: {}",
-                                &tx_header.id, e
+                                "Unable to find previous submit inclusion for publish candidate {}",
+                                &tx_header.id
                             );
                             continue;
                         }
-                    };
-
-                    // Calculate expected assigned proofs, clamping to available miners
-                    let mut expected_assigned_proofs = self
-                        .config
-                        .consensus
-                        .number_of_ingress_proofs_from_assignees
-                        as usize;
-
-                    if assigned_miners < expected_assigned_proofs {
-                        warn!(
-                            "Clamping expected_assigned_proofs from {} to {} for tx {}",
-                            expected_assigned_proofs, assigned_miners, &tx_header.id
-                        );
-                        expected_assigned_proofs = assigned_miners;
                     }
+                }
 
-                    // Check if we have enough assigned proofs
-                    if assigned_proofs.len() < expected_assigned_proofs {
-                        info!(
-                            "Not promoting tx {} - insufficient assigned proofs (got {} wanted {})",
-                            &tx_header.id,
-                            assigned_proofs.len(),
-                            expected_assigned_proofs
+                // If it's not promoted, validate the proofs
+
+                // Get all the proofs for this tx
+                let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+
+                // Check for minimum number of ingress proofs
+                let total_miners = self
+                    .block_tree_read_guard
+                    .read()
+                    .canonical_epoch_snapshot()
+                    .commitment_state
+                    .stake_commitments
+                    .len();
+
+                // Take the smallest value, the configured total proofs count or the number
+                // of staked miners that can produce a valid proof.
+                let proofs_per_tx = std::cmp::min(
+                    self.config.consensus.number_of_ingress_proofs_total as usize,
+                    total_miners,
+                );
+
+                if all_proofs.len() < proofs_per_tx {
+                    info!(
+                        "Not promoting tx {} - insufficient proofs (got {} wanted {})",
+                        &tx_header.id,
+                        &all_proofs.len(),
+                        proofs_per_tx
+                    );
+                    continue;
+                }
+
+                // Convert to IngressProof vector for assignment checking
+                let all_tx_proofs: Vec<IngressProof> = all_proofs
+                    .iter()
+                    .map(|(_, proof_entry)| proof_entry.proof.clone())
+                    .collect();
+
+                // Get assigned and unassigned proofs using the existing utility function
+                let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
+                    &all_tx_proofs,
+                    tx_header,
+                    |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
+                    &self.block_tree_read_guard,
+                    &self.irys_db,
+                    &self.config,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            "Failed to get assigned proofs for tx {}: {}",
+                            &tx_header.id, e
                         );
                         continue;
                     }
+                };
 
-                    // Separate assigned and unassigned proofs
-                    let assigned_proof_set: HashSet<_> = assigned_proofs
-                        .iter()
-                        .map(|p| &p.proof.0) // Use signature as unique identifier
-                        .collect();
+                // Calculate expected assigned proofs, clamping to available miners
+                let mut expected_assigned_proofs =
+                    self.config
+                        .consensus
+                        .number_of_ingress_proofs_from_assignees as usize;
 
-                    let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
-                        .iter()
-                        .filter(|p| !assigned_proof_set.contains(&p.proof.0))
-                        .cloned()
-                        .collect();
+                if assigned_miners < expected_assigned_proofs {
+                    warn!(
+                        "Clamping expected_assigned_proofs from {} to {} for tx {}",
+                        expected_assigned_proofs, assigned_miners, &tx_header.id
+                    );
+                    expected_assigned_proofs = assigned_miners;
+                }
 
-                    // Build the final proof list
-                    let mut final_proofs = Vec::new();
+                // Check if we have enough assigned proofs
+                if assigned_proofs.len() < expected_assigned_proofs {
+                    info!(
+                        "Not promoting tx {} - insufficient assigned proofs (got {} wanted {})",
+                        &tx_header.id,
+                        assigned_proofs.len(),
+                        expected_assigned_proofs
+                    );
+                    continue;
+                }
 
-                    // First, add assigned proofs up to the total network limit
-                    // Use all available assigned proofs, but don't exceed the network total
-                    let total_network_limit =
-                        self.config.consensus.number_of_ingress_proofs_total as usize;
-                    let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
-                    final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
+                // Separate assigned and unassigned proofs
+                let assigned_proof_set: HashSet<_> = assigned_proofs
+                    .iter()
+                    .map(|p| &p.proof.0) // Use signature as unique identifier
+                    .collect();
 
-                    // Then fill remaining slots with unassigned proofs if needed
-                    let remaining_slots = total_network_limit - final_proofs.len();
-                    if remaining_slots > 0 {
-                        let unassigned_to_use =
-                            std::cmp::min(unassigned_proofs.len(), remaining_slots);
-                        final_proofs.extend_from_slice(&unassigned_proofs[..unassigned_to_use]);
-                    }
+                let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
+                    .iter()
+                    .filter(|p| !assigned_proof_set.contains(&p.proof.0))
+                    .cloned()
+                    .collect();
 
-                    // Final check - do we have enough total proofs?
-                    if final_proofs.len()
-                        < self.config.consensus.number_of_ingress_proofs_total as usize
-                    {
-                        info!(
+                // Build the final proof list
+                let mut final_proofs = Vec::new();
+
+                // First, add assigned proofs up to the total network limit
+                // Use all available assigned proofs, but don't exceed the network total
+                let total_network_limit =
+                    self.config.consensus.number_of_ingress_proofs_total as usize;
+                let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
+                final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
+
+                // Then fill remaining slots with unassigned proofs if needed
+                let remaining_slots = total_network_limit - final_proofs.len();
+                if remaining_slots > 0 {
+                    let unassigned_to_use = std::cmp::min(unassigned_proofs.len(), remaining_slots);
+                    final_proofs.extend_from_slice(&unassigned_proofs[..unassigned_to_use]);
+                }
+
+                // Final check - do we have enough total proofs?
+                if final_proofs.len()
+                    < self.config.consensus.number_of_ingress_proofs_total as usize
+                {
+                    info!(
                             "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
                             &tx_header.id,
                             final_proofs.len(),
                             self.config.consensus.number_of_ingress_proofs_total
                         );
-                        continue;
-                    }
-
-                    // Success - add this transaction and its proofs
-                    publish_txs.push(tx_header.clone());
-                    publish_proofs.extend(final_proofs.clone()); // Clone to avoid moving final_proofs
-
-                    info!(
-                        "Promoting tx {} with {} assigned proofs and {} total proofs",
-                        &tx_header.id,
-                        assigned_to_use, // Show actual assigned proofs used (capped by network limit)
-                        final_proofs.len()
-                    );
+                    continue;
                 }
+
+                // Success - add this transaction and its proofs
+                publish_txs.push(tx_header.clone());
+                publish_proofs.extend(final_proofs.clone()); // Clone to avoid moving final_proofs
+
+                info!(
+                    "Promoting tx {} with {} assigned proofs and {} total proofs",
+                    &tx_header.id,
+                    assigned_to_use, // Show actual assigned proofs used (capped by network limit)
+                    final_proofs.len()
+                );
             }
         }
 
