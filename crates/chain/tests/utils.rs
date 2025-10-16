@@ -1577,9 +1577,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             match oneshot_rx.await {
                 Ok(txs) => {
                     if let Some(tx_header) = &txs[0] {
-                        if tx_header.promoted_height.is_some() {
-                            return Ok(true);
-                        }
+                        return Ok(tx_header.promoted_height.is_some());
                     }
                 }
                 Err(e) => tracing::info!("receive error for mempool {}", e),

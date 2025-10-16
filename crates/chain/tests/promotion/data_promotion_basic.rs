@@ -275,28 +275,16 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
 
     let seconds_to_wait = 30;
 
-    // Set up consensus to require 3 ingress proofs to promote
-    let mut config = NodeConfig::testing()
+    let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            // Set the total number of proofs required to promote above the number of nodes (3)
-            // to validate the clamping to 3 proofs to promote.
-            consensus.number_of_ingress_proofs_total = 5;
-            consensus.number_of_ingress_proofs_from_assignees = 2;
-            consensus.num_partitions_per_slot = 3;
+            consensus.num_partitions_per_slot = 1;
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
         })
         .with_genesis_peer_discovery_timeout(1000);
 
-    config.consensus.get_mut().number_of_ingress_proofs_total = 3;
-    config.consensus.get_mut().chunk_size = 32;
-
-    // Create a signer (keypair) for the peer and fund it
-    let peer1_signer = config.new_random_signer();
-    let peer2_signer = config.new_random_signer();
     let genesis_signer = config.signer();
-    config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
 
     // Start the genesis node and wait for packing
     let genesis_node = IrysNodeTest::new_genesis(config.clone())
@@ -307,7 +295,6 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     genesis_node.mine_blocks(5).await?;
     let blk5 = genesis_node.get_block_by_height(5).await?;
 
-    // Post a transaction and it's chunks to all 3
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
     for chunk in &chunks {
@@ -365,31 +352,28 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
 
     let res = genesis_node
-        .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
+        .wait_for_ingress_proofs_no_mining(vec![data_tx.header.id], seconds_to_wait)
         .await;
 
     assert_matches!(res, Ok(()));
 
-    let height = genesis_node.get_canonical_chain_height().await;
-    genesis_node.start_mining();
-    genesis_node
-        .wait_until_height_confirmed(height + 1, seconds_to_wait)
-        .await?;
-
-    // Check is promoted state of tx in the mempool
+    // asser the tx is not promoted and wasn't included in any blocks
+    let block = genesis_node.mine_block().await?;
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
     assert!(!is_promoted);
 
-    genesis_node
-        .wait_until_height_confirmed(
-            height + config.consensus_config().block_migration_depth as u64,
-            seconds_to_wait,
-        )
-        .await?;
+    assert_eq!(
+        block.data_ledgers.iter().fold(0, |n, l| n + l.tx_ids.len()),
+        0
+    );
 
-    // Check is promoted state of tx after it migrates to DB
+    // now we wait for the tx to have an old enough anchor
+    genesis_node
+        .mine_blocks(config.consensus_config().block_migration_depth as usize + 1)
+        .await?;
+    // ..and now it should be promoted!
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
-    assert!(!is_promoted);
+    assert!(is_promoted);
 
     // Wind down test
     genesis_node.stop().await;
