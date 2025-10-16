@@ -431,7 +431,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
 }
 
 #[test_log::test(actix_web::test)]
-async fn heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
+async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Result<()> {
     struct EvilEpochStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
