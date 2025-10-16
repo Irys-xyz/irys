@@ -20,7 +20,7 @@ use reth_transaction_pool::{
     TransactionPool, ValidPoolTransaction,
 };
 use revm_primitives::FixedBytes;
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{collections::{HashMap, HashSet}, num::NonZeroUsize};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -29,6 +29,11 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 use reth_ethereum_payload_builder::{default_ethereum_payload, EthereumBuilderConfig};
+
+use crate::constants::PD_MAX_CHUNKS_PER_BLOCK;
+use crate::pd_policy::{PdPolicy, PdPricingShared, snapshot_pricing};
+use crate::pd_tx::sum_pd_chunks_in_access_list;
+use crate::pd_pricing::state::PdPricingStateInner;
 
 type BestTransactionsIter =
     Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;
@@ -161,6 +166,10 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     builder_config: EthereumBuilderConfig,
     /// Shadow txs don't live inside the tx pool, so they need to be handled separately.
     shadow_tx_store: ShadowTxStore,
+    /// PD pricing state for policy decisions.
+    pd_pricing: PdPricingShared,
+    /// PD policy used to gate PD transactions.
+    pd_policy: Arc<dyn PdPolicy>, 
 }
 
 /// Combined iterator that yields shadow transactions first, then pool transactions
@@ -249,6 +258,8 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         evm_config: EvmConfig,
         builder_config: EthereumBuilderConfig,
         shadow_tx_store: ShadowTxStore,
+        pd_pricing: PdPricingShared,
+        pd_policy: Arc<dyn PdPolicy>,
     ) -> Self {
         Self {
             client,
@@ -256,6 +267,8 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             evm_config,
             builder_config,
             shadow_tx_store,
+            pd_pricing,
+            pd_policy,
         }
     }
 
@@ -289,9 +302,14 @@ where
         // Get pool transactions iterator
         let pool_txs = self.pool.best_transactions_with_attributes(attributes);
 
-        // Create combined iterator
-        Box::new(CombinedTransactionIterator::new(
-            timestamp, shadow_txs, pool_txs,
+        // Base iterator that yields shadow txs first and then pool txs.
+        let combined = CombinedTransactionIterator::new(timestamp, shadow_txs, pool_txs);
+        let pricing = self.pd_pricing.clone();
+        Box::new(PdAwareBestTransactions::new(
+            Box::new(combined),
+            PD_MAX_CHUNKS_PER_BLOCK,
+            self.pd_policy.clone(),
+            pricing,
         ))
     }
 }
@@ -350,6 +368,94 @@ where
         )?
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
+    }
+}
+
+/// PD-aware wrapper over a BestTransactions iterator that enforces a per-block PD chunk budget
+/// and delegates accept/skip decisions to a pluggable PdPolicy. Non-PD txs pass through.
+pub struct PdAwareBestTransactions {
+    inner: BestTransactionsIter,
+    remaining_pd_chunks: u64,
+    /// Tracks PD chunks accounted for included txs to refund on invalidation.
+    included_pd: HashMap<FixedBytes<32>, u64>,
+    policy: Arc<dyn PdPolicy>,
+    pricing: PdPricingShared,
+}
+
+impl PdAwareBestTransactions {
+    pub fn new(
+        inner: BestTransactionsIter,
+        pd_chunk_budget: u64,
+        policy: Arc<dyn PdPolicy>,
+        pricing: PdPricingShared,
+    ) -> Self {
+        Self {
+            inner,
+            remaining_pd_chunks: pd_chunk_budget,
+            included_pd: HashMap::new(),
+            policy,
+            pricing,
+        }
+    }
+
+    fn classify_pd_chunks(&self, tx: &ValidPoolTransaction<EthPooledTransaction>) -> u64 {
+        // EthPooledTransaction implements alloy_consensus::Transaction, which exposes access_list.
+        if let Some(al) = tx.transaction.access_list() {
+            sum_pd_chunks_in_access_list(al)
+        } else {
+            0
+        }
+    }
+}
+
+impl Iterator for PdAwareBestTransactions {
+    type Item = Arc<ValidPoolTransaction<EthPooledTransaction>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = self.inner.next()?;
+            let pd_chunks = self.classify_pd_chunks(&next);
+            if pd_chunks == 0 {
+                // Not a PD tx; yield as-is.
+                return Some(next);
+            }
+
+            // PD tx: check budget and policy.
+            if pd_chunks > self.remaining_pd_chunks {
+                // Over budget: skip this tx and continue.
+                continue;
+            }
+
+            // Snapshot pricing from shared PD pricing state.
+            let pricing_snapshot = snapshot_pricing(&self.pricing);
+
+            if self.policy.accept_pd_tx(&next.transaction, pd_chunks, &pricing_snapshot) {
+                // Accept: account chunks and yield.
+                self.remaining_pd_chunks = self.remaining_pd_chunks.saturating_sub(pd_chunks);
+                self.included_pd.insert(*next.hash(), pd_chunks);
+                return Some(next);
+            }
+
+            // Policy rejected: skip and continue.
+        }
+    }
+}
+
+impl BestTransactions for PdAwareBestTransactions {
+    fn mark_invalid(&mut self, transaction: &Self::Item, kind: InvalidPoolTransactionError) {
+        // If we accounted PD chunks for this tx, refund them into the budget.
+        if let Some(chunks) = self.included_pd.remove(transaction.hash()) {
+            self.remaining_pd_chunks = self.remaining_pd_chunks.saturating_add(chunks);
+        }
+        self.inner.mark_invalid(transaction, kind);
+    }
+
+    fn no_updates(&mut self) {
+        self.inner.no_updates();
+    }
+
+    fn set_skip_blobs(&mut self, skip_blobs: bool) {
+        self.inner.set_skip_blobs(skip_blobs);
     }
 }
 

@@ -70,6 +70,7 @@ pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod pd_pricing;
 pub mod pd_tx;
+pub mod pd_policy;
 pub mod mempool;
 pub mod precompile;
 pub mod rpc;
@@ -144,6 +145,14 @@ impl IrysEthereumNode {
             .executor(IrysExecutorBuilder)
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 shadow_tx_store: self.shadow_tx_store.clone(),
+                // Provide default PD pricing and policy; higher layers can override by building their own node type.
+                pd_pricing: {
+                    use crate::pd_pricing::state::PdPricingState as _PdPricingState;
+                    use crate::constants::ONE_TOKEN_SCALE_ALLOY;
+                    let (state, _handle) = _PdPricingState::new_from_params(32, ONE_TOKEN_SCALE_ALLOY);
+                    state
+                },
+                pd_policy: crate::pd_policy::default_pd_policy(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -224,6 +233,13 @@ where
 
         let spec = ctx.chain_spec();
         let evm_factory = IrysEvmFactory::new();
+        // Provide a default PD pricing state for the executor. Higher layers may replace it via custom wiring.
+        let pd_state = {
+            use crate::pd_pricing::state::PdPricingState as _PdPricingState;
+            let (state, _handle) = _PdPricingState::new_from_params(32, crate::constants::ONE_TOKEN_SCALE_ALLOY);
+            state
+        };
+
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -231,6 +247,7 @@ where
                 RethReceiptBuilder::default(),
                 spec,
                 evm_factory,
+                pd_state,
             ),
         };
         Ok(evm_config)

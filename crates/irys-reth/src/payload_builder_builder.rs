@@ -15,11 +15,15 @@ use reth_node_builder::{
 use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 
 use crate::payload::ShadowTxStore;
+use crate::pd_policy::{PdPolicy, PdPricingShared};
+use std::sync::Arc;
 
 /// A basic ethereum payload service.
 #[derive(Clone, Debug)]
 pub struct IrysPayloadBuilderBuilder {
     pub shadow_tx_store: ShadowTxStore,
+    pub pd_pricing: PdPricingShared,
+    pub pd_policy: Arc<dyn PdPolicy>, 
 }
 
 impl<Types, Node, Pool, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for IrysPayloadBuilderBuilder
@@ -55,6 +59,8 @@ where
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
             self.shadow_tx_store,
+            self.pd_pricing,
+            self.pd_policy,
         ))
     }
 }
