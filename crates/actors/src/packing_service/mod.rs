@@ -22,6 +22,9 @@ const CONTROL_CHANNEL_CAPACITY: usize = 64;
 /// Per-storage-module channel capacity
 const PER_SM_CHANNEL_CAPACITY: usize = 100;
 
+const UNPACKING_BATCH_SIZE: usize = 10;
+const UNPACKING_BATCH_TIMEOUT: Duration = Duration::from_millis(5);
+
 /// Sync pending chunks with warning on error
 pub(crate) fn sync_with_warning(storage_module: &irys_domain::StorageModule, context: &str) {
     if let Err(e) = storage_module.sync_pending_chunks() {
@@ -80,10 +83,11 @@ pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest, UnpackingReque
 use dashmap::DashMap;
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_types::{
-    ii, partition_chunk_offset_ii, Config, PartitionChunkOffset, PartitionChunkRange,
-    TokioServiceHandle,
+    ii, partition_chunk_offset_ii, Config, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
+    TokioServiceHandle, UnpackedChunk,
 };
 use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
+use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
 use self::{
@@ -114,6 +118,13 @@ pub struct PackingService {
     /// Packing strategies
     local_strategy: Arc<dyn PackingStrategy>,
     remote_strategy: Arc<RemotePackingStrategy>,
+
+    // Unpacking
+    unpacking_service: Arc<unpacking::UnpackingService>,
+
+    // Background unpacking
+    unpacking_tx: mpsc::Sender<UnpackingRequest>,
+    unpacking_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<UnpackingRequest>>>,
 }
 
 impl PackingService {
@@ -161,6 +172,18 @@ impl PackingService {
             notify.clone(),
         ));
 
+        // Create unpacking channel
+        let (unpacking_tx, unpacking_rx) = mpsc::channel(packing_config.unpacking_queue_capacity);
+
+        // Create unpacking service
+        let unpacking_service = Arc::new(
+            unpacking::UnpackingService::new(
+                config.clone(),
+                packing_config.unpacking_concurrency as usize,
+            )
+            .expect("Failed to create unpacking service"),
+        );
+
         Self {
             pending_jobs,
             semaphore,
@@ -170,7 +193,27 @@ impl PackingService {
             notify,
             local_strategy,
             remote_strategy,
+            unpacking_tx,
+            unpacking_rx: Arc::new(tokio::sync::Mutex::new(unpacking_rx)),
+            unpacking_service,
         }
+    }
+
+    /// Submit an unpacking request
+    pub async fn unpack(
+        &self,
+        packed_chunk: Arc<PackedChunk>,
+    ) -> Result<UnpackedChunk, UnpackingError> {
+        let (request, response_rx) = UnpackingRequest::new(packed_chunk);
+
+        self.unpacking_tx
+            .send(request)
+            .await
+            .map_err(|_| UnpackingError::ChannelClosed)?;
+
+        response_rx
+            .await
+            .map_err(|_| UnpackingError::ChannelClosed)?
     }
 
     /// Try to poll a job from any non-empty queue, or wait for new work
@@ -207,6 +250,42 @@ impl PackingService {
         tokio::select! {
             _ = notified => None,
             _ = tokio::time::sleep(self.packing_config.poll_duration) => None,
+        }
+    }
+
+    /// Main worker loop for processing unpacking jobs
+    async fn process_unpacking_jobs(self) {
+        let mut batch = Vec::with_capacity(UNPACKING_BATCH_SIZE);
+
+        loop {
+            batch.clear();
+
+            let mut rx = self.unpacking_rx.lock().await;
+
+            // Wait for first request
+            match tokio::time::timeout(UNPACKING_BATCH_TIMEOUT, rx.recv()).await {
+                Ok(Some(req)) => {
+                    batch.push(req);
+
+                    // Try to fill batch (non-blocking)
+                    while batch.len() < UNPACKING_BATCH_SIZE {
+                        match rx.try_recv() {
+                            Ok(req) => batch.push(req),
+                            Err(_) => break,
+                        }
+                    }
+                }
+                Ok(None) => break,  // Channel closed
+                Err(_) => continue, // Timeout
+            }
+
+            drop(rx); // Release lock before processing
+
+            if !batch.is_empty() {
+                self.unpacking_service
+                    .unpack(std::mem::take(&mut batch))
+                    .await;
+            }
         }
     }
 
@@ -420,6 +499,48 @@ impl PackingService {
         }
 
         PackingHandle::new(sender, internals, packing_service_sender)
+    }
+
+    /// Spawn unpacking controller workers
+    pub fn spawn_unpacking_controllers(
+        &self,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Vec<TokioServiceHandle> {
+        let mut handles = Vec::new();
+        let controller_count =
+            std::cmp::max(1_usize, self.packing_config.unpacking_concurrency as usize);
+
+        info!(
+            target: "irys::unpacking",
+            "Spawning {} unpacking controllers",
+            controller_count
+        );
+
+        for i in 0..controller_count {
+            let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+            let self_clone = self.clone();
+
+            let handle = runtime_handle.spawn(async move {
+                tokio::select! {
+                    _ = Self::process_unpacking_jobs(self_clone) => {},
+                    _ = shutdown_rx => {
+                        info!(
+                            target: "irys::unpacking",
+                            "Unpacking controller {} received shutdown signal",
+                            i
+                        );
+                    }
+                }
+            });
+
+            handles.push(TokioServiceHandle {
+                name: format!("unpacking_controller_{}", i),
+                handle,
+                shutdown_signal: shutdown_tx,
+            });
+        }
+
+        handles
     }
 
     /// Spawn multiple packing controllers

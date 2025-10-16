@@ -10,7 +10,7 @@ use super::errors::UnpackingError;
 use super::types::UnpackingRequest;
 
 /// CPU-based unpacking using rayon thread pool
-pub struct UnpackingService {
+pub(super) struct UnpackingService {
     config: Arc<Config>,
     thread_pool: Arc<rayon::ThreadPool>,
     num_threads: usize,
@@ -18,10 +18,10 @@ pub struct UnpackingService {
 }
 
 /// Default timeout for batch unpacking operations
-pub const DEFAULT_UNPACKING_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const DEFAULT_UNPACKING_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl UnpackingService {
-    pub fn new(config: Arc<Config>, num_threads: usize) -> eyre::Result<Self> {
+    pub(super) fn new(config: Arc<Config>, num_threads: usize) -> eyre::Result<Self> {
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .thread_name(|idx| format!("unpack-cpu-{}", idx))
@@ -152,7 +152,7 @@ impl UnpackingService {
 
     /// For small batches (batch_size <= num_threads), unpacks sequentially to avoid
     /// parallel processing overhead. For larger batches, uses rayon for parallel processing.
-    pub async fn unpack(&self, requests: Vec<UnpackingRequest>) {
+    pub(super) async fn unpack(&self, requests: Vec<UnpackingRequest>) {
         if requests.is_empty() {
             return;
         }

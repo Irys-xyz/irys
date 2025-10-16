@@ -5,7 +5,6 @@ use irys_types::{PackedChunk, UnpackedChunk};
 use std::sync::{atomic::AtomicUsize, Arc};
 use std::time::Duration;
 use std::time::Instant;
-use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use super::errors::UnpackingError;
