@@ -30,7 +30,7 @@ pub struct StorageSubmodulesConfig {
     pub submodule_paths: Vec<PathBuf>,
 }
 
-const SUBMODULES_CONFIG_FILE_NAME: &str = ".irys_submodules.toml";
+pub const SUBMODULES_CONFIG_FILE_NAME: &str = ".irys_submodules.toml";
 
 impl StorageSubmodulesConfig {
     /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path
