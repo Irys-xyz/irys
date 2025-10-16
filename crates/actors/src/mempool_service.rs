@@ -995,9 +995,9 @@ impl Inner {
                 // check for previous submit inclusion
                 // we do this by checking if the tx is in the block tree or database.
                 // if it is, we know it could've only gotten there by being included in the submit ledger.
-                // if it's not, we also check if the submit ledger for this block contains the tx. if it does, we also promote it.
+                // if it's not, we also check if the submit ledger for this block contains the tx (single-block promotion). if it does, we also promote it.
                 if !submit_txs_from_canonical.contains(&tx_header.id) {
-                    // check for double promotion
+                    // check for single-block promotion
                     if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
                         // check database
                         if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
