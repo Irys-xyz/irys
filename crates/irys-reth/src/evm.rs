@@ -496,6 +496,51 @@ where
             Either::Right(tx) => tx,
         };
 
+        // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
+        // Layout: [magic][version:u16][borsh header][rest]
+        if let Some((pd_header, consumed)) =
+            crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
+        {
+            // todo: verify the `chunks_declared` in the header vs actual amountf from the access list
+
+            // Compute PD fees based on header values. For now, we treat the base fee per chunk
+            // as the user's max base fee per chunk; this will be reconciled with dynamic pricing
+            // in a follow-up by comparing against current base and enforcing caps.
+            let chunks = U256::from(pd_header.chunks_declared);
+            // TODO: We shoud access the `pd base fee` and use that instead, otherwise
+            // the user could be overpaying if we use their provided max_base_fee_per_chunk
+            let base_per_chunk = pd_header.max_base_fee_per_chunk;
+            let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
+
+            let base_total = chunks.saturating_mul(base_per_chunk);
+            let prio_total = chunks.saturating_mul(prio_per_chunk);
+
+            // Fee payer is the transaction caller; priority recipient is block beneficiary.
+            let fee_payer = tx.caller;
+            let beneficiary = self.block().beneficiary;
+            // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
+            // that will alos make accounting easier on irys side
+            let base_sink = Address::ZERO;
+
+            // Charge PD base fee and PD priority fee.
+            // - Base: transfer from payer -> sink
+            // - Priority: transfer from payer -> beneficiary
+            self.distribute_base_fee(base_total, fee_payer, base_sink)?;
+            self.distribute_priority_fee(prio_total, Some(fee_payer), beneficiary)?;
+
+            // Strip the PD header from calldata before executing the tx logic.
+            let stripped: Bytes = tx.data[consumed..].to_vec().into();
+            let mut tx = tx;
+            tx.data = stripped;
+
+            if self.inspect {
+                self.inner.set_tx(tx);
+                return self.inner.inspect_replay();
+            } else {
+                return self.inner.transact(tx);
+            }
+        }
+
         if self.inspect {
             self.inner.set_tx(tx);
             self.inner.inspect_replay()
@@ -897,6 +942,40 @@ where
 
         assert_ne!(bef, aft);
         assert_eq!(beneficiary_state, aft);
+
+        Ok(())
+    }
+
+    /// Distributes PD base fees to a designated sink address by debiting the fee payer.
+    /// If `total_fee` is zero, this is a no-op.
+    pub fn distribute_base_fee(
+        &mut self,
+        total_fee: U256,
+        fee_payer_address: Address,
+        sink: Address,
+    ) -> Result<(), <Self as Evm>::Error> {
+        if total_fee.is_zero() {
+            return Ok(());
+        }
+
+        // Early return for same-address transfer (no-op)
+        if fee_payer_address == sink {
+            // Ensure account exists
+            let account_state = self.load_account(fee_payer_address)?;
+            if account_state.is_none() {
+                return Err(Self::create_internal_error(format!(
+                    "PD base fee failed: payer account does not exist for same-address transfer. Payer: {fee_payer_address}, Fee: {total_fee}"
+                )));
+            }
+            return Ok(());
+        }
+
+        // Prepare transfer: payer -> sink
+        let (payer_state, sink_state) =
+            self.prepare_fee_transfer(fee_payer_address, sink, total_fee)?;
+
+        self.commit_account_change(fee_payer_address, payer_state);
+        self.commit_account_change(sink, sink_state);
 
         Ok(())
     }
@@ -1344,5 +1423,89 @@ mod tests {
         assert!(res.is_ok(), "expected Ok, got: {:?}", res);
         let result = res.unwrap().result;
         assert!(result.is_success(), "expected success, got: {:?}", result);
+    }
+
+    /// Ensure a PD-shaped transaction with header charges base and priority fees and strips the header.
+    #[test]
+    fn evm_pd_header_tx_charges_fees() {
+        use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
+
+        let factory = IrysEvmFactory::new();
+
+        // Cancun spec, chain id 1, zero basefee and ample gas limit
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let beneficiary = Address::random();
+        let block_env = BlockEnv { gas_limit: 30_000_000, basefee: 0, beneficiary, ..Default::default() };
+
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Pre-fund the payer account so fee deductions succeed
+        let payer = Address::random();
+        let mut payer_acc = Account::new_not_existing();
+        payer_acc.info.balance = U256::from(1_000_000u64);
+        evm.commit_account_change(payer, payer_acc);
+
+        // Ensure beneficiary account exists to satisfy internal assertions
+        let mut ben_acc = Account::new_not_existing();
+        ben_acc.info.balance = U256::ZERO;
+        evm.commit_account_change(beneficiary, ben_acc);
+
+        // Construct PD header: 3 chunks, 10 tip per chunk, 7 base per chunk
+        let header = PdHeaderV1 {
+            chunks_declared: 3,
+            max_priority_fee_per_chunk: U256::from(10u64),
+            max_base_fee_per_chunk: U256::from(7u64),
+        };
+        let user_calldata = Bytes::from(vec![0xAA, 0xBB]); // arbitrary payload seen by contract after strip
+        let data = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
+
+        let tx = TxEnv {
+            caller: payer,
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 50_000,
+            value: U256::ZERO,
+            data,
+            gas_price: 0,
+            chain_id: Some(1),
+            gas_priority_fee: None,
+            access_list: Default::default(),
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            tx_type: 0,
+            authorization_list: Default::default(),
+        };
+
+        let res = evm.transact_raw(tx);
+        assert!(res.is_ok(), "expected Ok, got: {:?}", res);
+        let result = res.unwrap().result;
+        assert!(result.is_success(), "expected success, got: {:?}", result);
+
+        // Validate balances updated: payer decreased by base+prio, sink increased by base, beneficiary increased by prio
+        let base_total = U256::from(3u64) * U256::from(7u64);
+        let prio_total = U256::from(3u64) * U256::from(10u64);
+        let total = base_total + prio_total;
+
+        // Payer
+        let payer_state = evm.load_account(payer).expect("load payer").expect("payer exists");
+        assert_eq!(
+            payer_state.info.balance,
+            U256::from(1_000_000u64) - total,
+            "payer balance not deducted correctly"
+        );
+
+        // Beneficiary (priority fees)
+        let beneficiary_state = evm
+            .load_account(beneficiary)
+            .expect("load beneficiary")
+            .expect("beneficiary exists after fee");
+        assert_eq!(beneficiary_state.info.balance, prio_total, "beneficiary should receive priority fees");
+
+        // Sink (base fees)
+        let sink = Address::ZERO;
+        let sink_state = evm.load_account(sink).expect("load sink").expect("sink exists after base fee");
+        assert_eq!(sink_state.info.balance, base_total, "sink should receive base fees");
     }
 }

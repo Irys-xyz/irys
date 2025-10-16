@@ -16,7 +16,9 @@ use crate::constants::{
 };
 use alloy_consensus::TxEip1559;
 use alloy_eips::eip2930::{AccessList, AccessListItem};
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
+use borsh::{BorshDeserialize, BorshSerialize};
+use std::io::{Read, Write};
 use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
 
 /// PD storage key components extracted from a 32-byte access-list key.
@@ -138,4 +140,98 @@ pub fn make_pd_eip1559_tx_with_access_list(
         input: alloy_primitives::Bytes::new(),
         access_list,
     }
+}
+
+// ===== PD Calldata Header Encoding / Decoding =====
+
+/// Magic prefix to identify PD metadata header in transaction calldata.
+/// Length is fixed to avoid ambiguity and aid quick detection.
+pub const IRYS_PD_HEADER_MAGIC: &[u8; 12] = b"irys-pd-meta";
+
+/// PD header version values.
+pub const PD_HEADER_VERSION_V1: u16 = 1;
+
+/// V1 PD header carrying pricing-related metadata for PD reads.
+/// Manual Borsh impls to keep a stable, fixed-size encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdHeaderV1 {
+    /// Declared total PD chunks to be accessed by this tx (must match access list sum).
+    pub chunks_declared: u64,
+    /// User-offered PD priority fee per chunk (scaled 1e18 tokens).
+    pub max_priority_fee_per_chunk: U256,
+    /// User-accepted maximum PD base fee per chunk (scaled 1e18 tokens).
+    /// Acts like EIP-1559 `max_fee_per_gas` but for PD base fee exposure.
+    pub max_base_fee_per_chunk: U256,
+}
+
+impl BorshSerialize for PdHeaderV1 {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        // u64 be
+        writer.write_all(&self.chunks_declared.to_be_bytes())?;
+        // U256 be (32 bytes) priority per chunk
+        writer.write_all(&self.max_priority_fee_per_chunk.to_be_bytes::<32>())?;
+        // U256 be (32 bytes) max base per chunk
+        writer.write_all(&self.max_base_fee_per_chunk.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for PdHeaderV1 {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut chunks_buf = [0u8; 8];
+        reader.read_exact(&mut chunks_buf)?;
+        let chunks_declared = u64::from_be_bytes(chunks_buf);
+
+        let mut prio_buf = [0u8; 32];
+        reader.read_exact(&mut prio_buf)?;
+        let max_priority_fee_per_chunk = U256::from_be_bytes(prio_buf);
+
+        let mut base_buf = [0u8; 32];
+        reader.read_exact(&mut base_buf)?;
+        let max_base_fee_per_chunk = U256::from_be_bytes(base_buf);
+
+        Ok(Self { chunks_declared, max_priority_fee_per_chunk, max_base_fee_per_chunk })
+    }
+}
+
+/// Encodes a PD header and prepends it to the provided calldata bytes.
+/// Result layout: [magic][version:u16 be][borsh(header)][rest]
+pub fn prepend_pd_header_v1_to_calldata(header: &PdHeaderV1, rest: &[u8]) -> Bytes {
+    let mut out = Vec::with_capacity(IRYS_PD_HEADER_MAGIC.len() + 2 + 8 + 32 + 32 + rest.len());
+    out.extend_from_slice(IRYS_PD_HEADER_MAGIC);
+    out.extend_from_slice(&PD_HEADER_VERSION_V1.to_be_bytes());
+    let mut buf = Vec::with_capacity(8 + 32 + 32);
+    header.serialize(&mut buf).expect("borsh serialize PdHeaderV1");
+    out.extend_from_slice(&buf);
+    out.extend_from_slice(rest);
+    out.into()
+}
+
+/// Attempts to detect and decode a PD header at the beginning of `input`.
+/// If present and valid, returns (header, offset_after_header).
+pub fn detect_and_decode_pd_header(input: &[u8]) -> Result<Option<(PdHeaderV1, usize)>, borsh::io::Error> {
+    let magic_len = IRYS_PD_HEADER_MAGIC.len();
+    if input.len() < magic_len + 2 {
+        return Ok(None);
+    }
+    if &input[..magic_len] != IRYS_PD_HEADER_MAGIC {
+        return Ok(None);
+    }
+
+    // parse version (u16 be)
+    let ver_bytes = [input[magic_len], input[magic_len + 1]];
+    let version = u16::from_be_bytes(ver_bytes);
+    if version != PD_HEADER_VERSION_V1 {
+        return Err(borsh::io::Error::new(
+            borsh::io::ErrorKind::InvalidData,
+            format!("unsupported PD header version: {}", version),
+        ));
+    }
+
+    // Decode fixed-size V1 header
+    let hdr_start = magic_len + 2;
+    let mut rdr = &input[hdr_start..];
+    let header = PdHeaderV1::deserialize_reader(&mut rdr)?;
+    let consumed = input.len() - rdr.len();
+    Ok(Some((header, consumed)))
 }
