@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
@@ -92,7 +92,7 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -169,7 +169,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let required_index_blocks_height: usize = 2;
     let max_seconds = 20;
@@ -339,7 +339,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         )
         .await;
 
-        let mut result_genesis = block_index_endpoint_request(
+        let result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             required_index_blocks_height.try_into()?,
@@ -456,7 +456,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
             .wait_until_block_index_height(genesis_starting_index_height + 1, max_seconds)
             .await?;
 
-        let mut result_genesis = block_index_endpoint_request(
+        let result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             genesis_starting_index_height + 1,
@@ -555,13 +555,12 @@ async fn poll_until_fetch_at_block_index_height(
     node_ctx: &IrysNodeCtx,
     required_blocks_height: u64,
     max_attempts: u64,
-) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
+) -> Option<reqwest::Response> {
     let mut attempts = 0;
-    let mut result_peer = None;
     let max_attempts = max_attempts * 10;
     let url = local_test_url(&node_ctx.config.node_config.http.bind_port);
     loop {
-        let mut response = info_endpoint_request(&url).await;
+        let response = info_endpoint_request(&url).await;
 
         if max_attempts < attempts {
             error!(
@@ -594,7 +593,7 @@ async fn poll_until_fetch_at_block_index_height(
             //wait one second and try again
             sleep(Duration::from_millis(100)).await;
         } else {
-            result_peer = Some(
+            return Some(
                 block_index_endpoint_request(
                     &local_test_url(&node_ctx.config.node_config.http.bind_port),
                     0,
@@ -602,8 +601,7 @@ async fn poll_until_fetch_at_block_index_height(
                 )
                 .await,
             );
-            break;
         }
     }
-    result_peer
+    None
 }

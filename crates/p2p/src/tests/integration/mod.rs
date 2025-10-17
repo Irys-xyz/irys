@@ -12,7 +12,7 @@ use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;
 use tracing::debug;
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::Result<()> {
     let mut gossip_service_test_fixture_1 = GossipServiceTestFixture::new().await;
     let mut gossip_service_test_fixture_2 = GossipServiceTestFixture::new().await;
@@ -56,7 +56,7 @@ async fn heavy_should_broadcast_message_to_an_established_connection() -> eyre::
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> {
     let mut fixtures = vec![
         GossipServiceTestFixture::new().await,
@@ -123,7 +123,7 @@ async fn heavy_should_broadcast_message_to_multiple_peers() -> eyre::Result<()> 
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
@@ -167,7 +167,7 @@ async fn heavy_should_not_resend_recently_seen_data() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
@@ -209,7 +209,7 @@ async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let fixture2 = GossipServiceTestFixture::new().await;
@@ -235,7 +235,7 @@ async fn heavy_should_handle_offline_peer_gracefully() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
@@ -293,7 +293,7 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;
@@ -348,7 +348,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new().await;
     let mut fixture2 = GossipServiceTestFixture::new().await;

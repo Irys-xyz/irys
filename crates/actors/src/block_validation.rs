@@ -3,7 +3,6 @@ use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
-    mining::hash_to_number,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -26,6 +25,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::u256_from_le_bytes as hash_to_number;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -2688,7 +2688,7 @@ mod tests {
         )
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_test_3_complete_txs() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
@@ -2734,7 +2734,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
         let (_tmp, context) = init().await;
 
@@ -2770,7 +2770,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn is_seed_data_valid_should_validate_seeds() {
         let reset_frequency = 2;
 
@@ -2980,7 +2980,7 @@ mod tests {
         assert!(poa_valid.is_ok(), "PoA should be valid");
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks

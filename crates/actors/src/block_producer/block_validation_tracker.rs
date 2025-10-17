@@ -32,8 +32,7 @@ use crate::{block_tree_service::BlockStateUpdated, services::ServiceSenders};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::{BlockHash, U256};
 use std::time::Duration;
-use tokio::sync::broadcast::Receiver;
-use tokio::time::Instant;
+use tokio::{sync::broadcast::Receiver, time::Instant};
 use tracing::{debug, info, instrument, trace, warn};
 
 /// Tracks the state of block validation during parent block selection

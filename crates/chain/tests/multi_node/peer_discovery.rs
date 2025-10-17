@@ -15,7 +15,7 @@ use irys_types::{
 };
 use tracing::{debug, error, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.trusted_peers = vec![];
@@ -351,7 +351,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     // TODO: this test should:
     //  1. Peer 1 launched. Peer 1 doesn't have trusted peers.

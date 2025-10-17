@@ -72,7 +72,7 @@ async fn inject_payload_into_cache(node_ctx: &IrysNodeCtx, sealed: SealedBlock<B
         .await;
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
@@ -110,7 +110,7 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
@@ -148,7 +148,7 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
@@ -193,7 +193,7 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;

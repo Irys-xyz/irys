@@ -8,7 +8,7 @@ use irys_types::{
 use tracing::info;
 
 /// Test that verifies the treasury field is correctly tracked across blocks
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -172,7 +172,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 }
 
 /// Test that verifies treasury is correctly initialized from genesis commitments
-#[actix_web::test]
+#[tokio::test]
 async fn test_genesis_treasury_calculation() -> eyre::Result<()> {
     initialize_tracing();
 

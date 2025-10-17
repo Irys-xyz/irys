@@ -48,7 +48,7 @@ const EVM_TEST_TRANSFER_AMOUNT: U256 = U256::ONE;
 const ZERO_BALANCE: U256 = U256::ZERO;
 const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]); // 1 IRYS
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_blockprod() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let user_account = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -179,7 +179,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> {
     let config = NodeConfig::testing();
     let node = IrysNodeTest::new_genesis(config).start().await;
@@ -232,7 +232,7 @@ async fn heavy_mine_ten_blocks_with_capacity_poa_solution() -> eyre::Result<()> 
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
@@ -278,7 +278,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
@@ -309,7 +309,7 @@ async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -457,7 +457,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async();
     let node = node.start().await;
@@ -493,7 +493,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 }
 
 #[ignore]
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let unfunded_user = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -581,7 +581,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 }
 
 #[ignore]
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
     let nonexistent_user = IrysSigner::random_signer(&node.cfg.consensus_config());
@@ -662,7 +662,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     let data_bytes = "Hello, world!".as_bytes().to_vec();
 
@@ -788,7 +788,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
@@ -1039,7 +1039,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 }
 
 // This test produces a block with invalid tx ordering.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
     // Evil strategy that tampers shadow txs (EVM payload) while keeping PoA/link/difficulty valid
     struct EvilBlockProdStrategy {
@@ -1183,7 +1183,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 // This test verifies that block production fails when a shadow transaction
 // attempts to deduct storage fees from a user with insufficient balance.
 // irys-reth should reject even building such a block.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
     use irys_types::DataLedger;
 
@@ -1306,7 +1306,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     let mut config = NodeConfig::testing_with_epochs(2);
     config.consensus.get_mut().chunk_size = 32;
@@ -1370,7 +1370,7 @@ async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<
 // Setup: Configure a node with block_tree_depth=3 to test pruning behavior
 // Action: Mine 10 blocks, checking that blocks get pruned while mining.
 // Assert: Verify blocks 1-7 are pruned and blocks 8, 9, 10 still exist in the tree
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     // Setup
     // Configure test parameters
@@ -1447,7 +1447,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     // Evil strategy that uses an incorrect solution hash
     struct InvalidSolutionHashStrategy {
@@ -1539,7 +1539,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 /// test that config option max_commitment_txs_per_block is enforced
 /// check individual blocks have correct txs. e.g.
 /// 1 stake + 11 pledge commitment txs with a limit of two per block, we should see 2 +2 +2 +2 +0 +2 +2

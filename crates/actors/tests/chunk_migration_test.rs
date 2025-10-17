@@ -29,7 +29,7 @@
 // use reth::{revm::primitives::B256, tasks::TaskManager};
 // use tracing::info;
 
-// #[actix::test]
+// #[tokio::test]
 // async fn finalize_block_test() -> eyre::Result<()> {
 //     let node_config = IrysNodeConfig::default();
 //     if node_config.base_directory.exists() {

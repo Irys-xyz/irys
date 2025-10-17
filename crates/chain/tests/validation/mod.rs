@@ -47,7 +47,7 @@ async fn send_block_to_block_tree(
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
 // The assertion will fail (block will be discarded) because stake commitments must have exact stake_value
 // from the consensus config.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     use irys_primitives::CommitmentType;
     use irys_types::U256;
@@ -143,7 +143,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // This test creates a malicious block producer that includes a pledge commitment with invalid value.
 // The assertion will fail (block will be discarded) because pledge commitments must have value
 // calculated using calculate_pledge_value_at_count().
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     use irys_primitives::CommitmentType;
     use irys_types::U256;
@@ -241,7 +241,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
 
 // This test creates a malicious block producer that includes commitments in wrong order.
 // The assertion will fail (block will be discarded) because stake commitments must come before pledge commitments.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -350,7 +350,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 // This test creates a malicious block producer that includes wrong commitments in an epoch block.
 // The assertion will fail (block will be discarded) because epoch blocks must contain exactly
 // the commitments from the parent's snapshot.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -449,7 +449,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 // This test ensures that blocks with incorrect `last_epoch_hash` are rejected during validation.
 // Firstly verify rejection of malformed/incorrect last_epoch_hash
 // Secondly verify the first-after-epoch rule
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
@@ -561,7 +561,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
 
 // This test creates a malicious block producer that includes duplicate ingress proof signers for the same data root.
 // The assertion will fail (block will be discarded) because each address can only provide one proof per data root.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
     use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
     use irys_types::{
@@ -757,7 +757,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 // This test creates a malicious block producer that omits expected commitments from an epoch block.
 // The assertion will fail (block will be discarded) because epoch blocks must contain all
 // commitments from the parent's snapshot.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,

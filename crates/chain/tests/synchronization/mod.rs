@@ -1,5 +1,4 @@
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
 
@@ -13,7 +12,7 @@ use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // settings
     let max_seconds = 10;
@@ -56,7 +55,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -64,7 +63,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     let message = "Hirys, world!";
@@ -89,13 +88,13 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     let tx = account1.sign_transaction(tx).unwrap();
 
     // post tx header
-    let mut resp = client
+    let resp = client
         .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
+        .json(&tx.header)
+        .send()
         .await
         .unwrap();
-    println!("Response: {:?}", resp.body().await);
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     // Check that tx has been sent
     node.wait_for_mempool(tx.header.id, max_seconds).await?;
@@ -212,7 +211,7 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources() -> eyre::Result<()>
 {
     // settings

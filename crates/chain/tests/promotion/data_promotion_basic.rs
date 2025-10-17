@@ -1,10 +1,10 @@
 use crate::utils::{get_block_parent, post_chunk, verify_published_chunk};
 use crate::utils::{AddTxError, IrysNodeTest};
+use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
-use awc::http::StatusCode;
 use irys_actors::MempoolServiceMessage;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
@@ -12,7 +12,7 @@ use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
 use tracing::debug;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;

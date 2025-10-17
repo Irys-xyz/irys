@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Default test node config

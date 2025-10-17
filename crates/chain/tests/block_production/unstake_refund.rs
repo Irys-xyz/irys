@@ -18,7 +18,7 @@ use crate::block_production::unpledge_refund::{
 /// 1. unpledge all partitions from a signer and process epoch refunds.
 /// 2. Submit an unstake commitment, mine the inclusion block, and ensure it is fee-only.
 /// 3. Advance to the next epoch to assert the unstake refund, treasury delta, and stake removal.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -295,7 +295,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 /// 2. Unstake transaction is NOT included in any block while pledges are active
 /// 3. No balance changes or treasury changes occur from the unstake attempt
 /// 4. After all pledges are cleared, the same unstake transaction can be included and processed normally
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -517,7 +517,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 /// 2. When a block is mined, the PLEDGE is included (priority 1) but UNSTAKE is rejected (priority 3)
 /// 3. The simulation validation sees the pledge being added, which creates an active pledge that blocks the unstake
 /// 4. This demonstrates transaction priority ordering: Pledge (1) < Unstake (3)
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -971,7 +971,7 @@ fn assert_no_unstake_in_commitment_snapshot(
 /// 6. Balance increases by total unpledge refunds + unstake refund - fees
 /// 7. No storage modules remain assigned (all pledges cleared)
 /// 8. User is no longer staked (removed from epoch snapshot)
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()> {
     initialize_tracing();
 

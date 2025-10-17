@@ -52,7 +52,7 @@ pub use app_state::*;
 pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;
 pub use chunk::*;
-pub use conversions::{parse_address, AddressParseError};
+pub use conversions::{parse_address, u256_from_le_bytes, AddressParseError};
 pub use merkle::*;
 pub use nodit::Interval;
 pub use peer_list::*;
