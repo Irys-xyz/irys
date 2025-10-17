@@ -7,7 +7,8 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
+    IrysTransactionId, H256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
@@ -23,6 +24,19 @@ impl Inner {
         &mut self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
+        {
+            let fingerprint = tx.fingerprint();
+            if self
+                .mempool_state
+                .read()
+                .await
+                .recent_invalid_payload_fingerprints
+                .contains(&fingerprint)
+            {
+                return Err(TxIngressError::InvalidSignature);
+            }
+        }
         // Early exit if already known in mempool or DB
         {
             if self.is_known_data_tx(&tx.id).await? {
@@ -195,7 +209,8 @@ impl Inner {
     /// Returns Ok(true) if known, Ok(false) if not known.
     async fn is_known_data_tx(&self, tx_id: &H256) -> Result<bool, TxIngressError> {
         let guard = self.mempool_state.read().await;
-        if guard.recent_invalid_tx.contains(tx_id) || guard.recent_valid_tx.contains(tx_id) {
+        // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
+        if guard.recent_valid_tx.contains(tx_id) {
             return Ok(true);
         }
         drop(guard);
@@ -350,9 +365,6 @@ impl Inner {
         {
             Ok(true)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-            Ok(true)
-        } else if mempool_state_guard.recent_invalid_tx.contains(&txid) {
-            // Still has it, just invalid
             Ok(true)
         } else {
             drop(mempool_state_guard);
