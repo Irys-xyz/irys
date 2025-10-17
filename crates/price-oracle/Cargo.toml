@@ -15,9 +15,13 @@ ignored = ["rust_decimal"]
 irys-types.workspace = true
 eyre = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
+reqwest = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+reth = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

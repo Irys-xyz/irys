@@ -185,6 +185,13 @@ pub enum OracleConfig {
         /// Number of blocks between price updates
         smoothing_interval: u64,
     },
+    /// CoinMarketCap-backed price oracle
+    CoinMarketCap {
+        /// API key for the CoinMarketCap Pro API
+        api_key: String,
+        /// Ticker symbol to query (e.g., "IRYS", "BTC").
+        symbol: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

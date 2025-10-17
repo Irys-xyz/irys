@@ -1,35 +1,129 @@
 //! # Irys Price Oracle Module
 //!
-//! This module defines the `IrysPriceOracle` enum, which is responsible for
-//! fetching the current price of IRYS tokens in USD.
+//! Background service that periodically fetches the IRYS price and caches it
+//! for fast reads without issuing network requests on demand.
 
 use irys_types::storage_pricing::{
     Amount,
     phantoms::{IrysPrice, Usd},
 };
+use irys_types::TokioServiceHandle;
+use std::sync::{Arc, RwLock};
+use tokio::time::{interval, Duration};
+use tracing::Instrument as _;
 
-/// An enum representing all the possible price oracles for IRYS tokens.
 #[derive(Debug)]
-pub enum IrysPriceOracle {
+enum OracleSource {
     /// An Oracle that generates the price locally, not suitable for production usage.
-    MockOracle(mock_oracle::MockOracle),
+    Mock(mock_oracle::MockOracle),
+    /// CoinMarketCap-backed oracle
+    CoinMarketCap(coinmarketcap::CoinMarketCapOracle),
+}
+
+#[derive(Debug, Default)]
+struct PriceCache {
+    value: Amount<(IrysPrice, Usd)>,
+}
+
+/// Public oracle handle. Spawns a background poller to keep `cache` up-to-date.
+#[derive(Debug)]
+pub struct IrysPriceOracle {
+    source: OracleSource,
+    cache: Arc<RwLock<PriceCache>>,
 }
 
 impl IrysPriceOracle {
-    /// Returns the current price of IRYS in USD.
-    ///
-    /// # Errors
-    ///
-    /// If the underlying `current_price()` call fails.
-    #[expect(
-        clippy::unused_async,
-        reason = "will be async once proper oracles get added"
-    )]
+    /// Construct a mock oracle and spawn the hourly poller.
+    pub fn new_mock(
+        initial_price: Amount<(IrysPrice, Usd)>,
+        incremental_change: Amount<(IrysPrice, Usd)>,
+        smoothing_interval: u64,
+    ) -> Arc<Self> {
+        // Initialize underlying oracle and fetch initial value immediately
+        let source = OracleSource::Mock(mock_oracle::MockOracle::new(
+            initial_price,
+            incremental_change,
+            smoothing_interval,
+        ));
+        // Use the configured initial price for the starting cache value
+        let initial = initial_price;
+
+        Arc::new(Self { source, cache: Arc::new(RwLock::new(PriceCache { value: initial })) })
+    }
+
+    /// Construct a CoinMarketCap oracle and spawn the hourly poller.
+    pub fn new_coinmarketcap_blocking(
+        api_key: String,
+        symbol: String,
+        handle: &tokio::runtime::Handle,
+    ) -> Arc<Self> {
+        let client = coinmarketcap::CoinMarketCapOracle::new(api_key, symbol);
+        let initial = handle
+            .block_on(client.current_price())
+            .expect("coinmarketcap initial price fetch must succeed");
+        Arc::new(Self {
+            source: OracleSource::CoinMarketCap(client),
+            cache: Arc::new(RwLock::new(PriceCache { value: initial })),
+        })
+    }
+
+    /// Returns the last cached price of IRYS in USD.
     pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
-        use IrysPriceOracle::*;
-        match self {
-            MockOracle(mock_oracle) => mock_oracle.current_price(),
+        let guard = self
+            .cache
+            .read()
+            .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
+        Ok(guard.value)
+    }
+
+    pub fn spawn_poller(
+        this: Arc<Self>,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> Option<TokioServiceHandle> {
+        match &this.source {
+            OracleSource::Mock(_) => None,
+            OracleSource::CoinMarketCap(_) => {
+                let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
+                let handle = runtime_handle.spawn(
+                    async move {
+                        let mut ticker = interval(Duration::from_secs(60 * 60));
+                        loop {
+                            tokio::select! {
+                                _ = &mut shutdown_rx => {
+                                    tracing::info!("price oracle poller shutdown");
+                                    break;
+                                }
+                                _ = ticker.tick() => {
+                                    if let Err(err) = this.update_once().await {
+                                        tracing::warn!(?err, "oracle price fetch failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .in_current_span(),
+                );
+                Some(TokioServiceHandle {
+                    name: "price_oracle_poller".to_string(),
+                    handle,
+                    shutdown_signal: shutdown_tx,
+                })
+            }
         }
+    }
+
+    #[tracing::instrument(skip(self), err)]
+    async fn update_once(&self) -> eyre::Result<()> {
+        let price = match &self.source {
+            OracleSource::Mock(m) => m.current_price(),
+            OracleSource::CoinMarketCap(c) => c.current_price().await,
+        }?;
+        let mut guard = self
+            .cache
+            .write()
+            .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
+        guard.value = price;
+        Ok(())
     }
 }
 
@@ -195,6 +289,190 @@ pub mod mock_oracle {
             //            => 1.10 - 0.10 = 1.00
             let price_after_second = oracle.current_price().unwrap();
             assert_eq!(price_after_second.token_to_decimal().unwrap(), dec!(1.00));
+        }
+    }
+}
+
+/// CoinMarketCap oracle implementation
+pub mod coinmarketcap {
+    use super::*;
+    use eyre::{bail, eyre, Context};
+    use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
+    use reqwest::Client;
+    use rust_decimal::Decimal;
+    use serde_json::Value;
+    use std::str::FromStr;
+
+    #[derive(Debug, Clone)]
+    pub struct CoinMarketCapOracle {
+        client: Client,
+        api_key: String,
+        symbol: String,
+    }
+
+    impl CoinMarketCapOracle {
+        /// Create a new CoinMarketCap oracle client
+        #[must_use]
+        pub fn new(
+            api_key: String,
+            symbol: String,
+        ) -> Self {
+            let client = Client::new();
+            Self { client, api_key, symbol }
+        }
+
+        #[tracing::instrument(skip_all, err)]
+        pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+            // Build headers
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+            headers.insert(
+                "X-CMC_PRO_API_KEY",
+                HeaderValue::from_str(&self.api_key).context("invalid API key header value")?,
+            );
+
+            // Build query params
+            let mut params: Vec<(String, String)> = Vec::new();
+            params.push(("symbol".to_string(), self.symbol.clone()));
+            params.push(("convert".to_string(), "USD".to_string()));
+
+            let resp = self
+                .client
+                .get("https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest")
+                .headers(headers)
+                .query(&params)
+                .send()
+                .await
+                .context("failed to call CoinMarketCap API")?;
+
+            if !resp.status().is_success() {
+                bail!("CoinMarketCap API returned HTTP status {}", resp.status());
+            }
+
+            let body: Value = resp.json().await.context("failed to parse CMC JSON body")?;
+
+            // check status
+            if let Some(status_obj) = body.get("status").and_then(|v| v.as_object()) {
+                let error_code = status_obj.get("error_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                if error_code != 0 {
+                    let msg = status_obj
+                        .get("error_message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown error");
+                    bail!("CoinMarketCap API error {}: {}", error_code, msg);
+                }
+            }
+
+            let price_dec = extract_price_from_cmc(&body, "USD")
+                .context("failed to extract price from CMC response")?;
+
+            let amount = Amount::<(IrysPrice, Usd)>::token(price_dec)
+                .context("failed to convert price to Amount")?;
+            Ok(amount)
+        }
+    }
+
+    #[tracing::instrument(skip_all, err)]
+    fn extract_price_from_cmc(v: &Value, convert: &str) -> eyre::Result<Decimal> {
+        let data = v
+            .get("data")
+            .and_then(|d| d.as_object())
+            .ok_or_else(|| eyre!("missing or invalid 'data' field"))?;
+
+        // Normalize convert key (expect uppercase like "USD")
+        let convert_key = if convert.is_empty() { "USD" } else { convert };
+
+        for (_k, entry) in data.iter() {
+            // Some responses wrap entry in an array when using symbol
+            let items: Vec<&Value> = if let Some(arr) = entry.as_array() {
+                arr.iter().collect()
+            } else {
+                vec![entry]
+            };
+
+            for item in items {
+                if let Some(quote_obj) = item.get("quote").and_then(|q| q.as_object()) {
+                    if let Some(currency_obj) = quote_obj.get(convert_key).and_then(|c| c.as_object()) {
+                        if let Some(price_val) = currency_obj.get("price") {
+                            // Convert price to Decimal robustly
+                            if let Some(n) = price_val.as_f64() {
+                                if let Some(d) = Decimal::from_f64_retain(n) {
+                                    return Ok(d);
+                                }
+                            }
+                            // Fallback: parse from string representation
+                            let s = price_val.to_string();
+                            if let Ok(d) = Decimal::from_str(&s) {
+                                return Ok(d);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(eyre!("could not find price in CMC response"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn parse_sample_response() {
+            let sample = r#"{
+"data": {
+"1": {
+"id": 1,
+"name": "Bitcoin",
+"symbol": "BTC",
+"slug": "bitcoin",
+"is_active": 1,
+"is_fiat": 0,
+"circulating_supply": 17199862,
+"total_supply": 17199862,
+"max_supply": 21000000,
+"date_added": "2013-04-28T00:00:00.000Z",
+"num_market_pairs": 331,
+"cmc_rank": 1,
+"last_updated": "2018-08-09T21:56:28.000Z",
+"tags": [
+"mineable"
+],
+"platform": null,
+"self_reported_circulating_supply": null,
+"self_reported_market_cap": null,
+"quote": {
+"USD": {
+"price": 6602.60701122,
+"volume_24h": 4314444687.5194,
+"volume_change_24h": -0.152774,
+"percent_change_1h": 0.988615,
+"percent_change_24h": 4.37185,
+"percent_change_7d": -12.1352,
+"percent_change_30d": -12.1352,
+"market_cap": 852164659250.2758,
+"market_cap_dominance": 51,
+"fully_diluted_market_cap": 952835089431.14,
+"last_updated": "2018-08-09T21:56:28.000Z"
+}
+}
+}
+},
+"status": {
+"timestamp": "2025-10-13T00:00:34.078Z",
+"error_code": 0,
+"error_message": "",
+"elapsed": 10,
+"credit_count": 1,
+"notice": ""
+}
+}"#;
+
+            let v: Value = serde_json::from_str(sample).unwrap();
+            let d = extract_price_from_cmc(&v, "USD").unwrap();
+            assert_eq!(d, dec!(6602.60701122));
         }
     }
 }

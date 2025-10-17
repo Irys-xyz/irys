@@ -45,7 +45,7 @@ use irys_p2p::{
     ChainSyncServiceInner, GossipDataHandler, P2PService, ServiceHandleWithShutdownSignal,
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
-use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+use irys_price_oracle::IrysPriceOracle;
 use irys_reth_node_bridge::irys_reth::chainspec::irys_chain_spec;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
@@ -1202,8 +1202,8 @@ impl IrysNode {
             chain_sync_tx.clone(),
         )?;
 
-        // set up the price oracle
-        let price_oracle = Self::init_price_oracle(&config);
+        // set up the price oracle (initial price fetched during construction)
+        let (price_oracle, price_oracle_handle) = Self::init_price_oracle(&config, &runtime_handle);
 
         // set up the block producer
         let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
@@ -1382,6 +1382,9 @@ impl IrysNode {
             services.push(ArbiterEnum::ActixArbiter {
                 arbiter: ArbiterHandle::new(broadcast_arbiter, "broadcast_arbiter".to_string()),
             });
+            if let Some(oracle_handle) = price_oracle_handle {
+                services.push(ArbiterEnum::TokioService(oracle_handle));
+            }
             services.extend(partition_handles.into_iter().map(ArbiterEnum::TokioService));
             // Add packing controllers to services
             services.extend(
@@ -1639,21 +1642,29 @@ impl IrysNode {
         (block_producer_inner, tokio_service_handle)
     }
 
-    fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
-        let price_oracle = match config.node_config.oracle {
-            OracleConfig::Mock {
-                initial_price,
-                incremental_change,
-                smoothing_interval,
-            } => IrysPriceOracle::MockOracle(MockOracle::new(
-                initial_price,
-                incremental_change,
-                smoothing_interval,
-            )),
-            // note: depending on the oracle, it may require spawning an async background service.
-        };
-
-        Arc::new(price_oracle)
+    fn init_price_oracle(
+        config: &Config,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> (Arc<IrysPriceOracle>, Option<irys_types::TokioServiceHandle>) {
+        match &config.node_config.oracle {
+            OracleConfig::Mock { initial_price, incremental_change, smoothing_interval } => {
+                let oracle = IrysPriceOracle::new_mock(
+                    *initial_price,
+                    *incremental_change,
+                    *smoothing_interval,
+                );
+                (oracle, None)
+            }
+            OracleConfig::CoinMarketCap { api_key, symbol } => {
+                let oracle = IrysPriceOracle::new_coinmarketcap_blocking(
+                    api_key.clone(),
+                    symbol.clone(),
+                    runtime_handle,
+                );
+                let handle = IrysPriceOracle::spawn_poller(oracle.clone(), runtime_handle);
+                (oracle, handle)
+            }
+        }
     }
 
     fn init_block_discovery_service(
