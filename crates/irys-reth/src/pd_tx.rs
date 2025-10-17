@@ -16,7 +16,7 @@ pub struct PdKey {
 
 /// Encode a PD storage key `<slot_index:26><offset:4><chunk_count:2>` into a 32-byte big-endian word.
 pub fn encode_pd_storage_key(slot_index_be: [u8; 26], offset: u32, chunk_count: u16) -> B256 {
-    let mut buf = [0u8; 32];
+    let mut buf = [0_u8; 32];
     buf[0..26].copy_from_slice(&slot_index_be);
     buf[26..30].copy_from_slice(&offset.to_be_bytes());
     buf[30..32].copy_from_slice(&chunk_count.to_be_bytes());
@@ -26,11 +26,11 @@ pub fn encode_pd_storage_key(slot_index_be: [u8; 26], offset: u32, chunk_count: 
 /// Decode a PD storage key from a 32-byte big-endian word.
 pub fn decode_pd_storage_key(key: B256) -> PdKey {
     let bytes = key.0;
-    let mut slot = [0u8; 26];
+    let mut slot = [0_u8; 26];
     slot.copy_from_slice(&bytes[0..26]);
-    let mut off = [0u8; 4];
+    let mut off = [0_u8; 4];
     off.copy_from_slice(&bytes[26..30]);
-    let mut cnt = [0u8; 2];
+    let mut cnt = [0_u8; 2];
     cnt.copy_from_slice(&bytes[30..32]);
     PdKey {
         slot_index_be: slot,
@@ -92,11 +92,11 @@ impl BorshSerialize for PdHeaderV1 {
 
 impl BorshDeserialize for PdHeaderV1 {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let mut prio_buf = [0u8; 32];
+        let mut prio_buf = [0_u8; 32];
         reader.read_exact(&mut prio_buf)?;
         let max_priority_fee_per_chunk = U256::from_be_bytes(prio_buf);
 
-        let mut base_buf = [0u8; 32];
+        let mut base_buf = [0_u8; 32];
         reader.read_exact(&mut base_buf)?;
         let max_base_fee_per_chunk = U256::from_be_bytes(base_buf);
 
