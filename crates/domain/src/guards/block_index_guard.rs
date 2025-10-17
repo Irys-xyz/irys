@@ -7,8 +7,6 @@ use tracing::{debug, error};
 use crate::BlockIndex;
 
 /// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
-/// As soon as `block_index` is no longer an actix service this `MessageResponse` and the corresponding
-/// actix dependency in Cargo.toml can be dropped
 #[derive(Debug, Clone)]
 pub struct BlockIndexReadGuard {
     block_index_data: Arc<RwLock<BlockIndex>>,
@@ -25,7 +23,7 @@ impl BlockIndexReadGuard {
         self.block_index_data.read().unwrap()
     }
 
-    /// Get the inner Arc<RwLock<BlockIndex>>
+    /// Get the inner `Arc<RwLock<BlockIndex>>`
     pub fn inner(&self) -> Arc<RwLock<BlockIndex>> {
         self.block_index_data.clone()
     }

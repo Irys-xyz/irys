@@ -17,7 +17,6 @@ pub enum BlockIndexServiceMessage {
     },
 
     /// Migrate a block into the block index (pushes a new BlockIndexItem)
-    /// Uses the same payload as the legacy Actix message
     MigrateBlock {
         block_header: Arc<IrysBlockHeader>,
         all_txs: Arc<Vec<DataTransactionHeader>>,

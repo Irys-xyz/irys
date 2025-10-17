@@ -955,7 +955,7 @@ mod tests {
         #[case(100_000, 200_000, 90_000, "200% of limit evicts to 90%")]
         #[case(50_000, 75_000, 45_000, "Small cache (50KB) respects 90% rule")]
         #[tokio::test]
-        async fn test_size_based_eviction_hysteresis(
+        async fn slow_test_size_based_eviction_hysteresis(
             #[case] max_size: u64,
             #[case] initial_size: u64,
             #[case] expected_max_final_size: u64,
@@ -1093,7 +1093,7 @@ mod tests {
 
         proptest! {
             #[test]
-            fn fifo_ordering_always_maintained(
+            fn slow_fifo_ordering_always_maintained(
                 timestamps in prop::collection::vec(100_u64..1_000_000, 5..20)
             ) {
                 let rt = tokio::runtime::Runtime::new().unwrap();

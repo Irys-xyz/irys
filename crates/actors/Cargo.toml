@@ -15,9 +15,7 @@ irys-price-oracle.workspace = true
 irys-efficient-sampling.workspace = true
 irys-vdf.workspace = true
 
-actix.workspace = true
 nodit.workspace = true
-actix-rt.workspace = true
 priority-queue.workspace = true
 tokio.workspace = true
 lru.workspace = true

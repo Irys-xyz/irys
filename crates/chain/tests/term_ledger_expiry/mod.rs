@@ -15,7 +15,7 @@ use tracing::info;
 
 // Test 0: Complete slot expiry with 0 transactions
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
     info!("Testing ledger expiry with no transactions at all");
 
@@ -53,7 +53,7 @@ async fn heavy_ledger_expiry_many_blocks_no_txs() -> eyre::Result<()> {
 // Expiry = Block 7 - (2 epochs × 3 blocks) = 1
 // All slots created in blocks 1-3 expire when checked at block 7
 //
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_ledger_expiry_many_blocks_sparse_txs() -> eyre::Result<()> {
     info!("Testing ledger expiry with many sparse blocks (1 tx per block)");
 
@@ -89,7 +89,7 @@ async fn heavy_ledger_expiry_many_blocks_sparse_txs() -> eyre::Result<()> {
 // Epoch 3: EXPIRY → Only Slot 0 expires (5 txs)
 //         Slot 1 remains active
 //
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
     info!("Testing ledger expiry with multiple transactions per block");
     ledger_expiry_test(LedgerExpiryTestParams {
@@ -127,7 +127,7 @@ async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
 // After 1 epoch: Only Tx0 and Tx1 expire (start in Partition 0)
 // Tx2 and Tx3 start in later partitions, don't expire
 //
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()> {
     info!("Testing ledger expiry with large transactions spanning partitions");
     ledger_expiry_test(LedgerExpiryTestParams {
@@ -173,7 +173,7 @@ async fn heavy_ledger_expiry_large_txs_spanning_partitions() -> eyre::Result<()>
 // Epoch 3 (block 7):   EXPIRY → First 3 slots expire (6 txs)
 //                      Txs 0-5 expire (start in partitions 0-2)
 //
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_ledger_expiry_multiple_partitions_expire() -> eyre::Result<()> {
     info!("Testing ledger expiry with multiple partitions all expiring");
     ledger_expiry_test(LedgerExpiryTestParams {
@@ -600,7 +600,7 @@ impl LedgerExpiryTestContext {
                     )
                 {
                     if let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
-                        info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}", 
+                        info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}",
                             block.height, reward.target, reward.amount, reward.irys_ref);
                         if reward.target == self.miner_address {
                             let amount = U256::from_le_bytes(reward.amount.to_le_bytes());

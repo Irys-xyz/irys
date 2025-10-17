@@ -15,8 +15,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, warn, Instrument as _};
 
 pub struct DataSyncService {

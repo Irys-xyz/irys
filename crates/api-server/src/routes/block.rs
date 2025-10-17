@@ -207,7 +207,7 @@ impl Display for BlockParam {
 //     use tempfile::tempdir;
 
 //     #[ignore = "broken due to reth provider/block tree dependency"]
-//     #[actix_web::test]
+//     #[tokio::test]
 //     async fn test_get_block() -> eyre::Result<()> {
 //         //std::env::set_var("RUST_LOG", "debug");
 //         let _ = env_logger::try_init();
@@ -279,7 +279,7 @@ impl Display for BlockParam {
 //     }
 
 //     #[ignore = "broken due to reth provider/block tree dependency"]
-//     #[actix_web::test]
+//     #[tokio::test]
 //     async fn test_get_non_existent_block() -> Result<(), Error> {
 //         let path = tempdir().unwrap();
 //         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();

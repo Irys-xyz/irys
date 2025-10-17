@@ -1,9 +1,9 @@
-#[cfg(test)]
-use actix_rt::test;
 use irys_actors::peer_stats::{BandwidthRating, BandwidthWindow, PeerStats};
 use irys_domain::ChunkTimeRecord;
 use irys_types::PartitionChunkOffset;
 use std::time::{Duration, Instant};
+#[cfg(test)]
+use tokio::test;
 
 // Configurable chunk size for tests
 const CHUNK_SIZE: u64 = 32; // 32 bytes for sanity checks (normally 256KiB)
@@ -119,7 +119,7 @@ async fn test_bandwidth_window_functionality() {
     window.add_bytes(CHUNK_SIZE);
 
     // Give a small delay to ensure elapsed time calculation works
-    actix_rt::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Should have some throughput now
     let throughput = window.bytes_per_second();
@@ -141,13 +141,13 @@ async fn test_bandwidth_window_expiration() {
     window.add_bytes(CHUNK_SIZE);
 
     // Give a small delay to establish elapsed time
-    actix_rt::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let initial_throughput = window.bytes_per_second();
     assert!(initial_throughput > 0);
 
     // Wait for window to expire
-    actix_rt::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
     // Old data should have expired, throughput should be 0 or very low
     let expired_throughput = window.bytes_per_second();
@@ -157,7 +157,7 @@ async fn test_bandwidth_window_expiration() {
     window.add_bytes(CHUNK_SIZE * 2);
 
     // Give small delay for calculation
-    actix_rt::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let fresh_throughput = window.bytes_per_second();
     assert!(fresh_throughput > 0);
@@ -171,11 +171,11 @@ async fn test_bandwidth_window_buckets() {
     window.add_bytes(CHUNK_SIZE);
 
     // Wait for new bucket
-    actix_rt::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     window.add_bytes(CHUNK_SIZE * 2);
 
     // Wait for another new bucket
-    actix_rt::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     window.add_bytes(CHUNK_SIZE);
 
     // Should have throughput that accounts for all buckets within the window
@@ -230,7 +230,7 @@ async fn test_throughput_stability_detection() {
 
         // Add delay every few iterations to establish different time windows
         if i % 3 == 0 {
-            actix_rt::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 
@@ -257,7 +257,7 @@ async fn test_throughput_improvement_detection() {
         // Space out requests significantly to establish different time windows
         // We need gaps large enough that the later "fast" requests won't be
         // averaged with these early "slow" requests in the short-term window
-        actix_rt::time::sleep(Duration::from_millis(2500)).await; // 2.5 seconds between requests
+        tokio::time::sleep(Duration::from_millis(2500)).await; // 2.5 seconds between requests
     }
 
     // At this point we've taken ~12.5 seconds, so the medium-term window
@@ -271,11 +271,11 @@ async fn test_throughput_improvement_detection() {
         stats.record_request_completed(chunk_record);
 
         // Small delay between fast requests
-        actix_rt::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // Give a moment for the windows to update
-    actix_rt::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Debug the actual throughput values
     let short = stats.short_term_bandwidth_bps();
@@ -427,7 +427,7 @@ async fn test_multi_window_bandwidth_tracking() {
         stats.record_request_completed(chunk_record);
 
         // Add small delays to distribute across time
-        actix_rt::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     // All bandwidth windows should have some throughput

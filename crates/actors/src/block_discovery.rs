@@ -537,15 +537,6 @@ impl BlockDiscoveryServiceInner {
 
         match validation_result {
             Ok(()) => {
-                // add block to mempool
-                mempool_sender
-                    .send(MempoolServiceMessage::IngestBlocks {
-                        prevalidated_blocks: vec![new_block_header.clone()],
-                    })
-                    .map_err(|channel_error| {
-                        BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-                    })?;
-
                 // all txs
                 let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);

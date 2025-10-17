@@ -552,7 +552,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    #[actix_rt::test]
+    #[tokio::test]
     // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
     async fn handle_invalid_block_penalizes_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);

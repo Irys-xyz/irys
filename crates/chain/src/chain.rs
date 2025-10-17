@@ -1,32 +1,32 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use actix::{Actor as _, Arbiter, System, SystemRegistry};
+
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
 use futures::FutureExt as _;
-use irys_actors::block_discovery::{
-    BlockDiscoveryMessage, BlockDiscoveryService, BlockDiscoveryServiceInner,
-};
-use irys_actors::block_tree_service::BlockTreeServiceMessage;
-use irys_actors::broadcast_mining_service::MiningServiceBroadcaster;
-use irys_actors::chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher};
-use irys_actors::pledge_provider::MempoolPledgeProvider;
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacadeImpl,
+    block_discovery::{
+        BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
+        BlockDiscoveryServiceInner,
+    },
     block_producer::BlockProducerCommand,
-    block_tree_service::BlockTreeService,
-    broadcast_mining_service::BroadcastMiningService,
+    block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
     cache_service::ChunkCacheService,
+    chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
-    mining::{MiningControl, PartitionMiningActor},
+    mining_bus::{MiningBus, MiningBusBroadcaster},
     packing::PackingRequest,
+    partition_mining_service::{
+        PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
+    },
+    pledge_provider::MempoolPledgeProvider,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
+    BlockValidationTracker, DataSyncService, StorageModuleService,
 };
-use irys_actors::{ActorAddresses, BlockValidationTracker, DataSyncService, StorageModuleService};
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
@@ -54,10 +54,10 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
-    CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
-    ServiceSet, TokioServiceHandle, H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, CloneableJoinHandle,
+    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
+    TokioServiceHandle, H256, U256,
 };
 use irys_types::{BlockHash, EvmBlockHash};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -85,7 +85,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot::{self};
 use tokio::time::sleep;
-use tracing::{debug, error, info, instrument, warn, Instrument as _, Span};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -93,7 +93,7 @@ pub struct IrysNodeCtx {
     pub reth_handle: RethNodeProvider,
     pub reth_node_adapter: IrysRethNodeAdapter,
     pub reth_db: RethDbWrapper,
-    pub actor_addresses: ActorAddresses,
+
     pub db: DatabaseProvider,
     pub config: Config,
     pub genesis_hash: H256, // The actual genesis block hash for network consensus
@@ -103,6 +103,7 @@ pub struct IrysNodeCtx {
     pub block_tree_guard: BlockTreeReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
+    pub partition_controllers: Vec<PartitionMiningController>,
     pub packing_waiter: irys_actors::packing::PackingIdleWaiter,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
@@ -170,9 +171,9 @@ impl IrysNodeCtx {
     // Send a custom control message to all known partition actors to enable/disable partition mining
     // does NOT modify the state of the  VDF thread!
     pub fn set_partition_mining(&self, should_mine: bool) -> eyre::Result<()> {
-        // Send a custom control message to all known partition actors
-        for part in &self.actor_addresses.partitions {
-            part.try_send(MiningControl(should_mine))?;
+        // Send a control command to all partition mining services
+        for ctrl in &self.partition_controllers {
+            ctrl.set_mining(should_mine);
         }
         Ok(())
     }
@@ -487,8 +488,8 @@ impl IrysNode {
         info!("Fetching genesis block from trusted peer: {}", trusted_peer);
 
         // Create HTTP client and fetch genesis block
-        let awc_client = awc::Client::new();
-        let genesis_block = fetch_genesis_block(trusted_peer, &awc_client)
+        let http_client = reqwest::Client::new();
+        let genesis_block = fetch_genesis_block(trusted_peer, &http_client)
             .await
             .expect("expected genesis block from http api");
 
@@ -767,14 +768,15 @@ impl IrysNode {
         shadow_tx_store: ShadowTxStore,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<JoinHandle<()>, eyre::Error> {
-        let span = Span::current();
+        let span = tracing::Span::current();
         let actor_main_thread_handle = std::thread::Builder::new()
             .name("actor-main-thread".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn({
                 let irys_provider = Arc::clone(irys_provider);
+                let rt_handle = runtime_handle.clone();
                 move || {
-                    System::new().block_on(async move {
+                    rt_handle.block_on(async move {
                         let block_index = Arc::new(RwLock::new(block_index));
 
                         // start the rest of the services
@@ -794,7 +796,7 @@ impl IrysNode {
                                 shadow_tx_store,
                                 runtime_handle,
                             )
-                            .instrument(Span::current())
+                            .instrument(tracing::Span::current())
                             .await
                             .expect("initializing services should not fail");
                         service_set_sender.send(service_set).expect("ServiceSet must be sent");
@@ -805,7 +807,7 @@ impl IrysNode {
                         // await on actix web server
                         let server_handle = actix_server.handle();
 
-                        let server_stop_handle = actix_rt::spawn(async move {
+                        let server_stop_handle = tokio::spawn(async move {
                             let _ = main_actor_thread_shutdown_rx.recv().await;
                             info!("Main actor thread received shutdown signal");
 
@@ -850,7 +852,7 @@ impl IrysNode {
         tokio_runtime: Runtime,
         service_set: oneshot::Receiver<ServiceSet>,
     ) -> eyre::Result<JoinHandle<()>> {
-        let span = Span::current();
+        let span = tracing::Span::current();
         let span2 = span.clone();
 
         let reth_thread_handler = std::thread::Builder::new()
@@ -894,7 +896,15 @@ impl IrysNode {
                         .inspect_err(|e| error!("Reth thread error: {:?}", &e));
 
                     debug!("Sending shutdown signal to the main actor thread");
-                    let _ = main_actor_thread_shutdown_tx.try_send(());
+                    match main_actor_thread_shutdown_tx.try_send(()) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!("Failed to send shutdown signal to main actor thread: channel full");
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            error!("Failed to send shutdown signal to main actor thread: channel closed");
+                        }
+                    }
 
                     debug!("Waiting for the main actor thread to finish");
 
@@ -950,16 +960,13 @@ impl IrysNode {
 
         // initialize packing service early
         let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
-        // channel-first: create sender/receiver before attaching the service loop
-        let (packing_tx, packing_rx) = irys_actors::packing::PackingService::channel(5_000);
         // start service senders/receivers with packing sender
-        let (service_senders, receivers) =
-            ServiceSenders::new_with_packing_sender(packing_tx.clone());
+        let (service_senders, receivers) = ServiceSenders::new();
         // attach the receiver loop and obtain a handle for waiters/tests
         let packing_handle = packing_service.attach_receiver_loop(
             runtime_handle.clone(),
-            packing_rx,
-            packing_tx.clone(),
+            receivers.packing,
+            service_senders.packing_sender.clone(),
         );
 
         // start block index service (tokio)
@@ -1013,9 +1020,8 @@ impl IrysNode {
             .await
             .expect("to receive BlockIndexReadGuard from BlockIndex service");
 
-        // start the broadcast mining service
-        let span = Span::current();
-        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
+        // use the Tokio-native mining bus from ServiceSenders
+        let mining_bus = service_senders.mining_bus();
 
         // start the epoch service
         let replay_data =
@@ -1205,7 +1211,7 @@ impl IrysNode {
             &block_tree_guard,
             &vdf_state_readonly,
             block_discovery_facade,
-            broadcast_mining_actor.clone(),
+            mining_bus.clone(),
             price_oracle,
             reth_node_adapter.clone(),
             receivers.block_producer,
@@ -1224,14 +1230,15 @@ impl IrysNode {
         let packing_controller_handles =
             packing_service.spawn_packing_controllers(runtime_handle.clone());
 
-        // set up storage modules
-        let (part_actors, part_arbiters) = Self::init_partition_mining_actor(
+        // set up partition mining services (tokio)
+        let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
             &config,
             &storage_modules_guard,
             &vdf_state_readonly,
             &service_senders,
             &atomic_global_step_number,
             latest_block.diff,
+            runtime_handle.clone(),
         );
 
         // set up the vdf thread
@@ -1243,7 +1250,7 @@ impl IrysNode {
             latest_block,
             initial_hash,
             global_step_number,
-            broadcast_mining_actor,
+            mining_bus.clone(),
             vdf_state,
             atomic_global_step_number,
             block_status_provider,
@@ -1302,9 +1309,6 @@ impl IrysNode {
 
         // set up IrysNodeCtx
         let irys_node_ctx = IrysNodeCtx {
-            actor_addresses: ActorAddresses {
-                partitions: part_actors,
-            },
             reward_curve,
             reth_handle: reth_node.clone(),
             reth_db,
@@ -1314,6 +1318,7 @@ impl IrysNode {
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_state_readonly,
             service_senders: service_senders.clone(),
+            partition_controllers,
             packing_waiter: packing_handle.waiter(),
             reth_shutdown_sender,
             reth_thread_handle: None,
@@ -1371,16 +1376,7 @@ impl IrysNode {
             // Services are shut down in FIFO order (first added = first to shut down)
 
             // 1. Mining operations
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(broadcast_arbiter, "broadcast_arbiter".to_string()),
-            });
-            services.extend(
-                part_arbiters
-                    .into_iter()
-                    .map(|x| ArbiterEnum::ActixArbiter {
-                        arbiter: ArbiterHandle::new(x, "partition_arbiter".to_string()),
-                    }),
-            );
+            services.extend(partition_handles.into_iter().map(ArbiterEnum::TokioService));
             // Add packing controllers to services
             services.extend(
                 packing_controller_handles
@@ -1471,7 +1467,7 @@ impl IrysNode {
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
-        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
+        mining_bus: MiningBus,
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
@@ -1488,7 +1484,7 @@ impl IrysNode {
         if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
             error!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing")
         }
-        let span = Span::current();
+        let span = tracing::Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = config.vdf.clone();
@@ -1519,7 +1515,7 @@ impl IrysNode {
                     vdf_fast_forward_receiver,
                     is_vdf_mining_enabled,
                     vdf_shutdown_receiver,
-                    MiningServiceBroadcaster::from(broadcast_mining_actor.clone()),
+                    MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                     block_status_provider,
@@ -1529,18 +1525,19 @@ impl IrysNode {
         vdf_thread_handler
     }
 
-    fn init_partition_mining_actor(
+    fn init_partition_mining_services(
         config: &Config,
         storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
         atomic_global_step_number: &Arc<AtomicU64>,
         initial_difficulty: U256,
-    ) -> (Vec<actix::Addr<PartitionMiningActor>>, Vec<Arbiter>) {
-        let mut part_actors = Vec::new();
-        let mut arbiters = Vec::new();
+        runtime_handle: tokio::runtime::Handle,
+    ) -> (Vec<PartitionMiningController>, Vec<TokioServiceHandle>) {
+        let mut controllers = Vec::new();
+        let mut handles = Vec::new();
         for sm in storage_modules_guard.read().iter() {
-            let partition_mining_actor = PartitionMiningActor::new(
+            let inner = PartitionMiningServiceInner::new(
                 config,
                 service_senders.clone(),
                 sm.clone(),
@@ -1548,15 +1545,11 @@ impl IrysNode {
                 vdf_steps_guard.clone(),
                 atomic_global_step_number.clone(),
                 initial_difficulty,
-                Some(Span::current()),
             );
-            let part_arbiter = Arbiter::new();
-            let partition_mining_actor =
-                PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
-                    partition_mining_actor
-                });
-            part_actors.push(partition_mining_actor);
-            arbiters.push(part_arbiter);
+            let (controller, handle) =
+                PartitionMiningService::spawn_service(inner, runtime_handle.clone());
+            controllers.push(controller);
+            handles.push(handle);
         }
 
         // request packing for uninitialized ranges of assigned storage modules
@@ -1568,13 +1561,31 @@ impl IrysNode {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 let sender = service_senders.packing_sender();
-                let _ = sender.try_send(PackingRequest {
+                match sender.try_send(PackingRequest {
                     storage_module: sm.clone(),
                     chunk_range: PartitionChunkRange(interval),
-                });
+                }) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            target: "irys::packing",
+                            storage_module_id = %sm.id,
+                            ?interval,
+                            "Dropping packing request due to saturated channel"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                        tracing::error!(
+                            target: "irys::packing",
+                            storage_module_id = %sm.id,
+                            ?interval,
+                            "Packing channel closed; failed to enqueue repacking request"
+                        );
+                    }
+                }
             }
         }
-        (part_actors, arbiters)
+        (controllers, handles)
     }
 
     fn init_block_producer(
@@ -1585,7 +1596,7 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         block_discovery: BlockDiscoveryFacadeImpl,
-        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
+        mining_bus: MiningBus,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
@@ -1598,7 +1609,7 @@ impl IrysNode {
             db: irys_db.clone(),
             config: config.clone(),
             reward_curve,
-            mining_broadcaster: broadcast_mining_actor,
+            mining_broadcaster: mining_bus,
             block_discovery,
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
@@ -1786,19 +1797,6 @@ fn init_peer_list_service(
         peer_events,
         runtime_handle,
     )
-}
-
-fn init_broadcaster_service(span: Span) -> (actix::Addr<BroadcastMiningService>, Arbiter) {
-    let broadcast_arbiter = Arbiter::new();
-    let broadcast_mining_actor =
-        BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-            BroadcastMiningService {
-                span: Some(span),
-                ..Default::default()
-            }
-        });
-    SystemRegistry::set(broadcast_mining_actor.clone());
-    (broadcast_mining_actor, broadcast_arbiter)
 }
 
 fn init_reth_service(

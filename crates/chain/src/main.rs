@@ -9,7 +9,7 @@ use tracing_subscriber::{
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {

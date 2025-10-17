@@ -4,7 +4,6 @@ use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
 use irys_primitives::CommitmentStatus;
-use irys_storage::ie;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -1045,7 +1044,7 @@ impl EpochSnapshot {
     /// within each category, ensuring consistent mapping across node restarts.
     ///
     /// # Note
-    /// This function has the same configuration dependency as [`system_ledger::get_genesis_commitments()`].
+    /// This function has the same configuration dependency as [`irys_database::system_ledger::get_genesis_commitments`].
     /// When updating configuration related to StorageModule/submodule functionality, both functions
     /// will need corresponding updates.
     ///

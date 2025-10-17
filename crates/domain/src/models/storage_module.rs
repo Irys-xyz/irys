@@ -59,10 +59,7 @@ use irys_types::{
     PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath,
     UnpackedChunk, H256,
 };
-use nodit::{
-    interval::{ie, ii},
-    InclusiveInterval as _, Interval, NoditMap, NoditSet,
-};
+use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
 use reth_db::Database as _;
 use serde::{Deserialize, Serialize};
@@ -139,7 +136,6 @@ pub struct StorageModuleInfo {
     /// Hash of partition this storage module belongs to, if assigned
     pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
-    /// pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
     pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
 }
 

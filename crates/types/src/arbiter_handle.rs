@@ -1,4 +1,3 @@
-use actix_rt::Arbiter;
 use futures::future::{BoxFuture, FutureExt as _};
 use std::fmt;
 use std::future::Future;
@@ -75,22 +74,11 @@ impl fmt::Debug for ServiceSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.state {
             ServiceSetState::Polling(services) => {
-                let mut actix_count = 0;
-                let mut tokio_count = 0;
-
-                for service in services {
-                    match service {
-                        ArbiterEnum::ActixArbiter { .. } => actix_count += 1,
-                        ArbiterEnum::TokioService(_) => tokio_count += 1,
-                    }
-                }
-
                 write!(
                     f,
-                    "ServiceSet {{ total: {}, actix: {}, tokio: {}, state: polling }}",
+                    "ServiceSet {{ total: {}, tokio: {}, state: polling }}",
                     services.len(),
-                    actix_count,
-                    tokio_count
+                    services.len()
                 )
             }
             ServiceSetState::ShuttingDown(_) => {
@@ -171,7 +159,6 @@ pub struct TokioServiceHandle {
 
 #[derive(Debug)]
 pub enum ArbiterEnum {
-    ActixArbiter { arbiter: ArbiterHandle },
     TokioService(TokioServiceHandle),
 }
 
@@ -190,16 +177,12 @@ impl ArbiterEnum {
 
     pub fn name(&self) -> &str {
         match self {
-            Self::ActixArbiter { arbiter } => &arbiter.name,
             Self::TokioService(service) => &service.name,
         }
     }
 
     pub async fn stop_and_join(self) {
         match self {
-            Self::ActixArbiter { arbiter } => {
-                arbiter.stop_and_join();
-            }
             Self::TokioService(service) => {
                 // Fire the shutdown signal
                 service.shutdown_signal.fire();
@@ -230,11 +213,6 @@ impl Future for ArbiterEnum {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         match self.get_mut() {
-            Self::ActixArbiter { .. } => {
-                // Actix arbiters don't support polling for completion
-                // They need to be explicitly stopped
-                std::task::Poll::Pending
-            }
             Self::TokioService(service) => {
                 // Poll the tokio join handle
                 match service.handle.poll_unpin(cx) {
@@ -245,45 +223,6 @@ impl Future for ArbiterEnum {
                 }
             }
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct ArbiterHandle {
-    inner: Arc<Mutex<Option<Arbiter>>>,
-    pub name: String,
-}
-
-impl Clone for ArbiterHandle {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-impl ArbiterHandle {
-    pub fn new(value: Arbiter, name: String) -> Self {
-        Self {
-            name,
-            inner: Arc::new(Mutex::new(Some(value))),
-        }
-    }
-
-    pub fn take(&self) -> Arbiter {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(value) = guard.take() {
-            value
-        } else {
-            panic!("Value already consumed");
-        }
-    }
-
-    pub fn stop_and_join(self) {
-        let arbiter = self.take();
-        arbiter.stop();
-        arbiter.join().unwrap();
     }
 }
 

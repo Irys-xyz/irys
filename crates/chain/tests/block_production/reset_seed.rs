@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 ///    - seed = previous block's next_seed
 /// 3. Verifies non-reset blocks maintain seed continuity
 /// 4. Spins up a peer node to verify reset seeds propagate correctly during sync
-#[actix_web::test]
+#[tokio::test]
 async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
 ) -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");

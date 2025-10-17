@@ -546,7 +546,6 @@ impl PackingIdleWaiter {
     }
 }
 
-/// waits for any pending & active packing tasks to complete
 /// A lightweight, Tokio-native handle for enqueueing packing requests and introspecting service state.
 #[derive(Debug, Clone)]
 pub struct PackingHandle {
@@ -785,7 +784,7 @@ mod tests {
 
     use crate::packing::{cast_vec_u8_to_vec_u8_array, PackingRequest, PackingService};
 
-    #[test_log::test(actix::test)]
+    #[test_log::test(tokio::test)]
     async fn test_packing_actor() -> eyre::Result<()> {
         // setup
         let partition_hash = PartitionHash::zero();

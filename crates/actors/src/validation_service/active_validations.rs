@@ -18,8 +18,10 @@ use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::Notify;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::{
+    sync::Notify,
+    task::{JoinHandle, JoinSet},
+};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 use crate::block_tree_service::ValidationResult;
@@ -586,7 +588,7 @@ mod tests {
         );
     }
 
-    /// Helper function to setup a canonical chain scenario with n blocks  
+    /// Helper function to setup a canonical chain scenario with n blocks
     fn setup_canonical_chain_scenario(
         max_height: u64,
     ) -> (BlockTreeReadGuard, Vec<Arc<IrysBlockHeader>>) {

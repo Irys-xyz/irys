@@ -210,7 +210,7 @@ impl MockedServices {
     }
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_process_block() {
     let config = create_test_config();
 
@@ -266,7 +266,7 @@ async fn should_process_block() {
     assert_eq!(block_header_in_discovery, test_header);
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_process_block_with_intermediate_block_in_api() {
     let config = create_test_config();
 
@@ -438,7 +438,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     assert_eq!(discovered_block3, block3);
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
     let config = create_test_config();
 
@@ -511,7 +511,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let config = create_test_config();
 
@@ -685,7 +685,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_not_fast_track_block_already_in_index() {
     let config = create_test_config();
 

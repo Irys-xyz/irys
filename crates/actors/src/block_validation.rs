@@ -1,9 +1,8 @@
-use crate::block_tree_service::ValidationResult;
+use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
-    mining::hash_to_number,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -26,6 +25,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::u256_from_le_bytes as hash_to_number;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -1623,12 +1623,12 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> Result<(), PreValidationError> {
-    // Get the block's EMA snapshot for fee calculations
+    // Get the parent block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
         .read()
-        .get_ema_snapshot(&block.block_hash)
+        .get_ema_snapshot(&block.previous_block_hash)
         .ok_or(PreValidationError::BlockEmaSnapshotNotFound {
-            block_hash: block.block_hash,
+            block_hash: block.previous_block_hash,
         })?;
 
     // Extract data transactions from both ledgers
@@ -2270,10 +2270,10 @@ async fn get_previous_tx_inclusions(
     // Get mempool data and release lock quickly
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetState(tx))?;
-    let mempool_state = rx.await?;
-    let mempool_guard = mempool_state.read().await;
+        .block_tree
+        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+    let block_tree_guard = rx.await?;
+    let block_tree_guard = block_tree_guard.read();
 
     let min_anchor_height = block_under_validation
         .height
@@ -2297,7 +2297,7 @@ async fn get_previous_tx_inclusions(
             process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
         };
         // Move to the parent block and continue the traversal backwards
-        block = match mempool_guard.prevalidated_blocks.get(&block.0) {
+        block = match block_tree_guard.get_block(&block.0) {
             Some(header) => {
                 update_states(header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
@@ -2688,7 +2688,7 @@ mod tests {
         )
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_test_3_complete_txs() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
@@ -2734,7 +2734,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
         let (_tmp, context) = init().await;
 
@@ -2770,7 +2770,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn is_seed_data_valid_should_validate_seeds() {
         let reset_frequency = 2;
 
@@ -2980,7 +2980,7 @@ mod tests {
         assert!(poa_valid.is_ok(), "PoA should be valid");
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks

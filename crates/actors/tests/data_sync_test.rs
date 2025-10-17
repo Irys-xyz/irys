@@ -8,7 +8,6 @@ use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
-use irys_storage::ie;
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
@@ -30,7 +29,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error};
 
 #[tokio::test]
-async fn slow_test_data_sync_with_different_peer_performance() {
+async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     std::env::set_var("RUST_LOG", "debug,storage=off");
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 
