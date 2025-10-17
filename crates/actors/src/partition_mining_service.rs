@@ -357,7 +357,7 @@ pub struct PartitionMiningService {
     shutdown: Shutdown,
     state: PartitionMiningServiceInner,
     cmd_rx: UnboundedReceiver<PartitionMiningCommand>,
-    broadcast_rx: UnboundedReceiver<MiningBroadcastEvent>,
+    broadcast_rx: UnboundedReceiver<Arc<MiningBroadcastEvent>>,
 }
 
 impl PartitionMiningService {
@@ -422,15 +422,17 @@ impl PartitionMiningService {
                 // Broadcast messages (seed/diff/expiration)
                 evt = self.broadcast_rx.recv() => {
                     match evt {
-                        Some(MiningBroadcastEvent::Seed(msg)) => {
-                            self.state.handle_seed(msg);
-                        }
-                        Some(MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h))) => {
-                            self.state.update_difficulty(h.diff);
-                        }
-                        Some(MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list))) => {
-                            self.state.handle_partitions_expiration(&list);
-                        }
+                        Some(arc_evt) => match arc_evt.as_ref() {
+                            MiningBroadcastEvent::Seed(msg) => {
+                                self.state.handle_seed(msg.clone());
+                            }
+                            MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
+                                self.state.update_difficulty(h.diff);
+                            }
+                            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
+                                self.state.handle_partitions_expiration(list);
+                            }
+                        },
                         None => {
                             warn!("Mining broadcaster channel closed; stopping service");
                             break;

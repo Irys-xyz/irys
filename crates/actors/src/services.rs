@@ -66,7 +66,7 @@ impl ServiceSenders {
         self.0.mining_bus.clone()
     }
 
-    pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<MiningBroadcastEvent> {
+    pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<Arc<MiningBroadcastEvent>> {
         self.0.subscribe_mining_broadcast()
     }
 
@@ -228,7 +228,7 @@ impl ServiceSendersInner {
         self.block_migrated_events.subscribe()
     }
 
-    pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<MiningBroadcastEvent> {
+    pub fn subscribe_mining_broadcast(&self) -> UnboundedReceiver<Arc<MiningBroadcastEvent>> {
         self.mining_bus.subscribe()
     }
 }
