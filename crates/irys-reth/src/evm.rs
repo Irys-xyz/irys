@@ -1482,7 +1482,6 @@ mod tests {
         use alloy_eips::eip2930::AccessListItem as AlItem;
         use alloy_primitives::{Bytes, FixedBytes};
         use reth_transaction_pool::{TransactionOrigin, TransactionPool as _};
-        use std::{fs, path::PathBuf};
 
         use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
         use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
