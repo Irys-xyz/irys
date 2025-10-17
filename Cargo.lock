@@ -5366,6 +5366,7 @@ dependencies = [
  "bytes",
  "eyre",
  "futures",
+ "irys-primitives",
  "lru 0.14.0",
  "reth",
  "reth-basic-payload-builder",
