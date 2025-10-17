@@ -17,7 +17,7 @@ use irys_actors::{
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
-    packing::PackingRequest,
+    packing_service::PackingRequest,
     partition_mining_service::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
@@ -104,7 +104,7 @@ pub struct IrysNodeCtx {
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub partition_controllers: Vec<PartitionMiningController>,
-    pub packing_waiter: irys_actors::packing::PackingIdleWaiter,
+    pub packing_waiter: irys_actors::packing_service::PackingIdleWaiter,
     // Shutdown channels
     pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
     // Thread handles spawned by the start function
@@ -958,9 +958,10 @@ impl IrysNode {
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
         // initialize packing service early
-        let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
+        let packing_service =
+            irys_actors::packing_service::PackingService::new(Arc::new(config.clone()));
         // channel-first: create sender/receiver before attaching the service loop
-        let (packing_tx, packing_rx) = irys_actors::packing::PackingService::channel(5_000);
+        let (packing_tx, packing_rx) = irys_actors::packing_service::PackingService::channel(5_000);
         // start service senders/receivers with packing sender
         let (service_senders, receivers) =
             ServiceSenders::new_with_packing_sender(packing_tx.clone());
@@ -1232,6 +1233,8 @@ impl IrysNode {
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
         let packing_controller_handles =
             packing_service.spawn_packing_controllers(runtime_handle.clone());
+        let unpacking_controller_handles =
+            packing_service.spawn_unpacking_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
@@ -1386,6 +1389,12 @@ impl IrysNode {
             // Add packing controllers to services
             services.extend(
                 packing_controller_handles
+                    .into_iter()
+                    .map(ArbiterEnum::TokioService),
+            );
+            // Add unpacking controllers to services
+            services.extend(
+                unpacking_controller_handles
                     .into_iter()
                     .map(ArbiterEnum::TokioService),
             );
@@ -1567,26 +1576,25 @@ impl IrysNode {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
             for interval in uninitialized {
                 let sender = service_senders.packing_sender();
-                match sender.try_send(PackingRequest {
-                    storage_module: sm.clone(),
-                    chunk_range: PartitionChunkRange(interval),
-                }) {
-                    Ok(()) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            target: "irys::packing",
-                            storage_module_id = %sm.id,
-                            ?interval,
-                            "Dropping packing request due to saturated channel"
-                        );
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                        tracing::error!(
-                            target: "irys::packing",
-                            storage_module_id = %sm.id,
-                            ?interval,
-                            "Packing channel closed; failed to enqueue repacking request"
-                        );
+                if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
+                    match sender.try_send(req) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                target: "irys::packing",
+                                storage_module_id = %sm.id,
+                                ?interval,
+                                "Dropping packing request due to saturated channel"
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                            tracing::error!(
+                                target: "irys::packing",
+                                storage_module_id = %sm.id,
+                                ?interval,
+                                "Packing channel closed; failed to enqueue repacking request"
+                            );
+                        }
                     }
                 }
             }
