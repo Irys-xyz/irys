@@ -9,10 +9,33 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 eyre.workspace = true
 socket2.workspace = true
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tracing-error = { workspace = true, optional = true }
+tonic = { version = "0.12", optional = true }
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = []
+telemetry = [
+  "opentelemetry",
+  "opentelemetry-otlp",
+  "opentelemetry_sdk",
+  "tracing-opentelemetry",
+  "opentelemetry-semantic-conventions",
+  "tracing-subscriber",
+  "tracing-error",
+  "tonic",
+  "reqwest",
+]
 
 
 [lints]

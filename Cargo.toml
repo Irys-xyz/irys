@@ -116,6 +116,13 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "json",
   "ansi",
 ] }
+
+# OpenTelemetry
+opentelemetry = { version = "0.26", features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.26", features = ["trace", "logs", "http-proto", "reqwest-client"] }
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio", "trace", "logs"] }
+tracing-opentelemetry = "0.26"
+opentelemetry-semantic-conventions = "0.26"
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
