@@ -5,7 +5,6 @@ use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
-use awc::http::StatusCode;
 use irys_actors::MempoolServiceMessage;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
