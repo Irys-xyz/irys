@@ -16,6 +16,15 @@ use crate::{
     services::{ServiceReceivers, ServiceSenders},
 };
 
+/// Helper to create minimal ServiceSenders for test utilities
+fn build_test_service_senders() -> (ServiceSenders, ServiceReceivers) {
+    let (tx_packing, rx_packing) = tokio::sync::mpsc::channel(1);
+    let (tx_unpacking, rx_unpacking) = tokio::sync::mpsc::channel(1);
+    std::mem::forget(rx_packing);
+    std::mem::forget(rx_unpacking);
+    ServiceSenders::new_with_packing_sender(tx_packing, tx_unpacking)
+}
+
 pub fn build_genesis_tree_with_n_blocks(
     max_block_height: u64,
 ) -> (BlockTreeReadGuard, Vec<PriceInfo>) {
@@ -121,7 +130,7 @@ impl TestCtx {
     ) -> (Self, ServiceReceivers) {
         let task_manager = TaskManager::new(tokio::runtime::Handle::current());
         let task_executor = task_manager.executor();
-        let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
+        let (service_senders, service_rx) = build_test_service_senders();
 
         (
             Self {

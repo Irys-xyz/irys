@@ -469,9 +469,18 @@ async fn partition_expiration_and_repacking_test() {
         }
     });
 
+    // Wire a Tokio unpacking handle (for test compatibility)
+    let (tx_unpacking, mut rx_unpacking) =
+        tokio::sync::mpsc::channel::<irys_actors::packing_service::UnpackingRequest>(1);
+    tokio::spawn(async move {
+        while let Some(_unpacking_req) = rx_unpacking.recv().await {
+            // No-op for test
+        }
+    });
+
     // Create ServiceSenders for testing (channel-first)
     let (service_senders, mut receivers) =
-        ServiceSenders::new_with_packing_sender(tx_packing.clone());
+        ServiceSenders::new_with_packing_sender(tx_packing.clone(), tx_unpacking);
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {

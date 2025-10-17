@@ -323,9 +323,7 @@ impl ChunkOrchestrator {
         // is the max chunk offset before the start of this storage module (can happen at head of chain)
         if ledger_range.start() > max_chunk_offset.into() {
             // Ledger range of the partition starts after the max_chunk_offset meaning don't attempt to sync anything
-            debug!(
-                "get_max_chunk_offset: returning None (ledger_range.start > max_chunk_offset)"
-            );
+            debug!("get_max_chunk_offset: returning None (ledger_range.start > max_chunk_offset)");
             return None;
         }
 

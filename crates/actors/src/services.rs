@@ -8,7 +8,7 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    packing_service::PackingSender,
+    packing_service::{PackingRequest, UnpackingRequest},
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
     DataSyncServiceMessage, StorageModuleServiceMessage,
@@ -53,13 +53,20 @@ impl ServiceSenders {
         self.0.peer_events.subscribe()
     }
 
-    pub fn new_with_packing_sender(sender: PackingSender) -> (Self, ServiceReceivers) {
-        let (senders, receivers) = ServiceSendersInner::init_with_sender(sender);
+    pub fn new_with_packing_sender(
+        sender: tokio::sync::mpsc::Sender<PackingRequest>,
+        unpacking_sender: tokio::sync::mpsc::Sender<UnpackingRequest>,
+    ) -> (Self, ServiceReceivers) {
+        let (senders, receivers) = ServiceSendersInner::init_with_sender(sender, unpacking_sender);
         (Self(Arc::new(senders)), receivers)
     }
 
-    pub fn packing_sender(&self) -> PackingSender {
+    pub fn packing_sender(&self) -> tokio::sync::mpsc::Sender<PackingRequest> {
         self.0.packing_sender.clone()
+    }
+
+    pub fn unpacking_sender(&self) -> tokio::sync::mpsc::Sender<UnpackingRequest> {
+        self.0.unpacking_sender.clone()
     }
 }
 
@@ -105,11 +112,15 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
-    pub packing_sender: PackingSender,
+    pub packing_sender: tokio::sync::mpsc::Sender<PackingRequest>,
+    pub unpacking_sender: tokio::sync::mpsc::Sender<UnpackingRequest>,
 }
 
 impl ServiceSendersInner {
-    pub fn init_with_sender(sender: PackingSender) -> (Self, ServiceReceivers) {
+    pub fn init_with_sender(
+        packing_sender: tokio::sync::mpsc::Sender<PackingRequest>,
+        unpacking_sender: tokio::sync::mpsc::Sender<UnpackingRequest>,
+    ) -> (Self, ServiceReceivers) {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
@@ -140,6 +151,7 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
+        // unpacking_sender will be passed in from the caller
 
         let senders = Self {
             chunk_cache: chunk_cache_sender,
@@ -160,7 +172,8 @@ impl ServiceSendersInner {
             peer_events: peer_events_sender,
             peer_network: PeerNetworkSender::new(peer_network_sender),
             block_discovery: block_discovery_sender,
-            packing_sender: sender,
+            packing_sender,
+            unpacking_sender,
         };
         let receivers = ServiceReceivers {
             chunk_cache: chunk_cache_receiver,
