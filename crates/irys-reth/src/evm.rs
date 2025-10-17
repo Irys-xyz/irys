@@ -537,6 +537,10 @@ where
             let mut tx = tx;
             tx.data = stripped;
 
+            // TODO: bug - when we distribute fees we only update the self.state hashmap, not the undrlying evm state. As a result, if `self.inner` operates on any evm state for an account, then it will be ovreriden.
+            // - We neeed to either change the order of operations (play evm, then deduct fees)
+            // - Or make a more sophisticated state tracking apporac, interacting with the evm more directly, eliminating our self.state
+
             // Execute the (stripped) transaction and merge our custom fee distribution changes
             // into the returned state so they are persisted by the caller.
             let mut res = if self.inspect {
@@ -1478,7 +1482,7 @@ mod tests {
         use alloy_eips::eip2930::AccessListItem as AlItem;
         use alloy_primitives::{Bytes, FixedBytes};
         use reth_transaction_pool::{TransactionOrigin, TransactionPool as _};
-        use std::{fs, path::PathBuf};
+        
 
         use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
         use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
@@ -1495,7 +1499,7 @@ mod tests {
         let beneficiary = ctx.block_producer_a.address();
         let sink = Address::ZERO;
 
-        let pd_base_fee = U256::from(7u64);
+        let pd_base_fee = U256::from(7_u64);
         let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
         let pd_fee_update = ShadowTransaction::new_v1(
             TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
@@ -1515,16 +1519,16 @@ mod tests {
 
         // Build and submit a PD-header transaction: 3 chunks, prio=10, base<=7
         let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: U256::from(10u64),
-            max_base_fee_per_chunk: U256::from(7u64),
+            max_priority_fee_per_chunk: U256::from(10_u64),
+            max_base_fee_per_chunk: U256::from(7_u64),
         };
         let user_calldata = Bytes::from(vec![0xAA, 0xBB]);
         let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
 
         // PD access list: 3 storage keys at PD precompile address
-        let key1 = encode_pd_storage_key([0u8; 26], 0, 1);
-        let key2 = encode_pd_storage_key([0u8; 26], 1, 1);
-        let key3 = encode_pd_storage_key([0u8; 26], 2, 1);
+        let key1 = encode_pd_storage_key([0_u8; 26], 0, 1);
+        let key2 = encode_pd_storage_key([0_u8; 26], 1, 1);
+        let key3 = encode_pd_storage_key([0_u8; 26], 2, 1);
         let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
             address: irys_primitives::precompile::PD_PRECOMPILE_ADDRESS,
             storage_keys: vec![key1, key2, key3],
@@ -1554,8 +1558,8 @@ mod tests {
         advance_block(&mut node, &shadow_tx_store, vec![]).await?;
 
         // Expected PD fees
-        let base_total = U256::from(3u64) * pd_base_fee; // 3 chunks * 7 = 21
-        let prio_total = U256::from(3u64) * U256::from(10u64); // 3 chunks * 10 = 30
+        let base_total = U256::from(3_u64) * pd_base_fee; // 3 chunks * 7 = 21
+        let prio_total = U256::from(3_u64) * U256::from(10_u64); // 3 chunks * 10 = 30
 
         // Validate balances
         let payer_final = get_balance(&node.inner, payer);

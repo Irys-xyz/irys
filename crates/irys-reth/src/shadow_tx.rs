@@ -464,7 +464,7 @@ impl BorshSerialize for PdBaseFeeUpdate {
 
 impl BorshDeserialize for PdBaseFeeUpdate {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let mut buf = [0u8; 32];
+        let mut buf = [0_u8; 32];
         reader.read_exact(&mut buf)?;
         let per_chunk = U256::from_be_bytes(buf);
         Ok(Self { per_chunk })
