@@ -14,3 +14,4 @@ runs:
       with:
         cache-on-failure: true
         cache-all-crates: true
+        cache-workspace-crates: true
