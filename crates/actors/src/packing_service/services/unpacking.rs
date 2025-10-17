@@ -470,7 +470,7 @@ mod tests {
 
         irys_types::PackedChunk {
             data_root: Default::default(),
-            data_size: config.consensus.chunk_size as u64,
+            data_size: config.consensus.chunk_size,
             data_path: Default::default(),
             bytes: Base64(packed_data),
             packing_address: mining_address,
