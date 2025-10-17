@@ -7,7 +7,7 @@ use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
+use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, Log, LogData, U256};
 
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
@@ -32,6 +32,7 @@ use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
 use tracing::{trace, warn};
+use std::sync::LazyLock;
 
 // External crate imports - Other
 
@@ -47,6 +48,11 @@ mod constants {
     /// Gas refunded for shadow transactions (always 0)
     pub(super) const SHADOW_TX_GAS_REFUNDED: u64 = 0;
 }
+
+/// Magic account used to store PD base fee per chunk in its balance field.
+/// This is set by a dedicated shadow transaction and read during PD fee charging.
+pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_pd_base_fee_account")));
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
@@ -504,7 +510,13 @@ where
             // Compute PD fees based on header values. Always derive PD chunk count from access list.
             let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
             let chunks = U256::from(chunks_u64);
-            let base_per_chunk = pd_header.max_base_fee_per_chunk;
+            // Read the actual PD base fee from EVM state and cap by user's max.
+            let actual_per_chunk = self.read_pd_base_fee_per_chunk();
+            let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
+                pd_header.max_base_fee_per_chunk
+            } else {
+                actual_per_chunk
+            };
             let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
 
             let base_total = chunks.saturating_mul(base_per_chunk);
@@ -1094,6 +1106,15 @@ where
         }
     }
 
+    /// Reads the PD base fee per chunk from the dedicated EVM account's balance.
+    /// Returns 0 if the account does not exist.
+    fn read_pd_base_fee_per_chunk(&mut self) -> U256 {
+        match self.load_account(*PD_BASE_FEE_ACCOUNT) {
+            Ok(Some(acc)) => acc.info.balance,
+            _ => U256::ZERO,
+        }
+    }
+
     /// Main branching processing function, handles all shadow tx variants & their required operations
     fn process_shadow_transaction(
         &mut self,
@@ -1206,6 +1227,29 @@ where
                         Ok((plain_account, execution_result, account_existed)),
                         target,
                     ))
+                }
+                shadow_tx::TransactionPacket::PdBaseFeeUpdate(update) => {
+                    // Write the per-chunk base fee into the PD base fee account balance.
+                    let target = *PD_BASE_FEE_ACCOUNT;
+
+                    // Load existing or create new account
+                    let existed;
+                    let mut account = if let Some(acc) = self.load_account(target)? {
+                        existed = true;
+                        acc
+                    } else {
+                        existed = false;
+                        Account::new_not_existing()
+                    };
+                    account.info.balance = update.per_chunk;
+
+                    let log = Self::create_shadow_log(
+                        target,
+                        vec![topic],
+                        vec![DynSolValue::Uint(update.per_chunk, 256)],
+                    );
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Ok((account, execution_result, existed)), target))
                 }
             },
         }
@@ -1424,6 +1468,7 @@ mod tests {
     #[test]
     fn evm_pd_header_tx_charges_fees() {
         use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
+        use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
 
         let factory = IrysEvmFactory::new();
 
@@ -1436,6 +1481,35 @@ mod tests {
 
         let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
 
+        // First, set the PD base fee per chunk via a shadow transaction.
+        let setter = Address::random();
+        let pd_base_fee = U256::from(7u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate { per_chunk: pd_base_fee }),
+            solution_hash,
+        );
+        let pd_fee_update_input = crate::shadow_tx::encode_prefixed_input(&pd_fee_update);
+        let shadow_set_tx = TxEnv {
+            caller: setter,
+            kind: TxKind::Call(*crate::SHADOW_TX_DESTINATION_ADDR),
+            nonce: 0,
+            gas_limit: 50_000,
+            value: U256::ZERO,
+            data: pd_fee_update_input,
+            gas_price: 0,
+            chain_id: Some(1),
+            gas_priority_fee: None,
+            access_list: Default::default(),
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            tx_type: 0,
+            authorization_list: Default::default(),
+        };
+
+        let set_res = evm.transact_raw(shadow_set_tx);
+        assert!(set_res.is_ok(), "expected Ok setting PD base fee, got: {:?}", set_res);
+
         // Pre-fund the payer account so fee deductions succeed
         let payer = Address::random();
         let mut payer_acc = Account::new_not_existing();
@@ -1447,7 +1521,7 @@ mod tests {
         ben_acc.info.balance = U256::ZERO;
         evm.commit_account_change(beneficiary, ben_acc);
 
-        // Construct PD header: 10 tip per chunk, 7 base per chunk
+        // Construct PD header: 10 tip per chunk, max base per chunk 7
         let header = PdHeaderV1 {
             max_priority_fee_per_chunk: U256::from(10u64),
             max_base_fee_per_chunk: U256::from(7u64),
