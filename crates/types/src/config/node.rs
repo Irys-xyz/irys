@@ -90,8 +90,9 @@ pub struct NodeConfig {
     /// Cache management configuration
     pub cache: CacheConfig,
 
-    /// Settings for the price oracle system
-    pub oracle: OracleConfig,
+    /// Settings for the price oracle system (list).
+    #[serde(default)]
+    pub oracles: Vec<OracleConfig>,
 
     pub vdf: VdfNodeConfig,
 
@@ -575,12 +576,12 @@ impl NodeConfig {
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
-            oracle: OracleConfig::Mock {
+            oracles: vec![OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
-            },
+            }],
             mining_key,
             reward_address,
             storage: StorageSyncConfig {
@@ -706,12 +707,12 @@ impl NodeConfig {
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
-            oracle: OracleConfig::Mock {
+            oracles: vec![OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
-            },
+            }],
             mining_key,
             reward_address,
             storage: StorageSyncConfig {

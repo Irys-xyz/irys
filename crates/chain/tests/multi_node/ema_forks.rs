@@ -40,11 +40,11 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     let mut peer_config = node_1.testing_peer_with_signer(&peer_signer);
-    peer_config.oracle = OracleConfig::Mock {
+    peer_config.oracles = vec![OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.01)).unwrap(),
         incremental_change: Amount::token(dec!(0.005)).unwrap(),
         smoothing_interval: 3,
-    };
+    }];
 
     let node_2 = node_1
         .testing_peer_with_assignments_and_name(peer_config, "PEER")

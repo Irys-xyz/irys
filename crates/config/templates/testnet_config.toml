@@ -48,7 +48,7 @@ cache_clean_lag = 2
 type = "size_based"
 max_cache_size_bytes = 10737418240  # 10 GB
 
-[oracle]
+[[oracles]]
 type = "mock"
 initial_price = 1.0
 incremental_change = 0.00000000000001
