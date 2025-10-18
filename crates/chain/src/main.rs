@@ -25,7 +25,7 @@ async fn main() -> eyre::Result<()> {
         // Check if Axiom credentials are set
         if std::env::var("AXIOM_API_TOKEN").is_ok() && std::env::var("AXIOM_DATASET").is_ok() {
             info!("Axiom credentials detected, initializing OpenTelemetry");
-            telemetry::init_telemetry().expect("initializing telemetry should work");
+            telemetry::init_telemetry()?;
         } else {
             info!("Axiom credentials not set, using standard tracing");
             init_tracing().expect("initializing tracing should work");
@@ -35,7 +35,7 @@ async fn main() -> eyre::Result<()> {
     {
         init_tracing().expect("initializing tracing should work");
     }
-    
+
     setup_panic_hook().expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
     // load the config
@@ -53,10 +53,6 @@ async fn main() -> eyre::Result<()> {
     .await?;
 
     handle.stop().await;
-
-    // Shutdown telemetry to flush any pending logs
-    #[cfg(feature = "telemetry")]
-    telemetry::shutdown_telemetry();
 
     Ok(())
 }
