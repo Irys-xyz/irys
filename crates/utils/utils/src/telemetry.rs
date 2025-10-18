@@ -8,12 +8,12 @@ use eyre::Result;
 use {
     opentelemetry::{trace::TracerProvider as _, KeyValue},
     opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge,
-    opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig},
+    opentelemetry_otlp::{Protocol, WithExportConfig as _, WithHttpConfig as _},
     opentelemetry_sdk::resource::Resource,
     tracing::level_filters::LevelFilter,
     tracing_error::ErrorLayer,
     tracing_subscriber::{
-        layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer as _, Registry,
+        layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
     },
 };
 
@@ -55,7 +55,7 @@ pub fn init_telemetry() -> Result<()> {
         .with_headers(std::collections::HashMap::from([
             (
                 "authorization".to_string(),
-                format!("Bearer {}", axiom_token.clone()),
+                format!("Bearer {}", axiom_token),
             ),
             ("x-axiom-dataset".to_string(), axiom_dataset.clone()),
         ]))
