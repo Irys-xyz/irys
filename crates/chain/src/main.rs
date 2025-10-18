@@ -6,6 +6,9 @@ use tracing_subscriber::{
     layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
 };
 
+#[cfg(feature = "telemetry")]
+use irys_utils::telemetry;
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -17,7 +20,22 @@ async fn main() -> eyre::Result<()> {
     }
 
     // init logging
-    init_tracing().expect("initializing tracing should work");
+    #[cfg(feature = "telemetry")]
+    {
+        // Check if Axiom credentials are set
+        if std::env::var("AXIOM_API_TOKEN").is_ok() && std::env::var("AXIOM_DATASET").is_ok() {
+            info!("Axiom credentials detected, initializing OpenTelemetry");
+            telemetry::init_telemetry()?;
+        } else {
+            info!("Axiom credentials not set, using standard tracing");
+            init_tracing().expect("initializing tracing should work");
+        }
+    }
+    #[cfg(not(feature = "telemetry"))]
+    {
+        init_tracing().expect("initializing tracing should work");
+    }
+
     setup_panic_hook().expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
     // load the config
