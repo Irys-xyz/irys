@@ -19,7 +19,7 @@ From bottom to top:
 ## Service Types
 Within the consensus layer there are different types of services.
 
-| Service&nbsp;Type | Description |
+| Type | Description |
 |--------------|-------------|
 | **Domain&nbsp;Services** | Manage consensus layer domain objects (caches, state, indexes) as their single write authority—the "What" of the consensus layer. Other services read these objects through ReadGuards, but only domain services can modify them, centralizing write validation logic. |
 | **Process&nbsp;Services** | Execute consensus layer operations (validation, production, gossip) by orchestrating workflows—the "How" of the consensus layer. They coordinate complex processes across multiple domain services, reading state through ReadGuards to drive block validation, production, and network synchronization. |
@@ -27,7 +27,7 @@ Within the consensus layer there are different types of services.
 
 ### Examples
 
-| Service Type | Examples |
+| Type | Services |
 |--------------|----------|
-| **Domain Services** | BlockTreeService<br>BlockIndexService<br>StorageModuleService<br>CacheService<br>PeerListService<br>MempoolService<br>PDChunkService |
-| **Process Services** | BlockProducer<br>BlockDiscovery<br>ValidationService<br>DataSyncService<br>GossipService<br>ChunkMigrationService<br>RethService |
+| **Domain&nbsp;Services** | BlockTreeService, BlockIndexService, StorageModuleService, CacheService, PeerListService, MempoolService, PDChunkService |
+| **Process&nbsp;Services** | BlockProducer, BlockDiscovery, ValidationService, DataSyncService, GossipService, ChunkMigrationService, RethService |
