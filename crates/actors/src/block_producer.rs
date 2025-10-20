@@ -50,9 +50,10 @@ use reth::{
     tasks::shutdown::Shutdown,
 };
 use reth_transaction_pool::EthPooledTransaction;
+use std::time::UNIX_EPOCH;
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
@@ -1140,7 +1141,16 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let oracle_irys_price = self.inner().price_oracle.current_price().await?;
+        let (fresh_price, last_updated) = self.inner().price_oracle.current_snapshot().await?;
+        let oracle_updated_ms = millis_since_epoch(last_updated);
+
+        let oracle_irys_price = choose_oracle_price(
+            parent_block.timestamp,
+            parent_block.oracle_irys_price,
+            fresh_price,
+            oracle_updated_ms,
+        );
+
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
@@ -1365,6 +1375,47 @@ pub trait BlockProdStrategy {
     }
 }
 
+fn millis_since_epoch(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+#[inline]
+fn choose_oracle_price(
+    parent_ts_ms: u128,
+    parent_price: irys_types::storage_pricing::Amount<(
+        irys_types::storage_pricing::phantoms::IrysPrice,
+        irys_types::storage_pricing::phantoms::Usd,
+    )>,
+    oracle_price: irys_types::storage_pricing::Amount<(
+        irys_types::storage_pricing::phantoms::IrysPrice,
+        irys_types::storage_pricing::phantoms::Usd,
+    )>,
+    oracle_updated_ms: u128,
+) -> irys_types::storage_pricing::Amount<(
+    irys_types::storage_pricing::phantoms::IrysPrice,
+    irys_types::storage_pricing::phantoms::Usd,
+)> {
+    let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
+        (parent_price, "parent_fallback")
+    } else {
+        (oracle_price, "oracle_fresh")
+    };
+
+    tracing::debug!(
+        parent_ts_ms,
+        oracle_updated_ms,
+        parent_price = %parent_price,
+        oracle_price = %oracle_price,
+        chosen_price = %chosen,
+        source,
+        "selected oracle price for EMA calculation"
+    );
+
+    chosen
+}
+
 pub struct ProductionStrategy {
     pub inner: Arc<BlockProducerInner>,
 }
@@ -1413,4 +1464,50 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
     });
 
     bytes_added / chunk_size
+}
+
+#[cfg(test)]
+mod oracle_choice_tests {
+    use super::{choose_oracle_price, millis_since_epoch};
+    use irys_types::storage_pricing::Amount;
+    use rust_decimal_macros::dec;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn chooses_parent_when_parent_is_newer() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+        let parent_ts_ms = 2_000_u128; // parent block timestamp 2 seconds
+        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
+
+        let chosen = choose_oracle_price(
+            parent_ts_ms,
+            parent_price,
+            oracle_price,
+            millis_since_epoch(oracle_updated_at),
+        );
+        assert_eq!(
+            chosen, parent_price,
+            "should choose parent price when parent is newer"
+        );
+    }
+
+    #[test]
+    fn chooses_oracle_when_oracle_is_fresh() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+        let parent_ts_ms = 1_000_u128; // parent block timestamp 1 second
+        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
+
+        let chosen = choose_oracle_price(
+            parent_ts_ms,
+            parent_price,
+            oracle_price,
+            millis_since_epoch(oracle_updated_at),
+        );
+        assert_eq!(
+            chosen, oracle_price,
+            "should choose oracle price when oracle is fresher"
+        );
+    }
 }
