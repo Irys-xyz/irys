@@ -461,7 +461,7 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_valid_data_tx(tx_id).await? {
+            if !self.is_known_valid_present_data_tx(tx_id).await? {
                 missing_invalid_tx_ids.push(tx_id);
             }
         }
@@ -471,7 +471,10 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_valid_commitment_tx(system_tx_id).await? {
+            if !self
+                .is_known_valid_present_commitment_tx(system_tx_id)
+                .await?
+            {
                 missing_invalid_tx_ids.push(system_tx_id);
             }
         }
@@ -697,30 +700,30 @@ where
         Ok(())
     }
 
-    async fn is_known_valid_data_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+    async fn is_known_valid_present_data_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
         self.mempool
             .is_known_data_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "is_known_transaction() errored: {:?}",
+                    "is_known_valid_data_tx() errored: {:?}",
                     e
                 )))
             })
-            .map(|s| s.is_known_and_valid())
+            .map(|s| s.is_known_valid_and_present())
     }
 
-    async fn is_known_valid_commitment_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+    async fn is_known_valid_present_commitment_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
         self.mempool
             .is_known_commitment_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "is_known_transaction() errored: {:?}",
+                    "is_known_valid_commitment_tx() errored: {:?}",
                     e
                 )))
             })
-            .map(|s| s.is_known_and_valid())
+            .map(|s| s.is_known_valid_and_present())
     }
 
     pub(crate) async fn handle_get_data(
