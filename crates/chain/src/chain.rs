@@ -1674,10 +1674,10 @@ impl IrysNode {
                 }
                 OracleConfig::CoinMarketCap {
                     api_key,
-                    symbol,
+                    id,
                     poll_interval_ms,
                 } => {
-                    let o = SingleOracle::new_coinmarketcap(api_key, symbol, poll_interval_ms)
+                    let o = SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
                         .await
                         .expect("coinmarketcap initial price");
                     if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {

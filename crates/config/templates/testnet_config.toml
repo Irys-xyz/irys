@@ -62,7 +62,8 @@ poll_interval_ms = 300000
 [[oracles]]
 type = "coinmarketcap"
 api_key = "provide-coinmarketcap-api-key"
-symbol = "IRYS"
+# CoinMarketCap ids can be found via https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
+id = "1"
 # Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
 poll_interval_ms = 300000
 

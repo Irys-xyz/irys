@@ -195,8 +195,9 @@ pub enum OracleConfig {
     CoinMarketCap {
         /// API key for the CoinMarketCap Pro API
         api_key: String,
-        /// Ticker symbol to query (e.g., "IRYS", "BTC").
-        symbol: String,
+        /// CoinMarketCap coin id (e.g., "1" for Bitcoin).
+        /// Retrieve ids from https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
+        id: String,
         /// Poll interval in milliseconds.
         /// Free tier is limited to 10k requests/month, so a 5 minute (300_000 ms) interval is a safe default.
         #[serde(default = "default_price_oracle_poll_interval_ms")]

@@ -67,17 +67,20 @@ impl SingleOracle {
     /// Construct a CoinMarketCap oracle and fetch initial price.
     pub async fn new_coinmarketcap(
         api_key: String,
-        symbol: String,
+        id: String,
         poll_interval_ms: u64,
     ) -> eyre::Result<Arc<Self>> {
-        let client = coinmarketcap::CoinMarketCapOracle::new(api_key, symbol);
-        let initial = client.current_price().await?;
+        let client = coinmarketcap::CoinMarketCapOracle::new(api_key, id);
+        let coinmarketcap::CoinMarketCapQuote {
+            amount: initial_amount,
+            last_updated: initial_last_updated,
+        } = client.current_price().await?;
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinMarketCap(client),
             cache: Arc::new(RwLock::new(PriceCache {
-                value: initial,
-                last_updated: std::time::SystemTime::now(),
+                value: initial_amount,
+                last_updated: initial_last_updated,
             })),
             poll_interval: Some(poll_interval),
         }))
@@ -136,7 +139,7 @@ impl SingleOracle {
                                 }
                                 _ = ticker.tick() => {
                                     if let Err(err) = this.update_once().await {
-                                        tracing::warn!(?err, "oracle price fetch failed");
+                                        tracing::error!(?err, "oracle price fetch failed");
                                     }
                                 }
                             }
@@ -161,8 +164,11 @@ impl SingleOracle {
                 self.update_cache(amount, std::time::SystemTime::now())
             }
             OracleSource::CoinMarketCap(c) => {
-                let amount = c.current_price().await?;
-                self.update_cache(amount, std::time::SystemTime::now())
+                let coinmarketcap::CoinMarketCapQuote {
+                    amount,
+                    last_updated,
+                } = c.current_price().await?;
+                self.update_cache(amount, last_updated)
             }
             OracleSource::CoinGecko(cg) => {
                 let coingecko::CoinGeckoQuote {

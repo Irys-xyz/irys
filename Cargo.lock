@@ -5360,6 +5360,7 @@ dependencies = [
 name = "irys-price-oracle"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "eyre",
  "irys-types",
  "reqwest 0.12.15",

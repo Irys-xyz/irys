@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use eyre::{Context as _, bail, eyre};
 use irys_types::storage_pricing::{
     Amount,
@@ -6,30 +7,33 @@ use irys_types::storage_pricing::{
 use reqwest::Client;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
 use rust_decimal::Decimal;
+use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::str::FromStr as _;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone)]
 pub struct CoinMarketCapOracle {
     client: Client,
     api_key: String,
-    symbol: String,
+    id: String,
 }
 
 impl CoinMarketCapOracle {
     /// Create a new CoinMarketCap oracle client
     #[must_use]
-    pub fn new(api_key: String, symbol: String) -> Self {
+    pub fn new(api_key: String, id: String) -> Self {
         let client = Client::new();
         Self {
             client,
             api_key,
-            symbol,
+            id,
         }
     }
 
     #[tracing::instrument(skip_all, err)]
-    pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+    pub async fn current_price(&self) -> eyre::Result<CoinMarketCapQuote> {
         // Build headers
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -40,7 +44,7 @@ impl CoinMarketCapOracle {
 
         // Build query params
         let mut params: Vec<(String, String)> = Vec::new();
-        params.push(("symbol".to_string(), self.symbol.clone()));
+        params.push(("id".to_string(), self.id.clone()));
         params.push(("convert".to_string(), "USD".to_string()));
 
         let resp = self
@@ -56,74 +60,138 @@ impl CoinMarketCapOracle {
             bail!("CoinMarketCap API returned HTTP status {}", resp.status());
         }
 
-        let body: Value = resp.json().await.context("failed to parse CMC JSON body")?;
+        let body: CoinMarketCapResponse =
+            resp.json().await.context("failed to parse CMC JSON body")?;
 
-        // check status
-        if let Some(status_obj) = body.get("status").and_then(|v| v.as_object()) {
-            let error_code = status_obj
-                .get("error_code")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0);
-            if error_code != 0 {
-                let msg = status_obj
-                    .get("error_message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                bail!("CoinMarketCap API error {}: {}", error_code, msg);
+        if let Some(status) = &body.status {
+            if status.error_code != 0 {
+                let msg = status.error_message.as_deref().unwrap_or("unknown error");
+                bail!("CoinMarketCap API error {}: {}", status.error_code, msg);
             }
         }
 
-        let price_dec = extract_price_from_cmc(&body, "USD")
-            .context("failed to extract price from CMC response")?;
+        let quote = extract_quote_from_cmc(&body, "USD", &self.id)
+            .context("failed to extract USD quote from CMC response")?;
 
-        let amount = Amount::<(IrysPrice, Usd)>::token(price_dec)
+        let amount = Amount::<(IrysPrice, Usd)>::token(quote.price)
             .context("failed to convert price to Amount")?;
-        Ok(amount)
+        let last_updated = chrono_to_system_time(quote.last_updated);
+
+        Ok(CoinMarketCapQuote {
+            amount,
+            last_updated,
+        })
     }
 }
 
-#[tracing::instrument(skip_all, err)]
-fn extract_price_from_cmc(v: &Value, convert: &str) -> eyre::Result<Decimal> {
-    let data = v
-        .get("data")
-        .and_then(|d| d.as_object())
-        .ok_or_else(|| eyre!("missing or invalid 'data' field"))?;
+#[derive(Debug, Clone)]
+pub struct CoinMarketCapQuote {
+    /// Latest price converted into an `Amount`.
+    pub amount: Amount<(IrysPrice, Usd)>,
+    /// Timestamp reported by CoinMarketCap.
+    pub last_updated: SystemTime,
+}
 
-    // Normalize convert key (expect uppercase like "USD")
-    let convert_key = if convert.is_empty() { "USD" } else { convert };
+#[derive(Debug, Deserialize)]
+struct CoinMarketCapResponse {
+    status: Option<CoinMarketCapStatus>,
+    data: HashMap<String, CmcAsset>,
+}
 
-    for (_k, entry) in data.iter() {
-        // Some responses wrap entry in an array when using symbol
-        let items: Vec<&Value> = if let Some(arr) = entry.as_array() {
-            arr.iter().collect()
-        } else {
-            vec![entry]
-        };
+#[derive(Debug, Deserialize)]
+struct CoinMarketCapStatus {
+    error_code: i64,
+    error_message: Option<String>,
+}
 
-        for item in items {
-            if let Some(quote_obj) = item.get("quote").and_then(|q| q.as_object()) {
-                if let Some(currency_obj) = quote_obj.get(convert_key).and_then(|c| c.as_object()) {
-                    if let Some(price_val) = currency_obj.get("price") {
-                        let decimal = match price_val {
-                            Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
-                            Value::String(s) => Decimal::from_str(s).ok(),
-                            _ => None,
-                        };
-                        if let Some(d) = decimal {
-                            return Ok(d);
-                        }
-                    }
-                }
-            }
-        }
+#[derive(Debug, Deserialize)]
+struct CmcAsset {
+    #[serde(default)]
+    quote: HashMap<String, CmcQuoteCurrency>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CmcQuoteCurrency {
+    #[serde(deserialize_with = "deserialize_decimal")]
+    price: Decimal,
+    #[serde(rename = "last_updated", deserialize_with = "deserialize_datetime")]
+    last_updated: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct ExtractedQuote {
+    price: Decimal,
+    last_updated: DateTime<Utc>,
+}
+
+fn extract_quote_from_cmc(
+    response: &CoinMarketCapResponse,
+    convert: &str,
+    id: &str,
+) -> eyre::Result<ExtractedQuote> {
+    let convert_key = if convert.is_empty() {
+        "USD".to_string()
+    } else {
+        convert.to_uppercase()
+    };
+
+    let asset = response
+        .data
+        .get(id)
+        .ok_or_else(|| eyre!("missing CoinMarketCap id {}", id))?;
+
+    let quote = asset
+        .quote
+        .get(&convert_key)
+        .ok_or_else(|| eyre!("missing quote for currency {}", convert_key))?;
+
+    Ok(ExtractedQuote {
+        price: quote.price,
+        last_updated: quote.last_updated,
+    })
+}
+
+fn chrono_to_system_time(dt: DateTime<Utc>) -> SystemTime {
+    let secs = dt.timestamp();
+    let mut base = SystemTime::UNIX_EPOCH;
+    if let Ok(sec_u64) = secs.try_into() {
+        base = base + Duration::from_secs(sec_u64);
     }
+    let nanos = dt.timestamp_subsec_nanos();
+    if nanos > 0 {
+        base = base + Duration::from_nanos(u64::from(nanos));
+    }
+    base
+}
 
-    Err(eyre!("could not find price in CMC response"))
+fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Number(n) => Decimal::from_str(&n.to_string()).map_err(serde::de::Error::custom),
+        Value::String(s) => Decimal::from_str(&s).map_err(serde::de::Error::custom),
+        other => Err(serde::de::Error::custom(format!(
+            "expected number or string for Decimal, found {other}"
+        ))),
+    }
+}
+
+fn deserialize_datetime<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(&s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use rust_decimal_macros::dec;
 
     #[test]
@@ -177,8 +245,15 @@ mod tests {
 }
 }"#;
 
-        let v: Value = serde_json::from_str(sample).unwrap();
-        let d = extract_price_from_cmc(&v, "USD").unwrap();
-        assert_eq!(d, dec!(6602.60701122));
+        let response: CoinMarketCapResponse = serde_json::from_str(sample).unwrap();
+        let quote =
+            extract_quote_from_cmc(&response, "USD", "1").expect("quote should be available");
+        assert_eq!(quote.price, dec!(6602.60701122));
+        let expected_dt = DateTime::parse_from_rfc3339("2018-08-09T21:56:28.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expected = chrono_to_system_time(expected_dt);
+        let actual = chrono_to_system_time(quote.last_updated);
+        assert_eq!(actual, expected);
     }
 }
