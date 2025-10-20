@@ -37,52 +37,68 @@ struct PriceCache {
 pub struct SingleOracle {
     source: OracleSource,
     cache: Arc<RwLock<PriceCache>>,
+    poll_interval: Option<Duration>,
 }
 
 impl SingleOracle {
-    /// Construct a mock oracle (no background poller).
+    /// Construct a mock oracle with a configurable background refresh cadence.
     pub fn new_mock(
         initial_price: Amount<(IrysPrice, Usd)>,
         incremental_change: Amount<(IrysPrice, Usd)>,
         smoothing_interval: u64,
+        poll_interval_ms: u64,
     ) -> Arc<Self> {
         let source = OracleSource::Mock(mock_oracle::MockOracle::new(
             initial_price,
             incremental_change,
             smoothing_interval,
         ));
+        let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Arc::new(Self {
             source,
             cache: Arc::new(RwLock::new(PriceCache {
                 value: initial_price,
                 last_updated: std::time::SystemTime::now(),
             })),
+            poll_interval: Some(poll_interval),
         })
     }
 
     /// Construct a CoinMarketCap oracle and fetch initial price.
-    pub async fn new_coinmarketcap(api_key: String, symbol: String) -> eyre::Result<Arc<Self>> {
+    pub async fn new_coinmarketcap(
+        api_key: String,
+        symbol: String,
+        poll_interval_ms: u64,
+    ) -> eyre::Result<Arc<Self>> {
         let client = coinmarketcap::CoinMarketCapOracle::new(api_key, symbol);
         let initial = client.current_price().await?;
+        let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinMarketCap(client),
             cache: Arc::new(RwLock::new(PriceCache {
                 value: initial,
                 last_updated: std::time::SystemTime::now(),
             })),
+            poll_interval: Some(poll_interval),
         }))
     }
 
     /// Construct a CoinGecko oracle and fetch initial price.
-    pub async fn new_coingecko(api_key: String, coin_id: String) -> eyre::Result<Arc<Self>> {
+    pub async fn new_coingecko(
+        api_key: String,
+        coin_id: String,
+        poll_interval_ms: u64,
+    ) -> eyre::Result<Arc<Self>> {
         let client = coingecko::CoinGeckoOracle::new(api_key, coin_id);
         let initial = client.current_price().await?;
+        let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinGecko(client),
             cache: Arc::new(RwLock::new(PriceCache {
                 value: initial,
                 last_updated: std::time::SystemTime::now(),
             })),
+            poll_interval: Some(poll_interval),
         }))
     }
 
@@ -95,46 +111,19 @@ impl SingleOracle {
         Ok(guard.value)
     }
 
-    /// Spawn periodic polling task if this is a timed oracle (CMC). Returns a service handle.
+    /// Spawn periodic polling task when the oracle has a configured update cadence. Returns a service handle.
     pub fn spawn_poller(
         this: Arc<Self>,
         runtime_handle: &tokio::runtime::Handle,
     ) -> Option<TokioServiceHandle> {
+        let poll_interval = this.poll_interval?;
+
         match &this.source {
-            OracleSource::Mock(_) => None,
-            OracleSource::CoinMarketCap(_) => {
+            OracleSource::Mock(_) | OracleSource::CoinMarketCap(_) | OracleSource::CoinGecko(_) => {
                 let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
                 let handle = runtime_handle.spawn(
                     async move {
-                        let mut ticker = interval(Duration::from_secs(60 * 60));
-                        loop {
-                            tokio::select! {
-                                _ = &mut shutdown_rx => {
-                                    tracing::info!("price oracle poller shutdown");
-                                    break;
-                                }
-                                _ = ticker.tick() => {
-                                    if let Err(err) = this.update_once().await {
-                                        tracing::warn!(?err, "oracle price fetch failed");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .in_current_span(),
-                );
-                Some(TokioServiceHandle {
-                    name: "price_oracle_poller".to_string(),
-                    handle,
-                    shutdown_signal: shutdown_tx,
-                })
-            }
-            OracleSource::CoinGecko(_) => {
-                let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
-                let handle = runtime_handle.spawn(
-                    async move {
-                        // 15 minutes
-                        let mut ticker = interval(Duration::from_secs(15 * 60));
+                        let mut ticker = interval(poll_interval);
                         loop {
                             tokio::select! {
                                 _ = &mut shutdown_rx => {

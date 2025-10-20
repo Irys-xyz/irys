@@ -185,6 +185,9 @@ pub enum OracleConfig {
 
         /// Number of blocks between price updates
         smoothing_interval: u64,
+        /// Poll interval in milliseconds for refreshing the mock oracle price snapshots.
+        #[serde(default = "default_mock_oracle_poll_interval_ms")]
+        poll_interval_ms: u64,
     },
     /// CoinMarketCap-backed price oracle
     CoinMarketCap {
@@ -192,6 +195,10 @@ pub enum OracleConfig {
         api_key: String,
         /// Ticker symbol to query (e.g., "IRYS", "BTC").
         symbol: String,
+        /// Poll interval in milliseconds.
+        /// Free tier is limited to 10k requests/month, so a 5 minute (300_000 ms) interval is a safe default.
+        #[serde(default = "default_price_oracle_poll_interval_ms")]
+        poll_interval_ms: u64,
     },
     /// CoinGecko-backed price oracle
     CoinGecko {
@@ -199,7 +206,19 @@ pub enum OracleConfig {
         api_key: String,
         /// CoinGecko coin id (e.g., "bitcoin", "ethereum")
         coin_id: String,
+        /// Poll interval in milliseconds.
+        /// Free tier is limited to 10k requests/month, so a 5 minute (300_000 ms) interval is a safe default.
+        #[serde(default = "default_price_oracle_poll_interval_ms")]
+        poll_interval_ms: u64,
     },
+}
+
+const fn default_price_oracle_poll_interval_ms() -> u64 {
+    300_000
+}
+
+const fn default_mock_oracle_poll_interval_ms() -> u64 {
+    10_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -588,6 +607,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
+                poll_interval_ms: 500,
             }],
             mining_key,
             reward_address,
@@ -719,6 +739,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
+                poll_interval_ms: default_mock_oracle_poll_interval_ms(),
             }],
             mining_key,
             reward_address,

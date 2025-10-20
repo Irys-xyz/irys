@@ -1659,16 +1659,25 @@ impl IrysNode {
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    poll_interval_ms,
                 } => {
                     let o = SingleOracle::new_mock(
                         initial_price,
                         incremental_change,
                         smoothing_interval,
+                        poll_interval_ms,
                     );
+                    if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {
+                        handles.push(h);
+                    }
                     instances.push(o);
                 }
-                OracleConfig::CoinMarketCap { api_key, symbol } => {
-                    let o = SingleOracle::new_coinmarketcap(api_key, symbol)
+                OracleConfig::CoinMarketCap {
+                    api_key,
+                    symbol,
+                    poll_interval_ms,
+                } => {
+                    let o = SingleOracle::new_coinmarketcap(api_key, symbol, poll_interval_ms)
                         .await
                         .expect("coinmarketcap initial price");
                     if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {
@@ -1676,8 +1685,12 @@ impl IrysNode {
                     }
                     instances.push(o);
                 }
-                OracleConfig::CoinGecko { api_key, coin_id } => {
-                    let o = SingleOracle::new_coingecko(api_key, coin_id)
+                OracleConfig::CoinGecko {
+                    api_key,
+                    coin_id,
+                    poll_interval_ms,
+                } => {
+                    let o = SingleOracle::new_coingecko(api_key, coin_id, poll_interval_ms)
                         .await
                         .expect("coingecko initial price");
                     if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {

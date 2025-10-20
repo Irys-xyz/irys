@@ -44,6 +44,7 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         initial_price: Amount::token(dec!(1.01)).unwrap(),
         incremental_change: Amount::token(dec!(0.005)).unwrap(),
         smoothing_interval: 3,
+        poll_interval_ms: 500,
     }];
 
     let node_2 = node_1
