@@ -6,7 +6,7 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionId, H256,
+    IrysTransactionId, TxKnownStatus, H256,
 };
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
@@ -303,18 +303,23 @@ impl Inner {
     }
 
     /// checks only the mempool
+    /// TODO: expand this to check other places (see `handle_data_tx_exists_message`)
     pub async fn handle_commitment_tx_exists_message(
         &self,
         commitment_tx_id: H256,
-    ) -> Result<bool, TxReadError> {
+    ) -> Result<TxKnownStatus, TxReadError> {
         let mempool_state = &self.mempool_state.clone();
         let mempool_state_guard = mempool_state.read().await;
-
-        Ok(mempool_state_guard
+        if mempool_state_guard
             .valid_commitment_tx
             .values()
             .flatten()
-            .any(|tx| tx.id == commitment_tx_id))
+            .any(|tx| tx.id == commitment_tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
     }
 
     /// read specified commitment txs from mempool

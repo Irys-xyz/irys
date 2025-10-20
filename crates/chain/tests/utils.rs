@@ -1331,6 +1331,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .await
                 .expect("to process ChunkIngressMessage")
                 .expect("boolean response to transaction existence")
+                .is_known_and_valid()
             {
                 break;
             }

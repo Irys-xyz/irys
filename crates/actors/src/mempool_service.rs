@@ -46,7 +46,7 @@ use irys_types::{
     Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle};
+use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
@@ -200,7 +200,7 @@ pub enum MempoolServiceMessage {
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
 
     /// Confirm commitment tx exists in mempool
-    CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
+    CommitmentTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
     /// Ingress CommitmentTransaction into the mempool (from API)
     ///
     /// This function performs a series of checks and validations:
@@ -220,7 +220,7 @@ pub enum MempoolServiceMessage {
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Confirm data tx exists in mempool or database
-    DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
+    DataTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
     /// validate and process an incoming DataTransactionHeader (from API)
     IngestDataTxFromApi(
         DataTransactionHeader,

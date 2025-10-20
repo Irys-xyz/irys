@@ -157,7 +157,7 @@ where
 
         if self
             .mempool
-            .is_known_transaction(tx_id)
+            .is_known_data_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -165,6 +165,7 @@ where
                     e
                 )))
             })?
+            .is_known()
         {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
@@ -268,7 +269,7 @@ where
 
         if self
             .mempool
-            .is_known_transaction(tx_id)
+            .is_known_data_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -276,6 +277,7 @@ where
                     e
                 )))
             })?
+            .is_known()
         {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
@@ -459,7 +461,7 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(tx_id).await? {
+            if !self.is_known_valid_tx(tx_id).await? {
                 missing_tx_ids.push(tx_id);
             }
         }
@@ -469,7 +471,7 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(system_tx_id).await? {
+            if !self.is_known_valid_tx(system_tx_id).await? {
                 missing_tx_ids.push(system_tx_id);
             }
         }
@@ -692,13 +694,17 @@ where
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
-            GossipError::Internal(InternalGossipError::Unknown(format!(
-                "is_known_transaction() errored: {:?}",
-                e
-            )))
-        })
+    async fn is_known_valid_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        self.mempool
+            .is_known_data_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_transaction() errored: {:?}",
+                    e
+                )))
+            })
+            .map(|s| s.is_known_and_valid())
     }
 
     pub(crate) async fn handle_get_data(
