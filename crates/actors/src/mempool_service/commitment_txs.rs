@@ -1,7 +1,7 @@
 use crate::mempool_service::{
     validate_commitment_transaction, Inner, MempoolServiceMessage, TxIngressError, TxReadError,
 };
-use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid};
+use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{
