@@ -110,7 +110,7 @@ impl SingleOracle {
     }
 
     /// Returns the last cached price of IRYS in USD.
-    pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+    pub fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
         let guard = self
             .cache
             .read()
@@ -207,7 +207,7 @@ impl IrysPriceOracle {
         Arc::new(Self { oracles })
     }
 
-    pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+    pub fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
         let mut best_ts: Option<std::time::SystemTime> = None;
         let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
         for o in &self.oracles {
@@ -224,7 +224,7 @@ impl IrysPriceOracle {
     }
 
     /// Returns the freshest price along with its last_updated timestamp.
-    pub async fn current_snapshot(
+    pub fn current_snapshot(
         &self,
     ) -> eyre::Result<(Amount<(IrysPrice, Usd)>, std::time::SystemTime)> {
         let mut best_ts: Option<std::time::SystemTime> = None;

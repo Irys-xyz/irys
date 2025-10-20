@@ -43,9 +43,10 @@ impl CoinMarketCapOracle {
         );
 
         // Build query params
-        let mut params: Vec<(String, String)> = Vec::new();
-        params.push(("id".to_string(), self.id.clone()));
-        params.push(("convert".to_string(), "USD".to_string()));
+        let params: Vec<(String, String)> = vec![
+            ("id".to_string(), self.id.clone()),
+            ("convert".to_string(), "USD".to_string()),
+        ];
 
         let resp = self
             .client
