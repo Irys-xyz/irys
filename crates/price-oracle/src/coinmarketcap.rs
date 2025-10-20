@@ -155,11 +155,11 @@ fn chrono_to_system_time(dt: DateTime<Utc>) -> SystemTime {
     let secs = dt.timestamp();
     let mut base = SystemTime::UNIX_EPOCH;
     if let Ok(sec_u64) = secs.try_into() {
-        base = base + Duration::from_secs(sec_u64);
+        base += Duration::from_secs(sec_u64);
     }
     let nanos = dt.timestamp_subsec_nanos();
     if nanos > 0 {
-        base = base + Duration::from_nanos(u64::from(nanos));
+        base += Duration::from_nanos(u64::from(nanos));
     }
     base
 }
