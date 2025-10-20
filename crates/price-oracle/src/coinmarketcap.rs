@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr as _;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct CoinMarketCapOracle {
@@ -34,7 +34,6 @@ impl CoinMarketCapOracle {
 
     #[tracing::instrument(skip_all, err)]
     pub async fn current_price(&self) -> eyre::Result<CoinMarketCapQuote> {
-        // Build headers
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(
@@ -42,7 +41,6 @@ impl CoinMarketCapOracle {
             HeaderValue::from_str(&self.api_key).context("invalid API key header value")?,
         );
 
-        // Build query params
         let params: Vec<(String, String)> = vec![
             ("id".to_string(), self.id.clone()),
             ("convert".to_string(), "USD".to_string()),
@@ -153,16 +151,7 @@ fn extract_quote_from_cmc(
 }
 
 fn chrono_to_system_time(dt: DateTime<Utc>) -> SystemTime {
-    let secs = dt.timestamp();
-    let mut base = SystemTime::UNIX_EPOCH;
-    if let Ok(sec_u64) = secs.try_into() {
-        base += Duration::from_secs(sec_u64);
-    }
-    let nanos = dt.timestamp_subsec_nanos();
-    if nanos > 0 {
-        base += Duration::from_nanos(u64::from(nanos));
-    }
-    base
+    dt.into()
 }
 
 fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>

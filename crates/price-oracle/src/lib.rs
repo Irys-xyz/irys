@@ -37,7 +37,7 @@ struct PriceCache {
 pub struct SingleOracle {
     source: OracleSource,
     cache: Arc<RwLock<PriceCache>>,
-    poll_interval: Option<Duration>,
+    poll_interval: Duration,
 }
 
 impl SingleOracle {
@@ -60,7 +60,7 @@ impl SingleOracle {
                 value: initial_price,
                 last_updated: std::time::SystemTime::now(),
             })),
-            poll_interval: Some(poll_interval),
+            poll_interval: poll_interval,
         })
     }
 
@@ -82,7 +82,7 @@ impl SingleOracle {
                 value: initial_amount,
                 last_updated: initial_last_updated,
             })),
-            poll_interval: Some(poll_interval),
+            poll_interval: poll_interval,
         }))
     }
 
@@ -103,9 +103,9 @@ impl SingleOracle {
             source: OracleSource::CoinGecko(client),
             cache: Arc::new(RwLock::new(PriceCache {
                 value: initial_amount,
-                last_updated: initial_last_updated.unwrap_or_else(std::time::SystemTime::now),
+                last_updated: initial_last_updated,
             })),
-            poll_interval: Some(poll_interval),
+            poll_interval: poll_interval,
         }))
     }
 
@@ -120,39 +120,35 @@ impl SingleOracle {
 
     /// Spawn periodic polling task when the oracle has a configured update cadence. Returns a service handle.
     pub fn spawn_poller(
-        this: Arc<Self>,
+        self: Arc<Self>,
         runtime_handle: &tokio::runtime::Handle,
-    ) -> Option<TokioServiceHandle> {
-        let poll_interval = this.poll_interval?;
+    ) -> TokioServiceHandle {
+        let poll_interval = self.poll_interval;
 
-        match &this.source {
-            OracleSource::Mock(_) | OracleSource::CoinMarketCap(_) | OracleSource::CoinGecko(_) => {
-                let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
-                let handle = runtime_handle.spawn(
-                    async move {
-                        let mut ticker = interval(poll_interval);
-                        loop {
-                            tokio::select! {
-                                _ = &mut shutdown_rx => {
-                                    tracing::info!("price oracle poller shutdown");
-                                    break;
-                                }
-                                _ = ticker.tick() => {
-                                    if let Err(err) = this.update_once().await {
-                                        tracing::error!(?err, "oracle price fetch failed");
-                                    }
-                                }
+        let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
+        let handle = runtime_handle.spawn(
+            async move {
+                let mut ticker = interval(poll_interval);
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            tracing::info!("price oracle poller shutdown");
+                            break;
+                        }
+                        _ = ticker.tick() => {
+                            if let Err(err) = self.update_once().await {
+                                tracing::error!(?err, "oracle price fetch failed");
                             }
                         }
                     }
-                    .in_current_span(),
-                );
-                Some(TokioServiceHandle {
-                    name: "price_oracle_poller".to_string(),
-                    handle,
-                    shutdown_signal: shutdown_tx,
-                })
+                }
             }
+            .in_current_span(),
+        );
+        TokioServiceHandle {
+            name: "price_oracle_poller".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
         }
     }
 
@@ -175,8 +171,7 @@ impl SingleOracle {
                     amount,
                     last_updated,
                 } = cg.current_price().await?;
-                let ts = last_updated.unwrap_or_else(std::time::SystemTime::now);
-                self.update_cache(amount, ts)
+                self.update_cache(amount, last_updated)
             }
         }
     }

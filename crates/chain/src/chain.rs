@@ -1647,57 +1647,37 @@ impl IrysNode {
         let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
 
         for oc in oracle_cfgs {
-            match oc {
+            let oracle = match oc {
                 OracleConfig::Mock {
                     initial_price,
                     incremental_change,
                     smoothing_interval,
                     poll_interval_ms,
-                } => {
-                    let o = SingleOracle::new_mock(
-                        initial_price,
-                        incremental_change,
-                        smoothing_interval,
-                        poll_interval_ms,
-                    );
-                    if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {
-                        handles.push(h);
-                    }
-                    instances.push(o);
-                }
+                } => SingleOracle::new_mock(
+                    initial_price,
+                    incremental_change,
+                    smoothing_interval,
+                    poll_interval_ms,
+                ),
                 OracleConfig::CoinMarketCap {
                     api_key,
                     id,
                     poll_interval_ms,
-                } => {
-                    let o = SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
-                        .await
-                        .expect("coinmarketcap initial price");
-                    if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {
-                        handles.push(h);
-                    }
-                    instances.push(o);
-                }
+                } => SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
+                    .await
+                    .expect("coinmarketcap initial price"),
                 OracleConfig::CoinGecko {
                     api_key,
                     coin_id,
                     demo_api_key,
                     poll_interval_ms,
-                } => {
-                    let o = SingleOracle::new_coingecko(
-                        api_key,
-                        coin_id,
-                        demo_api_key,
-                        poll_interval_ms,
-                    )
+                } => SingleOracle::new_coingecko(api_key, coin_id, demo_api_key, poll_interval_ms)
                     .await
-                    .expect("coingecko initial price");
-                    if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {
-                        handles.push(h);
-                    }
-                    instances.push(o);
-                }
-            }
+                    .expect("coingecko initial price"),
+            };
+            let handle = Arc::clone(&oracle).spawn_poller(runtime_handle);
+            handles.push(handle);
+            instances.push(oracle);
         }
 
         (IrysPriceOracle::new(instances), handles)
