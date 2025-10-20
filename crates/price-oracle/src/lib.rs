@@ -60,7 +60,7 @@ impl SingleOracle {
                 value: initial_price,
                 last_updated: std::time::SystemTime::now(),
             })),
-            poll_interval: poll_interval,
+            poll_interval,
         })
     }
 
@@ -82,7 +82,7 @@ impl SingleOracle {
                 value: initial_amount,
                 last_updated: initial_last_updated,
             })),
-            poll_interval: poll_interval,
+            poll_interval,
         }))
     }
 
@@ -105,7 +105,7 @@ impl SingleOracle {
                 value: initial_amount,
                 last_updated: initial_last_updated,
             })),
-            poll_interval: poll_interval,
+            poll_interval,
         }))
     }
 

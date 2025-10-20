@@ -206,13 +206,13 @@ pub enum OracleConfig {
     /// CoinGecko-backed price oracle
     #[serde(rename = "coingecko", alias = "coin_gecko")]
     CoinGecko {
-        /// API key for the CoinGecko Pro API
+        /// API key for the CoinGecko Pro/Demo API
         api_key: String,
         /// CoinGecko coin id (e.g., "bitcoin", "ethereum").
         /// Retrieve ids from https://docs.coingecko.com/reference/coins-list
+        /// Or from the official spreadsheet: https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
         coin_id: String,
-        /// Set to true when using a CoinGecko demo API key; switches to https://api.coingecko.com.
-        /// See https://docs.coingecko.com/v3.0.1/reference/introduction for details.
+        /// Set to true when using a CoinGecko demo API key (free, not paid version)
         #[serde(default)]
         demo_api_key: bool,
         /// Poll interval in milliseconds.
