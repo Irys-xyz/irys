@@ -1688,11 +1688,17 @@ impl IrysNode {
                 OracleConfig::CoinGecko {
                     api_key,
                     coin_id,
+                    demo_api_key,
                     poll_interval_ms,
                 } => {
-                    let o = SingleOracle::new_coingecko(api_key, coin_id, poll_interval_ms)
-                        .await
-                        .expect("coingecko initial price");
+                    let o = SingleOracle::new_coingecko(
+                        api_key,
+                        coin_id,
+                        demo_api_key,
+                        poll_interval_ms,
+                    )
+                    .await
+                    .expect("coingecko initial price");
                     if let Some(h) = SingleOracle::spawn_poller(o.clone(), runtime_handle) {
                         handles.push(h);
                     }

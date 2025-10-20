@@ -104,15 +104,12 @@ fn extract_price_from_cmc(v: &Value, convert: &str) -> eyre::Result<Decimal> {
             if let Some(quote_obj) = item.get("quote").and_then(|q| q.as_object()) {
                 if let Some(currency_obj) = quote_obj.get(convert_key).and_then(|c| c.as_object()) {
                     if let Some(price_val) = currency_obj.get("price") {
-                        // Convert price to Decimal robustly
-                        if let Some(n) = price_val.as_f64() {
-                            if let Some(d) = Decimal::from_f64_retain(n) {
-                                return Ok(d);
-                            }
-                        }
-                        // Fallback: parse from string representation
-                        let s = price_val.to_string();
-                        if let Ok(d) = Decimal::from_str(&s) {
+                        let decimal = match price_val {
+                            Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
+                            Value::String(s) => Decimal::from_str(s).ok(),
+                            _ => None,
+                        };
+                        if let Some(d) = decimal {
                             return Ok(d);
                         }
                     }

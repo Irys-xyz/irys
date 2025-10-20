@@ -165,9 +165,10 @@ pub enum PeerFilterMode {
 ///
 /// Defines how the node obtains and processes external price information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum OracleConfig {
     /// A simulated price oracle for testing and development
+    #[serde(rename = "mock")]
     Mock {
         /// Starting price for the token in USD
         #[serde(
@@ -190,6 +191,7 @@ pub enum OracleConfig {
         poll_interval_ms: u64,
     },
     /// CoinMarketCap-backed price oracle
+    #[serde(rename = "coinmarketcap", alias = "coin_market_cap")]
     CoinMarketCap {
         /// API key for the CoinMarketCap Pro API
         api_key: String,
@@ -201,11 +203,17 @@ pub enum OracleConfig {
         poll_interval_ms: u64,
     },
     /// CoinGecko-backed price oracle
+    #[serde(rename = "coingecko", alias = "coin_gecko")]
     CoinGecko {
         /// API key for the CoinGecko Pro API
         api_key: String,
-        /// CoinGecko coin id (e.g., "bitcoin", "ethereum")
+        /// CoinGecko coin id (e.g., "bitcoin", "ethereum").
+        /// Retrieve ids from https://docs.coingecko.com/reference/coins-list
         coin_id: String,
+        /// Set to true when using a CoinGecko demo API key; switches to https://api.coingecko.com.
+        /// See https://docs.coingecko.com/v3.0.1/reference/introduction for details.
+        #[serde(default)]
+        demo_api_key: bool,
         /// Poll interval in milliseconds.
         /// Free tier is limited to 10k requests/month, so a 5 minute (300_000 ms) interval is a safe default.
         #[serde(default = "default_price_oracle_poll_interval_ms")]

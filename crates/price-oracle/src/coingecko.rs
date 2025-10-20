@@ -1,3 +1,9 @@
+//! CoinGecko oracle integration.
+//!
+//! API reference: https://docs.coingecko.com/reference/simple-price
+//! Coin ids can be retrieved from https://docs.coingecko.com/reference/coins-list
+//! Demo API key behaviour is documented at https://docs.coingecko.com/v3.0.1/reference/introduction
+
 use eyre::{Context as _, bail, eyre};
 use irys_types::storage_pricing::{
     Amount,
@@ -6,29 +12,42 @@ use irys_types::storage_pricing::{
 use reqwest::Client;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue};
 use rust_decimal::Decimal;
+use serde::Deserialize;
+use serde::de::Error as DeError;
 use serde_json::Value;
 use std::str::FromStr as _;
+use std::time::{Duration, SystemTime};
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct CoinGeckoOracle {
     client: Client,
     api_key: String,
     coin_id: String,
+    url: Arc<String>,
 }
 
 impl CoinGeckoOracle {
     #[must_use]
-    pub fn new(api_key: String, coin_id: String) -> Self {
+    pub fn new(api_key: String, coin_id: String, use_demo_api: bool) -> Self {
         let client = Client::new();
+        let base_url = if use_demo_api {
+            "https://api.coingecko.com/api/v3"
+        } else {
+            "https://pro-api.coingecko.com/api/v3"
+        };
+        let url = format!("{base_url}/simple/price");
+
         Self {
             client,
             api_key,
             coin_id,
+            url: Arc::new(url),
         }
     }
 
     #[tracing::instrument(skip_all, err)]
-    pub async fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
+    pub async fn current_price(&self) -> eyre::Result<CoinGeckoQuote> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         // CoinGecko pro header is lowercase: x-cg-pro-api-key
@@ -39,72 +58,101 @@ impl CoinGeckoOracle {
 
         let resp = self
             .client
-            .get("https://pro-api.coingecko.com/api/v3/simple/price")
+            .get(&*self.url)
             .headers(headers)
             .query(&[
                 ("ids", self.coin_id.clone()),
                 ("vs_currencies", "usd".to_string()),
+                ("include_last_updated_at", "true".to_string()),
             ])
             .send()
             .await
             .context("failed to call CoinGecko API")?;
 
         if !resp.status().is_success() {
-            bail!("CoinGecko API returned HTTP status {}", resp.status());
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!(
+                "CoinGecko API returned HTTP status {} {} {}",
+                self.url,
+                status,
+                body
+            );
         }
 
-        let body: Value = resp
+        let body: HashMap<String, SimplePriceData> = resp
             .json()
             .await
             .context("failed to parse CoinGecko JSON body")?;
 
-        let price_dec = extract_price_from_coingecko(&body, &self.coin_id)
-            .context("failed to extract price from CoinGecko response")?;
+        let entry = body
+            .get(&self.coin_id)
+            .ok_or_else(|| eyre!("coin id {} missing in CoinGecko response", self.coin_id))?;
 
-        let amount = Amount::<(IrysPrice, Usd)>::token(price_dec)
+        let amount = Amount::<(IrysPrice, Usd)>::token(entry.usd)
             .context("failed to convert price to Amount")?;
-        Ok(amount)
+
+        let last_updated = entry
+            .last_updated_at
+            .map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts));
+
+        Ok(CoinGeckoQuote {
+            amount,
+            last_updated,
+        })
     }
 }
 
-#[tracing::instrument(skip_all, err)]
-fn extract_price_from_coingecko(v: &Value, coin_id: &str) -> eyre::Result<Decimal> {
-    let obj = v
-        .as_object()
-        .ok_or_else(|| eyre!("root is not an object"))?;
-    let coin = obj
-        .get(coin_id)
-        .and_then(|x| x.as_object())
-        .ok_or_else(|| eyre!("missing coin id in response"))?;
-    let usd = coin.get("usd").ok_or_else(|| eyre!("missing usd field"))?;
-    if let Some(n) = usd.as_f64() {
-        if let Some(d) = Decimal::from_f64_retain(n) {
-            return Ok(d);
-        }
+#[derive(Debug, Clone)]
+pub struct CoinGeckoQuote {
+    /// Latest price converted into an `Amount`.
+    pub amount: Amount<(IrysPrice, Usd)>,
+    /// Timestamp reported by CoinGecko (seconds since UNIX epoch).
+    pub last_updated: Option<SystemTime>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimplePriceData {
+    #[serde(deserialize_with = "deserialize_decimal")]
+    usd: Decimal,
+    #[serde(default)]
+    last_updated_at: Option<u64>,
+}
+
+fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Number(n) => Decimal::from_str(&n.to_string()).map_err(DeError::custom),
+        Value::String(s) => Decimal::from_str(&s).map_err(DeError::custom),
+        other => Err(DeError::custom(format!(
+            "expected number or string for Decimal, found {other}"
+        ))),
     }
-    let s = usd.to_string();
-    let d = Decimal::from_str(&s).context("failed to parse decimal")?;
-    Ok(d)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::collections::HashMap;
 
     #[test]
     fn parse_sample_response() {
         let sample = r#"{
   "bitcoin": {
     "usd": 67187.3358936566,
-    "usd_market_cap": 1317802988326.25,
-    "usd_24h_vol": 31260929299.5248,
-    "usd_24h_change": 3.63727894677354,
     "last_updated_at": 1711356300
   }
 }"#;
-        let v: Value = serde_json::from_str(sample).unwrap();
-        let d = extract_price_from_coingecko(&v, "bitcoin").unwrap();
-        assert_eq!(d, dec!(67187.3358936566));
+        let parsed: HashMap<String, SimplePriceData> =
+            serde_json::from_str(sample).expect("valid sample");
+        let entry = parsed.get("bitcoin").unwrap();
+        assert_eq!(entry.usd, dec!(67187.3358936566));
+        assert_eq!(entry.last_updated_at, Some(1711356300));
+        let amount = Amount::<(IrysPrice, Usd)>::token(entry.usd).unwrap();
+        assert_eq!(amount.token_to_decimal().unwrap(), dec!(67187.3358936566));
     }
 }

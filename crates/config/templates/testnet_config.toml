@@ -1,6 +1,6 @@
 node_mode = "Peer"
 sync_mode = "Full"
-base_directory = ""
+base_directory = ".irys"
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
 trusted_peers = []
 initial_stake_and_pledge_whitelist = []
@@ -49,10 +49,22 @@ type = "size_based"
 max_cache_size_bytes = 10737418240  # 10 GB
 
 [[oracles]]
-type = "mock"
-initial_price = 1.0
-incremental_change = 0.00000000000001
-smoothing_interval = 15
+type = "coingecko"
+api_key = "provide-coingecko-api-key"
+# Coin ids are listed at https://docs.coingecko.com/reference/coins-list
+# Or in this official spreadsheet https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
+coin_id = "irys"
+# Set to true when using a CoinGecko demo API key (see https://docs.coingecko.com/v3.0.1/reference/introduction)
+demo_api_key = true
+# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+poll_interval_ms = 300000
+
+[[oracles]]
+type = "coinmarketcap"
+api_key = "provide-coinmarketcap-api-key"
+symbol = "IRYS"
+# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+poll_interval_ms = 300000
 
 [mempool]
 max_pending_pledge_items = 100
@@ -140,7 +152,7 @@ min_difficulty_adjustment_factor = "0.25"
 [consensus.Custom.vdf]
 reset_frequency = 600
 num_checkpoints_in_vdf_step = 25
-max_allowed_vdf_fork_steps = 60000
+max_allowed_vdf_fork_steps = 64840
 sha_1s_difficulty = 1800000
 
 [consensus.Custom.block_reward_config]

@@ -87,16 +87,20 @@ impl SingleOracle {
     pub async fn new_coingecko(
         api_key: String,
         coin_id: String,
+        demo_api_key: bool,
         poll_interval_ms: u64,
     ) -> eyre::Result<Arc<Self>> {
-        let client = coingecko::CoinGeckoOracle::new(api_key, coin_id);
-        let initial = client.current_price().await?;
+        let client = coingecko::CoinGeckoOracle::new(api_key, coin_id, demo_api_key);
+        let coingecko::CoinGeckoQuote {
+            amount: initial_amount,
+            last_updated: initial_last_updated,
+        } = client.current_price().await?;
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinGecko(client),
             cache: Arc::new(RwLock::new(PriceCache {
-                value: initial,
-                last_updated: std::time::SystemTime::now(),
+                value: initial_amount,
+                last_updated: initial_last_updated.unwrap_or_else(std::time::SystemTime::now),
             })),
             poll_interval: Some(poll_interval),
         }))
@@ -151,17 +155,37 @@ impl SingleOracle {
 
     #[tracing::instrument(skip(self), err)]
     async fn update_once(&self) -> eyre::Result<()> {
-        let price = match &self.source {
-            OracleSource::Mock(m) => m.current_price(),
-            OracleSource::CoinMarketCap(c) => c.current_price().await,
-            OracleSource::CoinGecko(cg) => cg.current_price().await,
-        }?;
+        match &self.source {
+            OracleSource::Mock(m) => {
+                let amount = m.current_price()?;
+                self.update_cache(amount, std::time::SystemTime::now())
+            }
+            OracleSource::CoinMarketCap(c) => {
+                let amount = c.current_price().await?;
+                self.update_cache(amount, std::time::SystemTime::now())
+            }
+            OracleSource::CoinGecko(cg) => {
+                let coingecko::CoinGeckoQuote {
+                    amount,
+                    last_updated,
+                } = cg.current_price().await?;
+                let ts = last_updated.unwrap_or_else(std::time::SystemTime::now);
+                self.update_cache(amount, ts)
+            }
+        }
+    }
+
+    fn update_cache(
+        &self,
+        amount: Amount<(IrysPrice, Usd)>,
+        timestamp: std::time::SystemTime,
+    ) -> eyre::Result<()> {
         let mut guard = self
             .cache
             .write()
             .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
-        guard.value = price;
-        guard.last_updated = std::time::SystemTime::now();
+        guard.value = amount;
+        guard.last_updated = timestamp;
         Ok(())
     }
 }
