@@ -211,7 +211,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 // Tests
 //------------------------------------------------------------------------------
 // #[cfg(test)]
-// #[actix_web::test]
+// #[tokio::test]
 // async fn post_tx_and_chunks_golden_path() {
 //     use irys_database::tables::IrysTables;
 //     use reth::tasks::TaskManager;

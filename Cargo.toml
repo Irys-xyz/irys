@@ -64,8 +64,6 @@ irys-packing-worker = { path = "./crates/packing-worker" }
 irys-tui = { path = "./crates/tui" }
 irys-macros-integer-tagged = { path = "./crates/macros/integer-tagged" }
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
-actix = "0.13.5"
-actix-rt = "2.10.0"
 actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"

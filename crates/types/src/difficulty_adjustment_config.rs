@@ -164,7 +164,8 @@ mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
     use crate::{
-        adjust_difficulty, calculate_difficulty, calculate_initial_difficulty, H256, U256,
+        adjust_difficulty, calculate_difficulty, calculate_initial_difficulty, u256_from_le_bytes,
+        H256, U256,
     };
     use openssl::sha;
     use rstest::{fixture, rstest};
@@ -349,7 +350,7 @@ mod tests {
         let mut prev_hash = initial_hash;
         for i in 0..hashes_per_second {
             prev_hash = hash_sha256(&prev_hash.0);
-            let hash_val = hash_to_number(&prev_hash.0);
+            let hash_val = u256_from_le_bytes(&prev_hash.0);
             if hash_val >= difficulty {
                 // Return elapsed time within this one-second bucket in milliseconds.
                 // i hashes out of hashes_per_second ⇒ elapsed_ms = floor(i * 1000 / hashes_per_second)
@@ -369,10 +370,6 @@ mod tests {
         let mut hasher = sha::Sha256::new();
         hasher.update(message);
         H256::from(hasher.finish())
-    }
-
-    fn hash_to_number(hash: &[u8]) -> U256 {
-        U256::from_little_endian(hash)
     }
 
     fn mine_block(hashes_per_second: u64, seed: H256, difficulty: U256) -> (f64, H256) {

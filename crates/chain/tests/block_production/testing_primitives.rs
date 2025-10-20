@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::utils::IrysNodeTest;
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_wait_until_height() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
@@ -22,7 +22,7 @@ async fn heavy_test_wait_until_height() {
     irys_node.stop().await;
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_mine() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
@@ -36,7 +36,7 @@ async fn heavy_test_mine() {
     irys_node.stop().await;
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_mine_tx() {
     // output tracing
     let mut config = NodeConfig::testing();

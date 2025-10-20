@@ -3,31 +3,6 @@
 version = 4
 
 [[package]]
-name = "actix"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de7fa236829ba0841304542f7614c42b80fca007455315c45c785ccfa873a85b"
-dependencies = [
- "actix-macros",
- "actix-rt",
- "actix_derive",
- "bitflags 2.9.1",
- "bytes",
- "crossbeam-channel",
- "futures-core",
- "futures-sink",
- "futures-task",
- "futures-util",
- "log",
- "once_cell",
- "parking_lot",
- "pin-project-lite",
- "smallvec",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "actix-codec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -129,7 +104,6 @@ version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24eda4e2a6e042aa4e55ac438a2ae052d3b5da0ecf83d7411e1a368946925208"
 dependencies = [
- "actix-macros",
  "futures-core",
  "tokio",
 ]
@@ -240,17 +214,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f591380e2e68490b5dfaf1dd1aa0ebe78d84ba7067078512b4ea6e4492d622b8"
 dependencies = [
  "actix-router",
- "proc-macro2",
- "quote",
- "syn 2.0.101",
-]
-
-[[package]]
-name = "actix_derive"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6ac1e58cded18cb28ddc17143c4dea5345b3ad575e14f32f66e4054a56eb271"
-dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.101",
@@ -4984,8 +4947,6 @@ dependencies = [
 name = "irys-actors"
 version = "0.1.0"
 dependencies = [
- "actix",
- "actix-rt",
  "alloy-consensus",
  "alloy-eips",
  "alloy-network",
@@ -5096,9 +5057,7 @@ dependencies = [
 name = "irys-chain"
 version = "0.1.0"
 dependencies = [
- "actix",
  "actix-http",
- "actix-rt",
  "actix-web",
  "alloy-consensus",
  "alloy-contract",
@@ -5114,7 +5073,6 @@ dependencies = [
  "alloy-sol-macro",
  "alloy-sol-types",
  "assert_matches",
- "awc",
  "base58",
  "core_affinity",
  "eyre",
@@ -5297,7 +5255,6 @@ dependencies = [
 name = "irys-p2p"
 version = "0.1.0"
 dependencies = [
- "actix-rt",
  "actix-web",
  "async-trait",
  "dashmap 6.1.0",
@@ -5550,8 +5507,6 @@ dependencies = [
 name = "irys-types"
 version = "0.1.0"
 dependencies = [
- "actix",
- "actix-rt",
  "alloy-core",
  "alloy-eips",
  "alloy-genesis",
@@ -5619,7 +5574,6 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
- "actix-rt",
  "base58",
  "eyre",
  "hex",

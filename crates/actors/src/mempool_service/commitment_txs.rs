@@ -6,7 +6,7 @@ use irys_domain::CommitmentSnapshotStatus;
 use irys_primitives::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
-    IrysTransactionId, H256,
+    IrysTransactionId, TxKnownStatus, H256,
 };
 use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
@@ -302,19 +302,62 @@ impl Inner {
             .expect("Failed to send gossip data");
     }
 
-    /// checks only the mempool
+    // checks recent_valid_tx, recent_invalid_tx, valid_commitment_tx, pending_pledges, and the database
     pub async fn handle_commitment_tx_exists_message(
         &self,
         commitment_tx_id: H256,
-    ) -> Result<bool, TxReadError> {
-        let mempool_state = &self.mempool_state.clone();
+    ) -> Result<TxKnownStatus, TxReadError> {
+        let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        Ok(mempool_state_guard
+        #[expect(clippy::if_same_then_else, reason = "readability")]
+        if mempool_state_guard
+            .recent_valid_tx
+            .contains(&commitment_tx_id)
+        {
+            Ok(TxKnownStatus::ValidSeen)
+        } else if mempool_state_guard
+            .recent_invalid_tx
+            .contains(&commitment_tx_id)
+        {
+            // Still has it, just invalid
+            Ok(TxKnownStatus::InvalidSeen)
+            // Get any CommitmentTransactions from the valid commitments Map
+        } else if mempool_state_guard
             .valid_commitment_tx
             .values()
-            .flatten()
-            .any(|tx| tx.id == commitment_tx_id))
+            .flat_map(|txs| txs.iter())
+            .any(|tx| tx.id == commitment_tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        }
+        // Get any CommitmentTransactions from the pending commitments LRU cache
+        else if mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .any(|(id, _tx)| *id == commitment_tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            //now check the database
+            drop(mempool_state_guard);
+            let read_tx = self.read_tx();
+
+            if read_tx.is_err() {
+                Err(TxReadError::DatabaseError)
+            } else if commitment_tx_by_txid(
+                &read_tx.expect("expected valid header from tx id"),
+                &commitment_tx_id,
+            )
+            .map_err(|_| TxReadError::DatabaseError)?
+            .is_some()
+            {
+                Ok(TxKnownStatus::Migrated)
+            } else {
+                Ok(TxKnownStatus::Unknown)
+            }
+        }
     }
 
     /// read specified commitment txs from mempool

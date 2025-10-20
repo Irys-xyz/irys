@@ -13,7 +13,7 @@ use tracing::warn;
 // Action: Both nodes mine blocks independently creating a fork, then node_2's longer chain is gossiped.
 // Assert: EMA snapshots differ after the price adjustment interval during the fork.
 // Assert: After convergence, both nodes have identical chains with matching EMA snapshots.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // setup
     const PRICE_ADJUSTMENT_INTERVAL: u64 = 2;

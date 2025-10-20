@@ -784,7 +784,7 @@ mod tests {
 
     use crate::packing::{cast_vec_u8_to_vec_u8_array, PackingRequest, PackingService};
 
-    #[test_log::test(actix::test)]
+    #[test_log::test(tokio::test)]
     async fn test_packing_actor() -> eyre::Result<()> {
         // setup
         let partition_hash = PartitionHash::zero();

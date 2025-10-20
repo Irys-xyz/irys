@@ -31,7 +31,7 @@ use irys_types::{
     GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
     IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    UnpackedChunk, VersionRequest, H256,
+    TxKnownStatus, UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -137,14 +137,38 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn is_known_transaction(&self, tx_id: H256) -> std::result::Result<bool, TxReadError> {
-        let exists = self
+    async fn is_known_data_transaction(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<TxKnownStatus, TxReadError> {
+        if self
             .txs
             .read()
             .expect("to read txs")
             .iter()
-            .any(|message| message.id == tx_id);
-        Ok(exists)
+            .any(|message| message.id == tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
+    }
+
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<TxKnownStatus, TxReadError> {
+        if self
+            .txs
+            .read()
+            .expect("to read txs")
+            .iter()
+            .any(|message| message.id == tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
     }
 
     async fn handle_ingest_ingress_proof(

@@ -16,8 +16,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{interval, timeout},
+};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 /// Sync service errors
@@ -1445,7 +1447,7 @@ mod tests {
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex, RwLock};
 
-        #[actix_web::test]
+        #[tokio::test]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;
@@ -1609,7 +1611,7 @@ mod tests {
             Ok(())
         }
 
-        #[actix_web::test]
+        #[tokio::test]
         async fn should_sync_and_change_status_for_the_non_zero_genesis_with_offline_peers(
         ) -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
@@ -1717,7 +1719,7 @@ mod tests {
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
 
-        #[actix_web::test]
+        #[tokio::test]
         async fn should_retry_next_peer_for_same_hash_and_succeed() -> EyreResult<()> {
             let sync_state = ChainSyncState::new(true, false);
             let temp_block_hash = BlockHash::repeat_byte(9);
@@ -1849,7 +1851,7 @@ mod tests {
             Ok(())
         }
 
-        #[actix_web::test]
+        #[tokio::test]
         async fn should_try_all_peers_when_all_fail() -> EyreResult<()> {
             let sync_state = ChainSyncState::new(true, false);
             let temp_block_hash = BlockHash::repeat_byte(7);

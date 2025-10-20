@@ -36,7 +36,7 @@ async fn send_block_to_block_tree(
 }
 
 // This test ensures that during full block validation, data transaction pricing validates the perm fee
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,

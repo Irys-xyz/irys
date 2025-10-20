@@ -7,11 +7,10 @@ use eyre::eyre;
 use irys_types::{
     chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
 };
-use irys_types::{Address, IngressProof};
+use irys_types::{Address, IngressProof, TxKnownStatus};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{broadcast, mpsc::UnboundedSender};
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
@@ -32,7 +31,12 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
+    async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError>;
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> Result<TxKnownStatus, TxReadError>;
+
     async fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
@@ -182,10 +186,22 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError> {
+    async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))
+            .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
+
+        oneshot_rx.await.expect("to process TxExistenceQuery")
+    }
+
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> Result<TxKnownStatus, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::CommitmentTxExists(tx_id, oneshot_tx))
             .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")

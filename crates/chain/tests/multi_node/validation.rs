@@ -13,7 +13,7 @@ use reth::payload::EthBuiltPayload;
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
 // block must match.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -96,7 +96,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 // setting it to a valid reth block hash, but not the one that was intended to be used.
 // The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
 // (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
@@ -160,7 +160,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
 // This test adds an extra transaction to the EVM block that isn't included in the Irys block's transaction list.
 // The assertion will fail (block will be discarded) because during validation, the system will detect
 // that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -247,7 +247,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 // This test reverses the order of transactions when creating the EVM block compared to their order in the Irys block.
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,

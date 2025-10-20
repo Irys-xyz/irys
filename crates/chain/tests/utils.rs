@@ -1,15 +1,15 @@
 use actix_http::Request;
+use actix_web::http::StatusCode;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
 use actix_web::App;
 use actix_web::{
-    body::BoxBody,
+    body::{BoxBody, MessageBody},
     dev::{Service, ServiceResponse},
     Error,
 };
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::{BlockHashOrNumber, BlockId};
-use awc::{body::MessageBody, http::StatusCode};
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
@@ -172,7 +172,7 @@ pub async fn capacity_chunk_solution(
             let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
             // Check difficulty: interpret hash as little-endian number
-            let solution_val = U256::from_little_endian(&solution_hash.0);
+            let solution_val = irys_types::u256_from_le_bytes(&solution_hash.0);
             if solution_val >= difficulty {
                 return SolutionContext {
                     partition_hash,
@@ -759,17 +759,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn wait_for_chunk(
+    pub async fn wait_for_chunk<T, B>(
         &self,
-        app: &impl actix_web::dev::Service<
-            actix_http::Request,
-            Response = ServiceResponse,
-            Error = actix_web::Error,
-        >,
+        app: &T,
         ledger: DataLedger,
         offset: i32,
         seconds: usize,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+        B: MessageBody,
+    {
         let delay = Duration::from_secs(1);
         for attempt in 1..seconds {
             if let Some(_packed_chunk) =
@@ -1331,6 +1331,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .await
                 .expect("to process ChunkIngressMessage")
                 .expect("boolean response to transaction existence")
+                .is_known_and_valid()
             {
                 break;
             }
@@ -2010,30 +2011,34 @@ impl IrysNodeTest<IrysNodeCtx> {
             .sign_transaction(tx)
             .expect("to sign the storage transaction");
 
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
-        let mut response = client
-            .post(url)
-            .send_json(&tx.header) // Send the tx as JSON in the request body
+        let response = client
+            .post(&url)
+            .json(&tx.header)
+            .send()
             .await
             .expect("client post failed");
 
-        if response.status() != StatusCode::OK {
+        let status = response.status();
+        if status != 200 {
             // Read the response body
-            let body_bytes = response.body().await.expect("Failed to read response body");
-            let body_str = String::from_utf8_lossy(&body_bytes);
+            let body_str = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<failed to read body>"));
 
             panic!(
                 "Response status: {} - {}\nRequest Body: {}",
-                response.status(),
+                status,
                 body_str,
                 serde_json::to_string_pretty(&tx.header).unwrap(),
             );
         } else {
             info!(
                 "Response status: {}\n{}",
-                response.status(),
+                status,
                 serde_json::to_string_pretty(&tx).unwrap()
             );
         }
@@ -2041,30 +2046,34 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
-        let mut response = client
-            .post(url)
-            .send_json(&tx) // Send the tx as JSON in the request body
+        let response = client
+            .post(&url)
+            .json(&tx)
+            .send()
             .await
             .expect("client post failed");
 
-        if response.status() != StatusCode::OK {
+        let status = response.status();
+        if status != 200 {
             // Read the response body
-            let body_bytes = response.body().await.expect("Failed to read response body");
-            let body_str = String::from_utf8_lossy(&body_bytes);
+            let body_str = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<failed to read body>"));
 
             panic!(
                 "Response status: {} - {}\nRequest Body: {}",
-                response.status(),
+                status,
                 body_str,
                 serde_json::to_string_pretty(&tx).unwrap(),
             );
         } else {
             info!(
                 "Response status: {}\n{}",
-                response.status(),
+                status,
                 serde_json::to_string_pretty(&tx).unwrap()
             );
         }
@@ -2084,17 +2093,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             tx_offset: TxChunkOffset::from(chunk_index as u32),
         };
 
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/chunk", api_uri);
         let response = client
-            .post(url)
-            .send_json(&chunk) // Send the tx as JSON in the request body
+            .post(&url)
+            .json(&chunk)
+            .send()
             .await
             .expect("client post failed");
 
         debug!("chunk_index: {:?}", chunk_index);
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {
@@ -2156,11 +2166,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         for _ in 0..max_attempts {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let client = awc::Client::default();
+            let client = reqwest::Client::new();
             let api_uri = self.node_ctx.config.node_config.local_api_url();
             let url = format!("{}/v1/peer_list", api_uri);
 
-            if let Ok(mut resp) = client.get(url).send().await {
+            if let Ok(resp) = client.get(&url).send().await {
                 if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
                     if list.contains(target) {
                         return Ok(());
@@ -2190,12 +2200,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/stake", api_uri);
 
-        let mut response = client
-            .get(url)
+        let response = client
+            .get(&url)
             .send()
             .await
             .map_err(|e| eyre::eyre!("Failed to get stake price: {}", e))?;
@@ -2212,12 +2222,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         user_address: Address,
     ) -> eyre::Result<CommitmentPriceInfo> {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
 
-        let mut response = client
-            .get(url)
+        let response = client
+            .get(&url)
             .send()
             .await
             .map_err(|e| eyre::eyre!("Failed to get pledge price: {}", e))?;
@@ -2414,14 +2424,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         info!("Posting Commitment TX: {}", commitment_tx.id);
 
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        let result = client
-            .post(url)
-            .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
-            .await;
+        let result = client.post(&url).json(commitment_tx).send().await;
 
-        let mut response = match result {
+        let response = match result {
             Ok(r) => r,
             Err(e) => {
                 error!("Failed to post commitment transaction: {e}");
@@ -2432,32 +2439,32 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         };
 
-        if response.status() != StatusCode::OK {
+        let status = response.status();
+        if status != 200 {
             // Read the response body for logging
-            let body_bytes = match response.body().await {
-                Ok(bytes) => bytes,
+            let body_str = match response.text().await {
+                Ok(text) => text,
                 Err(e) => {
                     error!("Failed to read error response body: {e}");
-                    Default::default()
+                    String::new()
                 }
             };
-            let body_str = String::from_utf8_lossy(&body_bytes);
 
             error!(
                 "Response status: {} - {}\nRequest Body: {}",
-                response.status(),
+                status,
                 body_str,
                 serde_json::to_string_pretty(&commitment_tx).unwrap(),
             );
             Err(eyre::eyre!(
                 "Posted commitment transaction {} but got HTTP response code: {:?}",
-                response.status(),
-                &commitment_tx.id
+                &commitment_tx.id,
+                status
             ))
         } else {
             info!(
                 "Response status: {}\n{}",
-                response.status(),
+                status,
                 serde_json::to_string_pretty(&commitment_tx).unwrap()
             );
             Ok(())

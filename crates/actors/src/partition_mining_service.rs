@@ -1,21 +1,20 @@
 use crate::{
     block_producer::BlockProducerCommand,
-    broadcast_mining_service::{
-        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastMiningService,
-        BroadcastPartitionsExpiration, MiningBroadcastEvent, SubscribeTokio,
+    mining_bus::{
+        BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
+        MiningBroadcastEvent,
     },
     packing::PackingRequest,
     services::ServiceSenders,
 };
-use actix::prelude::*;
 use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{num_recall_ranges_in_partition, Ranges};
 use irys_storage::ii;
 use irys_types::{
     block_production::{Seed, SolutionContext},
-    partition_chunk_offset_ie, AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset,
-    PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, U256,
+    partition_chunk_offset_ie, u256_from_le_bytes, AtomicVdfStepNumber, Config, H256List,
+    LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -186,10 +185,6 @@ impl PartitionMiningServiceInner {
             .wrap_err("recall range larger than u64")
     }
 
-    fn hash_to_number(hash: &[u8]) -> U256 {
-        U256::from_little_endian(hash)
-    }
-
     fn mine_partition_with_seed(
         &mut self,
         mining_seed: irys_types::H256,
@@ -250,7 +245,7 @@ impl PartitionMiningServiceInner {
                 *partition_chunk_offset,
                 &mining_seed,
             );
-            let test_solution = Self::hash_to_number(&solution_hash.0);
+            let test_solution = u256_from_le_bytes(&solution_hash.0);
 
             if test_solution >= self.difficulty {
                 info!(
@@ -375,12 +370,7 @@ impl PartitionMiningService {
         let (cmd_tx, cmd_rx) = unbounded_channel();
 
         // Broadcast subscription channel
-        let (broadcast_tx, broadcast_rx) = unbounded_channel::<MiningBroadcastEvent>();
-        // Subscribe to the Actix broadcaster (we are in the Actix system initialization context here)
-        {
-            let addr = BroadcastMiningService::from_registry();
-            addr.do_send(SubscribeTokio(broadcast_tx));
-        }
+        let broadcast_rx = inner.service_senders.subscribe_mining_broadcast();
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 

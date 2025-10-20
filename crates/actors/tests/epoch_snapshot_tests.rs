@@ -1,9 +1,6 @@
-use actix::SystemService as _;
-use irys_actors::broadcast_mining_service::{
-    BroadcastMiningService, BroadcastPartitionsExpiration,
-};
 use irys_actors::{
     block_producer::BlockProducerCommand,
+    mining_bus::BroadcastPartitionsExpiration,
     partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     services::ServiceSenders,
 };
@@ -27,7 +24,7 @@ use std::sync::{Arc, RwLock};
 use std::{sync::atomic::AtomicU64, time::Duration};
 use tracing::{debug, error};
 
-#[actix::test]
+#[tokio::test]
 async fn genesis_test() {
     // setup temp dir
     let mut config = NodeConfig::testing();
@@ -164,7 +161,7 @@ async fn genesis_test() {
     // println!("{:#?}", infos);
 }
 
-#[actix::test]
+#[tokio::test]
 async fn add_slots_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -254,7 +251,7 @@ async fn add_slots_test() {
     println!("Ledger State: {:#?}", epoch_snapshot.ledgers);
 }
 
-#[actix::test]
+#[tokio::test]
 async fn unique_addresses_per_slot_test() {
     std::env::set_var("RUST_LOG", "debug");
 
@@ -358,7 +355,7 @@ async fn unique_addresses_per_slot_test() {
     assert!(submit_addresses_set.contains(&signer2.address()));
 }
 
-#[actix::test]
+#[tokio::test]
 async fn capacity_projection_tests() {
     let max_data_parts = 1000;
     let config = ConsensusConfig::testing();
@@ -374,7 +371,7 @@ async fn capacity_projection_tests() {
     }
 }
 
-#[actix::test]
+#[tokio::test]
 /*
 Summary:
 Verify that when a Submit ledger slot expires at an epoch boundary,
@@ -386,9 +383,9 @@ High-level steps:
 1) Configure a minimal consensus and build an EpochSnapshot with initial
    Publish/Submit slots and capacity partitions. Map local
    StorageModuleInfos to StorageModule instances for the miner.
-2) Spawn a Tokio PartitionMiningService per storage module. The Actix
-   BroadcastMiningService (global event bus) is accessed lazily via
-   from_registry() when broadcasting.
+2) Spawn a Tokio PartitionMiningService per storage module.
+   Subscribe to the MiningBus via ServiceSenders; publish events
+   using ServiceSenders send_* helpers. No Actix registry is involved.
 3) Wire a packing channel in ServiceSenders and forward the first
    PackingRequest into a oneshot receiver for assertions.
 4) Drive epoch transitions by repeatedly calling perform_epoch_tasks
@@ -458,21 +455,19 @@ async fn partition_expiration_and_repacking_test() {
         storage_modules.push(arc_module.clone());
     }
 
-    // Wire a Tokio packing handle that captures a single request via oneshot
-    let (tx_packing, mut rx_packing) =
-        tokio::sync::mpsc::channel::<irys_actors::packing::PackingRequest>(storage_modules.len());
+    // Wire a Tokio packing handle that captures a single request via oneshot (using internal receiver)
     let (pack_req_tx, pack_req_rx) =
         tokio::sync::oneshot::channel::<irys_actors::packing::PackingRequest>();
-    //spawn a task that will await rx_packing and send the very first packing request before exiting
+
+    // Create ServiceSenders for testing
+    let (service_senders, mut receivers) = ServiceSenders::new();
+    // Spawn a task that will await the first packing request from the internal receiver
+    let mut packing_rx = receivers.packing;
     tokio::spawn(async move {
-        if let Some(packing_req) = rx_packing.recv().await {
+        if let Some(packing_req) = packing_rx.recv().await {
             pack_req_tx.send(packing_req).expect("pack_req_rx dropped");
         }
     });
-
-    // Create ServiceSenders for testing (channel-first)
-    let (service_senders, mut receivers) =
-        ServiceSenders::new_with_packing_sender(tx_packing.clone());
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {
@@ -596,8 +591,7 @@ async fn partition_expiration_and_repacking_test() {
                 infos.iter().map(|info| info.partition_hash).collect()
             });
 
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
             expired_partition_hashes,
         )));
 
@@ -743,7 +737,7 @@ async fn partition_expiration_and_repacking_test() {
     );
 }
 
-#[actix::test]
+#[tokio::test]
 async fn epoch_blocks_reinitialization_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -939,7 +933,7 @@ async fn epoch_blocks_reinitialization_test() {
     }
 }
 
-#[actix::test]
+#[tokio::test]
 async fn partitions_assignment_determinism_test() {
     std::env::set_var("RUST_LOG", "debug");
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);

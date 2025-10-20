@@ -1,6 +1,6 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use actix::{Actor as _, Arbiter, System, SystemRegistry};
+
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
@@ -12,11 +12,11 @@ use irys_actors::{
     },
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
-    broadcast_mining_service::{BroadcastMiningService, MiningServiceBroadcaster},
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
+    mining_bus::{MiningBus, MiningBusBroadcaster},
     packing::PackingRequest,
     partition_mining_service::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
@@ -54,10 +54,10 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, ArbiterHandle,
-    CloneableJoinHandle, CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode,
-    OracleConfig, PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo,
-    ServiceSet, TokioServiceHandle, H256, U256,
+    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, CloneableJoinHandle,
+    CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
+    PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
+    TokioServiceHandle, H256, U256,
 };
 use irys_types::{BlockHash, EvmBlockHash};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -488,8 +488,8 @@ impl IrysNode {
         info!("Fetching genesis block from trusted peer: {}", trusted_peer);
 
         // Create HTTP client and fetch genesis block
-        let awc_client = awc::Client::new();
-        let genesis_block = fetch_genesis_block(trusted_peer, &awc_client)
+        let http_client = reqwest::Client::new();
+        let genesis_block = fetch_genesis_block(trusted_peer, &http_client)
             .await
             .expect("expected genesis block from http api");
 
@@ -774,8 +774,9 @@ impl IrysNode {
             .stack_size(32 * 1024 * 1024)
             .spawn({
                 let irys_provider = Arc::clone(irys_provider);
+                let rt_handle = runtime_handle.clone();
                 move || {
-                    System::new().block_on(async move {
+                    rt_handle.block_on(async move {
                         let block_index = Arc::new(RwLock::new(block_index));
 
                         // start the rest of the services
@@ -806,7 +807,7 @@ impl IrysNode {
                         // await on actix web server
                         let server_handle = actix_server.handle();
 
-                        let server_stop_handle = actix_rt::spawn(async move {
+                        let server_stop_handle = tokio::spawn(async move {
                             let _ = main_actor_thread_shutdown_rx.recv().await;
                             info!("Main actor thread received shutdown signal");
 
@@ -959,16 +960,13 @@ impl IrysNode {
 
         // initialize packing service early
         let packing_service = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
-        // channel-first: create sender/receiver before attaching the service loop
-        let (packing_tx, packing_rx) = irys_actors::packing::PackingService::channel(5_000);
         // start service senders/receivers with packing sender
-        let (service_senders, receivers) =
-            ServiceSenders::new_with_packing_sender(packing_tx.clone());
+        let (service_senders, receivers) = ServiceSenders::new();
         // attach the receiver loop and obtain a handle for waiters/tests
         let packing_handle = packing_service.attach_receiver_loop(
             runtime_handle.clone(),
-            packing_rx,
-            packing_tx.clone(),
+            receivers.packing,
+            service_senders.packing_sender.clone(),
         );
 
         // start block index service (tokio)
@@ -1022,9 +1020,8 @@ impl IrysNode {
             .await
             .expect("to receive BlockIndexReadGuard from BlockIndex service");
 
-        // start the broadcast mining service
-        let span = tracing::Span::current();
-        let (broadcast_mining_actor, broadcast_arbiter) = init_broadcaster_service(span.clone());
+        // use the Tokio-native mining bus from ServiceSenders
+        let mining_bus = service_senders.mining_bus();
 
         // start the epoch service
         let replay_data =
@@ -1215,7 +1212,7 @@ impl IrysNode {
             &block_tree_guard,
             &vdf_state_readonly,
             block_discovery_facade,
-            broadcast_mining_actor.clone(),
+            mining_bus.clone(),
             price_oracle,
             reth_node_adapter.clone(),
             receivers.block_producer,
@@ -1254,7 +1251,7 @@ impl IrysNode {
             latest_block,
             initial_hash,
             global_step_number,
-            broadcast_mining_actor,
+            mining_bus.clone(),
             vdf_state,
             atomic_global_step_number,
             block_status_provider,
@@ -1378,11 +1375,7 @@ impl IrysNode {
         let mut services = Vec::new();
         {
             // Services are shut down in FIFO order (first added = first to shut down)
-
             // 1. Mining operations
-            services.push(ArbiterEnum::ActixArbiter {
-                arbiter: ArbiterHandle::new(broadcast_arbiter, "broadcast_arbiter".to_string()),
-            });
             for oracle_handle in price_oracle_handles {
                 services.push(ArbiterEnum::TokioService(oracle_handle));
             }
@@ -1477,7 +1470,7 @@ impl IrysNode {
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
-        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
+        mining_bus: MiningBus,
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
@@ -1525,7 +1518,7 @@ impl IrysNode {
                     vdf_fast_forward_receiver,
                     is_vdf_mining_enabled,
                     vdf_shutdown_receiver,
-                    MiningServiceBroadcaster::from(broadcast_mining_actor.clone()),
+                    MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                     block_status_provider,
@@ -1606,7 +1599,7 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         block_discovery: BlockDiscoveryFacadeImpl,
-        broadcast_mining_actor: actix::Addr<BroadcastMiningService>,
+        mining_bus: MiningBus,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
         block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
@@ -1619,7 +1612,7 @@ impl IrysNode {
             db: irys_db.clone(),
             config: config.clone(),
             reward_curve,
-            mining_broadcaster: broadcast_mining_actor,
+            mining_broadcaster: mining_bus,
             block_discovery,
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
@@ -1857,19 +1850,6 @@ fn init_peer_list_service(
         peer_events,
         runtime_handle,
     )
-}
-
-fn init_broadcaster_service(span: tracing::Span) -> (actix::Addr<BroadcastMiningService>, Arbiter) {
-    let broadcast_arbiter = Arbiter::new();
-    let broadcast_mining_actor =
-        BroadcastMiningService::start_in_arbiter(&broadcast_arbiter.handle(), |_| {
-            BroadcastMiningService {
-                span: Some(span),
-                ..Default::default()
-            }
-        });
-    SystemRegistry::set(broadcast_mining_actor.clone());
-    (broadcast_mining_actor, broadcast_arbiter)
 }
 
 fn init_reth_service(

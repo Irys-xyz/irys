@@ -1,9 +1,9 @@
 use crate::utils::post_chunk;
 use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
+use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use awc::http::StatusCode;
 
 use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
@@ -12,7 +12,7 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tracing::debug;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
