@@ -25,6 +25,7 @@ pub mod storage;
 pub mod storage_pricing;
 pub mod time;
 pub mod transaction;
+pub mod tx_known_status;
 pub mod tx_source;
 pub mod version;
 pub mod versioning;
@@ -59,6 +60,7 @@ pub use peer_list::*;
 pub use reth_codecs::Compact;
 pub use rlp::*;
 pub use simple_rng::*;
+pub use tx_known_status::*;
 pub use version::*;
 pub use versioning::*;
 

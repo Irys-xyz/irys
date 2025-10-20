@@ -157,7 +157,7 @@ where
 
         if self
             .mempool
-            .is_known_transaction(tx_id)
+            .is_known_data_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -165,6 +165,7 @@ where
                     e
                 )))
             })?
+            .is_known()
         {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
@@ -268,7 +269,7 @@ where
 
         if self
             .mempool
-            .is_known_transaction(tx_id)
+            .is_known_commitment_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -276,6 +277,7 @@ where
                     e
                 )))
             })?
+            .is_known()
         {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
@@ -452,15 +454,15 @@ where
             self.gossip_client.mining_address, block_header.block_hash
         );
 
-        let mut missing_tx_ids = Vec::new();
+        let mut missing_invalid_tx_ids = Vec::new();
 
         for tx_id in block_header
             .data_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(tx_id).await? {
-                missing_tx_ids.push(tx_id);
+            if !self.is_known_valid_present_data_tx(tx_id).await? {
+                missing_invalid_tx_ids.push(tx_id);
             }
         }
 
@@ -469,18 +471,24 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(system_tx_id).await? {
-                missing_tx_ids.push(system_tx_id);
+            if !self
+                .is_known_valid_present_commitment_tx(system_tx_id)
+                .await?
+            {
+                missing_invalid_tx_ids.push(system_tx_id);
             }
         }
 
-        if !missing_tx_ids.is_empty() {
-            debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
+        if !missing_invalid_tx_ids.is_empty() {
+            debug!(
+                "Missing/invalid transactions to fetch: {:?}",
+                missing_invalid_tx_ids
+            );
         }
 
         // remove them from the mempool's blacklist
         self.mempool
-            .remove_from_blacklist(missing_tx_ids.clone())
+            .remove_from_blacklist(missing_invalid_tx_ids.clone())
             .await
             .map_err(|error| {
                 error!("Failed to remove txs from mempool blacklist");
@@ -489,7 +497,7 @@ where
 
         // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
         // Fetch and process each missing transaction one-by-one with retries
-        for tx_id_to_fetch in missing_tx_ids {
+        for tx_id_to_fetch in missing_invalid_tx_ids {
             // Try source peer first
             let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
             let mut last_err: Option<String> = None;
@@ -692,13 +700,30 @@ where
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
-            GossipError::Internal(InternalGossipError::Unknown(format!(
-                "is_known_transaction() errored: {:?}",
-                e
-            )))
-        })
+    async fn is_known_valid_present_data_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        self.mempool
+            .is_known_data_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_valid_data_tx() errored: {:?}",
+                    e
+                )))
+            })
+            .map(|s| s.is_known_valid_and_present())
+    }
+
+    async fn is_known_valid_present_commitment_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        self.mempool
+            .is_known_commitment_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_valid_commitment_tx() errored: {:?}",
+                    e
+                )))
+            })
+            .map(|s| s.is_known_valid_and_present())
     }
 
     pub(crate) async fn handle_get_data(
