@@ -193,6 +193,13 @@ pub enum OracleConfig {
         /// Ticker symbol to query (e.g., "IRYS", "BTC").
         symbol: String,
     },
+    /// CoinGecko-backed price oracle
+    CoinGecko {
+        /// API key for the CoinGecko Pro API
+        api_key: String,
+        /// CoinGecko coin id (e.g., "bitcoin", "ethereum")
+        coin_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

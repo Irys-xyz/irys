@@ -12,6 +12,9 @@ use irys_types::storage_pricing::{
 use std::sync::{Arc, RwLock};
 use tokio::time::{Duration, interval};
 use tracing::Instrument as _;
+pub mod coingecko;
+pub mod coinmarketcap;
+pub mod mock_oracle;
 
 #[derive(Debug)]
 enum OracleSource {
@@ -19,6 +22,8 @@ enum OracleSource {
     Mock(mock_oracle::MockOracle),
     /// CoinMarketCap-backed oracle
     CoinMarketCap(coinmarketcap::CoinMarketCapOracle),
+    /// CoinGecko-backed oracle
+    CoinGecko(coingecko::CoinGeckoOracle),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,23 +60,30 @@ impl SingleOracle {
         })
     }
 
-    /// Construct a CoinMarketCap oracle and synchronously fetch initial price.
-    pub fn new_coinmarketcap_blocking(
-        api_key: String,
-        symbol: String,
-        handle: &tokio::runtime::Handle,
-    ) -> Arc<Self> {
+    /// Construct a CoinMarketCap oracle and fetch initial price.
+    pub async fn new_coinmarketcap(api_key: String, symbol: String) -> eyre::Result<Arc<Self>> {
         let client = coinmarketcap::CoinMarketCapOracle::new(api_key, symbol);
-        let initial = handle
-            .block_on(client.current_price())
-            .expect("coinmarketcap initial price must succeed");
-        Arc::new(Self {
+        let initial = client.current_price().await?;
+        Ok(Arc::new(Self {
             source: OracleSource::CoinMarketCap(client),
             cache: Arc::new(RwLock::new(PriceCache {
                 value: initial,
                 last_updated: std::time::SystemTime::now(),
             })),
-        })
+        }))
+    }
+
+    /// Construct a CoinGecko oracle and fetch initial price.
+    pub async fn new_coingecko(api_key: String, coin_id: String) -> eyre::Result<Arc<Self>> {
+        let client = coingecko::CoinGeckoOracle::new(api_key, coin_id);
+        let initial = client.current_price().await?;
+        Ok(Arc::new(Self {
+            source: OracleSource::CoinGecko(client),
+            cache: Arc::new(RwLock::new(PriceCache {
+                value: initial,
+                last_updated: std::time::SystemTime::now(),
+            })),
+        }))
     }
 
     /// Returns the last cached price of IRYS in USD.
@@ -117,6 +129,34 @@ impl SingleOracle {
                     shutdown_signal: shutdown_tx,
                 })
             }
+            OracleSource::CoinGecko(_) => {
+                let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
+                let handle = runtime_handle.spawn(
+                    async move {
+                        // 15 minutes
+                        let mut ticker = interval(Duration::from_secs(15 * 60));
+                        loop {
+                            tokio::select! {
+                                _ = &mut shutdown_rx => {
+                                    tracing::info!("price oracle poller shutdown");
+                                    break;
+                                }
+                                _ = ticker.tick() => {
+                                    if let Err(err) = this.update_once().await {
+                                        tracing::warn!(?err, "oracle price fetch failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .in_current_span(),
+                );
+                Some(TokioServiceHandle {
+                    name: "price_oracle_poller".to_string(),
+                    handle,
+                    shutdown_signal: shutdown_tx,
+                })
+            }
         }
     }
 
@@ -125,6 +165,7 @@ impl SingleOracle {
         let price = match &self.source {
             OracleSource::Mock(m) => m.current_price(),
             OracleSource::CoinMarketCap(c) => c.current_price().await,
+            OracleSource::CoinGecko(cg) => cg.current_price().await,
         }?;
         let mut guard = self
             .cache
@@ -162,8 +203,26 @@ impl IrysPriceOracle {
         }
         best_val.ok_or_else(|| eyre::eyre!("no oracles configured"))
     }
-}
 
-// External module files
-pub mod coinmarketcap;
-pub mod mock_oracle;
+    /// Returns the freshest price along with its last_updated timestamp.
+    pub async fn current_snapshot(
+        &self,
+    ) -> eyre::Result<(Amount<(IrysPrice, Usd)>, std::time::SystemTime)> {
+        let mut best_ts: Option<std::time::SystemTime> = None;
+        let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
+        for o in &self.oracles {
+            let guard = o
+                .cache
+                .read()
+                .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
+            if best_ts.map(|t| guard.last_updated > t).unwrap_or(true) {
+                best_ts = Some(guard.last_updated);
+                best_val = Some(guard.value);
+            }
+        }
+        match (best_val, best_ts) {
+            (Some(v), Some(ts)) => Ok((v, ts)),
+            _ => eyre::bail!("no oracles configured"),
+        }
+    }
+}
