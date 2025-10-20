@@ -43,7 +43,7 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
         .await
         .expect("mempool responded")
         .unwrap()
-        .is_known();
+        .is_known_and_valid();
     assert!(!exists, "invalid-value tx must not be stored in mempool");
 
     // Re-gossip same tx; precheck should now skip due to recent_invalid_tx marking
@@ -97,7 +97,7 @@ async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result
         .await
         .expect("mempool responded")
         .unwrap()
-        .is_known();
+        .is_known_and_valid();
     assert!(!exists, "low-fee tx must not be stored in mempool");
 
     // Re-gossip same tx; should be skipped now
