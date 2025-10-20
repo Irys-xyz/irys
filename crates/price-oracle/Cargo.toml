@@ -16,7 +16,7 @@ irys-types.workspace = true
 eyre = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-rust_decimal = { workspace = true }
+rust_decimal = { workspace = true, features = ["serde-with-float"] }
 rust_decimal_macros = { workspace = true }
 reqwest = { workspace = true }
 serde = { version = "1", features = ["derive"] }

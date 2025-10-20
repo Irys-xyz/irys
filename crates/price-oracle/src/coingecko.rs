@@ -13,9 +13,6 @@ use reqwest::Client;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue};
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use serde::de::Error as DeError;
-use serde_json::Value;
-use std::str::FromStr as _;
 use std::time::{Duration, SystemTime};
 use std::{collections::HashMap, sync::Arc};
 
@@ -50,9 +47,13 @@ impl CoinGeckoOracle {
     pub async fn current_price(&self) -> eyre::Result<CoinGeckoQuote> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        // CoinGecko pro header is lowercase: x-cg-pro-api-key
+        let header_name = if self.url.starts_with("https://api.coingecko.com") {
+            HeaderName::from_static("x-cg-demo-api-key")
+        } else {
+            HeaderName::from_static("x-cg-pro-api-key")
+        };
         headers.insert(
-            HeaderName::from_static("x-cg-pro-api-key"),
+            header_name,
             HeaderValue::from_str(&self.api_key).context("invalid API key header value")?,
         );
 
@@ -94,7 +95,8 @@ impl CoinGeckoOracle {
 
         let last_updated = entry
             .last_updated_at
-            .map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts));
+            .ok_or_else(|| eyre!("updated_at field missing"))?;
+        let last_updated = SystemTime::UNIX_EPOCH + Duration::from_secs(last_updated);
 
         Ok(CoinGeckoQuote {
             amount,
@@ -108,29 +110,15 @@ pub struct CoinGeckoQuote {
     /// Latest price converted into an `Amount`.
     pub amount: Amount<(IrysPrice, Usd)>,
     /// Timestamp reported by CoinGecko (seconds since UNIX epoch).
-    pub last_updated: Option<SystemTime>,
+    pub last_updated: SystemTime,
 }
 
 #[derive(Debug, Deserialize)]
 struct SimplePriceData {
-    #[serde(deserialize_with = "deserialize_decimal")]
+    #[serde(with = "rust_decimal::serde::float")]
     usd: Decimal,
     #[serde(default)]
     last_updated_at: Option<u64>,
-}
-
-fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    match value {
-        Value::Number(n) => Decimal::from_str(&n.to_string()).map_err(DeError::custom),
-        Value::String(s) => Decimal::from_str(&s).map_err(DeError::custom),
-        other => Err(DeError::custom(format!(
-            "expected number or string for Decimal, found {other}"
-        ))),
-    }
 }
 
 #[cfg(test)]

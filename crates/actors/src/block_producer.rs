@@ -33,8 +33,8 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -1383,19 +1383,10 @@ fn millis_since_epoch(time: SystemTime) -> u128 {
 #[inline]
 fn choose_oracle_price(
     parent_ts_ms: u128,
-    parent_price: irys_types::storage_pricing::Amount<(
-        irys_types::storage_pricing::phantoms::IrysPrice,
-        irys_types::storage_pricing::phantoms::Usd,
-    )>,
-    oracle_price: irys_types::storage_pricing::Amount<(
-        irys_types::storage_pricing::phantoms::IrysPrice,
-        irys_types::storage_pricing::phantoms::Usd,
-    )>,
+    parent_price: IrysTokenPrice,
+    oracle_price: IrysTokenPrice,
     oracle_updated_ms: u128,
-) -> irys_types::storage_pricing::Amount<(
-    irys_types::storage_pricing::phantoms::IrysPrice,
-    irys_types::storage_pricing::phantoms::Usd,
-)> {
+) -> IrysTokenPrice {
     let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
         (parent_price, "parent_fallback")
     } else {
@@ -1476,11 +1467,11 @@ mod oracle_choice_tests {
     fn chooses_parent_when_parent_is_newer() {
         let parent_price = Amount::token(dec!(2.0)).unwrap();
         let oracle_price = Amount::token(dec!(1.0)).unwrap();
-        let parent_ts_ms = 2_000_u128; // parent block timestamp 2 seconds
+        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(2_000); // parent block timestamp 2 seconds
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
 
         let chosen = choose_oracle_price(
-            parent_ts_ms,
+            millis_since_epoch(parent_ts_ms),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),
@@ -1495,11 +1486,11 @@ mod oracle_choice_tests {
     fn chooses_oracle_when_oracle_is_fresh() {
         let parent_price = Amount::token(dec!(2.0)).unwrap();
         let oracle_price = Amount::token(dec!(1.0)).unwrap();
-        let parent_ts_ms = 1_000_u128; // parent block timestamp 1 second
+        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(1_000); // parent block timestamp 1 second
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
 
         let chosen = choose_oracle_price(
-            parent_ts_ms,
+            millis_since_epoch(parent_ts_ms),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),
