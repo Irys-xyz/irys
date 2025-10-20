@@ -110,10 +110,18 @@ impl ChunkOrchestrator {
     }
 
     fn populate_request_queue(&mut self) {
-        // Retain only those pending chunk requests that are still Entropy
-        // removing those satisfied by other means (user upload, chunk migration, etc etc)
-        // and retain only those requests that are not Completed
+        // Retain in-flight requests (for telemetry tracking) and pending entropy requests.
+        // Remove completed requests and pending requests for chunks that changed type
+        // (satisfied via gossip/upload or invalidated by storage fault/expiry).
+
         self.chunk_requests.retain(|offset, cr| {
+            // Always retain in-flight requests
+            if matches!(cr.request_state, ChunkRequestState::Requested(..)) {
+                return true;
+            }
+
+            // For non-requested states, only retain if the chunk is still Entropy
+            // and not Completed
             matches!(
                 self.storage_module.get_chunk_type(offset),
                 Some(ChunkType::Entropy)
