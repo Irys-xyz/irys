@@ -616,7 +616,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
-                poll_interval_ms: 500,
+                poll_interval_ms: default_mock_oracle_poll_interval_ms(),
             }],
             mining_key,
             reward_address,
