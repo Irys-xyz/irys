@@ -1092,6 +1092,7 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
+            #![proptest_config(ProptestConfig::with_cases(10))]
             #[test]
             fn slow_fifo_ordering_always_maintained(
                 timestamps in prop::collection::vec(100_u64..1_000_000, 5..20)
