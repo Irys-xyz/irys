@@ -39,14 +39,33 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn tmp_base_dir() -> PathBuf {
-    // check for custom tmp directory at compile time, fall back to .tmp in repo
     if let Some(custom_tmp) = option_env!("IRYS_CUSTOM_TMP_DIR") {
-        PathBuf::from(custom_tmp)
-    } else {
-        PathBuf::from_str(CARGO_MANIFEST_DIR)
-            .unwrap()
-            .join("../../.tmp")
+        // try to parse the value as a path
+        let path = PathBuf::from(custom_tmp);
+        if path.is_absolute()
+            || path.exists()
+            || custom_tmp.starts_with('/')
+            || custom_tmp.starts_with("./")
+        {
+            return path;
+        }
+
+        // if it doesn't look like a path, try to use it as an env var key
+        if let Ok(env_value) = std::env::var(custom_tmp) {
+            return PathBuf::from(env_value);
+        }
+
+        // If both failed, print error and fall back
+        eprintln!(
+            "Warning: IRYS_CUSTOM_TMP_DIR='{}' is not a valid path and does not reference a valid environment variable. Falling back to default.",
+            custom_tmp
+        );
     }
+
+    // Default fallback
+    PathBuf::from_str(CARGO_MANIFEST_DIR)
+        .unwrap()
+        .join("../../.tmp")
 }
 
 /// Creates a temporary directory
