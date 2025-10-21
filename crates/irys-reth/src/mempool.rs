@@ -9,12 +9,11 @@ use reth::{
     providers::StateProviderFactory,
     transaction_pool::TransactionValidationTaskExecutor,
 };
-use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec as _, EthereumHardforks};
 use reth_provider::CanonStateSubscriptions as _;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
-    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    CoinbaseTipOrdering, EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool,
+    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig}, EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool,
     TransactionOrigin, TransactionValidationOutcome, TransactionValidator,
 };
 use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
@@ -289,7 +288,7 @@ where
                 let chunks_u64 = transaction
                     .access_list()
                     .map(sum_pd_chunks_in_access_list)
-                    .unwrap_or(0u64);
+                    .unwrap_or(0_u64);
                 alloy_primitives::U256::from(chunks_u64).saturating_mul(pd_tip_per_chunk)
             }
             _ => alloy_primitives::U256::ZERO,

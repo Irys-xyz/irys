@@ -11,30 +11,27 @@
 //! - Balance increments correspond to rewards
 //! - Balance decrements correspond to storage transaction fees
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 
 use alloy_consensus::TxEip1559;
-use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{TxKind, U256};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
-        components::{ComponentsBuilder, ExecutorBuilder, PoolBuilder},
+        components::{ComponentsBuilder, ExecutorBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
         PayloadBuilderConfig as _,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    primitives::{InvalidTransactionError, SealedBlock},
     providers::{
-        providers::ProviderFactoryBuilder, CanonStateSubscriptions as _, EthStorage,
-        StateProviderFactory,
+        providers::ProviderFactoryBuilder, EthStorage,
     },
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
-    transaction_pool::TransactionValidationTaskExecutor,
 };
-use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, ChainSpecProvider as _, EthChainSpec, EthereumHardforks};
 pub use reth_ethereum_engine_primitives;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
@@ -47,15 +44,9 @@ use reth_node_ethereum::{
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
-use reth_transaction_pool::{
-    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
-    TransactionValidator,
-};
-use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
+use reth_transaction_pool::EthPooledTransaction;
 use reth_trie_db::MerklePatriciaTrie;
 use shadow_tx::ShadowTransaction;
-use tracing::info;
 
 use crate::{
     mempool::IrysPoolBuilder, payload::ShadowTxStore,

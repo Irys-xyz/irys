@@ -441,9 +441,9 @@ mod tests {
     use super::*;
     use crate::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1, PdKey};
     use alloy_primitives::U256;
-    use rand09::{rngs::StdRng, SeedableRng};
+    use rand09::{rngs::StdRng, SeedableRng as _};
     use reth_primitives_traits::SignedTransaction;
-    use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction};
+    use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction as _};
     use std::collections::VecDeque;
 
     #[test]
@@ -476,7 +476,7 @@ mod tests {
         };
         let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
         let access_list = build_pd_access_list([PdKey {
-            slot_index_be: [0u8; 26],
+            slot_index_be: [0_u8; 26],
             offset: 0,
             chunk_count,
         }]);
