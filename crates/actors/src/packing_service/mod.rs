@@ -304,8 +304,8 @@ impl PackingService {
     /// Check if the packing system is idle
     fn is_system_idle(internals: &Internals) -> bool {
         let has_queued_jobs = internals.pending_jobs.iter().any(|entry| {
-            let (_sm_id, (_tx, _rx)) = entry.pair();
-            _tx.capacity() < PER_SM_CHANNEL_CAPACITY
+            let (_sm_id, (tx, _rx)) = entry.pair();
+            tx.capacity() < PER_SM_CHANNEL_CAPACITY
         });
 
         let available_permits = internals.semaphore.available_permits();
