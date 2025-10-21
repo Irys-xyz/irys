@@ -39,9 +39,14 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn tmp_base_dir() -> PathBuf {
-    PathBuf::from_str(CARGO_MANIFEST_DIR)
-        .unwrap()
-        .join("../../.tmp")
+    // check for custom tmp directory at compile time, fall back to .tmp in repo
+    if let Some(custom_tmp) = option_env!("IRYS_CUSTOM_TMP_DIR") {
+        PathBuf::from(custom_tmp)
+    } else {
+        PathBuf::from_str(CARGO_MANIFEST_DIR)
+            .unwrap()
+            .join("../../.tmp")
+    }
 }
 
 /// Creates a temporary directory
