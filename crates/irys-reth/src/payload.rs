@@ -52,30 +52,18 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     num::NonZeroUsize,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
-use tokio::sync::{mpsc, oneshot};
 
 use reth_ethereum_payload_builder::{default_ethereum_payload, EthereumBuilderConfig};
 
 type BestTransactionsIter =
     Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;
 
-/// Request for shadow transactions for a specific payload ID
-///
-/// This is sent through the notification channel when a payload is requested
-/// but not found in the cache.
-#[derive(Debug)]
-pub struct ShadowTxRequest {
-    pub payload_id: PayloadId,
-    pub response_tx: oneshot::Sender<(Vec<EthPooledTransaction>, Instant)>,
-}
-
-/// Thread-safe store for shadow transactions indexed by payload ID with notification system
+/// Thread-safe store for shadow transactions indexed by payload ID.
 #[derive(Debug, Clone)]
 pub struct ShadowTxStore {
     inner: Arc<Mutex<LruCache<DeterministicShadowTxKey, (Vec<EthPooledTransaction>, Instant)>>>,
-    request_tx: Option<mpsc::UnboundedSender<ShadowTxRequest>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -88,31 +76,16 @@ impl DeterministicShadowTxKey {
 }
 
 impl ShadowTxStore {
-    /// Create a new shadow transaction store with LRU cache capacity of 50
+    /// Create a new shadow transaction store with LRU cache capacity of 50.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(128).expect("50 is non-zero"),
+                NonZeroUsize::new(50).expect("50 is non-zero"),
             ))),
-            request_tx: None,
         }
     }
 
-    /// Create a new shadow transaction store with notification capability
-    pub fn new_with_notifications() -> (Self, mpsc::UnboundedReceiver<ShadowTxRequest>) {
-        let (request_tx, request_rx) = mpsc::unbounded_channel();
-        let store = Self {
-            inner: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(50).expect("50 is non-zero"),
-            ))),
-            request_tx: Some(request_tx),
-        };
-        (store, request_rx)
-    }
-
-    /// Set shadow transactions for a specific payload ID
-    /// This method should be called by external code (like block producers) to provide
-    /// shadow transactions that will be included in the payload for the given ID.
+    /// Set shadow transactions for a specific payload ID.
     pub fn set_shadow_txs(
         &self,
         key: DeterministicShadowTxKey,
@@ -123,49 +96,13 @@ impl ShadowTxStore {
         store.put(key, (shadow_txs, timestamp));
     }
 
-    /// Get shadow transactions for a specific payload ID (blocking version)
-    /// This version blocks until shadow transactions are available or timeout occurs
-    pub async fn get_shadow_txs_blocking(
-        &self,
-        payload_id: PayloadId,
-        timeout: Duration,
-    ) -> (Vec<EthPooledTransaction>, Instant) {
+    /// Returns the shadow transactions for `payload_id`, or an empty list if none are registered.
+    pub fn shadow_txs(&self, payload_id: PayloadId) -> (Vec<EthPooledTransaction>, Instant) {
         let key = DeterministicShadowTxKey::new(payload_id);
-        // First attempt to get from cache
-        {
-            let mut store = self.inner.lock().unwrap();
-            if let Some((shadow_txs, timestamp)) = store.get(&key) {
-                return (shadow_txs.clone(), *timestamp);
-            }
+        let mut store = self.inner.lock().unwrap();
+        if let Some((shadow_txs, timestamp)) = store.get(&key) {
+            return (shadow_txs.clone(), *timestamp);
         }
-
-        // If not found and notifications are enabled, send notification and wait
-        if let Some(request_tx) = &self.request_tx {
-            let (response_tx, response_rx) = oneshot::channel();
-            let request = ShadowTxRequest {
-                payload_id,
-                response_tx,
-            };
-
-            // Send notification
-            request_tx
-                .send(request)
-                .expect("Notification channel closed");
-            // Wait for response with specified timeout
-            if let Ok(Ok((shadow_txs, timestamp))) =
-                tokio::time::timeout(timeout, response_rx).await
-            {
-                // add to cache
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .put(key, (shadow_txs.clone(), timestamp));
-
-                return (shadow_txs, timestamp);
-            }
-        }
-
-        // Fallback: return empty if not found
         (Vec::new(), Instant::now())
     }
 }
@@ -424,10 +361,7 @@ where
         payload_id: PayloadId,
     ) -> BestTransactionsIter {
         // Get shadow transactions from the store
-        let (shadow_txs, timestamp) = futures::executor::block_on(
-            self.shadow_tx_store
-                .get_shadow_txs_blocking(payload_id, Duration::from_secs(1)),
-        );
+        let (shadow_txs, timestamp) = self.shadow_tx_store.shadow_txs(payload_id);
 
         // Get pool transactions iterator
         let pool_txs = self.pool.best_transactions_with_attributes(attributes);
@@ -504,35 +438,25 @@ mod tests {
     use rand09::{rngs::StdRng, SeedableRng};
     use reth_primitives_traits::SignedTransaction;
     use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction};
-    use std::{collections::VecDeque, time::Duration};
-    use tokio::time::timeout;
+    use std::collections::VecDeque;
 
-    #[tokio::test]
-    async fn test_shadow_tx_store_blocking() {
-        // Create store with notifications
-        let (store, mut request_rx) = ShadowTxStore::new_with_notifications();
-        let store_clone = store.clone();
-
-        // Spawn a handler that responds to requests
-        let handler = tokio::spawn(async move {
-            if let Some(request) = request_rx.recv().await {
-                // Simulate generating shadow transactions
-                let shadow_txs = vec![]; // Empty for test
-                let timestamp = Instant::now();
-                let _ = request.response_tx.send((shadow_txs, timestamp));
-            }
-        });
-
-        // Test blocking version
+    #[test]
+    fn shadow_tx_store_returns_inserted_transactions() {
+        let store = ShadowTxStore::new();
         let payload_id = PayloadId::new([5; 8]);
 
-        let (txs, _) = store_clone
-            .get_shadow_txs_blocking(payload_id, Duration::from_millis(500))
-            .await;
-        assert!(txs.is_empty()); // Should get empty response from handler
+        let mut generator = TransactionGenerator::with_num_signers(StdRng::seed_from_u64(33), 1);
+        generator.set_base_fee(1);
+        generator.set_gas_limit(210_000);
+        let tx = normal_pooled_transaction(&mut generator, 0);
 
-        // Wait for handler to complete
-        let _ = timeout(Duration::from_secs(1), handler).await;
+        store.set_shadow_txs(DeterministicShadowTxKey::new(payload_id), vec![tx.clone()]);
+
+        let (retrieved, _) = store.shadow_txs(payload_id);
+        assert_eq!(retrieved, vec![tx]);
+
+        let (missing, _) = store.shadow_txs(PayloadId::new([6; 8]));
+        assert!(missing.is_empty());
     }
 
     fn pd_pooled_transaction(

@@ -3251,8 +3251,8 @@ pub mod test_utils {
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
 
-            // Create the MPSC channel for shadow transaction requests
-            let (shadow_tx_store, _shadow_tx_receiver) = ShadowTxStore::new_with_notifications();
+            // Shadow transactions are injected manually by the block producer.
+            let shadow_tx_store = ShadowTxStore::new();
 
             let NodeHandle {
                 node,

@@ -625,8 +625,7 @@ impl IrysNode {
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
-        let (shadow_tx_store, _shadow_tx_notification_stream) =
-            ShadowTxStore::new_with_notifications();
+        let shadow_tx_store = ShadowTxStore::new();
 
         let irys_provider = reth_provider::create_provider();
 
