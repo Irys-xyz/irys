@@ -5,6 +5,7 @@ use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
+use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
@@ -354,30 +355,37 @@ impl Inner {
     }
 
     /// checks mempool and mdbx
-    pub async fn handle_data_tx_exists_message(&self, txid: H256) -> Result<bool, TxReadError> {
+    pub async fn handle_data_tx_exists_message(
+        &self,
+        txid: H256,
+    ) -> Result<TxKnownStatus, TxReadError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        #[expect(clippy::if_same_then_else, reason = "readability")]
+        // #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard
             .valid_submit_ledger_tx
             .contains_key(&txid)
         {
-            Ok(true)
+            Ok(TxKnownStatus::Valid)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-            Ok(true)
+            Ok(TxKnownStatus::ValidSeen)
+        } else if mempool_state_guard.recent_invalid_tx.contains(&txid) {
+            // Still has it, just invalid
+            Ok(TxKnownStatus::InvalidSeen)
         } else {
             drop(mempool_state_guard);
             let read_tx = self.read_tx();
 
             if read_tx.is_err() {
                 Err(TxReadError::DatabaseError)
+            } else if tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
+                .map_err(|_| TxReadError::DatabaseError)?
+                .is_some()
+            {
+                Ok(TxKnownStatus::Migrated)
             } else {
-                Ok(
-                    tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
-                        .map_err(|_| TxReadError::DatabaseError)?
-                        .is_some(),
-                )
+                Ok(TxKnownStatus::Unknown)
             }
         }
     }

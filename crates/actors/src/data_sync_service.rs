@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{debug, warn, Instrument as _};
+use tracing::{debug, error, warn, Instrument as _};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -96,17 +96,31 @@ impl DataSyncServiceInner {
                 chunk_offset,
                 peer_address: peer_addr,
                 chunk,
-            } => self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)?,
+            } => {
+                if let Err(e) =
+                    self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
+                {
+                    error!("Failed to handle chunk completion: {e:?}");
+                }
+            }
             DataSyncServiceMessage::ChunkFailed {
                 storage_module_id,
                 chunk_offset,
                 peer_addr,
-            } => self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr)?,
+            } => {
+                if let Err(e) = self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr) {
+                    error!("Failed to handle chunk failure: {e:?}");
+                }
+            }
             DataSyncServiceMessage::ChunkTimedOut {
                 storage_module_id,
                 chunk_offset,
                 peer_address: peer_addr,
-            } => self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr)?,
+            } => {
+                if let Err(e) = self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr) {
+                    error!("Failed to handle chunk timeout: {e:?}");
+                }
+            }
             DataSyncServiceMessage::PeerListUpdated => self.handle_peer_list_updated(),
             DataSyncServiceMessage::PeerDisconnected {
                 peer_address: peer_addr,

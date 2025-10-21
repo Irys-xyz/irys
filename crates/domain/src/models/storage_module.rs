@@ -1398,11 +1398,20 @@ impl StorageModule {
         let recent_chunk_times = self.recent_chunk_times.read().unwrap();
 
         if recent_chunk_times.is_empty() {
+            tracing::debug!("write_throughput_bps: empty buffer, returning 0");
             return 0;
         }
 
         let front = recent_chunk_times.front().unwrap();
         let back = recent_chunk_times.back().unwrap();
+
+        tracing::debug!(
+            "write_throughput_bps: buffer_len={} chunk_size={} front_start={:?} back_completion={:?}",
+            recent_chunk_times.len(),
+            chunk_size,
+            front.start_time,
+            back.completion_time
+        );
 
         // Calculate the actual time span covered by our records.
         //

@@ -84,6 +84,7 @@ sha2 = "0.10"
 rayon = "1.8.0"
 reqwest = "0.12.15"
 color-eyre = "0.6"
+dashmap = "6.0"
 itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
@@ -116,6 +117,14 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "json",
   "ansi",
 ] }
+
+# OpenTelemetry
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "http-proto"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio", "trace", "logs"] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
+tracing-opentelemetry = "0.32.0"
+opentelemetry-semantic-conventions = "0.31.0"
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
