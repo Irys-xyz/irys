@@ -226,8 +226,15 @@ impl ChunkOrchestrator {
         let target_throughput = self.config.data_sync.max_storage_throughput_bps;
         let storage_capacity_remaining = target_throughput.saturating_sub(storage_throughput);
 
+        let should_throttle = storage_capacity_remaining < (target_throughput / 10);
+
+        debug!(
+            "Throttle check: throughput={} target={} remaining={} throttle={}",
+            storage_throughput, target_throughput, storage_capacity_remaining, should_throttle
+        );
+
         // If we're within 10% of target_throughput, throttle this orchestrator
-        storage_capacity_remaining < (target_throughput / 10)
+        should_throttle
     }
 
     #[tracing::instrument(skip_all)]
