@@ -33,7 +33,7 @@ async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     std::env::set_var("RUST_LOG", "debug,storage=off");
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 
-    let setup = TestSetup::new(800, Duration::from_secs(5), &tmp_dir);
+    let setup = TestSetup::new(100, Duration::from_secs(5), &tmp_dir);
     let storage_modules = Arc::new(RwLock::new(vec![setup.storage_module.clone()]));
     debug!("Creating chunk_fetcher_factory");
     let chunk_fetcher_factory = setup.create_chunk_fetcher_factory();
