@@ -348,7 +348,7 @@ pub struct NodeInfo {
     pub current_sync_height: usize,
     pub uptime_secs: u64,
     #[serde(with = "address_base58_stringify")]
-    pub address: Address,
+    pub mining_address: Address,
 }
 
 #[cfg(test)]
@@ -393,7 +393,7 @@ mod tests {
             is_syncing: false,
             current_sync_height: 0,
             uptime_secs: 0,
-            address: Address::ZERO,
+            mining_address: Address::ZERO,
         };
 
         let json = serde_json::to_string(&node_info).unwrap();
