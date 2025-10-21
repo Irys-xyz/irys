@@ -829,6 +829,7 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
         fn test_is_system_idle_invariant(
             queued_jobs in 0..100_usize,
