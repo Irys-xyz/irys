@@ -5,7 +5,7 @@ use actix_web::{
     HttpResponse,
 };
 use irys_domain::get_canonical_chain;
-use irys_types::{Address, NodeInfo, H256};
+use irys_types::{NodeInfo, H256};
 
 pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
     let (block_index_height, block_index_hash) = {
@@ -33,7 +33,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         is_syncing: state.sync_state.is_syncing(),
         current_sync_height: state.sync_state.sync_target_height(),
         uptime_secs: state.started_at.elapsed().as_secs(),
-        mining_address: Address::ZERO,
+        mining_address: state.mining_address,
     };
 
     HttpResponse::Ok()

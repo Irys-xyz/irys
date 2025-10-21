@@ -138,6 +138,7 @@ impl IrysNodeCtx {
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
             started_at: self.started_at,
+            mining_address: self.config.node_config.miner_address(),
         }
     }
 
@@ -1430,6 +1431,7 @@ impl IrysNode {
                 sync_state,
                 mempool_pledge_provider,
                 started_at: irys_node_ctx.started_at,
+                mining_address: irys_node_ctx.config.node_config.miner_address(),
             },
             http_listener,
         );
