@@ -58,18 +58,20 @@ use shadow_tx::ShadowTransaction;
 use tracing::info;
 
 use crate::{
-    mempool::IrysPoolBuilder, payload::ShadowTxStore, payload_builder_builder::IrysPayloadBuilderBuilder, payload_service_builder::IyrsPayloadServiceBuilder
+    mempool::IrysPoolBuilder, payload::ShadowTxStore,
+    payload_builder_builder::IrysPayloadBuilderBuilder,
+    payload_service_builder::IyrsPayloadServiceBuilder,
 };
 
 pub mod chainspec;
 pub mod evm;
+pub mod mempool;
 pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod pd_tx;
 pub mod precompile;
 pub mod shadow_tx;
-pub mod mempool;
 pub use chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
@@ -199,7 +201,6 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
         }
     }
 }
-
 
 /// A regular ethereum evm and executor builder.
 #[derive(Debug, Default, Clone, Copy)]
