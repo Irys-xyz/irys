@@ -9,7 +9,6 @@ use crate::{
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    packing::PackingSender,
     packing_service::{PackingRequest, UnpackingRequest},
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
@@ -142,7 +141,7 @@ pub struct ServiceSendersInner {
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<BlockDiscoveryMessage>,
     pub mining_bus: MiningBus,
-    pub packing_sender: PackingSender,
+    pub packing_sender: tokio::sync::mpsc::Sender<PackingRequest>,
     pub unpacking_sender: tokio::sync::mpsc::Sender<UnpackingRequest>,
 }
 
