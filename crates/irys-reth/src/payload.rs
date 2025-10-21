@@ -182,6 +182,7 @@ impl CombinedTransactionIterator {
         let shadow_txs = shadow_txs
             .into_iter()
             .map(|tx| ValidPoolTransaction {
+                // todo - recheck the SenderId::from(0) - what are the consequences of using `0`
                 transaction_id: TransactionId::new(SenderId::from(0), tx.nonce()),
                 transaction: tx,
                 propagate: false,
