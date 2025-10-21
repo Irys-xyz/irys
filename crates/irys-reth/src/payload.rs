@@ -126,6 +126,8 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     builder_config: EthereumBuilderConfig,
     /// Shadow txs don't live inside the tx pool, so they need to be handled separately.
     shadow_tx_store: ShadowTxStore,
+    /// Maximum number of PD chunks that can be included in a single block.
+    max_pd_chunks_per_block: u64,
 }
 
 /// Combined iterator that yields shadow transactions first, then pool transactions
@@ -177,11 +179,9 @@ struct PdChunkBudget {
 }
 
 impl PdChunkBudget {
-    const MAX_PD_CHUNKS_PER_BLOCK: u64 = 7_500;
-
-    fn new() -> Self {
+    fn new(max_pd_chunks_per_block: u64) -> Self {
         Self {
-            max: Self::MAX_PD_CHUNKS_PER_BLOCK,
+            max: max_pd_chunks_per_block,
             used: 0,
             deferred: VecDeque::new(),
             accounted: HashMap::new(),
@@ -255,10 +255,11 @@ impl CombinedTransactionIterator {
         timestamp: Instant,
         shadow_txs: Vec<EthPooledTransaction>,
         pool_iter: BestTransactionsIter,
+        max_pd_chunks_per_block: u64,
     ) -> Self {
         Self {
             shadow: ShadowTxQueue::from_shadow_transactions(timestamp, shadow_txs),
-            pd_budget: PdChunkBudget::new(),
+            pd_budget: PdChunkBudget::new(max_pd_chunks_per_block),
             pool_iter,
         }
     }
@@ -329,6 +330,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         evm_config: EvmConfig,
         builder_config: EthereumBuilderConfig,
         shadow_tx_store: ShadowTxStore,
+        max_pd_chunks_per_block: u64,
     ) -> Self {
         Self {
             client,
@@ -336,6 +338,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             evm_config,
             builder_config,
             shadow_tx_store,
+            max_pd_chunks_per_block,
         }
     }
 
@@ -368,7 +371,10 @@ where
 
         // Create combined iterator
         Box::new(CombinedTransactionIterator::new(
-            timestamp, shadow_txs, pool_txs,
+            timestamp,
+            shadow_txs,
+            pool_txs,
+            self.max_pd_chunks_per_block,
         ))
     }
 }
@@ -563,7 +569,8 @@ mod tests {
             make_valid(normal_tx, 13, timestamp),
         ]));
 
-        let mut iterator = CombinedTransactionIterator::new(timestamp, vec![shadow_tx], pool_iter);
+        let mut iterator =
+            CombinedTransactionIterator::new(timestamp, vec![shadow_tx], pool_iter, 7_500);
 
         let collected: Vec<_> = (&mut iterator).take(3).collect();
 

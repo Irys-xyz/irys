@@ -150,9 +150,12 @@ pub async fn run_node(
         .with_database(database.clone())
         .with_launch_context(task_executor.clone());
 
+    let max_pd_chunks_per_block = node_config.consensus_config().mempool.max_pd_chunks_per_block;
+
     let handle = builder
         .node(IrysEthereumNode {
             shadow_tx_store: shadow_tx_store.clone(),
+            max_pd_chunks_per_block,
         })
         .launch_with_debug_capabilities()
         .in_current_span()

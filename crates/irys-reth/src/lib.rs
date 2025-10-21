@@ -104,6 +104,7 @@ pub fn compose_shadow_tx(
 #[derive(Debug, Clone)]
 pub struct IrysEthereumNode {
     pub shadow_tx_store: ShadowTxStore,
+    pub max_pd_chunks_per_block: u64,
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -141,6 +142,7 @@ impl IrysEthereumNode {
             .executor(IrysExecutorBuilder)
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 shadow_tx_store: self.shadow_tx_store.clone(),
+                max_pd_chunks_per_block: self.max_pd_chunks_per_block,
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -3261,6 +3263,8 @@ pub mod test_utils {
                 .testing_node(exec.clone())
                 .node(IrysEthereumNode {
                     shadow_tx_store: shadow_tx_store.clone(),
+                    // Use default value for tests
+                    max_pd_chunks_per_block: 7_500,
                 })
                 .launch()
                 .await?;
