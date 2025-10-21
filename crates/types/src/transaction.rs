@@ -903,8 +903,7 @@ pub trait IrysTransactionCommon {
     where
         Self: Sized;
 
-    /// Used as a unique combination of signature + prehash to verify the integrity
-    /// and authenticity of the transaction
+    /// Computed using a combination of signature bytes + prehash + ID bytes to uniquely identify even invalid transactions (i.e with an invalid ID/signature set)
     fn fingerprint(&self) -> H256;
 }
 
@@ -972,7 +971,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn fingerprint(&self) -> H256 {
-        // Compute composite fingerprint: keccak(signature + prehash)
+        // Compute composite fingerprint: keccak(signature + prehash + id)
         let prehash = self.signature_hash();
         let mut buf = Vec::with_capacity(65 + 32 + 32);
         buf.extend_from_slice(&self.signature.as_bytes());
@@ -1049,7 +1048,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn fingerprint(&self) -> H256 {
-        // Compute composite fingerprint: keccak(signature + prehash)
+        // Compute composite fingerprint: keccak(signature + prehash + id)
         let prehash = self.signature_hash();
         let mut buf = Vec::with_capacity(65 + 32 + 32);
         buf.extend_from_slice(&self.signature.as_bytes());

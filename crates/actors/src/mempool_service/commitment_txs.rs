@@ -23,7 +23,8 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
-            // Compute composite fingerprint: keccak(signature + prehash)
+            // Compute composite fingerprint: keccak(signature + prehash + id)
+            // TODO: share the signature hash computed here with validate_signature
             let fingerprint = commitment_tx.fingerprint();
             if self
                 .mempool_state
