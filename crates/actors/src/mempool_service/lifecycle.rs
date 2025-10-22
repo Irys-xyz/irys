@@ -2,12 +2,16 @@ use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
+use irys_database::tables::IngressProofs;
+use irys_database::{
+    cached_data_root_by_data_root, insert_commitment_tx, tx_header_by_txid, SystemLedger,
+};
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
 use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, H256,
 };
+use reth_db::transaction::DbTxMut as _;
 use reth_db::{transaction::DbTx as _, Database as _};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -780,6 +784,28 @@ impl Inner {
         }
 
         let mempool_state = &self.mempool_state.clone();
+
+        // step 4: tidy up ingress proofs
+        let read_tx = self.irys_db.tx()?;
+        if let Some(proofs) = &migrated_block.data_ledgers[DataLedger::Publish].proofs {
+            for proof in proofs.iter() {
+                // look up the CachedDataRoot by data_root
+                let cached_data_root =
+                    match cached_data_root_by_data_root(&read_tx, proof.data_root)? {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                let can_prune = cached_data_root
+                    .expiry_height
+                    .is_some_and(|eh| eh < migrated_block.height);
+                if can_prune {
+                    // prune the ingress proofs
+                    self.irys_db.update_eyre(|tx| {
+                        Ok(tx.delete::<IngressProofs>(proof.data_root, None))
+                    })??;
+                }
+            }
+        }
 
         // Remove the submit tx from the pending valid_submit_ledger_tx pool
         {
