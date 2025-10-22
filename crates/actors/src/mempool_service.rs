@@ -82,8 +82,8 @@ pub fn validate_funding(
         .map_err(|e| {
             tracing::error!(
                 tx.id = %commitment_tx.id,
-                signer = %commitment_tx.signer,
-                error = %e,
+                tx.signer = %commitment_tx.signer,
+                tx.error = %e,
                 "Failed to fetch balance for commitment tx"
             );
             TxIngressError::BalanceFetchError {
@@ -130,15 +130,15 @@ pub fn validate_commitment_transaction(
 ) -> Result<(), TxIngressError> {
     debug!(
         tx.id = ?commitment_tx.id,
-        signer = ?commitment_tx.signer,
+        tx.signer = ?commitment_tx.signer,
         "Validating commitment transaction"
     );
     // Fee
     commitment_tx.validate_fee(consensus).map_err(|e| {
         warn!(
             tx.id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
-            error = ?e,
+            tx.signer = ?commitment_tx.signer,
+            tx.error = ?e,
             "Commitment tx fee validation failed"
         );
         TxIngressError::from(e)
@@ -148,8 +148,8 @@ pub fn validate_commitment_transaction(
     validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
         warn!(
             tx.id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
-            error = ?e,
+            tx.signer = ?commitment_tx.signer,
+            tx.error = ?e,
             "Commitment tx funding validation failed"
         );
         e
@@ -159,8 +159,8 @@ pub fn validate_commitment_transaction(
     commitment_tx.validate_value(consensus).map_err(|e| {
         warn!(
             tx.id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
-            error = ?e,
+            tx.signer = ?commitment_tx.signer,
+            tx.error = ?e,
             "Commitment tx value validation failed"
         );
         TxIngressError::from(e)
@@ -567,9 +567,9 @@ impl Inner {
         };
 
         info!(
-            head_height = last_block.height,
-            block_hash = ?last_block.block_hash,
-            chain_length = canonical.len(),
+            chain.head_height = last_block.height,
+            chain.head_hash = ?last_block.block_hash,
+            chain.canonical_length = canonical.len(),
             "Starting mempool transaction selection"
         );
 
@@ -602,8 +602,8 @@ impl Inner {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
                     tx.id = ?tx.id,
-                    commitment_type = ?tx.commitment_type,
-                    signer = ?tx.signer,
+                    tx.commitment_type = ?tx.commitment_type,
+                    tx.signer = ?tx.signer,
                     "Skipping already confirmed commitment transaction"
                 );
                 continue;
@@ -616,7 +616,7 @@ impl Inner {
                 tx,
                 parent_evm_block_id,
             ) {
-                tracing::warn!(?error, "rejecting commitment tx");
+                tracing::warn!(tx.error = ?error, "rejecting commitment tx");
                 continue;
             }
 
@@ -632,8 +632,8 @@ impl Inner {
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
                     debug!(
                         tx.id = ?tx.id,
-                        signer = ?tx.signer,
-                        is_staked = is_staked,
+                        tx.signer = ?tx.signer,
+                        tx.is_staked = is_staked,
                         "Checking stake status for commitment tx"
                     );
                 if is_staked {
@@ -648,9 +648,9 @@ impl Inner {
                 // skip commitments that would not be accepted
                 if simulation != CommitmentSnapshotStatus::Accepted {
                     warn!(
-                        commitment_type = ?tx.commitment_type,
+                        tx.commitment_type = ?tx.commitment_type,
                         tx.id = ?tx.id,
-                        simulation_status = ?simulation,
+                        tx.simulation_status = ?simulation,
                         "Commitment tx rejected by simulation"
                     );
                     continue;
@@ -659,11 +659,11 @@ impl Inner {
 
             debug!(
                 tx.id = ?tx.id,
-                commitment_type = ?tx.commitment_type,
-                signer = ?tx.signer,
-                fee = ?tx.total_cost(),
-                selected_count = commitment_tx.len() + 1,
-                max_commitments,
+                tx.commitment_type = ?tx.commitment_type,
+                tx.signer = ?tx.signer,
+                tx.fee = ?tx.total_cost(),
+                tx.selected_count = commitment_tx.len() + 1,
+                tx.max_commitments = max_commitments,
                 "Adding commitment transaction to block"
             );
             commitment_tx.push(tx.clone());
@@ -689,10 +689,10 @@ impl Inner {
                         }
                     });
             info!(
-                selected_commitments = commitment_tx.len(),
-                stake_txs = commitment_summary.0,
-                pledge_txs = commitment_summary.1,
-                max_allowed = max_commitments,
+                commitment_selection.selected_commitments = commitment_tx.len(),
+                commitment_selection.stake_txs = commitment_summary.0,
+                commitment_selection.pledge_txs = commitment_summary.1,
+                commitment_selection.max_allowed = max_commitments,
                 "Completed commitment transaction selection"
             );
         }
@@ -726,7 +726,7 @@ impl Inner {
             let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
                 trace!(
                     tx.id = ?tx.id,
-                    ledger_id = tx.ledger_id,
+                    tx.ledger_id = tx.ledger_id,
                     "Skipping tx: invalid ledger ID"
                 );
                 continue;
@@ -894,7 +894,7 @@ impl Inner {
                     mempool_selected.commitments_selected = commitment_tx.len(),
                     mempool_selected.data_available = total_data_available,
                     mempool_selected.data_selected = submit_tx.len(),
-                    umempool_selected.unfunded_addresses = unfunded_address.len(),
+                    mempool_selected.unfunded_addresses = unfunded_address.len(),
                     "High transaction rejection rate detected"
                 );
             }
@@ -1149,7 +1149,7 @@ impl Inner {
         }
 
         let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
-        debug!(?txs, "Publish transactions");
+        debug!(tx.ids = ?txs, "Publish transactions");
 
         debug!("Processing Publish transactions {:#?}", &publish_txs);
 

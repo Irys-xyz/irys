@@ -104,8 +104,8 @@ impl Inner {
             }
             CommitmentSnapshotStatus::Unstaked => {
                 warn!(
-                    tx = ?commitment_tx.id,
-                    status = ?commitment_status,
+                    tx.id = ?commitment_tx.id,
+                    tx.commitment_status = ?commitment_status,
                     "commitment tx cached while address is unstaked"
                 );
                 // Cache pledge while address is unstaked
@@ -265,14 +265,14 @@ impl Inner {
                 let tx_id = pledge_tx.id;
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 if let Err(e) = self
-                    tx.id = ?commitment_tx.id,
-                    custom.commitment_status = ?commitment_status,
+                    .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                        pledge_tx, oneshot_tx,
                     ))
                     .await
                 {
                     warn!(
                         tx.id = ?tx_id,
-                        error = ?e,
+                        tx.err = ?e,
                         "Failed to process pending pledge for newly staked address"
                     );
                 }

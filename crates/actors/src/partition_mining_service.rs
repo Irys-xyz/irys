@@ -105,7 +105,11 @@ impl PartitionMiningServiceInner {
         if let Some(partition_hash) = self.storage_module.partition_hash() {
             if expired.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
-                    debug!(?partition_hash, ?interval, "Expiring partition hash");
+                    debug!(
+                        storage_module.partintion_hash = ?partition_hash,
+                        storage_module.packing_interval = ?interval,
+                        "Expiring partition hash"
+                    );
                     if let Ok(req) = PackingRequest::new(
                         self.storage_module.clone(),
                         PartitionChunkRange(interval),
@@ -114,25 +118,25 @@ impl PartitionMiningServiceInner {
                             Ok(()) => {}
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                 warn!(
-                                                storage_module.id = %self.storage_module.id,
-                                                ?partition_hash,
-                                                packing.interval = ?interval,
-                                                "Dropping packing request due to saturated channel"
-                                            );
+                                    storage_module.id = %self.storage_module.id,
+                                    storage_module.partintion_hash = ?partition_hash,
+                                    storage_module.packing_interval = ?interval,
+                                    "Dropping packing request due to a saturated channel"
+                                );
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                                 error!(
-                                        storage_module.id = %self.storage_module.id,
-                                        ?partition_hash,
-                                        packing.interval = ?interval,
-                                        "Packing channel closed; failed to enqueue repacking request"
-                                    );
+                                    storage_module.id = %self.storage_module.id,
+                                    storage_module.partintion_hash = ?partition_hash,
+                                    storage_module.packing_interval = ?interval,
+                                    "Packing channel closed; failed to enqueue repacking request"
+                                );
                             }
                         }
                     }
                 } else {
                     error!(
-                        ?partition_hash,
+                        storage_module.partintion_hash = ?partition_hash,
                         "Expiring partition hash, could not reset its storage module!"
                     );
                 }

@@ -762,11 +762,11 @@ pub fn get_recall_range(
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(skip_all, fields(
-    ?miner_address,
-    chunk_offset = ?poa.partition_chunk_offset,
-    partition_hash = ?poa.partition_hash,
-    entropy_packing_iterations = ?config.entropy_packing_iterations,
-    chunk_size = ?config.chunk_size
+    block.miner_address = ?miner_address,
+    poa.chunk_offset = ?poa.partition_chunk_offset,
+    poa.partition_hash = ?poa.partition_hash,
+    config.entropy_packing_iterations = ?config.entropy_packing_iterations,
+    config.chunk_size = ?config.chunk_size
 ), err)]
 
 pub fn poa_is_valid(
@@ -938,7 +938,7 @@ pub async fn shadow_transactions_are_valid(
         tracing::debug!(
             block.hash = %block.block_hash,
             block.evm_block_hash = %block.evm_block_hash,
-            block.blob_gas_used = payload_v3.blob_gas_used,
+            payload.blob_gas_used = payload_v3.blob_gas_used,
             "Rejecting block: blob_gas_used must be zero",
         );
         eyre::bail!("block has non-zero blob_gas_used which is disabled");
@@ -947,7 +947,7 @@ pub async fn shadow_transactions_are_valid(
         tracing::debug!(
             block.block_hash = %block.block_hash,
             block.evm_block_hash = %block.evm_block_hash,
-            block.excess_blob_gas = payload_v3.excess_blob_gas,
+            payload.excess_blob_gas = payload_v3.excess_blob_gas,
             "Rejecting block: excess_blob_gas must be zero",
         );
         eyre::bail!("block has non-zero excess_blob_gas which is disabled");
@@ -2254,7 +2254,7 @@ enum TxInclusionState {
     },
 }
 
-#[tracing::instrument(skip_all, fields(block_under_validation = ?block_under_validation.block_hash))]
+#[tracing::instrument(skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,

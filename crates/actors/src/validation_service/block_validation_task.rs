@@ -194,9 +194,9 @@ impl BlockValidationTask {
                 None => {
                     // Parent doesn't exist in tree - this is an error condition
                     error!(
-                        parent_hash = %parent_hash,
-                        block_hash = %self.block.block_hash,
-                        block_height = %self.block.height,
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
                         "CRITICAL: Parent block not found"
                     );
                     return ParentValidationResult::Cancelled;
@@ -211,7 +211,7 @@ impl BlockValidationTask {
             }
 
             // 3. Wait for relevant state changes
-            debug!(parent_hash = %parent_hash, "Waiting for parent validation");
+            debug!(block.parent_hash = %parent_hash, "Waiting for parent validation");
             match block_state_rx.recv().await {
                 Ok(event) if event.block_hash == parent_hash => {
                     // Parent state changed, loop back to check
@@ -224,9 +224,9 @@ impl BlockValidationTask {
                 Err(_) => {
                     // Channel closed - treat as error
                     error!(
-                        parent_hash = %parent_hash,
-                        block_hash = %self.block.block_hash,
-                        block_height = %self.block.height,
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
                         "Block state channel closed while waiting for parent"
                     );
                     return ParentValidationResult::Cancelled;
@@ -303,7 +303,7 @@ impl BlockValidationTask {
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
-                    debug!(?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
+                    debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
                     return Ok(ValidationResult::Valid);
                 }
                 poa_is_valid(
@@ -464,7 +464,7 @@ impl BlockValidationTask {
                         Ok(ValidationResult::Valid)
                     }
                     Err(err) => {
-                        tracing::error!(?err, "Reth execution layer validation failed");
+                        tracing::error!(custom.err = ?err, "Reth execution layer validation failed");
                         Ok(ValidationResult::Invalid)
                     }
                 }

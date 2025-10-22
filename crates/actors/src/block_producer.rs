@@ -342,8 +342,8 @@ impl BlockProducerService {
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
-                    old_value = ?self.blocks_remaining_for_test,
-                    new_value = ?remaining,
+                    custom.old_value = ?self.blocks_remaining_for_test,
+                    custom.new_value = ?remaining,
                     "Updating test blocks remaining"
                 );
                 self.blocks_remaining_for_test = remaining;
@@ -356,15 +356,15 @@ impl BlockProducerService {
     #[tracing::instrument(skip_all, fields(
         solution.hash = %solution.solution_hash,
         solution.vdf_step = solution.vdf_step,
-        mining_address = %solution.mining_address
+        solution.mining_address = %solution.mining_address
     ))]
     async fn produce_block_inner(
         inner: Arc<BlockProducerInner>,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
-            partition_hash = %solution.partition_hash,
-            chunk_offset = solution.chunk_offset,
+            solution.partition_hash = %solution.partition_hash,
+            solution.chunk_offset = solution.chunk_offset,
             "Starting block production for solution"
         );
 
@@ -602,8 +602,8 @@ pub trait BlockProdStrategy {
                     info!(
                         solution.hash = %solution.solution_hash,
                         solution.vdf_step = solution.vdf_step,
-                        new_parent = %new_parent,
-                        rebuild_attempt = rebuild_attempts + 1,
+                        block.new_parent = %new_parent,
+                        block.rebuild_attempt = rebuild_attempts + 1,
                         "Parent changed but solution is valid - rebuilding on new parent"
                     );
 
@@ -623,9 +623,9 @@ pub trait BlockProdStrategy {
                         } => {
                             warn!(
                                 solution.hash = %solution.solution_hash,
-                                solution.vdf_step,
-                                new_parent = %new_parent,
-                                parent_vdf_step,
+                                solution.vdf_step = solution.vdf_step,
+                                block.new_parent = %new_parent,
+                                block.parent_vdf_step = parent_vdf_step,
                                 "Solution is too old for new parent (vdf_step {} <= {}), discarding",
                                 solution_vdf_step,
                                 parent_vdf_step
@@ -644,10 +644,10 @@ pub trait BlockProdStrategy {
 
         if rebuild_attempts > 0 {
             info!(
-                solution_hash = %solution.solution_hash,
-                final_parent = %block.previous_block_hash,
-                block_height = block.height,
-                rebuild_count = rebuild_attempts,
+                block.solution_hash = %solution.solution_hash,
+                block.final_parent = %block.previous_block_hash,
+                block.block_height = block.height,
+                block.rebuild_count = rebuild_attempts,
                 "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
             );
         }
@@ -1056,9 +1056,9 @@ pub trait BlockProdStrategy {
                     stats.min_threshold
                 );
                 info!(
-                    max_difficulty = ?U256::MAX,
-                    previous_cumulative_diff = ?block.previous_cumulative_diff,
-                    current_diff = ?block.diff,
+                    block.max_difficulty = ?U256::MAX,
+                    block.previous_cumulative_diff = ?block.previous_cumulative_diff,
+                    block.current_diff = ?block.diff,
                     "Difficulty data",
                 );
                 is_difficulty_updated = true;
@@ -1164,8 +1164,8 @@ pub trait BlockProdStrategy {
 
         if !is_epoch {
             debug!(
-                block_height,
-                commitment_ids = ?mempool_txs
+                block.height = block_height,
+                custom.commitment_ids = ?mempool_txs
                     .commitment_tx
                     .iter()
                     .map(|t| t.id)
@@ -1254,7 +1254,7 @@ pub trait BlockProdStrategy {
             txids.push(tx.id);
         }
         debug!(
-            tx_count = commitments.len(),
+            custom.tx_count = commitments.len(),
             "Producing epoch rollup for commitment ledger"
         );
         SystemTransactionLedger {

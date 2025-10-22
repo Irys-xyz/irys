@@ -116,7 +116,10 @@ impl RethService {
         let join_handle = runtime_handle.spawn(
             async move {
                 if let Err(err) = service.run().await {
-                    error!(error = %err, "Reth service terminated with error");
+                    error!(
+                        custom.error = %err,
+                        "Reth service terminated with error"
+                    );
                 }
             }
             .in_current_span(),
@@ -220,9 +223,9 @@ impl RethService {
         } = fcu;
 
         tracing::debug!(
-            head = %head_hash,
-            confirmed = %confirmed_hash,
-            finalized = %finalized_hash,
+            fcu.head = %head_hash,
+            fcu.confirmed = %confirmed_hash,
+            fcu.finalized = %finalized_hash,
             "Updating Reth fork choice"
         );
         let handle = self.handle.clone();
@@ -237,9 +240,9 @@ impl RethService {
         let (latest_before, safe_before, finalized_before) = get_blocks().await?;
 
         tracing::debug!(
-            latest_block = ?latest_before.as_ref().map(|b| (b.header.number, b.header.hash)),
-            safe_block = ?safe_before.as_ref().map(|b| (b.header.number, b.header.hash)),
-            finalized_block = ?finalized_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.latest_block = ?latest_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.safe_block = ?safe_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.finalized_block = ?finalized_before.as_ref().map(|b| (b.header.number, b.header.hash)),
             "Reth state before fork choice update"
         );
 
@@ -247,7 +250,11 @@ impl RethService {
             .update_forkchoice_full(head_hash, Some(confirmed_hash), Some(finalized_hash))
             .await
             .map_err(|e| {
-                error!(error = %e, ?fcu, "Failed to update Reth fork choice");
+                error!(
+                    custom.error = %e,
+                    fcu.message = ?fcu,
+                    "Failed to update Reth fork choice"
+                );
                 eyre!("Error updating reth with forkchoice {:?} - {}", &fcu, &e)
             })?;
 
@@ -255,9 +262,9 @@ impl RethService {
 
         let (latest_after, safe_after, finalized_after) = get_blocks().await?;
         tracing::debug!(
-            latest_block = ?latest_after.as_ref().map(|b| (b.header.number, b.header.hash)),
-            safe_block = ?safe_after.as_ref().map(|b| (b.header.number, b.header.hash)),
-            finalized_block = ?finalized_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.latest_block = ?latest_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.safe_block = ?safe_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.finalized_block = ?finalized_after.as_ref().map(|b| (b.header.number, b.header.hash)),
             "Reth state after fork choice update"
         );
 

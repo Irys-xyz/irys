@@ -118,14 +118,14 @@ impl ChunkCacheService {
                 let res = self.prune_cache(migration_height);
                 let Some(sender) = sender else { return };
                 if let Err(error) = sender.send(res) {
-                    warn!(?error, "RX failure for OnBlockMigrated");
+                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
                 }
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
                 let res = self.on_epoch_processed(epoch_snapshot);
                 if let Some(sender) = sender {
                     if let Err(e) = sender.send(res) {
-                        warn!(?e, "Unable to send response for OnEpochProcessed")
+                        warn!(custom.error = ?e, "Unable to send response for OnEpochProcessed")
                     }
                 }
             }
@@ -200,7 +200,7 @@ impl ChunkCacheService {
                 ))
             })?;
         info!(
-            ?migration_height,
+            custom.migration_height= ?migration_height,
             "Chunk cache: {} chunks ({:.3} GB),  {} ingress proofs",
             chunk_cache_count,
             (chunk_cache_size / GIGABYTE as u64),
@@ -221,10 +221,10 @@ impl ChunkCacheService {
 
                 if size_limit_exceeded {
                     info!(
-                        size_exceeded = size_limit_exceeded,
-                        current_size_gb = (chunk_cache_size / GIGABYTE as u64),
-                        max_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
-                        current_count = chunk_cache_count,
+                        custom.size_exceeded = size_limit_exceeded,
+                        custom.current_size_gb = (chunk_cache_size / GIGABYTE as u64),
+                        custom.max_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
+                        custom.current_count = chunk_cache_count,
                         "Cache limit exceeded, performing size-based eviction (FIFO)"
                     );
 
@@ -328,9 +328,9 @@ impl ChunkCacheService {
         let expiry_threshold = now.saturating_sub_secs(max_age_seconds);
 
         debug!(
-            now = now.as_secs(),
-            threshold = expiry_threshold.as_secs(),
-            max_age_seconds,
+            custom.now = now.as_secs(),
+            custom.threshold = expiry_threshold.as_secs(),
+            custom.max_age_seconds = max_age_seconds,
             "Time-based eviction: checking for expired entries"
         );
 
@@ -370,9 +370,9 @@ impl ChunkCacheService {
         }
 
         info!(
-            info.evicted_count = evicted_count,
-            info.evicted_size_gb = (evicted_size / GIGABYTE as u64),
-            info.max_age_seconds = max_age_seconds,
+            custom.evicted_count = evicted_count,
+            custom.evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            custom.max_age_seconds = max_age_seconds,
             "Time-based cache eviction complete"
         );
 
@@ -393,9 +393,9 @@ impl ChunkCacheService {
         let target_size_with_margin = max_cache_size_bytes.saturating_mul(9) / 10;
 
         debug!(
-            info.current_size_gb = (current_chunk_size / GIGABYTE as u64),
-            info.target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
-            info.target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
+            custom.current_size_gb = (current_chunk_size / GIGABYTE as u64),
+            custom.target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
+            custom.target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
             "Size-based eviction: cache limit exceeded"
         );
 
@@ -446,10 +446,10 @@ impl ChunkCacheService {
         }
 
         info!(
-            info.evicted_count = evicted_count,
-            info.evicted_size_gb = (evicted_size / GIGABYTE as u64),
-            info.remaining_count = running_chunk_count,
-            info.remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
+            custom.evicted_count = evicted_count,
+            custom.evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            custom.remaining_count = running_chunk_count,
+            custom.remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
             "Size-based cache eviction complete (FIFO)"
         );
 

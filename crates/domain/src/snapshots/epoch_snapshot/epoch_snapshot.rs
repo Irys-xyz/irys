@@ -833,8 +833,8 @@ impl EpochSnapshot {
             let partition_miner_address = match (data_present, cap_present) {
                 (None, None) => {
                     warn!(
-                        partition_hash = %ph,
-                        signer = %signer,
+                        tx.partition_hash = %ph,
+                        tx.signer = %signer,
                         "unpledge_target_not_found"
                     );
                     return Err(EpochSnapshotError::UnpledgeTargetNotFound {
@@ -858,7 +858,7 @@ impl EpochSnapshot {
                     data_partition.miner_address
                 }
                 (Some(_), Some(_)) => {
-                    warn!(partition_hash = %ph, "unpledge_target_in_both_maps");
+                    warn!(tx.partition_hash = %ph, "unpledge_target_in_both_maps");
                     return Err(EpochSnapshotError::UnpledgeTargetInBothMaps {
                         partition_hash: ph,
                     });
@@ -884,8 +884,8 @@ impl EpochSnapshot {
             }
 
             debug!(
-                partition_hash = %ph,
-                signer = %signer,
+                tx.partition_hash = %ph,
+                tx.signer = %signer,
                 "unpledge_retired_to_unassigned"
             );
         }

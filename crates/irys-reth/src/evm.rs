@@ -741,8 +741,7 @@ where
         // Block reward transactions MUST have 0 priority fee
         if is_block_reward && !total_fee.is_zero() {
             tracing::error!(
-
-                priority_fee = %total_fee,
+                tx.priority_fee = %total_fee,
                 "Block reward transaction with non-zero priority fee"
             );
             return Err(<Self as Evm>::Error::Transaction(
@@ -934,6 +933,7 @@ where
 
             tracing::trace!(
                 fee.address = %target,
+                fee.target = %target,
                 fee.total_fee = %total_fee,
                 "Priority fee payer and beneficiary are the same address, no-op transfer"
             );
@@ -1039,7 +1039,7 @@ where
         // Validate account exists
         let Some(mut account) = target_state else {
             tracing::warn!(
-                target = %target,
+                fee.target = %target,
                 "Target account does not exist, cannot deduct priority fee"
             );
             return Err(Self::create_internal_error(format!(
@@ -1050,9 +1050,9 @@ where
         // Validate sufficient balance
         if account.info.balance < fee {
             tracing::warn!(
-                tx.fee_target = %target,
+                fee.target = %target,
                 account.balance = %account.info.balance,
-                tx.required_fee = %fee,
+                fee.required = %fee,
                 "Target has insufficient balance for priority fee"
             );
             return Err(Self::create_internal_error(format!(
@@ -1067,8 +1067,8 @@ where
         account.info.balance = account.info.balance.saturating_sub(fee);
 
         tracing::trace!(
-            target = %target,
-            fee = %fee,
+            fee.target = %target,
+            fee.amount = %fee,
             "Deducting priority fee from target"
         );
 
@@ -1108,8 +1108,8 @@ where
             account.info.balance = fee;
 
             tracing::trace!(
-                beneficiary = %beneficiary,
-                balance = %fee,
+                account.beneficiary = %beneficiary,
+                account.balance = %fee,
                 "Creating new beneficiary account with priority fee"
             );
 
@@ -1299,10 +1299,10 @@ where
                 .saturating_add(balance_increment.amount);
 
             tracing::trace!(
-                target_address = %balance_increment.target,
-                original_balance = %original_balance,
-                increment_amount = %balance_increment.amount,
-                final_balance = %account.info.balance,
+                account.target_address = %balance_increment.target,
+                account.original_balance = %original_balance,
+                account.increment_amount = %balance_increment.amount,
+                account.final_balance = %account.info.balance,
                 "Balance increment on existing account"
             );
 
@@ -1313,9 +1313,9 @@ where
             account.info.balance = balance_increment.amount;
 
             tracing::debug!(
-                target_address = %balance_increment.target,
-                increment_amount = %balance_increment.amount,
-                final_balance = %account.info.balance,
+                account.target_address = %balance_increment.target,
+                account.increment_amount = %balance_increment.amount,
+                account.final_balance = %account.info.balance,
                 "Balance increment on new account"
             );
 

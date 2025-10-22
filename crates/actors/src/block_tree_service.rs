@@ -296,9 +296,9 @@ impl BlockTreeServiceInner {
     async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &markers.head;
         debug!(
-            head = %tip_block.block_hash,
-            migration = %markers.migration_block.block_hash,
-            prune = %markers.prune_block.block_hash,
+            fcu.head = %tip_block.block_hash,
+            fcu.migration = %markers.migration_block.block_hash,
+            fcu.prune = %markers.prune_block.block_hash,
             "broadcasting canonical chain update",
         );
 
@@ -502,13 +502,19 @@ impl BlockTreeServiceInner {
         );
 
         if validation_result == ValidationResult::Invalid {
-            error!(block.hash = %block_hash,"invalid block");
+            error!(
+                block.hash = %block_hash,
+                "invalid block"
+            );
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(block.hash = %block_hash,"invalid block");
+            error!(
+                block.hash = %block_hash,
+                "invalid block"
+            );
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());

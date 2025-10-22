@@ -98,7 +98,7 @@ impl BlockValidationTracker {
                     info!(
                         block.hash = %block_hash,
                         block.height = block_height,
-                        elapsed_ms = elapsed.as_millis(),
+                        custom.elapsed_ms = elapsed.as_millis(),
                         "Block validation completed"
                     );
                     return Ok(block_hash);
@@ -111,12 +111,12 @@ impl BlockValidationTracker {
                 } => {
                     let (fb_hash, fb_height) = fallback_block;
                     warn!(
-                            block_validation.target_block = %abandoned_target,
-                            block_validation.target_height = abandoned_target_height,
-                            block_validation.fallback_block = %fb_hash,
-                            block_validation.fallback_height = fb_height,
-                            "Validation timeout - using fallback block"
-                        );
+                        block_validation.target_block = %abandoned_target,
+                        block_validation.target_height = abandoned_target_height,
+                        block_validation.fallback_block = %fb_hash,
+                        block_validation.fallback_height = fb_height,
+                        "Validation timeout - using fallback block"
+                    );
                     return Ok(fb_hash);
                 }
 
@@ -167,11 +167,11 @@ impl BlockValidationTracker {
             // Check if max difficulty block changed
             if snapshot.max_block.hash != target_hash {
                 debug!(
-                    old_target = %target_hash,
-                    old_height = target_height,
-                    new_target = %snapshot.max_block.hash,
-                    new_height = snapshot.max_block.height,
-                    new_difficulty = %snapshot.max_block.cumulative_difficulty,
+                    block_validation.old_target = %target_hash,
+                    block_validation.old_height = target_height,
+                    block_validation.new_target = %snapshot.max_block.hash,
+                    block_validation.new_height = snapshot.max_block.height,
+                    block_validation.new_difficulty = %snapshot.max_block.cumulative_difficulty,
                     "Max difficulty block changed during validation wait"
                 );
 
@@ -197,11 +197,11 @@ impl BlockValidationTracker {
             }
 
             debug!(
-                target_block = %target_hash,
-                target_height = target_height,
-                blocks_validated = blocks_validated,
-                blocks_remaining = snapshot.awaiting_validation,
-                blocks_were = current_awaiting,
+                block_validation.target_block = %target_hash,
+                block_validation.target_height = target_height,
+                block_validation.blocks_validated = blocks_validated,
+                block_validation.blocks_remaining = snapshot.awaiting_validation,
+                block_validation.blocks_were = current_awaiting,
                 "Validation progress detected"
             );
 
