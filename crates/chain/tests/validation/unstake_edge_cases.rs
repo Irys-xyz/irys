@@ -26,14 +26,14 @@ async fn gossip_commitment_to_node(
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
             debug!(
-                tx_id = ?commitment.id,
+                tx.id = ?commitment.id,
                 ?err,
                 "Commitment gossip rejected by mempool"
             );
         }
         Err(recv_err) => {
             debug!(
-                tx_id = ?commitment.id,
+                tx.id = ?commitment.id,
                 ?recv_err,
                 "Commitment gossip channel dropped"
             );

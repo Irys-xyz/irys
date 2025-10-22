@@ -289,24 +289,24 @@ pub async fn prevalidate_block(
     )?;
 
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "difficulty_is_valid",
     );
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "previous_cumulative_difficulty_is_valid",
     );
 
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "cumulative_difficulty_is_valid",
     );
 
@@ -316,24 +316,24 @@ pub async fn prevalidate_block(
     // Check the solution_hash
     solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "solution_hash_is_valid",
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
     solution_hash_link_is_valid(&block, &poa_chunk)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "solution_hash_link_is_valid",
     );
 
     // Check the previous solution hash references the parent correctly
     previous_solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "previous_solution_hash_is_valid",
     );
 
@@ -355,8 +355,8 @@ pub async fn prevalidate_block(
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "last_epoch_hash_is_valid",
     );
 
@@ -409,8 +409,8 @@ pub async fn prevalidate_block(
     // Validate ingress proof signer uniqueness
     validate_unique_ingress_proof_signers(&block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "ingress_proof_signers_unique",
     );
 
@@ -936,18 +936,18 @@ pub async fn shadow_transactions_are_valid(
     // Reject any blob gas usage in the payload
     if payload_v3.blob_gas_used != 0 {
         tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
-            blob_gas_used = payload_v3.blob_gas_used,
+            block.hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            block.blob_gas_used = payload_v3.blob_gas_used,
             "Rejecting block: blob_gas_used must be zero",
         );
         eyre::bail!("block has non-zero blob_gas_used which is disabled");
     }
     if payload_v3.excess_blob_gas != 0 {
         tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
-            excess_blob_gas = payload_v3.excess_blob_gas,
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            block.excess_blob_gas = payload_v3.excess_blob_gas,
             "Rejecting block: excess_blob_gas must be zero",
         );
         eyre::bail!("block has non-zero excess_blob_gas which is disabled");
@@ -958,9 +958,9 @@ pub async fn shadow_transactions_are_valid(
     if let Some(versioned_hashes) = sidecar.versioned_hashes() {
         if !versioned_hashes.is_empty() {
             tracing::debug!(
-                block_hash = %block.block_hash,
-                evm_block_hash = %block.evm_block_hash,
-                versioned_hashes_len = versioned_hashes.len(),
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                block.versioned_hashes_len = versioned_hashes.len(),
                 "Rejecting block: EIP-4844 blobs/sidecars are not supported",
             );
             eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
@@ -970,9 +970,9 @@ pub async fn shadow_transactions_are_valid(
     if let Some(requests) = sidecar.requests() {
         if !requests.is_empty() {
             tracing::debug!(
-                block_hash = %block.block_hash,
-                evm_block_hash = %block.evm_block_hash,
-                versioned_hashes_len = requests.len(),
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                block.versioned_hashes_len = requests.len(),
                 "Rejecting block: EIP-7685 requests which are disabled",
             );
             eyre::bail!("block contains EIP-7685 requests which are disabled");
@@ -995,8 +995,8 @@ pub async fn shadow_transactions_are_valid(
     // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
     if evm_block.header.requests_hash.is_some() {
         tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
             "Rejecting block: EIP-7685 requests_hash present which is disabled",
         );
         eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
@@ -1006,8 +1006,8 @@ pub async fn shadow_transactions_are_valid(
     for tx in evm_block.body.transactions.iter() {
         if tx.is_eip4844() {
             tracing::debug!(
-                block_hash = %block.block_hash,
-                evm_block_hash = %block.evm_block_hash,
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
                 "Rejecting block: contains EIP-4844 transaction which is disabled",
             );
             eyre::bail!("block contains EIP-4844 transaction which is disabled");
@@ -1091,9 +1091,9 @@ fn extract_leading_shadow_txs(
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(skip_all, err, fields(
-    block_hash = %block.block_hash,
-    block_height = %block.height,
-    evm_block_hash = %block.evm_block_hash
+    block.hash = %block.block_hash,
+    block.height = %block.height,
+    block.evm_block_hash = %block.evm_block_hash
 ))]
 pub async fn submit_payload_to_reth(
     block: &IrysBlockHeader,

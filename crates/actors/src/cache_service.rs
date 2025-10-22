@@ -270,7 +270,7 @@ impl ChunkCacheService {
             };
             if horizon.is_none() {
                 debug!(
-                    ?data_root,
+                    data_root.data_root = ?data_root,
                     "Skipping prune for data root without inclusion or expiry"
                 );
                 continue;
@@ -284,9 +284,9 @@ impl ChunkCacheService {
 
             if max_height < prune_height {
                 debug!(
-                    ?data_root,
-                    ?max_height,
-                    ?prune_height,
+                    data_root.data_root = ?data_root,
+                    data_root.max_height = ?max_height,
+                    data_root.prune_height = ?prune_height,
                     "expiring cached data for data root",
                 );
                 write_tx.delete::<IngressProofs>(data_root, None)?;
@@ -295,7 +295,7 @@ impl ChunkCacheService {
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
             }
         }
-        debug!(?chunks_pruned, "Pruned chunks");
+        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
         write_tx.commit()?;
 
         Ok(())
@@ -347,9 +347,9 @@ impl ChunkCacheService {
 
             let age_seconds = now.saturating_seconds_since(cached.cached_at);
             debug!(
-                ?data_root,
-                cached_at = cached.cached_at.as_secs(),
-                age_seconds,
+                data_root.data_root = ?data_root,
+                data_root.cached_at = cached.cached_at.as_secs(),
+                data_root.age_seconds = age_seconds,
                 "Evicting expired cache entry"
             );
 
@@ -370,9 +370,9 @@ impl ChunkCacheService {
         }
 
         info!(
-            evicted_count,
-            evicted_size_gb = (evicted_size / GIGABYTE as u64),
-            max_age_seconds,
+            info.evicted_count = evicted_count,
+            info.evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            info.max_age_seconds = max_age_seconds,
             "Time-based cache eviction complete"
         );
 
@@ -393,9 +393,9 @@ impl ChunkCacheService {
         let target_size_with_margin = max_cache_size_bytes.saturating_mul(9) / 10;
 
         debug!(
-            current_size_gb = (current_chunk_size / GIGABYTE as u64),
-            target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
-            target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
+            info.current_size_gb = (current_chunk_size / GIGABYTE as u64),
+            info.target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
+            info.target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
             "Size-based eviction: cache limit exceeded"
         );
 
@@ -420,10 +420,10 @@ impl ChunkCacheService {
             let age_seconds = now.saturating_seconds_since(cached.cached_at);
 
             debug!(
-                ?data_root,
-                cached_at = cached.cached_at.as_secs(),
-                age_seconds,
-                data_size = cached.data_size,
+                data_root.data_root = ?data_root,
+                data_root.cached_at = cached.cached_at.as_secs(),
+                data_root.age_seconds = age_seconds,
+                data_root.data_size = cached.data_size,
                 "Evicting oldest cache entry to free space"
             );
 
@@ -446,10 +446,10 @@ impl ChunkCacheService {
         }
 
         info!(
-            evicted_count,
-            evicted_size_gb = (evicted_size / GIGABYTE as u64),
-            remaining_count = running_chunk_count,
-            remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
+            info.evicted_count = evicted_count,
+            info.evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            info.remaining_count = running_chunk_count,
+            info.remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
             "Size-based cache eviction complete (FIFO)"
         );
 

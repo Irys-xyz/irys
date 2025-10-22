@@ -21,7 +21,7 @@ pub async fn post_chunk(
     let chunk = body.into_inner();
     let data_root = chunk.data_root;
     let number = chunk.tx_offset;
-    info!(?data_root, ?number, "Received chunk");
+    info!(chunk.data_root = ?data_root, chunk.offset = ?number, "Received chunk");
 
     // Create a message and send it
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
@@ -47,7 +47,7 @@ pub async fn post_chunk(
     // If we received a response, check for validation errors within the response
     let inner_result: Result<(), ChunkIngressError> = msg_result;
     if let Err(err) = inner_result {
-        warn!(?data_root, ?number, "Error processing chunk: {:?}", &err);
+        warn!(chunk.data_root = ?data_root, chunk.offset = ?number, "Error processing chunk: {:?}", &err);
         return match err {
             ChunkIngressError::InvalidProof => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                 .body(format!("Invalid proof: {err:?}"))),

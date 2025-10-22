@@ -111,10 +111,10 @@ impl BlockValidationTracker {
                 } => {
                     let (fb_hash, fb_height) = fallback_block;
                     warn!(
-                            target_block = %abandoned_target,
-                            target_height = abandoned_target_height,
-                            fallback_block = %fb_hash,
-                            fallback_height = fb_height,
+                            block_validation.target_block = %abandoned_target,
+                            block_validation.target_height = abandoned_target_height,
+                            block_validation.fallback_block = %fb_hash,
+                            block_validation.fallback_height = fb_height,
                             "Validation timeout - using fallback block"
                         );
                     return Ok(fb_hash);

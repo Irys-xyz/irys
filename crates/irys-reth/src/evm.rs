@@ -933,17 +933,17 @@ where
             }
 
             tracing::trace!(
-                address = %target,
-                fee = %total_fee,
+                fee.address = %target,
+                fee.total_fee = %total_fee,
                 "Priority fee payer and beneficiary are the same address, no-op transfer"
             );
             return Ok(());
         }
 
         tracing::debug!(
-            beneficiary = %beneficiary,
-            target = %target,
-            total_fee = %total_fee,
+            fee.beneficiary = %beneficiary,
+            fee.target = %target,
+            fee.total_fee = %total_fee,
             "Distributing priority fee"
         );
 
@@ -1050,9 +1050,9 @@ where
         // Validate sufficient balance
         if account.info.balance < fee {
             tracing::warn!(
-                target = %target,
-                balance = %account.info.balance,
-                required_fee = %fee,
+                tx.fee_target = %target,
+                account.balance = %account.info.balance,
+                tx.required_fee = %fee,
                 "Target has insufficient balance for priority fee"
             );
             return Err(Self::create_internal_error(format!(
@@ -1093,10 +1093,10 @@ where
             account.info.balance = account.info.balance.saturating_add(fee);
 
             tracing::trace!(
-                beneficiary = %beneficiary,
-                original_balance = %original_balance,
-                new_balance = %account.info.balance,
-                fee_amount = %fee,
+                fee.beneficiary = %beneficiary,
+                account.original_balance = %original_balance,
+                account.new_balance = %account.info.balance,
+                account.fee_amount = %fee,
                 "Incrementing beneficiary balance with priority fee"
             );
 

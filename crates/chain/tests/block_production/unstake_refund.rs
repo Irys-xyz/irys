@@ -596,13 +596,13 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .sign_commitment(&mut pledge_tx)
         .expect("sign pledge commitment");
 
-    tracing::error!(?pledge_tx.id, ?pledge_tx.commitment_type, ?anchor, "Submitting NEW pledge transaction");
+    tracing::error!(tx.id = ?pledge_tx.id, tx.commitment_type = ?pledge_tx.commitment_type, tx.anchor = ?anchor, "Submitting NEW pledge transaction");
     genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     let pledge_mempool_result = genesis_node
         .wait_for_mempool(pledge_tx.id, seconds_to_wait)
         .await;
-    tracing::error!(?pledge_mempool_result, "Pledge wait_for_mempool result");
+    tracing::error!(tx.pledge_mempool_result = ?pledge_mempool_result, "Pledge wait_for_mempool result");
     pledge_mempool_result?;
 
     // Create and submit unstake transaction
@@ -612,13 +612,13 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         .sign_commitment(&mut unstake_tx)
         .expect("sign unstake commitment");
 
-    tracing::error!(?unstake_tx.id, ?unstake_tx.commitment_type, ?anchor, "Submitting NEW unstake transaction");
+    tracing::error!(tx.id = ?unstake_tx.id, tx.commitment_type = ?unstake_tx.commitment_type, tx.anchor = ?anchor, "Submitting NEW unstake transaction");
     genesis_node.post_commitment_tx(&unstake_tx).await?;
 
     let unstake_mempool_result = genesis_node
         .wait_for_mempool(unstake_tx.id, seconds_to_wait)
         .await;
-    tracing::error!(?unstake_mempool_result, "Unstake wait_for_mempool result");
+    tracing::error!(tx.unstake_mempool_result = ?unstake_mempool_result, "Unstake wait_for_mempool result");
     unstake_mempool_result?;
 
     tracing::error!("Both transactions confirmed in mempool, now mining block");

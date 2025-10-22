@@ -129,7 +129,7 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!(
             tx.id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
+            tx.signer = ?commitment_tx.signer,
             "Received commitment tx from Gossip"
         );
 
@@ -168,7 +168,7 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!(
             tx.id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
+            tx.signer = ?commitment_tx.signer,
             "Received commitment tx from API"
         );
 
@@ -265,13 +265,13 @@ impl Inner {
                 let tx_id = pledge_tx.id;
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 if let Err(e) = self
-                    .handle_message(MempoolServiceMessage::IngestCommitmentTxFromGossip(
-                        pledge_tx, oneshot_tx,
+                    tx.id = ?commitment_tx.id,
+                    custom.commitment_status = ?commitment_status,
                     ))
                     .await
                 {
                     warn!(
-                        tx = ?tx_id,
+                        tx.id = ?tx_id,
                         error = ?e,
                         "Failed to process pending pledge for newly staked address"
                     );

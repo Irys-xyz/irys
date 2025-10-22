@@ -65,7 +65,7 @@ impl Inner {
             .map_err(|_| ChunkIngressError::DatabaseError)?
             .map(|cdr| cdr.data_size)
             .or_else(|| {
-                debug!(data_root=?chunk.data_root, number=?chunk.tx_offset,"Checking SMs for data_size");
+                debug!(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset,"Checking SMs for data_size");
                 candidate_sms.iter().find_map(|(sm, write_offsets)| {
                     write_offsets.iter().find_map(|wo| {
                         sm.query_submodule_db_by_offset(*wo, |tx| {

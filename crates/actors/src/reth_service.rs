@@ -279,15 +279,15 @@ impl RethService {
 
     fn connect_to_peer(&self, peer: RethPeerInfo) -> eyre::Result<()> {
         info!(
-            peer.id = %peer.peer_id,
-            address = %peer.peering_tcp_addr,
+            reth_peer.id = %peer.peer_id,
+            reth_peer.address = %peer.peering_tcp_addr,
             "Connecting to peer"
         );
         self.handle
             .inner
             .network
             .add_peer(peer.peer_id, peer.peering_tcp_addr);
-        debug!(peer.id = %peer.peer_id, "Peer connection initiated");
+        debug!(reth_peer.id = %peer.peer_id, "Peer connection initiated");
         Ok(())
     }
 
@@ -297,8 +297,8 @@ impl RethService {
         let local_addr = handle.inner.network.local_addr();
 
         debug!(
-            peer.id = %peer_id,
-            local_address = %local_addr,
+            reth_peer.id = %peer_id,
+            reth_peer.local_address = %local_addr,
             "Returning peering info"
         );
 

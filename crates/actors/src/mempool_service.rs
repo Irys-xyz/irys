@@ -97,9 +97,9 @@ pub fn validate_funding(
     if balance < required {
         tracing::warn!(
             tx.id = %commitment_tx.id,
-            balance = %balance,
-            required = %required,
-            account = %commitment_tx.signer,
+            account.balance = %balance,
+            tx.required_balance = %required,
+            tx.signer = %commitment_tx.signer,
             "Insufficient balance for commitment tx"
         );
         return Err(TxIngressError::Unfunded);
@@ -107,8 +107,8 @@ pub fn validate_funding(
 
     tracing::debug!(
         tx.id = %commitment_tx.id,
-        balance = %balance,
-        required = %required,
+        account.balance = %balance,
+        tx.required_balance = %required,
         "Funding validated for commitment tx"
     );
 
@@ -526,8 +526,8 @@ impl Inner {
             // pledge commitments when their associated stake commitment is unfunded
             if !has_funds {
                 debug!(
-                    signer = ?signer,
-                    balance = ?balance,
+                    tx.signer = ?signer,
+                    account.balance = ?balance,
                     "Transaction funding check failed"
                 );
                 unfunded_address.insert(signer);
@@ -753,8 +753,8 @@ impl Inner {
                     if tx.term_fee < expected_term_fee {
                         trace!(
                             tx.id = ?tx.id,
-                            actual_term_fee = ?tx.term_fee,
-                            expected_term_fee = ?expected_term_fee,
+                            tx.actual_term_fee = ?tx.term_fee,
+                            tx.expected_term_fee = ?expected_term_fee,
                             "Skipping Publish tx: insufficient term_fee"
                         );
                         continue;
@@ -765,7 +765,7 @@ impl Inner {
                         // Missing perm_fee for Publish ledger transaction is invalid
                         warn!(
                             tx.id = ?tx.id,
-                            signer = ?tx.signer,
+                            tx.signer = ?tx.signer,
                             "Invalid Publish tx: missing perm_fee"
                         );
                         // todo: add to list of invalid txs because all publish txs must have perm fee present
@@ -774,8 +774,8 @@ impl Inner {
                     if perm_fee < expected_perm_fee.amount {
                         trace!(
                             tx.id = ?tx.id,
-                            actual_perm_fee = ?perm_fee,
-                            expected_perm_fee = ?expected_perm_fee.amount,
+                            tx.actual_perm_fee = ?perm_fee,
+                            tx.expected_perm_fee = ?expected_perm_fee.amount,
                             "Skipping Publish tx: insufficient perm_fee"
                         );
                         continue;
@@ -787,7 +787,7 @@ impl Inner {
                     {
                         trace!(
                             tx.id = ?tx.id,
-                            term_fee = ?tx.term_fee,
+                            tx.term_fee = ?tx.term_fee,
                             "Skipping Publish tx: invalid term fee structure"
                         );
                         continue;
@@ -802,8 +802,8 @@ impl Inner {
                     {
                         trace!(
                             tx.id = ?tx.id,
-                            perm_fee = ?perm_fee,
-                            term_fee = ?tx.term_fee,
+                            tx.perm_fee = ?perm_fee,
+                            tx.term_fee = ?tx.term_fee,
                             "Skipping Publish tx: invalid perm fee structure"
                         );
                         continue;
@@ -823,17 +823,17 @@ impl Inner {
 
                 trace!(
                     tx.id = ?tx.id,
-                    signer = ?tx.signer(),
-                    fee = ?tx.total_cost(),
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
                     "Checking funding for data transaction"
                 );
             if check_funding(&tx) {
                 trace!(
                     tx.id = ?tx.id,
-                    signer = ?tx.signer(),
-                    fee = ?tx.total_cost(),
-                    selected_count = submit_tx.len() + 1,
-                    max_data_txs,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.selected_count = submit_tx.len() + 1,
+                    tx.max_data_txs = max_data_txs,
                     "Data transaction passed funding check"
                 );
                 submit_tx.push(tx);
@@ -843,9 +843,9 @@ impl Inner {
             } else {
                 trace!(
                     tx.id = ?tx.id,
-                    signer = ?tx.signer(),
-                    fee = ?tx.total_cost(),
-                    reason = "insufficient_funds",
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.validation_failed_reason = "insufficient_funds",
                     "Data transaction failed funding check"
                 );
             }
@@ -869,11 +869,11 @@ impl Inner {
             );
 
         info!(
-            commitment_txs = commitment_tx.len(),
-            data_txs = submit_tx.len(),
-            publish_txs = publish_txs_and_proofs.txs.len(),
-            total_fee_collected = ?total_fee_collected,
-            unfunded_addresses = unfunded_address.len(),
+            mempool_selected.commitment_txs = commitment_tx.len(),
+            mempool_selected.data_txs = submit_tx.len(),
+            mempool_selected.publish_txs = publish_txs_and_proofs.txs.len(),
+            mempool_selected.total_fee_collected = ?total_fee_collected,
+            mempool_selected.unfunded_addresses = unfunded_address.len(),
             "Mempool transaction selection completed"
         );
 
@@ -887,14 +887,14 @@ impl Inner {
             let rejection_rate = ((total_available - total_selected) * 100) / total_available;
             if rejection_rate > REJECTION_RATE_THRESHOLD {
                 warn!(
-                    rejection_rate = rejection_rate,
-                    total_available,
-                    total_selected,
-                    commitments_available = total_commitments_available,
-                    commitments_selected = commitment_tx.len(),
-                    data_available = total_data_available,
-                    data_selected = submit_tx.len(),
-                    unfunded_addresses = unfunded_address.len(),
+                    mempool_selected.rejection_rate = rejection_rate,
+                    mempool_selected.total_available = total_available,
+                    mempool_selected.total_selected = total_selected,
+                    mempool_selected.commitments_available = total_commitments_available,
+                    mempool_selected.commitments_selected = commitment_tx.len(),
+                    mempool_selected.data_available = total_data_available,
+                    mempool_selected.data_selected = submit_tx.len(),
+                    umempool_selected.unfunded_addresses = unfunded_address.len(),
                     "High transaction rejection rate detected"
                 );
             }

@@ -130,7 +130,7 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!(
             tx.id = ?tx.id,
-            data_root = ?tx.data_root,
+            tx.data_root = ?tx.data_root,
             "Received data tx from Gossip"
         );
 
@@ -177,7 +177,7 @@ impl Inner {
     ) -> Result<(), TxIngressError> {
         debug!(
             tx.id = ?tx.id,
-            data_root = ?tx.data_root,
+            tx.data_root = ?tx.data_root,
             "Received data tx from API"
         );
 
