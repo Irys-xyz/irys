@@ -88,7 +88,7 @@ async fn evm_block_hash_from_block_hash(
     };
     debug!(
         block.hash = %irys_hash,
-        evm_block_hash = %irys_header.evm_block_hash,
+        block.evm_block_hash = %irys_header.evm_block_hash,
         block.height = irys_header.height,
         "Resolved Irys block to EVM block"
     );

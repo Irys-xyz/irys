@@ -460,7 +460,7 @@ impl StorageModuleServiceInner {
 
         if newer_local {
             debug!(
-                module_id = module.id,
+                storage_module.id = module.id,
                 update_height,
                 reason,
                 "skipping unassign: local packing params are newer than update"
@@ -469,8 +469,10 @@ impl StorageModuleServiceInner {
         }
 
         debug!(
-            module_id = module.id,
-            update_height, reason, "clearing local partition assignment"
+            storage_module.id = module.id,
+            update_height,
+            reason,
+            "clearing local partition assignment"
         );
         module.clear_assignment(update_height);
 
@@ -478,14 +480,14 @@ impl StorageModuleServiceInner {
             Ok(interval) => {
                 debug!(
                     packing.interval = ?interval,
-                    module_id = module.id,
+                    storage_module.id = module.id,
                     reason,
                     "storage module reset after unassign"
                 );
             }
             Err(e) => {
                 warn!(
-                    module_id = module.id,
+                    storage_module.id = module.id,
                     reason, "failed to reset storage module after unassign: {}", e
                 );
             }
