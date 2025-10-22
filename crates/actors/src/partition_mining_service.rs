@@ -114,19 +114,19 @@ impl PartitionMiningServiceInner {
                             Ok(()) => {}
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                 warn!(
-                                    storage_module.id = %self.storage_module.id,
-                                    ?partition_hash,
-                                    ?interval,
-                                    "Dropping packing request due to saturated channel"
-                                );
+                                                storage_module.id = %self.storage_module.id,
+                                                ?partition_hash,
+                                                packing.interval = ?interval,
+                                                "Dropping packing request due to saturated channel"
+                                            );
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                                 error!(
-                                    storage_module.id = %self.storage_module.id,
-                                    ?partition_hash,
-                                    ?interval,
-                                    "Packing channel closed; failed to enqueue repacking request"
-                                );
+                                        storage_module.id = %self.storage_module.id,
+                                        ?partition_hash,
+                                        packing.interval = ?interval,
+                                        "Packing channel closed; failed to enqueue repacking request"
+                                    );
                             }
                         }
                     }

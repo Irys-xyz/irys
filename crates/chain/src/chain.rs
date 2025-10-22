@@ -1571,7 +1571,7 @@ impl IrysNode {
                             tracing::warn!(
                                 target: "irys::packing",
                                 storage_module.id = %sm.id,
-                                ?interval,
+                                packing.interval = ?interval,
                                 "Dropping packing request due to saturated channel"
                             );
                         }
@@ -1579,7 +1579,7 @@ impl IrysNode {
                             tracing::error!(
                                 target: "irys::packing",
                                 storage_module.id = %sm.id,
-                                ?interval,
+                                packing.interval = ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }

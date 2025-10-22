@@ -276,7 +276,7 @@ impl StorageModuleServiceInner {
                             tracing::warn!(
                                 target: "irys::packing",
                                 storage_module = %packing_sm.id,
-                                ?interval,
+                                packing.interval = ?interval,
                                 "Dropping packing request due to saturated channel"
                             );
                         }
@@ -284,7 +284,7 @@ impl StorageModuleServiceInner {
                             tracing::error!(
                                 target: "irys::packing",
                                 storage_module = %packing_sm.id,
-                                ?interval,
+                                packing.interval = ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }
@@ -477,7 +477,7 @@ impl StorageModuleServiceInner {
         match module.reset() {
             Ok(interval) => {
                 debug!(
-                    ?interval,
+                    packing.interval = ?interval,
                     module_id = module.id,
                     reason,
                     "storage module reset after unassign"
