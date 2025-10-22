@@ -39,7 +39,7 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn tmp_base_dir() -> PathBuf {
-    if let Some(custom_tmp) = option_env!("IRYS_CUSTOM_TMP_DIR") {
+    if let Ok(custom_tmp) = &std::env::var("IRYS_CUSTOM_TMP_DIR") {
         // try to parse the value as a path
         let path = PathBuf::from(custom_tmp);
         if path.is_absolute()
