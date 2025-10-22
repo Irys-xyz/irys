@@ -44,7 +44,7 @@ pub(super) async fn gossip_data_tx_to_node(
     Ok(())
 }
 
-fn send_block_to_validation_service(
+pub fn send_block_to_validation_service(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
     skip_vdf_validation: bool,

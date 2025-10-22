@@ -153,4 +153,135 @@ pub fn detect_and_decode_pd_header(
     Ok(Some((header, consumed)))
 }
 
-// todo tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Address;
+
+    fn other_address() -> Address {
+        Address::repeat_byte(0xff)
+    }
+
+    fn pd_key(chunk_count: u16) -> PdKey {
+        PdKey {
+            slot_index_be: [0; 26],
+            offset: 0,
+            chunk_count,
+        }
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_empty_access_list() {
+        let access_list = AccessList::default();
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 0);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_no_pd_precompile() {
+        let access_list = AccessList::from(vec![AccessListItem {
+            address: other_address(),
+            storage_keys: vec![B256::ZERO, B256::repeat_byte(0x01)],
+        }]);
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 0);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_no_storage_keys() {
+        let access_list = AccessList::from(vec![AccessListItem {
+            address: PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![],
+        }]);
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 0);
+    }
+
+    // Basic Functionality Tests
+
+    #[test]
+    fn test_sum_pd_chunks_single_key() {
+        let access_list = build_pd_access_list(vec![pd_key(42)]);
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 42);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_multiple_keys() {
+        let access_list = build_pd_access_list(vec![pd_key(10), pd_key(20), pd_key(30)]);
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 60);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_zero_chunks() {
+        let access_list = build_pd_access_list(vec![pd_key(0), pd_key(0)]);
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 0);
+    }
+
+    // Complex Scenario Tests
+
+    #[test]
+    fn test_sum_pd_chunks_mixed_addresses() {
+        let pd_key = encode_pd_storage_key([3; 26], 123, 50);
+        let access_list = AccessList::from(vec![
+            AccessListItem {
+                address: other_address(),
+                storage_keys: vec![
+                    encode_pd_storage_key([1; 26], 0, 999), // This should be ignored
+                ],
+            },
+            AccessListItem {
+                address: PD_PRECOMPILE_ADDRESS,
+                storage_keys: vec![pd_key],
+            },
+            AccessListItem {
+                address: Address::repeat_byte(0xaa),
+                storage_keys: vec![
+                    encode_pd_storage_key([2; 26], 0, 888), // This should be ignored
+                ],
+            },
+        ]);
+        // Only the PD precompile entry should be counted
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 50);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_multiple_pd_entries() {
+        let access_list = AccessList::from(vec![
+            AccessListItem {
+                address: PD_PRECOMPILE_ADDRESS,
+                storage_keys: vec![
+                    encode_pd_storage_key([1; 26], 0, 10),
+                    encode_pd_storage_key([2; 26], 100, 15),
+                ],
+            },
+            AccessListItem {
+                address: PD_PRECOMPILE_ADDRESS,
+                storage_keys: vec![encode_pd_storage_key([3; 26], 200, 20)],
+            },
+        ]);
+        // All PD entries should be summed: 10 + 15 + 20 = 45
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 45);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_no_deduplication() {
+        // Same key appears multiple times - should be counted multiple times
+        let duplicate_key = encode_pd_storage_key([5; 26], 42, 25);
+        let access_list = AccessList::from(vec![AccessListItem {
+            address: PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![duplicate_key, duplicate_key, duplicate_key],
+        }]);
+        // 25 * 3 = 75 (no deduplication per spec)
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 75);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_large_values() {
+        let access_list = build_pd_access_list(vec![pd_key(u16::MAX), pd_key(u16::MAX)]);
+        // 65535 * 2 = 131070
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 131_070);
+    }
+
+    #[test]
+    fn test_sum_pd_chunks_max_single_key() {
+        let access_list = build_pd_access_list(vec![pd_key(u16::MAX)]);
+        assert_eq!(sum_pd_chunks_in_access_list(&access_list), 65_535);
+    }
+}
