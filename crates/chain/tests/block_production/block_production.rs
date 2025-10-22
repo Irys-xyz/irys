@@ -1327,7 +1327,10 @@ async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<
     for _ in 0..BLOCKS_TO_PIPELINE {
         let block = source_node.mine_block().await?;
         source_node.send_full_block(&peer_node, &block).await?;
-        tracing::error!(i = ?block.block_hash, prev = ?block.previous_block_hash);
+        tracing::error!(
+            block.hash = ?block.block_hash,
+            block.previous_block_hash = ?block.previous_block_hash
+        );
         source_blocks.push(block);
     }
 

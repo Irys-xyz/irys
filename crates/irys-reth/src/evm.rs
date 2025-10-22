@@ -483,9 +483,9 @@ where
             || tx.tx_type == EIP4844_TX_TYPE_ID
         {
             tracing::debug!(
-                blob_hashes_len = tx.blob_hashes.len(),
-                max_fee_per_blob_gas = tx.max_fee_per_blob_gas,
-                tx_type = tx.tx_type,
+                tx.blob_hashes_len = tx.blob_hashes.len(),
+                tx.max_fee_per_blob_gas = tx.max_fee_per_blob_gas,
+                tx.tx_type = tx.tx_type,
                 "Rejecting blob-carrying transaction: EIP-4844 not supported"
             );
             return Err(<Self as Evm>::Error::Transaction(

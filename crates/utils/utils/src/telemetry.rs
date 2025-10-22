@@ -132,9 +132,9 @@ pub fn init_telemetry() -> Result<()> {
 
     // NOW we can use tracing! All messages from here forward will go to both terminal and Axiom
     tracing::info!(
-        service_name = %service_name,
-        dataset = %axiom_dataset,
-        endpoint = %otlp_endpoint,
+        telemetry.service_name = %service_name,
+        telemetry.dataset = %axiom_dataset,
+        telemetry.endpoint = %otlp_endpoint,
         "OpenTelemetry telemetry initialized with Axiom backend - logs and spans will be exported in batches"
     );
 

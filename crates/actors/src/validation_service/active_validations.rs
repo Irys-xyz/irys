@@ -216,7 +216,11 @@ impl VdfScheduler {
         let handle = tokio::spawn(
             preemptible
                 .execute()
-                .instrument(tracing::info_span!("vdf_validation", block.hash = %hash, ?priority))
+                .instrument(tracing::info_span!(
+                    "vdf_validation",
+                    block.hash = %hash,
+                    block.priority = ?priority
+                ))
                 .in_current_span(),
         );
         self.current = Some(CurrentVdfTask {
@@ -348,9 +352,10 @@ impl ValidationCoordinator {
                                 validation_result,
                             }
                         }
-                        .instrument(
-                            tracing::error_span!("concurrent_validation", block.hash = %block_hash),
-                        )
+                        .instrument(tracing::error_span!(
+                            "concurrent_validation",
+                            block.hash = %block_hash
+                        ))
                         .in_current_span(),
                     );
                 }
@@ -445,7 +450,7 @@ impl ValidationCoordinator {
 
         if updated_count > 0 {
             debug!(
-                vdf_pending_updated = updated_count,
+                vdf.pending_updated = updated_count,
                 "Reevaluated VDF pending task priorities after reorg"
             );
         }

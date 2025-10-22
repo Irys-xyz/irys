@@ -438,7 +438,7 @@ impl Inner {
         max_anchor_height: u64,
         tx: &impl IrysTransactionCommon,
     ) -> eyre::Result<bool> {
-            let tx_id = tx.id();
+        let tx_id = tx.id();
         let anchor = tx.anchor();
         let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
 
@@ -630,12 +630,12 @@ impl Inner {
             // signer stake status check
             if matches!(tx.commitment_type, CommitmentType::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
-                    debug!(
-                        tx.id = ?tx.id,
-                        tx.signer = ?tx.signer,
-                        tx.is_staked = is_staked,
-                        "Checking stake status for commitment tx"
-                    );
+                debug!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer,
+                    tx.is_staked = is_staked,
+                    "Checking stake status for commitment tx"
+                );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
                     continue;
@@ -821,12 +821,12 @@ impl Inner {
                 continue;
             }
 
-                trace!(
-                    tx.id = ?tx.id,
-                    tx.signer = ?tx.signer(),
-                    tx.fee = ?tx.total_cost(),
-                    "Checking funding for data transaction"
-                );
+            trace!(
+                tx.id = ?tx.id,
+                tx.signer = ?tx.signer(),
+                tx.fee = ?tx.total_cost(),
+                "Checking funding for data transaction"
+            );
             if check_funding(&tx) {
                 trace!(
                     tx.id = ?tx.id,

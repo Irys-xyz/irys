@@ -239,7 +239,9 @@ impl EpochSnapshot {
     }
 
     /// Main worker function
-    #[tracing::instrument(skip_all, err, fields(new_epoch_block = ?new_epoch_block.block_hash))]
+    #[tracing::instrument(skip_all, err, fields(
+        block.hash = ?new_epoch_block.block_hash
+    ))]
     pub fn perform_epoch_tasks(
         &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
@@ -273,8 +275,8 @@ impl EpochSnapshot {
             .map_err(|_| EpochSnapshotError::InvalidCommitments)?;
 
         debug!(
-            height = new_epoch_block.height,
-            block_hash = %new_epoch_block.block_hash,
+            block.height = new_epoch_block.height,
+            block.hash = %new_epoch_block.block_hash,
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 

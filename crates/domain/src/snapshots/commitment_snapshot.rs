@@ -269,8 +269,8 @@ impl CommitmentSnapshot {
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
                         tx.id = ?commitment_tx.id,
-                        ?pledge_count_before_executing,
-                        ?current_pledge_count,
+                        custom.pledge_count_before_executing = ?pledge_count_before_executing,
+                        custom.current_pledge_count = ?current_pledge_count,
                         "rejected"
                     );
                     return CommitmentSnapshotStatus::InvalidPledgeCount;

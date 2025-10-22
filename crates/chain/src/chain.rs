@@ -334,7 +334,10 @@ impl IrysNode {
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
-        info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
+        info!(
+            config.miner_address = ?self.config.node_config.miner_address(),
+            "Starting Irys Node: {:?}", node_mode
+        );
 
         // Check if blockchain data already exists
         let has_existing_data = block_index.num_blocks() > 0;
@@ -885,7 +888,7 @@ impl IrysNode {
                             _ = &mut service_set => {
                             },
                             res = &mut task_manager_pinned => {
-                                tracing::warn!(?res)
+                                tracing::warn!(custom.res = ?res)
                             }
                             _ = reth_node => {}
                         }
@@ -1303,9 +1306,9 @@ impl IrysNode {
             .map_err(|err| eyre::eyre!("reth service dropped initial FCU acknowledgment: {err}"))?;
 
         debug!(
-            head = %fcu_markers.head.block_hash,
-            confirmed = %fcu_markers.migration_block.block_hash,
-            finalized = %fcu_markers.prune_block.block_hash,
+            fcu.head = %fcu_markers.head.block_hash,
+            fcu.confirmed = %fcu_markers.migration_block.block_hash,
+            fcu.finalized = %fcu_markers.prune_block.block_hash,
             "Initial fork choice update applied to Reth"
         );
 
@@ -1568,18 +1571,20 @@ impl IrysNode {
                     match sender.try_send(req) {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(
+                            tracing::event!(
                                 target: "irys::packing",
-                                storage_module_id = %sm.id,
-                                packing_interval = ?interval,
-                                "Dropping packing request due to saturated channel"
+                                tracing::Level::WARN,
+                                storage_module.id = %sm.id,
+                                packing.interval = ?interval,
+                                "Dropping packing request due to a saturated channel"
                             );
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                            tracing::error!(
+                            tracing::event!(
                                 target: "irys::packing",
-                                storage_module_id = %sm.id,
-                                packing_interval = ?interval,
+                                tracing::Level::ERROR,
+                                storage_module.id = %sm.id,
+                                packing.interval = ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }
@@ -1770,7 +1775,10 @@ fn init_peer_list_service(
                     peer: reth_peer_info,
                     response: response_tx,
                 }) {
-                    error!(%send_error, "Failed to enqueue connect-to-peer request for reth service");
+                    error!(
+                        custom.error = %send_error,
+                        "Failed to enqueue connect-to-peer request for reth service"
+                    );
                     return;
                 }
 
@@ -1779,10 +1787,10 @@ fn init_peer_list_service(
                         debug!("Successfully connected to reth peer");
                     }
                     Ok(Err(err)) => {
-                        error!(error = %err, "Reth service failed to connect to peer");
+                        error!(custom.error = %err, "Reth service failed to connect to peer");
                     }
                     Err(recv_error) => {
-                        error!(%recv_error, "Reth service connect-to-peer response channel closed");
+                        error!(custom.error = %recv_error, "Reth service connect-to-peer response channel closed");
                     }
                 }
             }

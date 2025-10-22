@@ -277,7 +277,7 @@ impl StorageModuleServiceInner {
                                 target = "irys::packing",
                                 storage_module.id = %packing_sm.id,
                                 storage_module.packing_interval = ?interval,
-                                "Dropping packing request due to saturated channel"
+                                "Dropping packing request due to a saturated channel"
                             );
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
@@ -489,7 +489,8 @@ impl StorageModuleServiceInner {
                 warn!(
                     storage_module.id = module.id,
                     storage_module.clear_reason = reason,
-                    "failed to reset storage module after unassign: {}", e
+                    "failed to reset storage module after unassign: {}",
+                    e
                 );
             }
         }

@@ -155,7 +155,10 @@ impl BlockValidationTask {
                     VdfValidationResult::Invalid(e)
                 }
             });
-        debug!(?mapped_res, "Finished validating");
+        debug!(
+            vdf.validation_result = ?mapped_res,
+            "Finished validating"
+        );
         mapped_res
     }
 
@@ -179,10 +182,10 @@ impl BlockValidationTask {
                 if let Some(tip_block) = block_tree.get_block(&tip_hash) {
                     let height_diff = tip_block.height.saturating_sub(self.block.height);
                     warn!(
-                        block_hash = %self.block.block_hash,
-                        block_height = %self.block.height,
-                        height_diff,
-                        threshold = self.service_inner.config.consensus.block_tree_depth,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        block.height_diff= height_diff,
+                        config.threshold = self.service_inner.config.consensus.block_tree_depth,
                         "Cancelling validation: block too far behind tip"
                     );
                 }
@@ -282,7 +285,10 @@ impl BlockValidationTask {
                 &self.service_inner.vdf_state,
             )
             .await
-            .inspect_err(|err| tracing::error!(?err, "recall range validation failed"))
+            .inspect_err(|err| tracing::error!(
+                custom.error = ?err,
+                "recall range validation failed"
+            ))
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         }
@@ -313,10 +319,17 @@ impl BlockValidationTask {
                     &consensus_config,
                     &miner_address,
                 )
-                .inspect_err(|err| tracing::error!(?err, "poa validation failed"))
+                .inspect_err(|err| tracing::error!(
+                    custom.error = ?err,
+                    "poa validation failed"
+                ))
                 .map(|()| ValidationResult::Valid)
             })
-            .instrument(tracing::info_span!("poa_validation", block.hash = %block_hash, block.height = %block_height))
+            .instrument(tracing::info_span!(
+                "poa_validation",
+                block.hash = %block_hash,
+                block.height = %block_height
+            ))
         };
 
         let poa_task = async move {
@@ -325,7 +338,10 @@ impl BlockValidationTask {
             match res {
                 Ok(res) => res.unwrap_or(ValidationResult::Invalid),
                 Err(err) => {
-                    tracing::error!(?err, "poa task panicked");
+                    tracing::error!(
+                        custom.error = ?err,
+                        "poa task panicked"
+                    );
                     ValidationResult::Invalid
                 }
             }
@@ -361,9 +377,18 @@ impl BlockValidationTask {
                 parent_commitment_snapshot,
                 block_index,
             )
-            .instrument(tracing::info_span!("shadow_tx_validation", block.hash = %self.block.block_hash, block.height = %self.block.height))
+            .instrument(tracing::info_span!(
+                "shadow_tx_validation",
+                block.hash = %self.block.block_hash,
+                block.height = %self.block.height
+            ))
             .await
-            .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    custom.error = ?err,
+                    "shadow transaction validation failed"
+                )
+            })
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
@@ -386,7 +411,12 @@ impl BlockValidationTask {
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await
-            .inspect_err(|err| tracing::error!(?err, "commitment ordering validation failed"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    custom.error = ?err,
+                    "commitment ordering validation failed"
+                )
+            })
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };
@@ -400,9 +430,18 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
             )
-            .instrument(tracing::info_span!("data_txs_validation", block.hash = %self.block.block_hash, block.height = %self.block.height))
+            .instrument(tracing::info_span!(
+                "data_txs_validation",
+                block.hash = %self.block.block_hash,
+                block.height = %self.block.height
+            ))
             .await
-            .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    custom.error = ?err,
+                    "data transaction validation failed"
+                )
+            })
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };
@@ -455,7 +494,11 @@ impl BlockValidationTask {
                     &self.service_inner.reth_node_adapter,
                     execution_data,
                 )
-                .instrument(tracing::info_span!("reth_submission", block.hash = %self.block.block_hash, block.height = %self.block.height))
+                .instrument(tracing::info_span!(
+                    "reth_submission",
+                    block.hash = %self.block.block_hash,
+                    block.height = %self.block.height
+                ))
                 .await;
 
                 match reth_result {
@@ -464,7 +507,7 @@ impl BlockValidationTask {
                         Ok(ValidationResult::Valid)
                     }
                     Err(err) => {
-                        tracing::error!(custom.err = ?err, "Reth execution layer validation failed");
+                        tracing::error!(custom.error = ?err, "Reth execution layer validation failed");
                         Ok(ValidationResult::Invalid)
                     }
                 }

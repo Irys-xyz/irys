@@ -125,7 +125,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
             handles.push(handle);
 
             debug!(
-                packing.target: "irys::packing::update",
+                target = "irys::packing::update",
                 packing.start = ?start,
                 packing.end = ?end,
                 packing.storage_module_id = ?storage_module_id,
