@@ -67,6 +67,8 @@ pub mod evm;
 pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
+pub mod pd_tx;
+pub mod precompile;
 pub mod shadow_tx;
 pub use chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
