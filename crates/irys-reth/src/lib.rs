@@ -26,12 +26,10 @@ use reth::{
         PayloadBuilderConfig as _,
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
-    providers::{
-        providers::ProviderFactoryBuilder, EthStorage,
-    },
+    providers::{providers::ProviderFactoryBuilder, EthStorage},
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
 };
-use reth_chainspec::{ChainSpec, ChainSpecProvider as _, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 pub use reth_ethereum_engine_primitives;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;

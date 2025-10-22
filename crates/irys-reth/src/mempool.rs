@@ -13,8 +13,9 @@ use reth_chainspec::{ChainSpecProvider, EthChainSpec as _, EthereumHardforks};
 use reth_provider::CanonStateSubscriptions as _;
 use reth_tracing::tracing;
 use reth_transaction_pool::{
-    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig}, EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool,
-    TransactionOrigin, TransactionValidationOutcome, TransactionValidator,
+    blobstore::{DiskFileBlobStore, DiskFileBlobStoreConfig},
+    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
+    TransactionValidationOutcome, TransactionValidator,
 };
 use reth_transaction_pool::{Priority as PoolPriority, TransactionOrdering};
 use std::marker::PhantomData;

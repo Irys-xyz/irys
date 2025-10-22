@@ -1,15 +1,9 @@
 use crate::utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest};
-use alloy_consensus::{
-    SignableTransaction, TxEip1559, TxEip4844, TxEnvelope as EthereumTxEnvelope,
-};
-use alloy_eips::eip2930::{AccessList, AccessListItem};
-use alloy_eips::Encodable2718;
-use alloy_network::TxSignerSync;
-use alloy_primitives::aliases::U200;
+use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
+use alloy_eips::Encodable2718 as _;
+use alloy_network::TxSignerSync as _;
 use alloy_primitives::{TxKind, U256};
 use alloy_signer_local::LocalSigner;
-use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_primitives::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
 use irys_reth::pd_tx::{
     build_pd_access_list, detect_and_decode_pd_header, prepend_pd_header_v1_to_calldata,
     sum_pd_chunks_in_access_list, PdHeaderV1, PdKey,
@@ -126,7 +120,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
 
     // Gossip block to peer node
     peer_node.gossip_block_to_peers(&block)?;
-    peer_node.gossip_eth_block_to_peers(&block_eth_payload.block())?;
+    peer_node.gossip_eth_block_to_peers(block_eth_payload.block())?;
 
     // Check that peer node rejected the block
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
