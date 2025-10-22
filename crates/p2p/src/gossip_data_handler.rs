@@ -394,12 +394,11 @@ where
             block_header.height
         );
 
-        if self.sync_state.is_syncing()
-            && block_header.height > (self.sync_state.sync_target_height() + 1) as u64
-        {
+        let sync_target = self.sync_state.sync_target_height();
+        if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
-                "Node {}: Block {} is out of the sync range, skipping",
-                self.gossip_client.mining_address, block_hash
+                "Node {}: Block {} is out of the sync range (target: {}, highest processed: {}), skipping",
+                self.gossip_client.mining_address, block_hash, &sync_target, &self.sync_state.highest_processed_block()
             );
             return Ok(());
         }
