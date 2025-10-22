@@ -1289,7 +1289,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 Ok(Some(block)) => {
                     tracing::error!(
                         custom.target = "test.reth",
-                        custom.tage = ?tag,
+                        custom.tag = ?tag,
                         custom.expected = %expected_hash,
                         custom.actual = %block.header.hash,
                         custom.attempt = attempt,
