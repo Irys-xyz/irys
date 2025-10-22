@@ -1,0 +1,30 @@
+[package]
+edition = "2021"
+name = "irys-primitives"
+version = "0.1.0"
+
+[dependencies]
+arbitrary.workspace = true
+bytes.workspace = true
+derive_more.workspace = true
+modular-bitfield.workspace = true
+ruint.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+eyre.workspace = true
+alloy-primitives.workspace = true
+reth-codecs.workspace = true
+alloy-rlp.workspace = true
+
+[dev-dependencies]
+test-fuzz.workspace = true
+rstest.workspace = true
+
+[features]
+test-utils = []
+
+[package.metadata.cargo-machete]
+ignored = ["derive_more"]
+
+[lints]
+workspace = true

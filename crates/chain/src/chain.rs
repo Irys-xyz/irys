@@ -244,6 +244,7 @@ async fn start_reth_node(
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
+    chunk_provider: Arc<dyn irys_primitives::chunk_provider::RethChunkProvider>,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -253,6 +254,7 @@ async fn start_reth_node(
         latest_block,
         random_ports,
         shadow_tx_store.clone(),
+        chunk_provider,
     )
     .in_current_span()
     .await?;
@@ -814,6 +816,7 @@ impl IrysNode {
                             .instrument(tracing::Span::current())
                             .await
                             .expect("initializing services should not fail");
+
                             service_set_sender
                                 .send(service_set)
                                 .expect("ServiceSet must be sent");
@@ -880,7 +883,10 @@ impl IrysNode {
             .spawn(move || {
                 let exec = task_manager.executor();
                 let _span = span.enter();
-                let run_reth_until_ctrl_c_or_signal = async || {
+                let run_reth_until_ctrl_c_or_signal = async move {
+                    // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
+                    let mock_provider = irys_primitives::chunk_provider::MockChunkProvider::new();
+
                     let node_handle = start_reth_node(
                         exec,
                         reth_chainspec,
@@ -888,6 +894,7 @@ impl IrysNode {
                         reth_handle_sender,
                         latest_block_height,
                         shadow_tx_store,
+                        Arc::new(mock_provider),
                     )
                     .in_current_span()
                     .await
@@ -939,7 +946,7 @@ impl IrysNode {
                 };
 
                 let reth_node =
-                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().in_current_span());
+                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal.in_current_span());
 
                 reth_node.provider.database.db.close();
                 reth_provider::cleanup_provider(&irys_provider);

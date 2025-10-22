@@ -53,6 +53,7 @@ tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
 lru.workspace = true
+parking_lot = "0.12"
 thiserror.workspace = true
 irys-types.workspace = true
 
@@ -62,6 +63,7 @@ serde_json.workspace = true
 alloy-rpc-types-engine.workspace = true
 test-log.workspace = true
 rstest.workspace = true
+proptest = "1.6"
 futures.workspace = true
 alloy-signer-local.workspace = true
 reth-engine-local = { workspace = true }
@@ -69,9 +71,10 @@ reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 rand09 = { package = "rand", version = "0.9" }
+irys-primitives = { workspace = true, features = ["test-utils"] }
 
 [features]
-test-utils = ["reth-e2e-test-utils", "reth-engine-local"]
+test-utils = ["reth-e2e-test-utils", "reth-engine-local", "irys-primitives/test-utils"]
 
 [lints]
 workspace = true
