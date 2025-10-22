@@ -94,7 +94,7 @@ impl BlockValidationTask {
     }
 
     /// Execute the concurrent validation task
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     pub async fn execute_concurrent(self) -> ValidationResult {
         let validation_result = self
             .validate_block()
@@ -118,7 +118,7 @@ impl BlockValidationTask {
         validation_result
     }
 
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     pub(crate) async fn execute_vdf(
         self,
         cancel: Arc<AtomicU8>,
@@ -161,7 +161,7 @@ impl BlockValidationTask {
 
     /// Wait for parent validation to complete
     /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
@@ -267,7 +267,7 @@ impl BlockValidationTask {
     }
 
     /// Perform block validation
-    #[tracing::instrument(skip_all, err, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, err, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
         let skip_vdf_validation = self.skip_vdf_validation;
         let poa = self.block.poa.clone();
@@ -286,7 +286,7 @@ impl BlockValidationTask {
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         }
-        .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block.block_hash, block_height = %self.block.height));
+        .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.block.block_hash, block.height = %self.block.height));
 
         let parent_epoch_snapshot = self
             .block_tree_guard
@@ -316,7 +316,7 @@ impl BlockValidationTask {
                 .inspect_err(|err| tracing::error!(?err, "poa validation failed"))
                 .map(|()| ValidationResult::Valid)
             })
-            .instrument(tracing::info_span!("poa_validation", block_hash = %block_hash, block_height = %block_height))
+            .instrument(tracing::info_span!("poa_validation", block.hash = %block_hash, block.height = %block_height))
         };
 
         let poa_task = async move {
@@ -361,7 +361,7 @@ impl BlockValidationTask {
                 parent_commitment_snapshot,
                 block_index,
             )
-            .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
+            .instrument(tracing::info_span!("shadow_tx_validation", block.hash = %self.block.block_hash, block.height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
         };
@@ -400,7 +400,7 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
             )
-            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
+            .instrument(tracing::info_span!("data_txs_validation", block.hash = %self.block.block_hash, block.height = %self.block.height))
             .await
             .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
             .map(|()| ValidationResult::Valid)
@@ -455,7 +455,7 @@ impl BlockValidationTask {
                     &self.service_inner.reth_node_adapter,
                     execution_data,
                 )
-                .instrument(tracing::info_span!("reth_submission", block_hash = %self.block.block_hash, block_height = %self.block.height))
+                .instrument(tracing::info_span!("reth_submission", block.hash = %self.block.block_hash, block.height = %self.block.height))
                 .await;
 
                 match reth_result {

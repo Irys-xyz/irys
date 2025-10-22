@@ -96,8 +96,8 @@ impl BlockValidationTracker {
                 } => {
                     let elapsed = start_time.elapsed();
                     info!(
-                        block_hash = %block_hash,
-                        block_height = block_height,
+                        block.hash = %block_hash,
+                        block.height = block_height,
                         elapsed_ms = elapsed.as_millis(),
                         "Block validation completed"
                     );
@@ -111,12 +111,12 @@ impl BlockValidationTracker {
                 } => {
                     let (fb_hash, fb_height) = fallback_block;
                     warn!(
-                        target_block = %abandoned_target,
-                        target_height = abandoned_target_height,
-                        fallback_block = %fb_hash,
-                        fallback_height = fb_height,
-                        "Validation timeout - using fallback block"
-                    );
+                            target_block = %abandoned_target,
+                            target_height = abandoned_target_height,
+                            fallback_block = %fb_hash,
+                            fallback_height = fb_height,
+                            "Validation timeout - using fallback block"
+                        );
                     return Ok(fb_hash);
                 }
 

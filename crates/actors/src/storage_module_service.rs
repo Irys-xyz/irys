@@ -275,7 +275,7 @@ impl StorageModuleServiceInner {
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             tracing::warn!(
                                 target: "irys::packing",
-                                storage_module_id = %packing_sm.id,
+                                storage_module = %packing_sm.id,
                                 ?interval,
                                 "Dropping packing request due to saturated channel"
                             );
@@ -283,7 +283,7 @@ impl StorageModuleServiceInner {
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                             tracing::error!(
                                 target: "irys::packing",
-                                storage_module_id = %packing_sm.id,
+                                storage_module = %packing_sm.id,
                                 ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
@@ -713,7 +713,7 @@ impl StorageModuleService {
             }
         }
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?
         }

@@ -62,7 +62,7 @@ async fn evm_block_hash_from_block_hash(
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
-    debug!(irys_hash = %irys_hash, "Resolving EVM block hash for Irys block");
+    debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block");
 
     let irys_header = {
         let (tx, rx) = oneshot::channel();
@@ -72,24 +72,24 @@ async fn evm_block_hash_from_block_hash(
         let mempool_response = rx.await?;
         match mempool_response {
             Some(h) => {
-                debug!(irys_hash = %irys_hash, "Found block in mempool");
+                debug!(block.hash = %irys_hash, "Found block in mempool");
                 h
             }
             None => {
-                debug!(irys_hash = %irys_hash, "Block not in mempool, checking database");
+                debug!(block.hash = %irys_hash, "Block not in mempool, checking database");
                 db
                     .view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?
                     .ok_or_else(|| {
-                        error!(irys_hash = %irys_hash, "Irys block not found in mempool or database");
+                        error!(block.hash = %irys_hash, "Irys block not found in mempool or database");
                         eyre!("Missing irys block {} in DB!", irys_hash)
                     })?
             }
         }
     };
     debug!(
-        irys_hash = %irys_hash,
+        block.hash = %irys_hash,
         evm_block_hash = %irys_header.evm_block_hash,
-        height = irys_header.height,
+        block.height = irys_header.height,
         "Resolved Irys block to EVM block"
     );
     Ok(irys_header.evm_block_hash)
@@ -279,7 +279,7 @@ impl RethService {
 
     fn connect_to_peer(&self, peer: RethPeerInfo) -> eyre::Result<()> {
         info!(
-            peer_id = %peer.peer_id,
+            peer.id = %peer.peer_id,
             address = %peer.peering_tcp_addr,
             "Connecting to peer"
         );
@@ -287,7 +287,7 @@ impl RethService {
             .inner
             .network
             .add_peer(peer.peer_id, peer.peering_tcp_addr);
-        debug!(peer_id = %peer.peer_id, "Peer connection initiated");
+        debug!(peer.id = %peer.peer_id, "Peer connection initiated");
         Ok(())
     }
 
@@ -297,7 +297,7 @@ impl RethService {
         let local_addr = handle.inner.network.local_addr();
 
         debug!(
-            peer_id = %peer_id,
+            peer.id = %peer_id,
             local_address = %local_addr,
             "Returning peering info"
         );

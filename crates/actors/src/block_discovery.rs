@@ -261,7 +261,7 @@ impl BlockDiscoveryServiceInner {
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
 
-        debug!(height = ?new_block_header.height,
+        debug!(block.height = ?new_block_header.height,
             global_step_counter = ?new_block_header.vdf_limiter_info.global_step_number,
             output = ?new_block_header.vdf_limiter_info.output,
             prev_output = ?new_block_header.vdf_limiter_info.prev_output,

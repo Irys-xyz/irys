@@ -81,7 +81,7 @@ pub fn validate_funding(
         .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
         .map_err(|e| {
             tracing::error!(
-                tx_id = %commitment_tx.id,
+                tx.id = %commitment_tx.id,
                 signer = %commitment_tx.signer,
                 error = %e,
                 "Failed to fetch balance for commitment tx"
@@ -96,7 +96,7 @@ pub fn validate_funding(
 
     if balance < required {
         tracing::warn!(
-            tx_id = %commitment_tx.id,
+            tx.id = %commitment_tx.id,
             balance = %balance,
             required = %required,
             account = %commitment_tx.signer,
@@ -106,7 +106,7 @@ pub fn validate_funding(
     }
 
     tracing::debug!(
-        tx_id = %commitment_tx.id,
+        tx.id = %commitment_tx.id,
         balance = %balance,
         required = %required,
         "Funding validated for commitment tx"
@@ -129,14 +129,14 @@ pub fn validate_commitment_transaction(
     parent_evm_block_id: Option<BlockId>,
 ) -> Result<(), TxIngressError> {
     debug!(
-        tx_id = ?commitment_tx.id,
+        tx.id = ?commitment_tx.id,
         signer = ?commitment_tx.signer,
         "Validating commitment transaction"
     );
     // Fee
     commitment_tx.validate_fee(consensus).map_err(|e| {
         warn!(
-            tx_id = ?commitment_tx.id,
+            tx.id = ?commitment_tx.id,
             signer = ?commitment_tx.signer,
             error = ?e,
             "Commitment tx fee validation failed"
@@ -147,7 +147,7 @@ pub fn validate_commitment_transaction(
     // Funding
     validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
         warn!(
-            tx_id = ?commitment_tx.id,
+            tx.id = ?commitment_tx.id,
             signer = ?commitment_tx.signer,
             error = ?e,
             "Commitment tx funding validation failed"
@@ -158,7 +158,7 @@ pub fn validate_commitment_transaction(
     // Value
     commitment_tx.validate_value(consensus).map_err(|e| {
         warn!(
-            tx_id = ?commitment_tx.id,
+            tx.id = ?commitment_tx.id,
             signer = ?commitment_tx.signer,
             error = ?e,
             "Commitment tx value validation failed"
@@ -438,7 +438,7 @@ impl Inner {
         max_anchor_height: u64,
         tx: &impl IrysTransactionCommon,
     ) -> eyre::Result<bool> {
-        let tx_id = tx.id();
+            let tx_id = tx.id();
         let anchor = tx.anchor();
         let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
 
@@ -458,7 +458,7 @@ impl Inner {
         }
     }
 
-    #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
+    #[instrument(skip(self), fields(parent_block.id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
         &mut self,
         parent_evm_block_id: Option<BlockId>,
@@ -601,7 +601,7 @@ impl Inner {
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
-                    tx_id = ?tx.id,
+                    tx.id = ?tx.id,
                     commitment_type = ?tx.commitment_type,
                     signer = ?tx.signer,
                     "Skipping already confirmed commitment transaction"
@@ -630,12 +630,12 @@ impl Inner {
             // signer stake status check
             if matches!(tx.commitment_type, CommitmentType::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
-                debug!(
-                    tx_id = ?tx.id,
-                    signer = ?tx.signer,
-                    is_staked = is_staked,
-                    "Checking stake status for commitment tx"
-                );
+                    debug!(
+                        tx.id = ?tx.id,
+                        signer = ?tx.signer,
+                        is_staked = is_staked,
+                        "Checking stake status for commitment tx"
+                    );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
                     continue;
@@ -649,7 +649,7 @@ impl Inner {
                 if simulation != CommitmentSnapshotStatus::Accepted {
                     warn!(
                         commitment_type = ?tx.commitment_type,
-                        tx_id = ?tx.id,
+                        tx.id = ?tx.id,
                         simulation_status = ?simulation,
                         "Commitment tx rejected by simulation"
                     );
@@ -658,7 +658,7 @@ impl Inner {
             }
 
             debug!(
-                tx_id = ?tx.id,
+                tx.id = ?tx.id,
                 commitment_type = ?tx.commitment_type,
                 signer = ?tx.signer,
                 fee = ?tx.total_cost(),
@@ -725,7 +725,7 @@ impl Inner {
             // Validate fees based on ledger type
             let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
                 trace!(
-                    tx_id = ?tx.id,
+                    tx.id = ?tx.id,
                     ledger_id = tx.ledger_id,
                     "Skipping tx: invalid ledger ID"
                 );
@@ -752,7 +752,7 @@ impl Inner {
                     // Validate term fee
                     if tx.term_fee < expected_term_fee {
                         trace!(
-                            tx_id = ?tx.id,
+                            tx.id = ?tx.id,
                             actual_term_fee = ?tx.term_fee,
                             expected_term_fee = ?expected_term_fee,
                             "Skipping Publish tx: insufficient term_fee"
@@ -764,7 +764,7 @@ impl Inner {
                     let Some(perm_fee) = tx.perm_fee else {
                         // Missing perm_fee for Publish ledger transaction is invalid
                         warn!(
-                            tx_id = ?tx.id,
+                            tx.id = ?tx.id,
                             signer = ?tx.signer,
                             "Invalid Publish tx: missing perm_fee"
                         );
@@ -773,7 +773,7 @@ impl Inner {
                     };
                     if perm_fee < expected_perm_fee.amount {
                         trace!(
-                            tx_id = ?tx.id,
+                            tx.id = ?tx.id,
                             actual_perm_fee = ?perm_fee,
                             expected_perm_fee = ?expected_perm_fee.amount,
                             "Skipping Publish tx: insufficient perm_fee"
@@ -786,7 +786,7 @@ impl Inner {
                         .is_err()
                     {
                         trace!(
-                            tx_id = ?tx.id,
+                            tx.id = ?tx.id,
                             term_fee = ?tx.term_fee,
                             "Skipping Publish tx: invalid term fee structure"
                         );
@@ -801,7 +801,7 @@ impl Inner {
                     .is_err()
                     {
                         trace!(
-                            tx_id = ?tx.id,
+                            tx.id = ?tx.id,
                             perm_fee = ?perm_fee,
                             term_fee = ?tx.term_fee,
                             "Skipping Publish tx: invalid perm fee structure"
@@ -821,15 +821,15 @@ impl Inner {
                 continue;
             }
 
-            trace!(
-                tx_id = ?tx.id,
-                signer = ?tx.signer(),
-                fee = ?tx.total_cost(),
-                "Checking funding for data transaction"
-            );
+                trace!(
+                    tx.id = ?tx.id,
+                    signer = ?tx.signer(),
+                    fee = ?tx.total_cost(),
+                    "Checking funding for data transaction"
+                );
             if check_funding(&tx) {
                 trace!(
-                    tx_id = ?tx.id,
+                    tx.id = ?tx.id,
                     signer = ?tx.signer(),
                     fee = ?tx.total_cost(),
                     selected_count = submit_tx.len() + 1,
@@ -842,7 +842,7 @@ impl Inner {
                 }
             } else {
                 trace!(
-                    tx_id = ?tx.id,
+                    tx.id = ?tx.id,
                     signer = ?tx.signer(),
                     fee = ?tx.total_cost(),
                     reason = "insufficient_funds",
@@ -941,7 +941,7 @@ impl Inner {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
                     let txids = cached_data_root.txid_set;
-                    debug!(tx_ids = ?txids, "Publish candidates");
+                    debug!(tx.ids = ?txids, "Publish candidates");
                     publish_txids.extend(txids)
                 }
             }
@@ -1213,7 +1213,7 @@ impl Inner {
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
     // if the anchor is valid, returns anchor block height
-    #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
+    #[instrument(skip_all, fields(tx.id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
         &self,
         tx: &impl IrysTransactionCommon,
@@ -1356,7 +1356,7 @@ impl Inner {
     }
 
     // Helper to verify signature
-    #[instrument(skip_all, fields(tx_id = %tx.id()))]
+    #[instrument(skip_all, fields(tx.id = %tx.id()))]
     pub async fn validate_signature<T: irys_types::versioning::Signable + IrysTransactionCommon>(
         &mut self,
         tx: &T,
@@ -1722,7 +1722,7 @@ impl MempoolService {
             }
         }
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }

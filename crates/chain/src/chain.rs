@@ -1570,7 +1570,7 @@ impl IrysNode {
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             tracing::warn!(
                                 target: "irys::packing",
-                                storage_module_id = %sm.id,
+                                storage_module.id = %sm.id,
                                 ?interval,
                                 "Dropping packing request due to saturated channel"
                             );
@@ -1578,7 +1578,7 @@ impl IrysNode {
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                             tracing::error!(
                                 target: "irys::packing",
-                                storage_module_id = %sm.id,
+                                storage_module.id = %sm.id,
                                 ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );

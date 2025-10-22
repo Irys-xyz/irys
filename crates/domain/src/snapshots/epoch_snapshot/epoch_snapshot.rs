@@ -335,7 +335,7 @@ impl EpochSnapshot {
                 return Err(EpochSnapshotError::UnstakeSignerNotStaked { signer });
             }
 
-            debug!(signer = %signer, "unstake_applied");
+            debug!(tx.signer = %signer, "unstake_applied");
         }
         Ok(())
     }

@@ -231,8 +231,8 @@ pub async fn prevalidate_block(
     parent_ema_snapshot: &EmaSnapshot,
 ) -> Result<(), PreValidationError> {
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "Prevalidating block",
     );
 
@@ -254,16 +254,16 @@ pub async fn prevalidate_block(
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "prev_output_is_valid",
     );
 
     // Check block height continuity
     height_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "height_is_valid",
     );
 
@@ -1405,7 +1405,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
+#[tracing::instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,

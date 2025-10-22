@@ -129,7 +129,7 @@ impl Inner {
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx_id = ?tx.id,
+            tx.id = ?tx.id,
             data_root = ?tx.data_root,
             "Received data tx from Gossip"
         );
@@ -176,7 +176,7 @@ impl Inner {
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx_id = ?tx.id,
+            tx.id = ?tx.id,
             data_root = ?tx.data_root,
             "Received data tx from API"
         );

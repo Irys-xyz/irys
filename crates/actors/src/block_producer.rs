@@ -1113,8 +1113,8 @@ pub trait BlockProdStrategy {
         }
 
         info!(
-            block_height = ?block.height,
-            hash = ?block.block_hash,
+            block.height = ?block.height,
+            block.hash = ?block.block_hash,
             "Finished producing block",
         );
 

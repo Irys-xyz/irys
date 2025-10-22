@@ -103,7 +103,7 @@ impl ChunkCacheService {
             }
         }
 
-        debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.on_handle_message(msg);
         }

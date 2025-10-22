@@ -128,7 +128,7 @@ impl Inner {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx_id = ?commitment_tx.id,
+            tx.id = ?commitment_tx.id,
             signer = ?commitment_tx.signer,
             "Received commitment tx from Gossip"
         );
@@ -167,7 +167,7 @@ impl Inner {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx_id = ?commitment_tx.id,
+            tx.id = ?commitment_tx.id,
             signer = ?commitment_tx.signer,
             "Received commitment tx from API"
         );
@@ -495,7 +495,7 @@ impl Inner {
         found
     }
 
-    #[tracing::instrument(skip_all, fields(tx_id = ?commitment_tx.id))]
+    #[tracing::instrument(skip_all, fields(tx.id = ?commitment_tx.id))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
