@@ -376,6 +376,11 @@ pub struct MempoolConsensusConfig {
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
+
+    /// Maximum number of PD (Programmable Data) chunks that can be included in a single block.
+    /// PD-aware transactions embed a PD header and list required data chunks in their access list.
+    /// This limit prevents exceeding the network's chunk processing capacity per block.
+    pub max_pd_chunks_per_block: u64,
 }
 
 impl ConsensusConfig {
@@ -484,6 +489,7 @@ impl ConsensusConfig {
                 max_commitment_txs_per_block: 100,
                 anchor_expiry_depth: 20,
                 commitment_fee: 100,
+                max_pd_chunks_per_block: 7_500,
             },
             vdf: VdfConsensusConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)

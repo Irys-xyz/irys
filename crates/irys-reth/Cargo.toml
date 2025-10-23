@@ -49,7 +49,6 @@ reth-provider.workspace = true
 tokio.workspace = true
 eyre.workspace = true
 serde.workspace = true
-futures.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
@@ -68,6 +67,8 @@ alloy-signer-local.workspace = true
 reth-engine-local = { workspace = true }
 reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
+rand09 = { package = "rand", version = "0.9" }
 
 [features]
 test-utils = ["reth-e2e-test-utils", "reth-engine-local"]

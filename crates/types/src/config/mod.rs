@@ -474,6 +474,7 @@ mod tests {
         max_commitment_txs_per_block = 100
         anchor_expiry_depth = 20
         commitment_fee = 100
+        max_pd_chunks_per_block = 7500
 
 
 

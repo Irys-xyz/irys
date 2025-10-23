@@ -20,6 +20,7 @@ use crate::payload::ShadowTxStore;
 #[derive(Clone, Debug)]
 pub struct IrysPayloadBuilderBuilder {
     pub shadow_tx_store: ShadowTxStore,
+    pub max_pd_chunks_per_block: u64,
 }
 
 impl<Types, Node, Pool, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for IrysPayloadBuilderBuilder
@@ -55,6 +56,7 @@ where
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
             self.shadow_tx_store,
+            self.max_pd_chunks_per_block,
         ))
     }
 }
