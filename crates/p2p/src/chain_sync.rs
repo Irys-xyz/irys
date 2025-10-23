@@ -621,6 +621,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     config: &irys_types::Config,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
 ) -> ChainSyncResult<()> {
+    let migration_depth = config.consensus.block_migration_depth as usize;
     let sync_mode = config.node_config.sync_mode;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
@@ -903,11 +904,28 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
             block_queue.extend(additional_index);
             blocks_to_request = block_queue.len();
             if blocks_to_request == 0 {
-                debug!(
-                    "block index request for entries >{} returned no extra results",
-                    &sync_target
-                );
-                break;
+                let estimated_height = estimate_canonical_height(
+                    peer_list,
+                    &api_client,
+                    start_sync_from_height as u64,
+                )
+                .await;
+                if estimated_height > (sync_state.sync_target_height() + migration_depth - 1) as u64
+                {
+                    error!(
+                        "block index request for entries >{} returned no extra results, but the estimated network height is {}",
+                        &sync_target, estimated_height
+                    );
+                    return Err(ChainSyncError::Internal(
+                        format!("Block index request for entries >{} returned no extra results, but the estimated network height is {}", &sync_target, estimated_height)
+                    ));
+                } else {
+                    debug!(
+                        "block index request for entries >{} returned no extra results",
+                        &sync_target
+                    );
+                    break;
+                }
             }
         }
     }
@@ -1204,7 +1222,7 @@ async fn get_block_index(
         peer_list.online_trusted_peers()
     } else {
         debug!("Fetching block index from top active peers");
-        peer_list.top_active_peers(Some(5), None)
+        peer_list.top_active_peers(None, None)
     };
 
     if peers_to_fetch_index_from.is_empty() {
@@ -1412,6 +1430,49 @@ async fn is_local_index_is_behind_trusted_peers(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),
         ))
     }
+}
+
+/// This function estimates the canonical height by querying trusted peers for their block index height.
+/// It returns the highest block index height reported by trusted peers.
+async fn estimate_canonical_height(
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    mut highest_trusted_peer_height: u64,
+) -> u64 {
+    // Don't wait for hydration, since the
+    let trusted_peers = peer_list.all_trusted_peers();
+    if trusted_peers.is_empty() {
+        warn!("The node has no trusted peers configured, falling back to local index height for canonical height estimation");
+        return highest_trusted_peer_height;
+    }
+
+    let futures = trusted_peers.iter().map(|(_, peer)| {
+        let api_client = api_client.clone();
+        async move {
+            debug!("Sync task: Trusted peer: {:?}", peer);
+            match api_client.node_info(peer.address.api).await {
+                Ok(info) => Some(info.block_index_height),
+                Err(err) => {
+                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
+                    None
+                }
+            }
+        }
+    });
+
+    let heights = futures::future::join_all(futures).await;
+
+    for index_tip in heights.into_iter().flatten() {
+        if index_tip > highest_trusted_peer_height {
+            debug!(
+                "Sync task: Updating the highest trusted peer height from {} to {}",
+                highest_trusted_peer_height, index_tip
+            );
+            highest_trusted_peer_height = index_tip;
+        }
+    }
+
+    highest_trusted_peer_height
 }
 
 #[cfg(test)]
