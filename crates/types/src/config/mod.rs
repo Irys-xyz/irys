@@ -567,6 +567,7 @@ mod tests {
 
         [packing.local]
         cpu_packing_concurrency = 4
+        cpu_unpacking_concurrency = 4
         gpu_packing_batch_size = 1024
 
         [cache]

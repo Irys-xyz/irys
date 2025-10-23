@@ -3,10 +3,13 @@ pub mod chunk_orchestrator;
 pub mod peer_bandwidth_manager;
 pub mod peer_stats;
 
-use crate::{chunk_fetcher::ChunkFetcherFactory, services::ServiceSenders};
+use crate::{
+    chunk_fetcher::ChunkFetcherFactory,
+    packing_service::types::{UnpackingPriority, UnpackingRequest},
+    services::ServiceSenders,
+};
 use chunk_orchestrator::ChunkOrchestrator;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
-use irys_packing::unpack;
 use irys_types::{Address, Config, PackedChunk, PartitionChunkOffset, TokioServiceHandle};
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
@@ -86,7 +89,7 @@ impl DataSyncServiceInner {
     }
 
     #[tracing::instrument(skip_all, err)]
-    pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
+    pub async fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
                 self.synchronize_peers_and_orchestrators();
@@ -97,8 +100,9 @@ impl DataSyncServiceInner {
                 peer_address: peer_addr,
                 chunk,
             } => {
-                if let Err(e) =
-                    self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
+                if let Err(e) = self
+                    .on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
+                    .await
                 {
                     error!("Failed to handle chunk completion: {e:?}");
                 }
@@ -206,7 +210,7 @@ impl DataSyncServiceInner {
         }
     }
 
-    fn on_chunk_completed(
+    async fn on_chunk_completed(
         &mut self,
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
@@ -218,14 +222,18 @@ impl DataSyncServiceInner {
             orchestrator.on_chunk_completed(chunk_offset, peer_addr)?;
         }
 
-        // Unpack and store the chunk data
-        let consensus = &self.config.consensus;
-        let unpacked_chunk = unpack(
-            &chunk,
-            consensus.entropy_packing_iterations,
-            consensus.chunk_size as usize,
-            consensus.chain_id,
-        );
+        // Unpack and store the chunk data using unpacking service
+        let (request, response_rx) =
+            UnpackingRequest::from_chunk(chunk, UnpackingPriority::Background);
+        self.service_senders
+            .unpacking_sender()
+            .send(request)
+            .await
+            .map_err(|_| eyre::eyre!("Failed to send unpacking request"))?;
+
+        let unpacked_chunk = response_rx
+            .await
+            .map_err(|_| eyre::eyre!("Unpacking response channel closed"))??;
 
         // Attempt to write the chunk directly to the sm, if it doesn't succeed
         // for a variety of reasons, indexes not initialized, no packing etc etc...
@@ -603,7 +611,7 @@ impl DataSyncService {
 
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(msg) => self.inner.handle_message(msg)?,
+                        Some(msg) => self.inner.handle_message(msg).await?,
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
                             break;
@@ -652,7 +660,7 @@ impl DataSyncService {
 
         // Process remaining messages before shutdown
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg)?;
+            self.inner.handle_message(msg).await?;
         }
 
         tracing::info!("shutting down DataSync Service gracefully");
