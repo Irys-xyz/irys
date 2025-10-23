@@ -5,10 +5,22 @@ use irys_primitives::chunk_provider::RethChunkProvider;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-#[derive(Clone)]
 pub struct PdContext {
+    // Arc<RwLock> allows sharing within a single EVM instance
+    // Custom Clone creates NEW Arc (not Arc::clone) for each EVM instance
     access_list: Arc<RwLock<Vec<AccessListItem>>>,
     chunk_provider: Arc<dyn RethChunkProvider>,
+}
+
+// Default Clone uses Arc::clone to share the same access_list storage
+// This is needed so precompile and EVM share the same Arc<RwLock>
+impl Clone for PdContext {
+    fn clone(&self) -> Self {
+        Self {
+            access_list: Arc::clone(&self.access_list),
+            chunk_provider: Arc::clone(&self.chunk_provider),
+        }
+    }
 }
 
 impl PdContext {
@@ -16,6 +28,16 @@ impl PdContext {
         Self {
             access_list: Arc::new(RwLock::new(Vec::new())),
             chunk_provider,
+        }
+    }
+
+    /// Creates an independent clone with a NEW Arc<RwLock> for use in a new EVM instance.
+    /// This ensures each EVM has its own access list storage (no cross-EVM contamination).
+    #[must_use = "cloned context should be used for new EVM instance"]
+    pub fn clone_for_new_evm(&self) -> Self {
+        Self {
+            access_list: Arc::new(RwLock::new(self.access_list.read().clone())),
+            chunk_provider: Arc::clone(&self.chunk_provider),
         }
     }
 
