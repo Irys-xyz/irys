@@ -3,6 +3,7 @@ use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
+    packing_service::{UnpackingPriority, UnpackingRequest},
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -2013,12 +2014,25 @@ pub async fn data_txs_are_valid(
 
                             let unpacked = match chunk_format {
                                 irys_types::ChunkFormat::Unpacked(u) => u,
-                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
-                                    &p,
-                                    config.consensus.entropy_packing_iterations,
-                                    config.consensus.chunk_size as usize,
-                                    config.consensus.chain_id,
-                                ),
+                                irys_types::ChunkFormat::Packed(p) => {
+                                    // Use unpacking service for packed chunks
+                                    let (request, response_rx) =
+                                        UnpackingRequest::from_chunk(p, UnpackingPriority::High);
+
+                                    if service_senders
+                                        .unpacking_sender()
+                                        .send(request)
+                                        .await
+                                        .is_err()
+                                    {
+                                        continue;
+                                    }
+
+                                    match response_rx.await {
+                                        Ok(Ok(unpacked)) => unpacked,
+                                        Ok(Err(_)) | Err(_) => continue,
+                                    }
+                                }
                             };
 
                             // Basic sanity checks before ingest
