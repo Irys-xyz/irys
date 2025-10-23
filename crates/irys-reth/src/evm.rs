@@ -331,11 +331,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             false,
-            self.context.clone(),
+            self.context.clone_for_new_evm(),
         );
 
         // Register Irys custom precompiles depending on active hardfork (Frontier+).
-        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, self.context.clone());
+        let pd_context = evm.pd_context().clone();
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
 
         evm
     }
@@ -357,11 +358,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             true,
-            self.context.clone(),
+            self.context.clone_for_new_evm(),
         );
 
         // Register Irys custom precompiles depending on active hardfork (Frontier+).
-        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, self.context.clone());
+        let pd_context = evm.pd_context().clone();
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
 
         evm
     }
@@ -453,6 +455,11 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     pub fn ctx_mut(&mut self) -> &mut EthEvmContext<DB> {
         &mut self.inner.ctx
     }
+
+    /// Provides a reference to the PD context.
+    pub const fn pd_context(&self) -> &PdContext {
+        &self.context
+    }
 }
 
 impl<DB: Database, I, PRECOMPILE> Deref for IrysEvm<DB, I, PRECOMPILE> {
@@ -517,13 +524,14 @@ where
             Either::Right(tx) => tx,
         };
 
-        // Update PdContext with transaction access_list for PD precompile
+        // Update EVM's PdContext with transaction access_list for PD precompile
+        // Each EVM has its own PdContext (via clone), so this is thread-safe
         let access_list = tx.access_list.to_vec();
-        tracing::debug!(
-            access_list_items = access_list.len(),
-            "Updating PdContext with transaction access_list"
-        );
         self.context.update_access_list(access_list);
+        tracing::debug!(
+            access_list_items = tx.access_list.len(),
+            "Updated PdContext with transaction access_list for this EVM instance"
+        );
 
         // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
         // Layout: [magic][version:u16][borsh header][rest]
