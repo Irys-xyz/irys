@@ -22,7 +22,7 @@
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
-    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
+    recall_recall_range_is_valid, reth_block_is_valid, submit_payload_to_reth,
 };
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
@@ -367,7 +367,7 @@ impl BlockValidationTask {
                 .read()
                 .get_commitment_snapshot(&block.previous_block_hash)
                 .expect("parent block should have a commitment snapshot in the block_tree");
-            shadow_transactions_are_valid(
+            reth_block_is_valid(
                 config,
                 service_senders,
                 block,
