@@ -91,7 +91,6 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     let _decoded = detect_and_decode_pd_header(&tx.input)
         .expect("pd header parse error")
         .unwrap();
-    tracing::error!("tx data {}", tx.input);
     let signature = local_signer
         .sign_transaction_sync(&mut tx)
         .expect("PD tx must be signable");
@@ -106,7 +105,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         .rpc
         .inject_tx(tx_envelope)
         .await
-        .expect("PD tx should be accepted by genesis node");
+        .expect("PD tx should be accepted by the peer node");
 
     // Mine block on genesis node containing the PD transaction
     let (block, block_eth_payload) = peer_node.mine_block_without_gossip().await?;
