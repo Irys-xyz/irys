@@ -633,8 +633,7 @@ impl IrysNode {
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
-        let (shadow_tx_store, _shadow_tx_notification_stream) =
-            ShadowTxStore::new_with_notifications();
+        let shadow_tx_store = ShadowTxStore::new();
 
         let irys_provider = reth_provider::create_provider();
 
@@ -1466,17 +1465,9 @@ impl IrysNode {
             services.extend(price_oracle_handles.into_iter());
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
-            services.extend(
-                packing_controller_handles
-                    .into_iter()
-                    .map(ArbiterEnum::TokioService),
-            );
+            services.extend(packing_controller_handles.into_iter());
             // Add unpacking controllers to services
-            services.extend(
-                unpacking_controller_handles
-                    .into_iter()
-                    .map(ArbiterEnum::TokioService),
-            );
+            services.extend(unpacking_controller_handles.into_iter());
 
             // 2. Block production flow
             services.push(block_producer_handle);
