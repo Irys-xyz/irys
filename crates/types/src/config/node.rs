@@ -90,8 +90,9 @@ pub struct NodeConfig {
     /// Cache management configuration
     pub cache: CacheConfig,
 
-    /// Settings for the price oracle system
-    pub oracle: OracleConfig,
+    /// Settings for the price oracle system (list).
+    #[serde(default)]
+    pub oracles: Vec<OracleConfig>,
 
     pub vdf: VdfNodeConfig,
 
@@ -164,9 +165,10 @@ pub enum PeerFilterMode {
 ///
 /// Defines how the node obtains and processes external price information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum OracleConfig {
     /// A simulated price oracle for testing and development
+    #[serde(rename = "mock")]
     Mock {
         /// Starting price for the token in USD
         #[serde(
@@ -184,7 +186,48 @@ pub enum OracleConfig {
 
         /// Number of blocks between price updates
         smoothing_interval: u64,
+        /// Poll interval in milliseconds for refreshing the mock oracle price snapshots.
+        #[serde(default = "default_mock_oracle_poll_interval_ms")]
+        poll_interval_ms: u64,
     },
+    /// CoinMarketCap-backed price oracle
+    #[serde(rename = "coinmarketcap", alias = "coin_market_cap")]
+    CoinMarketCap {
+        /// API key for the CoinMarketCap Pro API
+        api_key: String,
+        /// CoinMarketCap coin id (e.g., "1" for Bitcoin).
+        /// Retrieve ids from https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
+        id: String,
+        /// Poll interval in milliseconds.
+        /// Free tier is limited to 10k requests/month, so a 5 minute (300_000 ms) interval is a safe default.
+        #[serde(default = "default_price_oracle_poll_interval_ms")]
+        poll_interval_ms: u64,
+    },
+    /// CoinGecko-backed price oracle
+    #[serde(rename = "coingecko", alias = "coin_gecko")]
+    CoinGecko {
+        /// API key for the CoinGecko Pro/Demo API
+        api_key: String,
+        /// CoinGecko coin id (e.g., "bitcoin", "ethereum").
+        /// Retrieve ids from https://docs.coingecko.com/reference/coins-list
+        /// Or from the official spreadsheet: https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
+        coin_id: String,
+        /// Set to true when using a CoinGecko demo API key (free, not paid version)
+        #[serde(default)]
+        demo_api_key: bool,
+        /// Poll interval in milliseconds.
+        /// Free tier is limited to 10k requests/month, so a 5 minute (300_000 ms) interval is a safe default.
+        #[serde(default = "default_price_oracle_poll_interval_ms")]
+        poll_interval_ms: u64,
+    },
+}
+
+const fn default_price_oracle_poll_interval_ms() -> u64 {
+    300_000
+}
+
+const fn default_mock_oracle_poll_interval_ms() -> u64 {
+    10_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -568,12 +611,13 @@ impl NodeConfig {
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
-            oracle: OracleConfig::Mock {
+            oracles: vec![OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
-            },
+                poll_interval_ms: default_mock_oracle_poll_interval_ms(),
+            }],
             mining_key,
             reward_address,
             storage: StorageSyncConfig {
@@ -699,12 +743,13 @@ impl NodeConfig {
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
 
-            oracle: OracleConfig::Mock {
+            oracles: vec![OracleConfig::Mock {
                 initial_price: Amount::token(dec!(1)).expect("valid token amount"),
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
-            },
+                poll_interval_ms: default_mock_oracle_poll_interval_ms(),
+            }],
             mining_key,
             reward_address,
             storage: StorageSyncConfig {
