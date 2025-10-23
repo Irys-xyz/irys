@@ -16,7 +16,6 @@ pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
 pub mod storage_module_service;
-pub mod test_helpers;
 pub mod validation_service;
 
 pub use block_producer::*;
@@ -30,3 +29,16 @@ pub use storage_module_service::*;
 
 pub use async_trait;
 pub use openssl::sha;
+
+pub mod test_helpers {
+    use crate::services::{ServiceReceivers, ServiceSenders};
+
+    /// Helper to create minimal ServiceSenders for tests that don't need actual packing/unpacking
+    pub fn build_test_service_senders() -> (ServiceSenders, ServiceReceivers) {
+        let (tx_packing, rx_packing) = tokio::sync::mpsc::channel(1);
+        let (tx_unpacking, rx_unpacking) = tokio::sync::mpsc::channel(1);
+        std::mem::forget(rx_packing);
+        std::mem::forget(rx_unpacking);
+        ServiceSenders::new_with_packing_sender(tx_packing, tx_unpacking)
+    }
+}

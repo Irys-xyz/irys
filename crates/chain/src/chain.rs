@@ -975,16 +975,28 @@ impl IrysNode {
             IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
 
         // initialize packing service early
-        let packing_service =
+        let mut packing_service =
             irys_actors::packing_service::PackingService::new(Arc::new(config.clone()));
         // start service senders/receivers with packing sender
-        let (service_senders, receivers) = ServiceSenders::new();
+        // channel-first: create sender/receiver before attaching the service loop
+        //
+        let (packing_tx, packing_rx) =
+            irys_actors::packing_service::services::packing::InternalPackingService::channel(5_000);
+        let (unpacking_tx, unpacking_rx) =
+            irys_actors::packing_service::services::unpacking::InternalUnpackingService::channel(
+                5_000,
+            );
+        // start service senders/receivers with packing and unpacking senders
+        let (service_senders, receivers) =
+            ServiceSenders::new_with_packing_sender(packing_tx.clone(), unpacking_tx.clone());
         // attach the receiver loop and obtain a handle for waiters/tests
-        let packing_handle = packing_service.attach_receiver_loop(
-            runtime_handle.clone(),
-            receivers.packing,
-            service_senders.packing_sender.clone(),
-        );
+        let packing_handle = packing_service
+            .internal_packing_service
+            .attach_receiver_loop(runtime_handle.clone(), packing_rx, packing_tx);
+
+        let _unpacking_handle = packing_service
+            .internal_unpacking_service
+            .attach_receiver_loop(runtime_handle.clone(), unpacking_rx, unpacking_tx);
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1244,8 +1256,12 @@ impl IrysNode {
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let packing_controller_handles =
-            packing_service.spawn_packing_controllers(runtime_handle.clone());
+        let packing_controller_handles = packing_service
+            .internal_packing_service
+            .spawn_packing_controllers(runtime_handle.clone());
+        let unpacking_controller_handles = packing_service
+            .internal_unpacking_service
+            .spawn_unpacking_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
@@ -1395,7 +1411,17 @@ impl IrysNode {
             // 1. Mining operations
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
-            services.extend(packing_controller_handles.into_iter());
+            services.extend(
+                packing_controller_handles
+                    .into_iter()
+                    .map(ArbiterEnum::TokioService),
+            );
+            // Add unpacking controllers to services
+            services.extend(
+                unpacking_controller_handles
+                    .into_iter()
+                    .map(ArbiterEnum::TokioService),
+            );
 
             // 2. Block production flow
             services.push(block_producer_handle);
