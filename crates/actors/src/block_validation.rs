@@ -7,6 +7,7 @@ use crate::{
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
+use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
@@ -19,6 +20,7 @@ use irys_domain::{
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
+use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
@@ -908,7 +910,7 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
-pub async fn shadow_transactions_are_valid(
+pub async fn reth_block_is_valid(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &IrysBlockHeader,
@@ -1013,6 +1015,37 @@ pub async fn shadow_transactions_are_valid(
             );
             eyre::bail!("block contains EIP-4844 transaction which is disabled");
         }
+    }
+
+    // 2.5. Validate PD chunk budget
+    let max_pd_chunks = config.consensus.mempool.max_pd_chunks_per_block;
+    let mut total_pd_chunks: u64 = 0;
+
+    for tx in evm_block.body.transactions.iter() {
+        // Try to detect PD header in transaction input
+        let input = tx.input();
+        if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
+            // This is a PD transaction, sum chunks from access list if present
+            if let Some(access_list) = tx.access_list() {
+                let chunks = sum_pd_chunks_in_access_list(access_list);
+                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
+            }
+        }
+    }
+
+    if total_pd_chunks > max_pd_chunks {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            total_pd_chunks,
+            max_pd_chunks,
+            "Rejecting block: exceeds maximum PD chunks per block",
+        );
+        eyre::bail!(
+            "Block exceeds maximum PD chunks per block: {} > {}",
+            total_pd_chunks,
+            max_pd_chunks
+        );
     }
 
     // 3. Extract shadow transactions from the beginning of the block lazily

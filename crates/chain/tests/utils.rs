@@ -2817,7 +2817,7 @@ pub async fn read_block_from_state(
 
     // TODO: we must have a better way of getting block updates,
     // some kind of event bus from the block tree would be great.
-    for _ in 0..500 {
+    for _ in 0..250 {
         let result = {
             let read = node_ctx.block_tree_guard.read();
             let mut result = read
