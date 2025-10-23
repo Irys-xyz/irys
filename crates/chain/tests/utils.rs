@@ -108,7 +108,7 @@ pub async fn craft_data_poa_solution_from_tx(
         * node.node_ctx.config.consensus.num_partitions_per_slot
         * node.node_ctx.config.consensus.num_chunks_in_partition;
 
-    let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks as u64;
+    let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
 
     eyre::ensure!(
         prev_total_chunks >= slot_start,
