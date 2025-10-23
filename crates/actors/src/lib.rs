@@ -9,9 +9,8 @@ pub mod chunk_migration_service;
 pub mod commitment_refunds;
 pub mod data_sync_service;
 pub mod mempool_service;
-
 pub mod mining_bus;
-pub mod packing;
+pub mod packing_service;
 pub mod partition_mining_service;
 pub mod reth_service;
 pub mod services;

@@ -16,6 +16,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  IRYS_CUSTOM_TMP_DIR: RUNNER_TEMP
 
 jobs:
   gate:

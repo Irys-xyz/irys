@@ -902,6 +902,9 @@ pub trait IrysTransactionCommon {
     fn sign(self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error>
     where
         Self: Sized;
+
+    /// Computed using a combination of signature bytes + prehash + ID bytes to uniquely identify even invalid transactions (i.e with an invalid ID/signature set)
+    fn fingerprint(&self) -> H256;
 }
 
 impl DataTransactionHeader {
@@ -965,6 +968,16 @@ impl IrysTransactionCommon for DataTransactionHeader {
         self.id = H256::from(id);
 
         Ok(self)
+    }
+
+    fn fingerprint(&self) -> H256 {
+        // Compute composite fingerprint: keccak(signature + prehash + id)
+        let prehash = self.signature_hash();
+        let mut buf = Vec::with_capacity(65 + 32 + 32);
+        buf.extend_from_slice(&self.signature.as_bytes());
+        buf.extend_from_slice(&prehash);
+        buf.extend_from_slice(&self.id.0);
+        H256::from(alloy_primitives::keccak256(&buf).0)
     }
 }
 
@@ -1032,6 +1045,16 @@ impl IrysTransactionCommon for CommitmentTransaction {
         self.id = H256::from(id);
 
         Ok(self)
+    }
+
+    fn fingerprint(&self) -> H256 {
+        // Compute composite fingerprint: keccak(signature + prehash + id)
+        let prehash = self.signature_hash();
+        let mut buf = Vec::with_capacity(65 + 32 + 32);
+        buf.extend_from_slice(&self.signature.as_bytes());
+        buf.extend_from_slice(&prehash);
+        buf.extend_from_slice(&self.id.0);
+        H256::from(alloy_primitives::keccak256(&buf).0)
     }
 }
 
@@ -1122,6 +1145,13 @@ impl IrysTransactionCommon for IrysTransaction {
             Self::Data(tx) => Self::Data(tx.sign(signer)?),
             Self::Commitment(tx) => Self::Commitment(tx.sign(signer)?),
         })
+    }
+
+    fn fingerprint(&self) -> H256 {
+        match self {
+            Self::Data(tx) => tx.fingerprint(),
+            Self::Commitment(tx) => tx.fingerprint(),
+        }
     }
 }
 

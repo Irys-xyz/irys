@@ -5,9 +5,11 @@ use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
+use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionId, H256,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
+    IrysTransactionId, H256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
@@ -23,9 +25,30 @@ impl Inner {
         &mut self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
+        {
+            // Compute composite fingerprint: keccak(signature + prehash + id)
+            // TODO: share the signature hash computed here with validate_signature
+            let fingerprint = tx.fingerprint();
+            if self
+                .mempool_state
+                .read()
+                .await
+                .recent_invalid_payload_fingerprints
+                .contains(&fingerprint)
+            {
+                return Err(TxIngressError::InvalidSignature);
+            }
+        }
         // Early exit if already known in mempool or DB
         {
-            if self.is_known_data_tx(&tx.id).await? {
+            let tx_status = self
+                .handle_data_tx_exists_message(tx.id)
+                .await
+                .map_err(|e| {
+                    TxIngressError::Other(format!("DB error checking known tx: {:?}", e))
+                })?;
+            if tx_status.is_known_and_valid() {
                 return Err(TxIngressError::Skipped);
             }
         }
@@ -191,23 +214,6 @@ impl Inner {
 
     // --- Small shared helpers (kept private to this module) ---
 
-    /// Checks mempool caches and DB for an already-known data transaction.
-    /// Returns Ok(true) if known, Ok(false) if not known.
-    async fn is_known_data_tx(&self, tx_id: &H256) -> Result<bool, TxIngressError> {
-        let guard = self.mempool_state.read().await;
-        if guard.recent_invalid_tx.contains(tx_id) || guard.recent_valid_tx.contains(tx_id) {
-            return Ok(true);
-        }
-        drop(guard);
-
-        let known_in_db = self
-            .irys_db
-            .view_eyre(|dbtx| tx_header_by_txid(dbtx, tx_id))
-            .map_err(|_| TxIngressError::DatabaseError)?
-            .is_some();
-        Ok(known_in_db)
-    }
-
     /// Computes the pre-confirmation expiry height given a resolved anchor height.
     fn compute_expiry_height_from_anchor(&self, anchor_height: u64) -> u64 {
         let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
@@ -339,33 +345,37 @@ impl Inner {
     }
 
     /// checks mempool and mdbx
-    pub async fn handle_data_tx_exists_message(&self, txid: H256) -> Result<bool, TxReadError> {
+    pub async fn handle_data_tx_exists_message(
+        &self,
+        txid: H256,
+    ) -> Result<TxKnownStatus, TxReadError> {
         let mempool_state = &self.mempool_state;
         let mempool_state_guard = mempool_state.read().await;
 
-        #[expect(clippy::if_same_then_else, reason = "readability")]
+        // #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard
             .valid_submit_ledger_tx
             .contains_key(&txid)
         {
-            Ok(true)
+            Ok(TxKnownStatus::Valid)
         } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-            Ok(true)
+            Ok(TxKnownStatus::ValidSeen)
         } else if mempool_state_guard.recent_invalid_tx.contains(&txid) {
             // Still has it, just invalid
-            Ok(true)
+            Ok(TxKnownStatus::InvalidSeen)
         } else {
             drop(mempool_state_guard);
             let read_tx = self.read_tx();
 
             if read_tx.is_err() {
                 Err(TxReadError::DatabaseError)
+            } else if tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
+                .map_err(|_| TxReadError::DatabaseError)?
+                .is_some()
+            {
+                Ok(TxKnownStatus::Migrated)
             } else {
-                Ok(
-                    tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
-                        .map_err(|_| TxReadError::DatabaseError)?
-                        .is_some(),
-                )
+                Ok(TxKnownStatus::Unknown)
             }
         }
     }

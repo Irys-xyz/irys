@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, num::NonZero, sync::Arc, time::Duration};
 
-use irys_actors::packing::PackingRequest;
+use irys_actors::packing_service::PackingRequest;
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing_worker::worker::start_worker;
@@ -110,12 +110,12 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     let storage_module_info = &infos[0];
     let storage_module = Arc::new(StorageModule::new(storage_module_info, &config)?);
 
-    let request = PackingRequest {
-        storage_module: storage_module.clone(),
-        chunk_range: PartitionChunkRange(irys_types::partition_chunk_offset_ie!(0, packing_end)),
-    };
+    let request = PackingRequest::new(
+        storage_module.clone(),
+        PartitionChunkRange(irys_types::partition_chunk_offset_ie!(0, packing_end)),
+    )?;
     // Create an instance of the packing service
-    let packing = irys_actors::packing::PackingService::new(Arc::new(config.clone()));
+    let packing = irys_actors::packing_service::PackingService::new(Arc::new(config.clone()));
 
     // Spawn packing controllers with runtime handle
     // Get the current Tokio runtime handle for this test context

@@ -23,6 +23,7 @@ use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvi
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -31,7 +32,7 @@ use irys_types::{
     GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
     IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    UnpackedChunk, VersionRequest, H256,
+    TxKnownStatus, UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -137,14 +138,38 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn is_known_transaction(&self, tx_id: H256) -> std::result::Result<bool, TxReadError> {
-        let exists = self
+    async fn is_known_data_transaction(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<TxKnownStatus, TxReadError> {
+        if self
             .txs
             .read()
             .expect("to read txs")
             .iter()
-            .any(|message| message.id == tx_id);
-        Ok(exists)
+            .any(|message| message.id == tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
+    }
+
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<TxKnownStatus, TxReadError> {
+        if self
+            .txs
+            .read()
+            .expect("to read txs")
+            .iter()
+            .any(|message| message.id == tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
     }
 
     async fn handle_ingest_ingress_proof(
@@ -396,6 +421,8 @@ pub(crate) struct GossipServiceTestFixture {
     pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
+    // needs to be held so the directory is removed correctly
+    pub _temp_dir: TempDir,
 }
 
 impl GossipServiceTestFixture {
@@ -497,7 +524,7 @@ impl GossipServiceTestFixture {
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
 
         Self {
-            // temp_dir,
+            _temp_dir: temp_dir,
             gossip_port,
             api_port,
             execution: RethPeerInfo::default(),

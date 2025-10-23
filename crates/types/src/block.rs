@@ -2,6 +2,7 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
+use crate::address_base58_stringify;
 use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::versioning::{
@@ -375,6 +376,7 @@ pub struct IrysBlockHeaderV1 {
     pub poa: PoaData,
 
     /// The address that the block reward should be sent to
+    #[serde(with = "address_base58_stringify")]
     pub reward_address: Address,
 
     /// The amount of Irys tokens that must be rewarded to the `self.reward_address`
@@ -382,6 +384,7 @@ pub struct IrysBlockHeaderV1 {
 
     /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
     /// We allow for miners to send rewards to a separate address
+    #[serde(with = "address_base58_stringify")]
     pub miner_address: Address,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced

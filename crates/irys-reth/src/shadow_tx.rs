@@ -73,6 +73,8 @@ pub enum TransactionPacket {
     PermFeeRefund(BalanceIncrement),
     /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
     UnstakeRefund(BalanceIncrement),
+    /// Set the PD base fee per chunk in EVM state (protocol metadata update).
+    PdBaseFeeUpdate(PdBaseFeeUpdate),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -118,6 +120,7 @@ impl TransactionPacket {
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
+            Self::PdBaseFeeUpdate(_) => None,
         }
     }
 }
@@ -149,6 +152,8 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD"));
     pub static PERM_FEE_REFUND: LazyLock<FixedBytes<32>> =
         LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND"));
+    pub static PD_BASE_FEE_UPDATE: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_PD_BASE_FEE_UPDATE"));
 }
 
 impl ShadowTransaction {
@@ -221,6 +226,7 @@ impl TransactionPacket {
             Self::TermFeeReward(_) => *TERM_FEE_REWARD,
             Self::IngressProofReward(_) => *INGRESS_PROOF_REWARD,
             Self::PermFeeRefund(_) => *PERM_FEE_REFUND,
+            Self::PdBaseFeeUpdate(_) => *PD_BASE_FEE_UPDATE,
         }
     }
 }
@@ -237,6 +243,7 @@ pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 pub const UNPLEDGE_REFUND_ID: u8 = 0x0A;
 pub const UNSTAKE_DEBIT_ID: u8 = 0x0B;
+pub const PD_BASE_FEE_UPDATE_ID: u8 = 0x0C;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -328,6 +335,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[UNPLEDGE_REFUND_ID])?;
                 inner.serialize(writer)
             }
+            Self::PdBaseFeeUpdate(inner) => {
+                writer.write_all(&[PD_BASE_FEE_UPDATE_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -355,6 +366,9 @@ impl BorshDeserialize for TransactionPacket {
             }
             UNPLEDGE_REFUND_ID => {
                 Self::UnpledgeRefund(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            PD_BASE_FEE_UPDATE_ID => {
+                Self::PdBaseFeeUpdate(PdBaseFeeUpdate::deserialize_reader(reader)?)
             }
             _ => {
                 return Err(borsh::io::Error::new(
@@ -419,6 +433,41 @@ impl Default for ShadowTransaction {
 impl Default for TransactionPacket {
     fn default() -> Self {
         unimplemented!("relying on the default impl for `TransactionPacket` is a critical bug")
+    }
+}
+
+/// PD base fee update: sets per-chunk base fee value in EVM state (metadata-only; no direct balance move).
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct PdBaseFeeUpdate {
+    /// Base fee per PD chunk (tokens, 1e18 scale)
+    pub per_chunk: U256,
+}
+
+impl BorshSerialize for PdBaseFeeUpdate {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.per_chunk.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for PdBaseFeeUpdate {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut buf = [0_u8; 32];
+        reader.read_exact(&mut buf)?;
+        let per_chunk = U256::from_be_bytes(buf);
+        Ok(Self { per_chunk })
     }
 }
 

@@ -13,7 +13,7 @@ use irys_actors::{mempool_service::MempoolServiceMessage, pledge_provider::Mempo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
+use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
 use routes::{
     block, block_index, block_tree, commitment, full_config, get_chunk, index, ledger, mempool,
     mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
@@ -46,6 +46,7 @@ pub struct ApiState {
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub started_at: Instant,
+    pub mining_address: Address,
 }
 
 impl ApiState {
