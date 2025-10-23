@@ -1,3 +1,5 @@
+mod common;
+
 use irys_actors::{
     chunk_fetcher::{ChunkFetchError, ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher},
     peer_bandwidth_manager::PeerBandwidthManager,
