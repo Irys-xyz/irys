@@ -6,8 +6,6 @@ pub const PD_CHUNK_READ_COST: u64 = 500;
 /// TODO: Benchmark to find optimal cost.
 pub const PD_BASE_GAS_COST: u64 = 5000;
 
-pub const DEFAULT_CHUNK_SIZE: u64 = 262_144;
-
 pub const FUNCTION_ID_SIZE: usize = 1;
 pub const INDEX_SIZE: usize = 1;
 pub const INDEX_OFFSET: usize = 1;
