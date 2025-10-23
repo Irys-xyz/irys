@@ -1,4 +1,5 @@
 mod data_poa_boundary_acceptance;
+mod deterministic_boundary_poa_crafted_snapshot;
 mod perm_refund;
 
 use crate::utils::IrysNodeTest;
