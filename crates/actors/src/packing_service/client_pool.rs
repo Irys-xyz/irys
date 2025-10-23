@@ -44,8 +44,13 @@ impl HttpClientPool {
             builder = builder.connect_timeout(*t).read_timeout(*t);
         }
 
-        builder
-            .build()
-            .expect("Building the reqwest client should not fail")
+        builder.build().unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "irys::packing::client_pool",
+                error = %e,
+                "Failed to build custom reqwest client, falling back to default"
+            );
+            reqwest::Client::new()
+        })
     }
 }
