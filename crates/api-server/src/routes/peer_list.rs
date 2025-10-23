@@ -11,6 +11,6 @@ pub async fn peer_list_route(state: web::Data<ApiState>) -> HttpResponse {
         Ok(json_body) => HttpResponse::Ok()
             .content_type(ContentType::json())
             .body(json_body),
-        Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {e}")),
     }
 }

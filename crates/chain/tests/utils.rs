@@ -1,24 +1,24 @@
 use actix_http::Request;
+use actix_web::http::StatusCode;
 use actix_web::test::call_service;
 use actix_web::test::{self, TestRequest};
 use actix_web::App;
 use actix_web::{
-    body::BoxBody,
+    body::{BoxBody, MessageBody},
     dev::{Service, ServiceResponse},
     Error,
 };
 use alloy_core::primitives::FixedBytes;
 use alloy_eips::{BlockHashOrNumber, BlockId};
-use awc::{body::MessageBody, http::StatusCode};
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
+use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
     block_producer::BlockProducerCommand,
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
-    packing::wait_for_packing,
 };
 use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
@@ -334,7 +334,7 @@ pub async fn capacity_chunk_solution(
             let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
 
             // Check difficulty: interpret hash as little-endian number
-            let solution_val = U256::from_little_endian(&solution_hash.0);
+            let solution_val = irys_types::u256_from_le_bytes(&solution_hash.0);
             if solution_val >= difficulty {
                 return SolutionContext {
                     partition_hash,
@@ -714,12 +714,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn wait_for_packing(&self, seconds_to_wait: usize) {
-        wait_for_packing(
-            self.node_ctx.actor_addresses.packing.clone(),
-            Some(Duration::from_secs(seconds_to_wait as u64)),
-        )
-        .await
-        .expect("for packing to complete in the wait period");
+        self.node_ctx
+            .packing_waiter
+            .wait_for_idle(Some(Duration::from_secs(seconds_to_wait as u64)))
+            .await
+            .expect("for packing to complete in the wait period");
     }
 
     pub fn start_mining(&self) {
@@ -922,17 +921,17 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn wait_for_chunk(
+    pub async fn wait_for_chunk<T, B>(
         &self,
-        app: &impl actix_web::dev::Service<
-            actix_http::Request,
-            Response = ServiceResponse,
-            Error = actix_web::Error,
-        >,
+        app: &T,
         ledger: DataLedger,
         offset: i32,
         seconds: usize,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+        B: MessageBody,
+    {
         let delay = Duration::from_secs(1);
         for attempt in 1..seconds {
             if let Some(_packed_chunk) =
@@ -1300,13 +1299,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .read()
             .canonical_commitment_snapshot();
 
-        let is_staked = self
+        let epoch_snapshot = self
             .node_ctx
             .block_tree_guard
             .read()
-            .canonical_epoch_snapshot()
-            .is_staked(commitment_tx.signer);
-        commitment_snapshot.get_commitment_status(commitment_tx, is_staked)
+            .canonical_epoch_snapshot();
+        commitment_snapshot.get_commitment_status(commitment_tx, &epoch_snapshot)
     }
 
     /// wait for specific block to be available via block tree guard
@@ -1476,6 +1474,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
+    #[tracing::instrument(skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -1494,6 +1493,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .await
                 .expect("to process ChunkIngressMessage")
                 .expect("boolean response to transaction existence")
+                .is_known_and_valid()
             {
                 break;
             }
@@ -1503,6 +1503,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         if retries == max_retries {
+            tracing::error!("failed to locate tx");
             Err(eyre::eyre!(
                 "Failed to locate tx in mempool after {} retries",
                 retries
@@ -1557,7 +1558,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         publish_txs: usize,
         commitment_txs: usize,
         seconds_to_wait: u32,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<(
+        Vec<DataTransactionHeader>,
+        PublishLedgerWithTxs,
+        Vec<CommitmentTransaction>,
+    )> {
         let mempool_service = self.node_ctx.service_senders.mempool.clone();
         let mut retries = 0;
         let max_retries = seconds_to_wait; // 1 second per retry
@@ -1580,25 +1585,20 @@ impl IrysNodeTest<IrysNodeCtx> {
             prev = (submit_tx.len(), publish_tx.txs.len(), commitment_tx.len());
 
             if prev == expected {
-                break;
+                info!("mempool state valid after {} retries", &retries);
+                return Ok((submit_tx, publish_tx, commitment_tx));
             }
             debug!("got {:?} expected {:?} - txs: {:?}", &prev, expected, &txs);
 
             tokio::time::sleep(Duration::from_secs(1)).await;
             retries += 1;
         }
-
-        if retries == max_retries {
-            Err(eyre::eyre!(
+        Err(eyre::eyre!(
                 "Failed to validate mempool state after {} retries (state (submit, publish, commitment) {:?}, expected: {:?})",
                 retries,
                 &prev,
                 &expected
             ))
-        } else {
-            info!("mempool state valid after {} retries", &retries);
-            Ok(())
-        }
     }
 
     // Get the best txs from the mempool, based off the account state at the optional parent EVM block
@@ -1674,7 +1674,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTx(
+                .send(MempoolServiceMessage::IngestDataTxFromApi(
                     tx.header.clone(),
                     oneshot_tx,
                 ));
@@ -1740,9 +1740,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             match oneshot_rx.await {
                 Ok(txs) => {
                     if let Some(tx_header) = &txs[0] {
-                        if tx_header.promoted_height.is_some() {
-                            return Ok(true);
-                        }
+                        return Ok(tx_header.promoted_height.is_some());
                     }
                 }
                 Err(e) => tracing::info!("receive error for mempool {}", e),
@@ -1920,8 +1918,32 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    /// useful in tests when creating forks and
-    /// needing to send specific blocks between specific peers
+    /// Sends only the Irys block header directly to a specific peer, bypassing gossip.
+    ///
+    /// Important:
+    /// - This does NOT transfer:
+    ///   - Data transaction headers beyond what the block already references
+    ///   - Any data chunks for those transactions
+    ///   - The EVM execution payload for this block
+    /// - In contrast, `send_full_block`:
+    ///   - Ingests data tx headers on the peer
+    ///   - Optionally transfers chunks (when the peer has full ingress-proof validation enabled)
+    ///   - Pushes the EVM execution payload into the peer’s cache before delivering the header
+    ///
+    /// When to use:
+    /// - Prefer `send_block_to_peer` when you only need to deliver the header and do not require
+    ///   proof/chunk verification during validation (e.g., full ingress-proof validation is disabled),
+    ///   or when the receiver already has all required chunks/payloads.
+    /// - If `enable_full_ingress_proof_validation` is true on the receiving node and the block’s
+    ///   Publish ledger contains transactions with proofs, use `send_full_block` (or pre-ingest chunks)
+    ///   so validation can verify proofs against actual chunk bytes.
+    ///
+    /// Execution payload note:
+    /// - `send_full_block` requires that the sender has the EVM execution payload available locally
+    ///   (otherwise it will panic). For blocks produced “without gossip,” prefer:
+    ///   - Using `send_block_to_peer` for the header; and, if needed,
+    ///   - Pushing the EVM payload to the peer separately (e.g., gossiping the EVM block) before
+    ///     attempting a full transfer.
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
@@ -1975,10 +1997,85 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTx(tx_header, tx))
+                .send(MempoolServiceMessage::IngestDataTxFromGossip(
+                    tx_header.clone(),
+                    tx,
+                ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
+
+            // Before sending the header, only transfer chunks if full validation is enabled
+            if peer
+                .node_ctx
+                .config
+                .node_config
+                .consensus_config()
+                .enable_full_ingress_proof_validation
+            {
+                // Transfer chunks for this tx to the peer so block validation can verify proofs
+                let chunk_size = self
+                    .node_ctx
+                    .config
+                    .node_config
+                    .consensus_config()
+                    .chunk_size;
+                let expected_chunks = tx_header.data_size.div_ceil(chunk_size);
+                for i in 0..expected_chunks {
+                    // Read chunk directly from sender's DB cache by data_root + tx-relative offset
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
+                    if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
+                        irys_database::cached_chunk_by_chunk_offset(
+                            tx,
+                            tx_header.data_root,
+                            tx_chunk_offset,
+                        )
+                    }) {
+                        if let Some(bytes) = cached_chunk.chunk {
+                            let unpacked = irys_types::UnpackedChunk {
+                                data_root: tx_header.data_root,
+                                data_size: tx_header.data_size,
+                                data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
+                                bytes,
+                                tx_offset: tx_chunk_offset,
+                            };
+                            let verify_data_root = unpacked.data_root;
+                            let verify_tx_offset = unpacked.tx_offset;
+
+                            let (ctx, crx) = tokio::sync::oneshot::channel();
+                            let _ = peer
+                                .node_ctx
+                                .service_senders
+                                .mempool
+                                .send(MempoolServiceMessage::IngestChunk(unpacked, ctx));
+                            let _ = crx.await;
+
+                            // Verify the chunk is present on the peer DB (small retry loop)
+                            {
+                                let mut attempts = 0_usize;
+                                loop {
+                                    let got = peer
+                                        .node_ctx
+                                        .db
+                                        .view_eyre(|tx| {
+                                            irys_database::cached_chunk_by_chunk_offset(
+                                                tx,
+                                                verify_data_root,
+                                                verify_tx_offset,
+                                            )
+                                        })
+                                        .unwrap_or(None);
+                                    if got.is_some() || attempts >= 5 {
+                                        break;
+                                    }
+                                    attempts += 1;
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Send commitment txs
@@ -2004,10 +2101,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTx(commitment_tx, tx))
+                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                    commitment_tx,
+                    tx,
+                ))
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
-                tracing::error!("Error sending message IngestCommitmentTx to mempool: {e:?}");
+                tracing::error!(
+                    "Error sending message IngestCommitmentTxFromGossip to mempool: {e:?}"
+                );
             }
         }
 
@@ -2071,30 +2173,34 @@ impl IrysNodeTest<IrysNodeCtx> {
             .sign_transaction(tx)
             .expect("to sign the storage transaction");
 
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
-        let mut response = client
-            .post(url)
-            .send_json(&tx.header) // Send the tx as JSON in the request body
+        let response = client
+            .post(&url)
+            .json(&tx.header)
+            .send()
             .await
             .expect("client post failed");
 
-        if response.status() != StatusCode::OK {
+        let status = response.status();
+        if status != 200 {
             // Read the response body
-            let body_bytes = response.body().await.expect("Failed to read response body");
-            let body_str = String::from_utf8_lossy(&body_bytes);
+            let body_str = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<failed to read body>"));
 
             panic!(
                 "Response status: {} - {}\nRequest Body: {}",
-                response.status(),
+                status,
                 body_str,
                 serde_json::to_string_pretty(&tx.header).unwrap(),
             );
         } else {
             info!(
                 "Response status: {}\n{}",
-                response.status(),
+                status,
                 serde_json::to_string_pretty(&tx).unwrap()
             );
         }
@@ -2102,30 +2208,34 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn post_data_tx_raw(&self, tx: &DataTransactionHeader) {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/tx", api_uri);
-        let mut response = client
-            .post(url)
-            .send_json(&tx) // Send the tx as JSON in the request body
+        let response = client
+            .post(&url)
+            .json(&tx)
+            .send()
             .await
             .expect("client post failed");
 
-        if response.status() != StatusCode::OK {
+        let status = response.status();
+        if status != 200 {
             // Read the response body
-            let body_bytes = response.body().await.expect("Failed to read response body");
-            let body_str = String::from_utf8_lossy(&body_bytes);
+            let body_str = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<failed to read body>"));
 
             panic!(
                 "Response status: {} - {}\nRequest Body: {}",
-                response.status(),
+                status,
                 body_str,
                 serde_json::to_string_pretty(&tx).unwrap(),
             );
         } else {
             info!(
                 "Response status: {}\n{}",
-                response.status(),
+                status,
                 serde_json::to_string_pretty(&tx).unwrap()
             );
         }
@@ -2145,17 +2255,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             tx_offset: TxChunkOffset::from(chunk_index as u32),
         };
 
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/chunk", api_uri);
         let response = client
-            .post(url)
-            .send_json(&chunk) // Send the tx as JSON in the request body
+            .post(&url)
+            .json(&chunk)
+            .send()
             .await
             .expect("client post failed");
 
         debug!("chunk_index: {:?}", chunk_index);
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {
@@ -2217,11 +2328,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         for _ in 0..max_attempts {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let client = awc::Client::default();
+            let client = reqwest::Client::new();
             let api_uri = self.node_ctx.config.node_config.local_api_url();
             let url = format!("{}/v1/peer_list", api_uri);
 
-            if let Ok(mut resp) = client.get(url).send().await {
+            if let Ok(resp) = client.get(&url).send().await {
                 if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
                     if list.contains(target) {
                         return Ok(());
@@ -2251,12 +2362,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/stake", api_uri);
 
-        let mut response = client
-            .get(url)
+        let response = client
+            .get(&url)
             .send()
             .await
             .map_err(|e| eyre::eyre!("Failed to get stake price: {}", e))?;
@@ -2273,12 +2384,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         user_address: Address,
     ) -> eyre::Result<CommitmentPriceInfo> {
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         let url = format!("{}/v1/price/commitment/pledge/{}", api_uri, user_address);
 
-        let mut response = client
-            .get(url)
+        let response = client
+            .get(&url)
             .send()
             .await
             .map_err(|e| eyre::eyre!("Failed to get pledge price: {}", e))?;
@@ -2302,11 +2413,13 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result = self
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::IngestDataTx(data_tx, oneshot_tx));
+        let result =
+            self.node_ctx
+                .service_senders
+                .mempool
+                .send(MempoolServiceMessage::IngestDataTxFromApi(
+                    data_tx, oneshot_tx,
+                ));
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2323,14 +2436,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result =
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTx(
-                    commitment_tx,
-                    oneshot_tx,
-                ));
+        let result = self.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx),
+        );
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2352,7 +2460,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             config,
             anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2360,7 +2468,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
 
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2376,15 +2484,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         signer: &IrysSigner,
     ) -> CommitmentTransaction {
         let consensus = &self.node_ctx.config.consensus;
+        let anchor = self
+            .get_anchor()
+            .await
+            .expect("failed to get anchor for pledge commitment");
 
-        let pledge_tx = CommitmentTransaction::new_pledge(
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
             consensus,
-            self.get_anchor().await.expect("anchor should be provided"),
+            anchor,
             self.node_ctx.mempool_pledge_provider.as_ref(),
             signer.address(),
         )
         .await;
-        let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+        signer.sign_commitment(&mut pledge_tx).unwrap();
         info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
         // Submit pledge commitment via API
@@ -2416,9 +2528,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2436,8 +2548,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = self.get_anchor().await?;
-        let stake_tx = CommitmentTransaction::new_stake(config, anchor);
-        let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+        let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
+        signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id);
 
         // Submit stake commitment via public API
@@ -2474,14 +2586,11 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         info!("Posting Commitment TX: {}", commitment_tx.id);
 
-        let client = awc::Client::default();
+        let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment_tx", api_uri);
-        let result = client
-            .post(url)
-            .send_json(commitment_tx) // Send the commitment_tx as JSON in the request body
-            .await;
+        let result = client.post(&url).json(commitment_tx).send().await;
 
-        let mut response = match result {
+        let response = match result {
             Ok(r) => r,
             Err(e) => {
                 error!("Failed to post commitment transaction: {e}");
@@ -2492,32 +2601,32 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         };
 
-        if response.status() != StatusCode::OK {
+        let status = response.status();
+        if status != 200 {
             // Read the response body for logging
-            let body_bytes = match response.body().await {
-                Ok(bytes) => bytes,
+            let body_str = match response.text().await {
+                Ok(text) => text,
                 Err(e) => {
                     error!("Failed to read error response body: {e}");
-                    Default::default()
+                    String::new()
                 }
             };
-            let body_str = String::from_utf8_lossy(&body_bytes);
 
             error!(
                 "Response status: {} - {}\nRequest Body: {}",
-                response.status(),
+                status,
                 body_str,
                 serde_json::to_string_pretty(&commitment_tx).unwrap(),
             );
             Err(eyre::eyre!(
                 "Posted commitment transaction {} but got HTTP response code: {:?}",
-                response.status(),
-                &commitment_tx.id
+                &commitment_tx.id,
+                status
             ))
         } else {
             info!(
                 "Response status: {}\n{}",
-                response.status(),
+                status,
                 serde_json::to_string_pretty(&commitment_tx).unwrap()
             );
             Ok(())
@@ -2868,6 +2977,8 @@ pub async fn read_block_from_state(
 ) -> BlockValidationOutcome {
     let mut was_validation_scheduled = false;
 
+    // TODO: we must have a better way of getting block updates,
+    // some kind of event bus from the block tree would be great.
     for _ in 0..500 {
         let result = {
             let read = node_ctx.block_tree_guard.read();
@@ -3006,8 +3117,9 @@ pub fn new_stake_tx(
     signer: &IrysSigner,
     config: &ConsensusConfig,
 ) -> CommitmentTransaction {
-    let stake_tx = CommitmentTransaction::new_stake(config, *anchor);
-    signer.sign_commitment(stake_tx).unwrap()
+    let mut stake_tx = CommitmentTransaction::new_stake(config, *anchor);
+    signer.sign_commitment(&mut stake_tx).unwrap();
+    stake_tx
 }
 
 pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
@@ -3016,9 +3128,10 @@ pub async fn new_pledge_tx<P: irys_types::transaction::PledgeDataProvider>(
     config: &ConsensusConfig,
     pledge_provider: &P,
 ) -> CommitmentTransaction {
-    let pledge_tx =
+    let mut pledge_tx =
         CommitmentTransaction::new_pledge(config, *anchor, pledge_provider, signer.address()).await;
-    signer.sign_commitment(pledge_tx).unwrap()
+    signer.sign_commitment(&mut pledge_tx).unwrap();
+    pledge_tx
 }
 
 /// Retrieves a ledger chunk via HTTP GET request using the actix-web test framework.

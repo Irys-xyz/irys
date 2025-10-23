@@ -21,8 +21,7 @@ pub async fn block_index_route(
     };
     if limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
         return HttpResponse::BadRequest().body(format!(
-            "limit exceeds maximum allowed value of {}",
-            MAX_BLOCK_INDEX_QUERY_LIMIT
+            "limit exceeds maximum allowed value of {MAX_BLOCK_INDEX_QUERY_LIMIT}"
         ));
     }
     let height = query.height;

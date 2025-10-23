@@ -108,11 +108,13 @@ impl EpochReplayData {
                 .map(|txid| {
                     // First try to get the commitment tx from the DB
                     let opt = commitment_tx_by_txid(&read_tx, txid)?;
-                    opt.or_else(|| recovered.commitment_txs.get(txid).cloned())
-                        .ok_or_else(|| {
-                            // If we can't find it, there's no continuing
-                            eyre::eyre!("Commitment transaction not found: txid={}", txid)
-                        })
+                    opt.or_else(|| {
+                        recovered.commitment_txs.get(txid).cloned()
+                    })
+                    .ok_or_else(|| {
+                        // If we can't find it, there's no continuing
+                        eyre::eyre!("Commitment transaction not found: txid={}", txid)
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap_or_else(|_| panic!("Able to fetch all commitment transactions from database for epoch block {} at height {}", block.block_hash, block.height));

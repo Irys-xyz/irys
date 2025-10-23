@@ -23,6 +23,7 @@ use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvi
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
 use irys_primitives::Address;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -31,7 +32,7 @@ use irys_types::{
     GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
     IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    UnpackedChunk, VersionRequest, H256,
+    TxKnownStatus, UnpackedChunk, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -66,7 +67,7 @@ impl MempoolStub {
 
 #[async_trait]
 impl MempoolFacade for MempoolStub {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
     ) -> std::result::Result<(), TxIngressError> {
@@ -96,17 +97,24 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
+        &self,
+        tx_header: DataTransactionHeader,
+    ) -> std::result::Result<(), TxIngressError> {
+        self.handle_data_transaction_ingress_api(tx_header).await
+    }
+
+    async fn handle_commitment_transaction_ingress_api(
         &self,
         _tx_header: CommitmentTransaction,
     ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
-    async fn handle_ingest_ingress_proof(
+    async fn handle_commitment_transaction_ingress_gossip(
         &self,
-        _ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError> {
+        _tx_header: CommitmentTransaction,
+    ) -> std::result::Result<(), TxIngressError> {
         Ok(())
     }
 
@@ -130,14 +138,45 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn is_known_transaction(&self, tx_id: H256) -> std::result::Result<bool, TxReadError> {
-        let exists = self
+    async fn is_known_data_transaction(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<TxKnownStatus, TxReadError> {
+        if self
             .txs
             .read()
             .expect("to read txs")
             .iter()
-            .any(|message| message.id == tx_id);
-        Ok(exists)
+            .any(|message| message.id == tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
+    }
+
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> std::result::Result<TxKnownStatus, TxReadError> {
+        if self
+            .txs
+            .read()
+            .expect("to read txs")
+            .iter()
+            .any(|message| message.id == tx_id)
+        {
+            Ok(TxKnownStatus::Valid)
+        } else {
+            Ok(TxKnownStatus::Unknown)
+        }
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        _ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        Ok(())
     }
 
     async fn get_block_header(
@@ -157,10 +196,6 @@ impl MempoolFacade for MempoolStub {
             .expect("to unlock migrated blocks")
             .push(irys_block_header);
         Ok(1)
-    }
-
-    async fn insert_poa_chunk(&self, _block_hash: H256, _chunk_data: Base64) -> Result<()> {
-        Ok(())
     }
 
     async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {
@@ -386,6 +421,8 @@ pub(crate) struct GossipServiceTestFixture {
     pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
+    // needs to be held so the directory is removed correctly
+    pub _temp_dir: TempDir,
 }
 
 impl GossipServiceTestFixture {
@@ -406,7 +443,8 @@ impl GossipServiceTestFixture {
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let (service_senders, service_receivers) = ServiceSenders::new();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
         let vdf_fast_forward_rx = service_receivers.vdf_fast_forward;
         let gossip_broadcast_rx = service_receivers.gossip_broadcast;
         let block_tree_rx = service_receivers.block_tree;
@@ -486,7 +524,7 @@ impl GossipServiceTestFixture {
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
 
         Self {
-            // temp_dir,
+            _temp_dir: temp_dir,
             gossip_port,
             api_port,
             execution: RethPeerInfo::default(),
@@ -844,7 +882,8 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
-    let (service_senders, _service_receivers) = ServiceSenders::new();
+    let (service_senders, _service_receivers) =
+        irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
     let mempool_stub = MempoolStub::new(gossip_tx);

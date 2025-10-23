@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var(

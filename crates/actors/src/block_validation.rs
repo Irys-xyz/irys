@@ -1,13 +1,11 @@
-use crate::block_tree_service::ValidationResult;
+use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
-    mining::hash_to_number,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
-use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
@@ -16,17 +14,18 @@ use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
 };
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot,
-    ExecutionPayloadCache,
+    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_primitives::CommitmentType;
-use irys_reth::shadow_tx::{ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
+use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::u256_from_le_bytes as hash_to_number;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -218,6 +217,8 @@ pub enum PreValidationError {
     DuplicateIngressProofSigner { tx_id: H256, signer: Address },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
+    #[error("Invalid Epoch snapshot {error}")]
+    InvalidEpochSnapshot { error: String },
 }
 
 /// Full pre-validation steps for a block
@@ -913,6 +914,7 @@ pub async fn shadow_transactions_are_valid(
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
@@ -921,10 +923,7 @@ pub async fn shadow_transactions_are_valid(
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
-    let ExecutionData {
-        payload,
-        sidecar: _,
-    } = execution_data.clone();
+    let ExecutionData { payload, sidecar } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
         eyre::bail!("irys-reth expects that all payloads are of v3 type");
@@ -934,63 +933,99 @@ pub async fn shadow_transactions_are_valid(
         "withdrawals must always be empty"
     );
 
+    // Reject any blob gas usage in the payload
+    if payload_v3.blob_gas_used != 0 {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            blob_gas_used = payload_v3.blob_gas_used,
+            "Rejecting block: blob_gas_used must be zero",
+        );
+        eyre::bail!("block has non-zero blob_gas_used which is disabled");
+    }
+    if payload_v3.excess_blob_gas != 0 {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            excess_blob_gas = payload_v3.excess_blob_gas,
+            "Rejecting block: excess_blob_gas must be zero",
+        );
+        eyre::bail!("block has non-zero excess_blob_gas which is disabled");
+    }
+
+    // Reject any block that carries blob sidecars (EIP-4844).
+    // We keep Cancun active but disable blobs/sidecars entirely.
+    if let Some(versioned_hashes) = sidecar.versioned_hashes() {
+        if !versioned_hashes.is_empty() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                versioned_hashes_len = versioned_hashes.len(),
+                "Rejecting block: EIP-4844 blobs/sidecars are not supported",
+            );
+            eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+        }
+    }
+    // Requests are disabled: reject if any present or if header-level requests hash is set.
+    if let Some(requests) = sidecar.requests() {
+        if !requests.is_empty() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                versioned_hashes_len = requests.len(),
+                "Rejecting block: EIP-7685 requests which are disabled",
+            );
+            eyre::bail!("block contains EIP-7685 requests which are disabled");
+        }
+    }
+    // Note: `requests_hash` may be present even when the requests list is empty.
+    // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
+
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
     let block_timestamp_sec = block.timestamp / 1000;
     ensure!(
-            payload_timestamp == block_timestamp_sec,
-            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
-        );
+        payload_timestamp == block_timestamp_sec,
+        "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+    );
 
     let evm_block: Block = payload_v3.try_into_block()?;
-    // todo(IMPORTANT) validate that we have no blobs, no blob gas usage, and none of the txs have any sidecars with them
 
-    // 2. Extract shadow transactions from the beginning of the block
-    let mut expect_shadow_txs = true;
-    let actual_shadow_txs = evm_block
-        .body
-        .transactions
-        .into_iter()
-        .map(|tx| {
-            if expect_shadow_txs {
-                if Some(*SHADOW_TX_DESTINATION_ADDR) != tx.to() {
-                    // after reaching first non-shadow tx, we scan the rest of the
-                    // txs to check if we don't have any stray shadow txs in there
-                    expect_shadow_txs = false;
-                    ensure!(
-                        !tx.input().starts_with(IRYS_SHADOW_EXEC),
-                        "shadow tx injected in the middle of the block",
-                    );
-                    return Ok(None);
-                }
-                let input = tx.input();
-                if input.strip_prefix(IRYS_SHADOW_EXEC).is_none() {
-                    // after reaching first non-shadow tx, we scan the rest of the
-                    // txs to check if we don't have any stray shadow txs in there
-                    expect_shadow_txs = false;
-                    return Ok(None);
-                };
-                let shadow_tx = ShadowTransaction::decode(&mut &input[..])
-                    .map_err(|e| eyre::eyre!("failed to decode shadow tx: {e}"))?;
-                let tx_signer = tx.into_signed().recover_signer()?;
+    // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
+    if evm_block.header.requests_hash.is_some() {
+        tracing::debug!(
+            block_hash = %block.block_hash,
+            evm_block_hash = %block.evm_block_hash,
+            "Rejecting block: EIP-7685 requests_hash present which is disabled",
+        );
+        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
+    }
 
-                ensure!(
-                    block.miner_address == tx_signer,
-                    "Shadow tx signer is not the miner"
-                );
-                Ok(Some(shadow_tx))
-            } else {
-                // ensure that no other shadow txs are present in the block
-                let input = tx.input();
-                ensure!(
-                    !(input.starts_with(IRYS_SHADOW_EXEC)),
-                    "shadow tx injected in the middle of the block",
-                );
-                Ok(None)
-            }
-        })
-        .filter_map(std::result::Result::transpose);
+    // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
+    for tx in evm_block.body.transactions.iter() {
+        if tx.is_eip4844() {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                "Rejecting block: contains EIP-4844 transaction which is disabled",
+            );
+            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+        }
+    }
+
+    // 3. Extract shadow transactions from the beginning of the block lazily
+    let txs_slice = &evm_block.body.transactions;
+    let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
+        // Verify signer for each yielded shadow tx (must be the miner)
+        let (stx, tx_ref) = res?;
+        let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
+        ensure!(
+            block.miner_address == tx_signer,
+            "Shadow tx signer is not the miner"
+        );
+        Ok(stx)
+    });
 
     // 3. Generate expected shadow transactions
     let expected_txs = generate_expected_shadow_transactions_from_db(
@@ -999,6 +1034,7 @@ pub async fn shadow_transactions_are_valid(
         block,
         db,
         parent_epoch_snapshot,
+        parent_commitment_snapshot,
         block_index,
     )
     .await?;
@@ -1008,6 +1044,48 @@ pub async fn shadow_transactions_are_valid(
 
     // 5. Return the execution data for reuse
     Ok(execution_data)
+}
+
+/// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
+///
+/// - Yields shadow transactions at the front of the list.
+/// - If any shadow transaction appears after the first non-shadow, yields a single error and ends.
+fn extract_leading_shadow_txs(
+    txs: &[reth_ethereum_primitives::TransactionSigned],
+) -> impl Iterator<
+    Item = eyre::Result<(
+        ShadowTransaction,
+        &reth_ethereum_primitives::TransactionSigned,
+    )>,
+> + '_ {
+    let mut it = txs.iter();
+    let mut seen_non_shadow = false;
+    let mut reported_error = false;
+    std::iter::from_fn(move || {
+        if reported_error {
+            return None;
+        }
+        for tx in it.by_ref() {
+            match detect_and_decode(tx) {
+                Ok(Some(stx)) => {
+                    if seen_non_shadow {
+                        reported_error = true;
+                        return Some(Err(ShadowTxError::ShadowTxAfterNonShadow.into()));
+                    }
+                    return Some(Ok((stx, tx)));
+                }
+                Ok(None) => {
+                    seen_non_shadow = true;
+                    continue;
+                }
+                Err(e) => {
+                    reported_error = true;
+                    return Some(Err(e.into()));
+                }
+            }
+        }
+        None
+    })
 }
 
 /// Submits the EVM payload to reth for execution layer validation.
@@ -1078,6 +1156,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
@@ -1105,7 +1184,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
 
     // Lookup publish ledger for term fee rewards
-    let mut publish_ledger_with_txs =
+    let publish_ledger_with_txs =
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     // Get treasury balance from previous block
@@ -1130,6 +1209,25 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
+    // Compute commitment refund events for epoch blocks from parent's commitment snapshot
+    let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
+        if is_epoch_block {
+            crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &config.consensus,
+            )?
+        } else {
+            Vec::new()
+        };
+    let unstake_refund_events: Vec<crate::block_producer::UnstakeRefundEvent> = if is_epoch_block {
+        crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
+            &parent_commitment_snapshot,
+            &config.consensus,
+        )?
+    } else {
+        Vec::new()
+    };
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1139,9 +1237,11 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &config.consensus,
         &commitment_txs,
         &data_txs,
-        &mut publish_ledger_with_txs,
+        &publish_ledger_with_txs,
         initial_treasury_balance,
         &expired_ledger_fees,
+        &commitment_refund_events,
+        &unstake_refund_events,
     )
     .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 
@@ -1336,6 +1436,18 @@ pub async fn commitment_txs_are_valid(
         })?;
     }
 
+    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
+        let read = block_tree_guard.read();
+        let commitment_snapshot = read.get_commitment_snapshot(&block.previous_block_hash)?;
+        let epoch_snapshot = read
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .ok_or_eyre(format!(
+                "Parent epoch snapshot missing for block {}",
+                block.previous_block_hash
+            ))?;
+        (commitment_snapshot, epoch_snapshot)
+    };
+
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
@@ -1345,9 +1457,6 @@ pub async fn commitment_txs_are_valid(
         );
 
         // Get expected commitments from parent's snapshot
-        let parent_commitment_snapshot = block_tree_guard
-            .read()
-            .get_commitment_snapshot(&block.previous_block_hash)?;
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
@@ -1387,13 +1496,46 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
+    // Regular block validation: ensure commitments align with snapshot state
+    let mut simulated_snapshot = CommitmentSnapshot {
+        commitments: parent_commitment_snapshot.commitments.clone(),
+    };
+
+    for tx in &actual_commitments {
+        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
+            let partition_hash = H256::from(partition_hash);
+            let owner = parent_epoch_snapshot
+                .partition_assignments
+                .get_assignment(partition_hash)
+                .map(|assignment| assignment.miner_address);
+            ensure!(
+                owner == Some(tx.signer),
+                "Unpledge commitment {} targets partition {} not owned by signer {} (owner {:?})",
+                tx.id,
+                partition_hash,
+                tx.signer,
+                owner
+            );
+        }
+
+        let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
+        ensure!(
+            status == CommitmentSnapshotStatus::Accepted,
+            "Commitment {} rejected by snapshot validation with status {:?}",
+            tx.id,
+            status
+        );
+    }
+
     // Regular block validation: check priority ordering for stake and pledge commitments
     let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
         .iter()
         .filter(|tx| {
             matches!(
                 tx.commitment_type,
-                CommitmentType::Stake | CommitmentType::Pledge { .. }
+                CommitmentType::Stake
+                    | CommitmentType::Pledge { .. }
+                    | CommitmentType::Unpledge { .. }
             )
         })
         .collect();
@@ -1481,12 +1623,12 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> Result<(), PreValidationError> {
-    // Get the block's EMA snapshot for fee calculations
+    // Get the parent block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
         .read()
-        .get_ema_snapshot(&block.block_hash)
+        .get_ema_snapshot(&block.previous_block_hash)
         .ok_or(PreValidationError::BlockEmaSnapshotNotFound {
-            block_hash: block.block_hash,
+            block_hash: block.previous_block_hash,
         })?;
 
     // Extract data transactions from both ledgers
@@ -1784,6 +1926,218 @@ pub async fn data_txs_are_valid(
                 });
             }
 
+            // Enforce data availability by verifying ingress proofs with the actual chunks
+            // possible future improvements: refresh peer list on failure of all 5, try peers concurrently
+            if config.consensus.enable_full_ingress_proof_validation {
+                // Collect all chunks for this transaction from the DB (by tx-relative offset)
+                let expected_chunk_count =
+                    tx_header.data_size.div_ceil(config.consensus.chunk_size);
+
+                let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
+                    error: e.to_string(),
+                })?;
+
+                let mut chunks: Vec<irys_types::ChunkBytes> =
+                    Vec::with_capacity(expected_chunk_count as usize);
+
+                let client = reqwest::Client::new();
+
+                // Fetch active peers once outside the chunk loop (take up to 5)
+                let api_addrs: Vec<_> = {
+                    let (peers_tx, peers_rx) = tokio::sync::oneshot::channel();
+                    let _ = service_senders
+                        .data_sync
+                        .send(crate::DataSyncServiceMessage::GetActivePeersList(peers_tx));
+
+                    match tokio::time::timeout(Duration::from_millis(1000), peers_rx).await {
+                        Ok(Ok(active_peers)) => {
+                            let guard = active_peers.read().unwrap();
+                            guard
+                                .iter()
+                                .take(5)
+                                .map(|(_addr, pbm)| pbm.peer_address.api)
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    }
+                };
+
+                for i in 0..expected_chunk_count {
+                    let tx_offset_u32 =
+                        u32::try_from(i).map_err(|_| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!("Tx chunk offset index {} exceeds u32::MAX", i),
+                        })?;
+                    let tx_chunk_offset = irys_types::TxChunkOffset::from(tx_offset_u32);
+
+                    // Try local cache first
+                    let mut maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                        &ro_tx,
+                        tx_header.data_root,
+                        tx_chunk_offset,
+                    )
+                    .map_err(|e| PreValidationError::DatabaseError {
+                        error: e.to_string(),
+                    })?;
+
+                    // If missing locally, attempt fetch-on-miss from pre-selected peers and ingest
+                    if maybe_chunk.is_none() {
+                        for api_addr in api_addrs.iter() {
+                            // Build data_root/offset fetch URL using peer API address
+                            let url = format!(
+                                "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                api_addr,
+                                publish_ledger.ledger_id,
+                                tx_header.data_root,
+                                tx_offset_u32
+                            );
+
+                            // Fetch with short timeout
+                            let resp = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                client.get(&url).send(),
+                            )
+                            .await;
+
+                            let Ok(Ok(resp)) = resp else {
+                                continue;
+                            };
+                            if !resp.status().is_success() {
+                                continue;
+                            }
+
+                            // Parse ChunkFormat and convert to UnpackedChunk
+                            let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
+                            else {
+                                continue;
+                            };
+
+                            let unpacked = match chunk_format {
+                                irys_types::ChunkFormat::Unpacked(u) => u,
+                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
+                                    &p,
+                                    config.consensus.entropy_packing_iterations,
+                                    config.consensus.chunk_size as usize,
+                                    config.consensus.chain_id,
+                                ),
+                            };
+
+                            // Basic sanity checks before ingest
+                            if unpacked.data_root != tx_header.data_root
+                                || *unpacked.tx_offset != tx_offset_u32
+                            {
+                                continue;
+                            }
+
+                            // Ingest via mempool to persist and validate
+                            let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
+                            if service_senders
+                                .mempool
+                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .is_err()
+                            {
+                                return Err(PreValidationError::ValidationServiceUnreachable);
+                            }
+
+                            // Wait briefly for ingest to complete and log outcome
+                            let recv_res =
+                                tokio::time::timeout(std::time::Duration::from_millis(500), ing_rx)
+                                    .await;
+                            match recv_res {
+                                Err(_elapsed) => {
+                                    tracing::warn!(
+                                        "Timed out waiting for chunk ingest completion for data_root {:?}, tx_offset {}",
+                                        tx_header.data_root,
+                                        tx_offset_u32
+                                    );
+                                }
+                                Ok(Err(recv_err)) => {
+                                    tracing::warn!(
+                                        "IngestChunk oneshot channel error for data_root {:?}, tx_offset {}: {:?}",
+                                        tx_header.data_root,
+                                        tx_offset_u32,
+                                        recv_err
+                                    );
+                                }
+                                Ok(Ok(ingest_res)) => match ingest_res {
+                                    Ok(()) => {
+                                        tracing::debug!(
+                                                "Chunk ingested successfully for data_root {:?}, tx_offset {}",
+                                                tx_header.data_root,
+                                                tx_offset_u32
+                                            );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                                "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
+                                                tx_header.data_root,
+                                                tx_offset_u32,
+                                                e
+                                            );
+                                    }
+                                },
+                            }
+
+                            // Re-open a fresh read tx to observe the write
+                            let ro_tx2 =
+                                db.tx().map_err(|e| PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                })?;
+                            maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
+                                &ro_tx2,
+                                tx_header.data_root,
+                                tx_chunk_offset,
+                            )
+                            .map_err(|e| {
+                                PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                }
+                            })?;
+
+                            if maybe_chunk.is_some() {
+                                break;
+                            }
+                        }
+                    }
+
+                    let (_meta, cached_chunk) =
+                        maybe_chunk.ok_or_else(|| PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: format!(
+                                "Data unavailable: missing chunk at offset {} for data_root {:?}",
+                                i, tx_header.data_root
+                            ),
+                        })?;
+
+                    let chunk_bytes = cached_chunk.chunk.ok_or_else(|| {
+                        PreValidationError::InvalidIngressProof {
+                            tx_id: tx_header.id,
+                            reason: "Missing chunk body bytes".to_string(),
+                        }
+                    })?;
+                    chunks.push(chunk_bytes.0);
+                }
+
+                // Verify each ingress proof against the actual chunks
+                for proof in tx_proofs.iter() {
+                    let ok = irys_types::ingress::verify_ingress_proof(
+                        proof,
+                        &chunks,
+                        config.consensus.chain_id,
+                    )
+                    .map_err(|e| PreValidationError::InvalidIngressProof {
+                        tx_id: tx_header.id,
+                        reason: e.to_string(),
+                    })?;
+
+                    if !ok {
+                        return Err(PreValidationError::IngressProofMismatch {
+                            tx_id: tx_header.id,
+                        });
+                    }
+                }
+            }
+
             if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
                 return Err(PreValidationError::IngressProofCountMismatch {
                     expected: config.consensus.number_of_ingress_proofs_total as usize,
@@ -1916,10 +2270,10 @@ async fn get_previous_tx_inclusions(
     // Get mempool data and release lock quickly
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetState(tx))?;
-    let mempool_state = rx.await?;
-    let mempool_guard = mempool_state.read().await;
+        .block_tree
+        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+    let block_tree_guard = rx.await?;
+    let block_tree_guard = block_tree_guard.read();
 
     let min_anchor_height = block_under_validation
         .height
@@ -1943,7 +2297,7 @@ async fn get_previous_tx_inclusions(
             process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
         };
         // Move to the parent block and continue the traversal backwards
-        block = match mempool_guard.prevalidated_blocks.get(&block.0) {
+        block = match block_tree_guard.get_block(&block.0) {
             Some(header) => {
                 update_states(header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
@@ -2211,8 +2565,8 @@ mod tests {
     use irys_types::TokioServiceHandle;
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, NodeConfig,
-        Signature, H256, U256,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
+        NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2334,7 +2688,7 @@ mod tests {
         )
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_test_3_complete_txs() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
@@ -2380,7 +2734,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
         let (_tmp, context) = init().await;
 
@@ -2416,7 +2770,7 @@ mod tests {
         }
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn is_seed_data_valid_should_validate_seeds() {
         let reset_frequency = 2;
 
@@ -2524,7 +2878,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2556,8 +2910,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);
@@ -2626,7 +2980,7 @@ mod tests {
         assert!(poa_valid.is_ok(), "PoA should be valid");
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
         let (_tmp, context) = init().await;
         // Create a bunch of TX chunks
@@ -2784,7 +3138,7 @@ mod tests {
         };
 
         // Create a block from the tx
-        let irys_block = IrysBlockHeader {
+        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             reward_address: context.miner_address,
             poa: poa.clone(),
@@ -2816,8 +3170,8 @@ mod tests {
                     required_proof_count: None,
                 },
             ],
-            ..IrysBlockHeader::default()
-        };
+            ..IrysBlockHeaderV1::default()
+        });
 
         // Send the block confirmed message
         let block = Arc::new(irys_block);

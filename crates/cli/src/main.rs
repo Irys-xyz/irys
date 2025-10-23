@@ -33,6 +33,20 @@ pub enum Commands {
         #[command(subcommand)]
         mode: RollbackMode,
     },
+    #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
+    Tui {
+        /// Node URLs to connect to
+        #[arg(value_name = "NODE_URLS")]
+        node_urls: Vec<String>,
+
+        /// Configuration file path (contains both TUI settings and nodes list)
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Record node info to SQLite database (irys-tui-records.db)
+        #[arg(short, long)]
+        record: bool,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -76,14 +90,13 @@ async fn main() -> eyre::Result<()> {
 
     let args = IrysCli::parse();
 
-    let node_config: NodeConfig = load_config()?;
-
     match args.command {
         Commands::DumpState { .. } => {
             dump_state(cli_init_reth_db(DatabaseEnvKind::RO)?, "./".into())?;
             Ok(())
         }
         Commands::InitState { state_path } => {
+            let node_config: NodeConfig = load_config()?;
             let config = Config::new(node_config.clone());
             let chain_spec = irys_chain_spec(
                 config.consensus.reth.chain,
@@ -92,6 +105,7 @@ async fn main() -> eyre::Result<()> {
             init_state(node_config, chain_spec, state_path).await
         }
         Commands::RollbackBlocks { mode } => {
+            let node_config: NodeConfig = load_config()?;
             let db = cli_init_irys_db(DatabaseEnvKind::RW)?;
 
             let block_index = irys_domain::BlockIndex::new(&node_config).await?;
@@ -173,6 +187,44 @@ async fn main() -> eyre::Result<()> {
             rw_tx.commit()?;
 
             Ok(())
+        }
+        Commands::Tui {
+            node_urls,
+            config,
+            record,
+        } => {
+            // Check if we have any node configuration
+            if node_urls.is_empty() && config.is_none() {
+                eprintln!("Error: No nodes specified.");
+                eprintln!("\nYou must provide nodes via one of the following methods:");
+                eprintln!(
+                    "  1. Command line arguments: irys-cli tui http://node1:port http://node2:port"
+                );
+                eprintln!("  2. Config file: irys-cli tui --config tui.toml");
+                eprintln!("\nExample:");
+                eprintln!("  irys-cli tui http://localhost:19080 http://localhost:19081");
+                eprintln!("  irys-cli tui --config tui.toml");
+                std::process::exit(1);
+            }
+
+            // Initialize terminal
+            let mut terminal = irys_tui::utils::terminal::init()?;
+
+            // Create and run the TUI app with optional recording
+            let app_result = if record {
+                let mut app = irys_tui::app::App::new(node_urls, config)?
+                    .start_recording()
+                    .await?;
+                app.run(&mut terminal).await
+            } else {
+                let mut app = irys_tui::app::App::new(node_urls, config)?;
+                app.run(&mut terminal).await
+            };
+
+            // Restore terminal on exit
+            irys_tui::utils::terminal::restore()?;
+
+            app_result
         }
     }
 }

@@ -1,12 +1,13 @@
 use crate::utils::*;
 use assert_matches::assert_matches;
 use eyre::eyre;
-use irys_actors::packing::wait_for_packing;
+
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, CommitmentType, NodeConfig, H256, U256,
+    irys::IrysSigner, Address, CommitmentTransaction, CommitmentTransactionV1, CommitmentType,
+    NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -20,11 +21,11 @@ macro_rules! assert_ok {
     };
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Configure logging to reduce noise while keeping relevant commitment outputs
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=debug,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=off,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
 
     // ===== TEST PURPOSE: Multiple Epochs with Commitments =====
@@ -341,7 +342,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
@@ -393,7 +394,7 @@ async fn heavy_no_commitments_basic_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // tracing
     // ===== TEST SETUP =====
@@ -405,11 +406,10 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Initialize packing and mining
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // ===== TEST CASE 1: Stake Commitment Creation and Processing =====
     // Create a new stake commitment transaction
@@ -468,14 +468,14 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
 
     // Create a pledge for the unstaked address manually
     let consensus = &node.node_ctx.config.consensus;
-    let pledge_tx = CommitmentTransaction::new_pledge(
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         node.get_anchor().await?,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer2.address(),
     )
     .await;
-    let pledge_tx = signer2.sign_commitment(pledge_tx).unwrap();
+    signer2.sign_commitment(&mut pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Verify pledge starts in 'Unstaked' state
@@ -513,16 +513,16 @@ async fn post_stake_commitment(
         .get_anchor()
         .await
         .expect("anchor should be available for stake commitment");
-    let stake_tx = CommitmentTransaction {
+    let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransaction::new(consensus)
-    };
+        ..CommitmentTransactionV1::new(consensus)
+    });
 
     info!("Created stake_tx with value: {:?}", stake_tx.value);
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    signer.sign_commitment(&mut stake_tx).unwrap();
     info!("Generated stake_tx.id: {}", stake_tx.id);
 
     // Submit stake commitment via API
@@ -544,17 +544,17 @@ async fn post_pledge_commitment(
         .expect("Failed to get pledge price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let pledge_tx = CommitmentTransaction {
+    let mut pledge_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
         commitment_type: CommitmentType::Pledge {
             pledge_count_before_executing: 0, // First pledge
         },
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransaction::new(consensus)
-    };
+        ..CommitmentTransactionV1::new(consensus)
+    });
 
-    let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+    signer.sign_commitment(&mut pledge_tx).unwrap();
     info!("Generated pledge_tx.id: {}", pledge_tx.id);
 
     // Submit pledge commitment via API

@@ -28,7 +28,7 @@ pub fn initialize_tracing() {
 }
 
 /// Configures support for logging `Tracing` macros to console, and creates a temporary directory in ./<`project_dir>/.tmp`.
-/// The temp directory is prefixed by <name> (default: "irys-test-"), and automatically deletes itself on test completion -
+/// The temp directory is prefixed by `<name>` (default: "irys-test-"), and automatically deletes itself on test completion -
 /// unless the `keep` flag is set to `true` - in which case the folder persists indefinitely.
 pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
     initialize_tracing();
@@ -39,6 +39,30 @@ pub fn setup_tracing_and_temp_dir(name: Option<&str>, keep: bool) -> TempDir {
 pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn tmp_base_dir() -> PathBuf {
+    if let Ok(custom_tmp) = &std::env::var("IRYS_CUSTOM_TMP_DIR") {
+        // try to parse the value as a path
+        let path = PathBuf::from(custom_tmp);
+        if path.is_absolute()
+            || path.exists()
+            || custom_tmp.starts_with('/')
+            || custom_tmp.starts_with("./")
+        {
+            return path;
+        }
+
+        // if it doesn't look like a path, try to use it as an env var key
+        if let Ok(env_value) = std::env::var(custom_tmp) {
+            return PathBuf::from(env_value);
+        }
+
+        // If both failed, print error and fall back
+        eprintln!(
+            "Warning: IRYS_CUSTOM_TMP_DIR='{}' is not a valid path and does not reference a valid environment variable. Falling back to default.",
+            custom_tmp
+        );
+    }
+
+    // Default fallback
     PathBuf::from_str(CARGO_MANIFEST_DIR)
         .unwrap()
         .join("../../.tmp")
@@ -74,7 +98,7 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
 
         // print timestamp before the panic message
-        eprintln!("\x1b[1;31m[{}] Panic occurred:\x1b[0m", timestamp);
+        eprintln!("\x1b[1;31m[{timestamp}] Panic occurred:\x1b[0m");
 
         // call the original panic hook
         original_hook(panic_info);

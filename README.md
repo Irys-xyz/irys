@@ -82,3 +82,5 @@ sudo chmod 644 /Library/LaunchDaemons/limit.maxfiles.plist
 
 sudo launchctl load -w /Library/LaunchDaemons/limit.maxfiles.plist
 ```
+## Misc
+use the `IRYS_CUSTOM_TMP_DIR` env var to change the temporary directory used for tests from ./.tmp to whatever path you like. it can also be set to another env var to lookup and resolve as a path at runtime.

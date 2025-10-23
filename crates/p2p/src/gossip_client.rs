@@ -41,13 +41,6 @@ pub struct GossipClient {
     client: Client,
 }
 
-// TODO: Remove this when PeerList is no longer an actix service
-impl Default for GossipClient {
-    fn default() -> Self {
-        panic!("GossipClient must be initialized with a timeout and mining address. Default is implemented only to satisfy actix trait bounds.");
-    }
-}
-
 impl GossipClient {
     #[must_use]
     pub fn new(timeout: Duration, mining_address: Address) -> Self {

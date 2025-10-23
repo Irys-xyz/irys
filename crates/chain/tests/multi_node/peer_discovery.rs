@@ -7,7 +7,7 @@ use crate::utils::IrysNodeTest;
 use actix_web::test::{call_service, read_body, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_domain::ScoreDecreaseReason;
 use irys_types::{
     build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
@@ -15,7 +15,7 @@ use irys_types::{
 };
 use tracing::{debug, error, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_peer_discovery() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     config.trusted_peers = vec![];
@@ -36,11 +36,10 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config.clone());
     let node = node.start().await;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     node.node_ctx.start_mining().unwrap();
 
@@ -352,7 +351,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     // TODO: this test should:
     //  1. Peer 1 launched. Peer 1 doesn't have trusted peers.

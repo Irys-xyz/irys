@@ -1,0 +1,20 @@
+# Storage submodules configuration for Irys docker nodes
+# This file defines the storage paths that each node should use for storage modules
+#
+# is_using_hardcoded_paths = true: Use paths as-is without creating symlinks
+# submodule_paths: List of directories for storage submodules
+#
+# With num_partitions_per_slot=3, we need:
+# - 3 modules for Publish ledger slot 0
+# - 3 modules for Submit ledger slot 0
+# Total: 6 storage modules minimum
+
+is_using_hardcoded_paths = true
+submodule_paths = [
+    "/app/data/storage_modules/submodule_0",
+    "/app/data/storage_modules/submodule_1",
+    "/app/data/storage_modules/submodule_2",
+    "/app/data/storage_modules/submodule_3",
+    "/app/data/storage_modules/submodule_4",
+    "/app/data/storage_modules/submodule_5",
+]

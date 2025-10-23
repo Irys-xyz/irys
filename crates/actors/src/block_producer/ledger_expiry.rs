@@ -608,7 +608,7 @@ async fn process_middle_blocks(
 /// This struct tracks two types of balance adjustments:
 /// - Miner rewards for storing expired data (term fees distributed to storage providers)
 /// - User refunds for permanent fees when transactions were not promoted to permanent storage
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LedgerExpiryBalanceDelta {
     /// Rewards for miners who stored the expired data, mapped by miner address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
@@ -731,6 +731,7 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::DataTransactionHeaderV1;
 
     #[test]
     fn test_aggregate_miner_fees_handles_duplicates() {
@@ -739,19 +740,19 @@ mod tests {
         let config = Config::new(node_config);
 
         // Create test transactions
-        let tx1 = DataTransactionHeader {
+        let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             term_fee: U256::from(1000),
             data_size: 100,
             ..Default::default()
-        };
+        });
 
-        let tx2 = DataTransactionHeader {
+        let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             term_fee: U256::from(2000),
             data_size: 200,
             ..Default::default()
-        };
+        });
 
         // Create miners with duplicates
         let miner1 = Address::random();

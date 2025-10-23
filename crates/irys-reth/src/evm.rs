@@ -1,15 +1,14 @@
 // Standard library imports
 use core::convert::Infallible;
 
-// External crate imports - Alloy
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
+use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
+use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, Log, LogData, U256};
 
-// External crate imports - Reth
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::result::ExecutionResult;
@@ -25,19 +24,18 @@ use reth_evm::precompiles::PrecompilesMap;
 use reth_evm::{ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes};
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
-// External crate imports - Revm
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
 use revm::context::{BlockEnv, Cfg as _, CfgEnv, ContextTr as _};
 use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
+use std::sync::LazyLock;
 use tracing::{trace, warn};
 
-// External crate imports - Other
-
 use super::*;
-use crate::shadow_tx::{self, ShadowTransaction, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
+use crate::precompile::register_irys_precompiles_if_active;
+use crate::shadow_tx::{self, ShadowTransaction};
 
 /// Constants for shadow transaction processing
 mod constants {
@@ -47,6 +45,11 @@ mod constants {
     /// Gas refunded for shadow transactions (always 0)
     pub(super) const SHADOW_TX_GAS_REFUNDED: u64 = 0;
 }
+
+/// Magic account used to store PD base fee per chunk in its balance field.
+/// This is set by a dedicated shadow transaction and read during PD fee charging.
+pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_pd_base_fee_account")));
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
@@ -175,7 +178,7 @@ pub struct IrysBlockExecutorFactory {
 
 impl IrysBlockExecutorFactory {
     /// Creates a new [`EthBlockExecutorFactory`] with the given spec, [`EvmFactory`], and
-    /// [`ReceiptBuilder`].
+    /// [`RethReceiptBuilder`].
     pub const fn new(
         receipt_builder: RethReceiptBuilder,
         spec: Arc<ChainSpec>,
@@ -306,7 +309,7 @@ impl EvmFactory for IrysEvmFactory {
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        IrysEvm::new(
+        let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
                 .with_cfg(input.cfg_env)
@@ -316,7 +319,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             false,
-        )
+        );
+
+        // Register Irys custom precompiles depending on active hardfork (Frontier+).
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id);
+
+        evm
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -326,7 +334,7 @@ impl EvmFactory for IrysEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        IrysEvm::new(
+        let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
                 .with_cfg(input.cfg_env)
@@ -336,7 +344,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             true,
-        )
+        );
+
+        // Register Irys custom precompiles depending on active hardfork (Frontier+).
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id);
+
+        evm
     }
 }
 
@@ -463,11 +476,88 @@ where
     }
 
     fn transact_raw(&mut self, tx: Self::Tx) -> Result<ResultAndState, Self::Error> {
+        // Reject blob-carrying transactions (EIP-4844) at execution time.
+        // We keep Cancun active but explicitly disable blobs/sidecars.
+        if !tx.blob_hashes.is_empty()
+            || tx.max_fee_per_blob_gas != 0
+            || tx.tx_type == EIP4844_TX_TYPE_ID
+        {
+            tracing::debug!(
+                blob_hashes_len = tx.blob_hashes.len(),
+                max_fee_per_blob_gas = tx.max_fee_per_blob_gas,
+                tx_type = tx.tx_type,
+                "Rejecting blob-carrying transaction: EIP-4844 not supported"
+            );
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::Eip4844NotSupported,
+            ));
+        }
+
         // run this tx through our processing first, if it's not a shadow tx we return here and pass it on
         let tx = match self.process_shadow_tx(tx)? {
             Either::Left(res) => return Ok(res),
             Either::Right(tx) => tx,
         };
+
+        // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
+        // Layout: [magic][version:u16][borsh header][rest]
+        if let Some((pd_header, consumed)) =
+            crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
+        {
+            // Compute PD fees based on header values. Always derive PD chunk count from access list.
+            let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
+            let chunks = U256::from(chunks_u64);
+            // Read the actual PD base fee from EVM state and cap by user's max.
+            let actual_per_chunk = self.read_pd_base_fee_per_chunk();
+            let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
+                pd_header.max_base_fee_per_chunk
+            } else {
+                actual_per_chunk
+            };
+            let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
+
+            let base_total = chunks.saturating_mul(base_per_chunk);
+            let prio_total = chunks.saturating_mul(prio_per_chunk);
+
+            // Fee payer is the transaction caller; priority recipient is block beneficiary.
+            let fee_payer = tx.caller;
+            let beneficiary = self.block().beneficiary;
+            // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
+            // that will also make accounting easier on irys side
+            let base_sink = Address::ZERO;
+
+            // Charge PD base fee and PD priority fee.
+            // - Base: transfer from payer -> sink
+            // - Priority: transfer from payer -> beneficiary
+            self.distribute_base_fee(base_total, fee_payer, base_sink)?;
+            self.distribute_priority_fee(prio_total, Some(fee_payer), beneficiary)?;
+
+            // Strip the PD header from calldata before executing the tx logic.
+            let stripped: Bytes = tx.data[consumed..].to_vec().into();
+            let mut tx = tx;
+            tx.data = stripped;
+
+            // TODO: bug - when we distribute fees we only update the self.state hashmap, not the undrlying evm state. As a result, if `self.inner` operates on any evm state for an account, then it will be ovreriden.
+            // - We need to either change the order of operations (play evm, then deduct fees)
+            // - Or make a more sophisticated state tracking apporac, interacting with the evm more directly, eliminating our self.state
+
+            // Execute the (stripped) transaction and merge our custom fee distribution changes
+            // into the returned state so they are persisted by the caller.
+            let mut res = if self.inspect {
+                self.inner.set_tx(tx);
+                self.inner.inspect_replay()
+            } else {
+                self.inner.transact(tx)
+            }?;
+
+            // Merge any staged account changes from PD fee charging.
+            // This mirrors how shadow-tx path returns `self.state` for commit.
+            for (addr, account) in std::mem::take(&mut self.state) {
+                res.state.insert(addr, account);
+            }
+
+            return Ok(res);
+        }
 
         if self.inspect {
             self.inner.set_tx(tx);
@@ -603,31 +693,28 @@ where
     ) -> Result<Either<ResultAndState, <Self as Evm>::Tx>, <Self as Evm>::Error> {
         // figure out if this is a shadow tx
 
-        // check that the call target is [`SHADOW_TX_DESTINATION_ADDR`]
+        // Attempt unified shadow-tx detection + decoding
         let to_address = match tx.kind {
             TxKind::Create => return Ok(Either::Right(tx)),
             TxKind::Call(address) => address,
         };
         let tx_envelope_input_buf = &tx.data;
 
-        if to_address != *SHADOW_TX_DESTINATION_ADDR {
-            trace!("Not a shadow tx");
-            return Ok(Either::Right(tx));
+        let shadow_tx = match shadow_tx::detect_and_decode_from_parts(
+            Some(to_address),
+            tx_envelope_input_buf,
+        ) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => {
+                trace!("Not a shadow tx");
+                return Ok(Either::Right(tx));
+            }
+            Err(e) => {
+                return Err(Self::create_internal_error(format!(
+                    "failed to decode shadow tx: {e}"
+                )));
+            }
         };
-
-        // check that the tx data/input bytes start with the required prefix [`IRYS_SHADOW_EXEC`]
-        if tx_envelope_input_buf
-            .strip_prefix(IRYS_SHADOW_EXEC)
-            .is_none()
-        {
-            trace!("Not a shadow tx");
-            return Ok(Either::Right(tx));
-        };
-
-        // we've determined that this is/should be a shadow tx
-
-        let shadow_tx = ShadowTransaction::decode(&mut &tx_envelope_input_buf[..])
-            .map_err(|e| Self::create_internal_error(format!("failed to decode shadow tx: {e}")))?;
 
         tracing::trace!("executing shadow transaction");
 
@@ -706,11 +793,6 @@ where
                 if state_acc.status != account.status {
                     warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
                 }
-                // assert_eq!(
-                //     state_acc.status, account.status,
-                //     "Invalid account status flags: from commit {:?}, from prev: {:?}",
-                //     &state_acc.status, &account.status
-                // );
 
                 execution_result
             }
@@ -846,9 +928,7 @@ where
             let account_state = self.load_account(target)?;
             if account_state.is_none() {
                 return Err(Self::create_internal_error(format!(
-                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {}, Fee: {}",
-                    target,
-                    total_fee
+                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {target}, Fee: {total_fee}"
                 )));
             }
 
@@ -880,6 +960,40 @@ where
 
         assert_ne!(bef, aft);
         assert_eq!(beneficiary_state, aft);
+
+        Ok(())
+    }
+
+    /// Distributes PD base fees to a designated sink address by debiting the fee payer.
+    /// If `total_fee` is zero, this is a no-op.
+    pub fn distribute_base_fee(
+        &mut self,
+        total_fee: U256,
+        fee_payer_address: Address,
+        sink: Address,
+    ) -> Result<(), <Self as Evm>::Error> {
+        if total_fee.is_zero() {
+            return Ok(());
+        }
+
+        // Early return for same-address transfer (no-op)
+        if fee_payer_address == sink {
+            // Ensure account exists
+            let account_state = self.load_account(fee_payer_address)?;
+            if account_state.is_none() {
+                return Err(Self::create_internal_error(format!(
+                    "PD base fee failed: payer account does not exist for same-address transfer. Payer: {fee_payer_address}, Fee: {total_fee}"
+                )));
+            }
+            return Ok(());
+        }
+
+        // Prepare transfer: payer -> sink
+        let (payer_state, sink_state) =
+            self.prepare_fee_transfer(fee_payer_address, sink, total_fee)?;
+
+        self.commit_account_change(fee_payer_address, payer_state);
+        self.commit_account_change(sink, sink_state);
 
         Ok(())
     }
@@ -929,9 +1043,7 @@ where
                 "Target account does not exist, cannot deduct priority fee"
             );
             return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: target account does not exist. Target: {}, Required fee: {}",
-                target,
-                fee
+                "Shadow transaction priority fee failed: target account does not exist. Target: {target}, Required fee: {fee}"
             )));
         };
 
@@ -1005,6 +1117,15 @@ where
         }
     }
 
+    /// Reads the PD base fee per chunk from the dedicated EVM account's balance.
+    /// Returns 0 if the account does not exist.
+    fn read_pd_base_fee_per_chunk(&mut self) -> U256 {
+        match self.load_account(*PD_BASE_FEE_ACCOUNT) {
+            Ok(Some(acc)) => acc.info.balance,
+            _ => U256::ZERO,
+        }
+    }
+
     /// Main branching processing function, handles all shadow tx variants & their required operations
     fn process_shadow_transaction(
         &mut self,
@@ -1017,48 +1138,45 @@ where
 
         match shadow_tx {
             shadow_tx::ShadowTransaction::V1 { packet, .. } => match packet {
-                shadow_tx::TransactionPacket::Unstake(either_inc_dec)
-                | shadow_tx::TransactionPacket::Unpledge(either_inc_dec) => match either_inc_dec {
-                    shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(balance_increment) => {
-                        let log = Self::create_shadow_log(
-                            balance_increment.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_increment.amount, 256),
-                                DynSolValue::Address(balance_increment.target),
-                            ],
-                        );
-                        let target = balance_increment.target;
-                        let (plain_account, execution_result, account_existed) =
-                            self.handle_balance_increment(log, balance_increment)?;
-                        Ok((
-                            Ok((plain_account, execution_result, account_existed)),
-                            target,
-                        ))
-                    }
-                    shadow_tx::EitherIncrementOrDecrement::BalanceDecrement(balance_decrement) => {
-                        let log = Self::create_shadow_log(
-                            balance_decrement.target,
-                            vec![topic],
-                            vec![
-                                DynSolValue::Uint(balance_decrement.amount, 256),
-                                DynSolValue::Address(balance_decrement.target),
-                            ],
-                        );
-                        let target = balance_decrement.target;
-                        let res = self.handle_balance_decrement(
-                            log,
-                            &balance_decrement.irys_ref,
-                            balance_decrement,
-                        )?;
-                        Ok((
-                            res.map(|(plain_account, execution_result)| {
-                                (plain_account, execution_result, true)
-                            }),
-                            target,
-                        ))
-                    }
-                },
+                shadow_tx::TransactionPacket::UnstakeRefund(balance_increment) => {
+                    let log = Self::create_shadow_log(
+                        balance_increment.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Uint(balance_increment.amount, 256),
+                            DynSolValue::Address(balance_increment.target),
+                        ],
+                    );
+                    let target = balance_increment.target;
+                    let (plain_account, execution_result, account_existed) =
+                        self.handle_balance_increment(log, balance_increment)?;
+                    Ok((
+                        Ok((plain_account, execution_result, account_existed)),
+                        target,
+                    ))
+                }
+                shadow_tx::TransactionPacket::UnstakeDebit(unstake_debit) => {
+                    // Fee-only via priority fee (already processed). Emit a log only.
+                    let log = Self::create_shadow_log(
+                        unstake_debit.target,
+                        vec![topic],
+                        vec![DynSolValue::Address(unstake_debit.target)],
+                    );
+                    let target = unstake_debit.target;
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Err(execution_result), target))
+                }
+                shadow_tx::TransactionPacket::Unpledge(unpledge_debit) => {
+                    // Fee-only via priority fee (already processed). Emit a log only.
+                    let log = Self::create_shadow_log(
+                        unpledge_debit.target,
+                        vec![topic],
+                        vec![DynSolValue::Address(unpledge_debit.target)],
+                    );
+                    let target = unpledge_debit.target;
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Err(execution_result), target))
+                }
                 shadow_tx::TransactionPacket::BlockReward(block_reward_increment) => {
                     let log = Self::create_shadow_log(
                         beneficiary,
@@ -1103,7 +1221,8 @@ where
                 }
                 shadow_tx::TransactionPacket::TermFeeReward(balance_increment)
                 | shadow_tx::TransactionPacket::IngressProofReward(balance_increment)
-                | shadow_tx::TransactionPacket::PermFeeRefund(balance_increment) => {
+                | shadow_tx::TransactionPacket::PermFeeRefund(balance_increment)
+                | shadow_tx::TransactionPacket::UnpledgeRefund(balance_increment) => {
                     let log = Self::create_shadow_log(
                         balance_increment.target,
                         vec![topic],
@@ -1119,6 +1238,29 @@ where
                         Ok((plain_account, execution_result, account_existed)),
                         target,
                     ))
+                }
+                shadow_tx::TransactionPacket::PdBaseFeeUpdate(update) => {
+                    // Write the per-chunk base fee into the PD base fee account balance.
+                    let target = *PD_BASE_FEE_ACCOUNT;
+
+                    // Load existing or create new account
+                    let existed;
+                    let mut account = if let Some(acc) = self.load_account(target)? {
+                        existed = true;
+                        acc
+                    } else {
+                        existed = false;
+                        Account::new_not_existing()
+                    };
+                    account.info.balance = update.per_chunk;
+
+                    let log = Self::create_shadow_log(
+                        target,
+                        vec![topic],
+                        vec![DynSolValue::Uint(update.per_chunk, 256)],
+                    );
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Ok((account, execution_result, existed)), target))
                 }
             },
         }
@@ -1242,5 +1384,206 @@ where
             logs: vec![log],
             output: Output::Call(Bytes::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, B256, U256};
+    use reth_evm::EvmEnv;
+    use revm::context::result::{EVMError, InvalidTransaction};
+    use revm::context::{BlockEnv, CfgEnv, TxEnv};
+    use revm::database_interface::EmptyDB;
+
+    /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
+    #[test]
+    fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
+        // Build minimal EVM env with Cancun spec enabled
+        let factory = IrysEvmFactory::new();
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let block_env = BlockEnv::default();
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Create a TxEnv that carries EIP-4844 blob fields
+        let tx = TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 0,
+            value: U256::ZERO,
+            chain_id: Some(1),
+            blob_hashes: vec![B256::ZERO],
+            max_fee_per_blob_gas: 1,
+            ..TxEnv::default()
+        };
+
+        let res = evm.transact_raw(tx);
+        assert!(
+            matches!(
+                res,
+                Err(EVMError::Transaction(
+                    InvalidTransaction::Eip4844NotSupported
+                ))
+            ),
+            "expected EIP-4844 not supported, got: {:?}",
+            res
+        );
+    }
+
+    /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
+    #[test]
+    fn evm_processes_normal_tx_success() {
+        let factory = IrysEvmFactory::new();
+
+        // Cancun spec, chain id 1, zero basefee and ample gas limit
+        let mut cfg_env = CfgEnv::default();
+        cfg_env.spec = SpecId::CANCUN;
+        cfg_env.chain_id = 1;
+        let block_env = BlockEnv {
+            gas_limit: 30_000_000,
+            basefee: 0,
+            ..Default::default()
+        };
+
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
+
+        // Simple call with zero value and zero gas price
+        let tx = TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(Address::random()),
+            nonce: 0,
+            gas_limit: 21_000,
+            value: U256::ZERO,
+            data: Bytes::new(),
+            gas_price: 0,
+            chain_id: Some(1),
+            gas_priority_fee: None,
+            access_list: Default::default(),
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            tx_type: 0,
+            authorization_list: Default::default(),
+        };
+
+        let res = evm.transact_raw(tx);
+        assert!(res.is_ok(), "expected Ok, got: {:?}", res);
+        let result = res.unwrap().result;
+        assert!(result.is_success(), "expected success, got: {:?}", result);
+    }
+
+    /// Ensure a PD-shaped transaction with header charges base and priority fees end-to-end via node execution.
+    #[test_log::test(tokio::test)]
+    async fn evm_pd_header_tx_charges_fees() -> eyre::Result<()> {
+        use alloy_consensus::TxEip1559;
+        use alloy_eips::eip2930::AccessListItem as AlItem;
+        use alloy_primitives::{Bytes, FixedBytes};
+        use reth_transaction_pool::{TransactionOrigin, TransactionPool as _};
+
+        use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+        use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
+        use crate::test_utils::{
+            advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
+            DEFAULT_PRIORITY_FEE,
+        };
+
+        // Spin up a single node and set PD base fee via shadow transaction
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let payer = ctx.normal_signer.address();
+        let beneficiary = ctx.block_producer_a.address();
+        let sink = Address::ZERO;
+
+        let pd_base_fee = U256::from(7_u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: pd_base_fee,
+            }),
+            solution_hash,
+        );
+        // Priority fee ignored for PdBaseFeeUpdate (no payer address)
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
+
+        // Capture initial balances
+        let payer_initial = get_balance(&node.inner, payer);
+        let beneficiary_initial = get_balance(&node.inner, beneficiary);
+        let sink_initial = get_balance(&node.inner, sink);
+
+        // Build and submit a PD-header transaction: 3 chunks, prio=10, base<=7
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: U256::from(10_u64),
+            max_base_fee_per_chunk: U256::from(7_u64),
+        };
+        let user_calldata = Bytes::from(vec![0xAA, 0xBB]);
+        let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
+
+        // PD access list: 3 storage keys at PD precompile address
+        let key1 = encode_pd_storage_key([0_u8; 26], 0, 1);
+        let key2 = encode_pd_storage_key([0_u8; 26], 1, 1);
+        let key3 = encode_pd_storage_key([0_u8; 26], 2, 1);
+        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_primitives::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![key1, key2, key3],
+        }]);
+
+        // Compose EIP-1559 tx with zero priority gas fee so only PD fees affect balances
+        let nonce = get_nonce(&node.inner, payer);
+        let tx_raw = TxEip1559 {
+            access_list,
+            chain_id: 1,
+            gas_limit: 100_000,
+            input,
+            max_fee_per_gas: 1_000_000_000, // basefee=0 => effective gas price 0
+            max_priority_fee_per_gas: 0,
+            nonce,
+            to: TxKind::Call(Address::random()),
+            value: U256::ZERO,
+        };
+        let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
+        let _tx_hash = node
+            .inner
+            .pool
+            .add_transaction(TransactionOrigin::Local, pooled)
+            .await?;
+
+        // Mine a block including the PD-header tx
+        advance_block(&mut node, &shadow_tx_store, vec![]).await?;
+
+        // Expected PD fees
+        let base_total = U256::from(3_u64) * pd_base_fee; // 3 chunks * 7 = 21
+        let prio_total = U256::from(3_u64) * U256::from(10_u64); // 3 chunks * 10 = 30
+
+        // Validate balances
+        let payer_final = get_balance(&node.inner, payer);
+        let deducted = payer_initial.saturating_sub(payer_final);
+        // With dev chain basefee=0 and tx priority gas tip=0, the only deduction is PD base+priority.
+        assert_eq!(
+            deducted,
+            base_total + prio_total,
+            "payer balance not deducted exactly by PD fees"
+        );
+
+        let beneficiary_final = get_balance(&node.inner, beneficiary);
+        assert_eq!(
+            beneficiary_final,
+            beneficiary_initial + prio_total,
+            "beneficiary should receive priority fees"
+        );
+
+        let sink_final = get_balance(&node.inner, sink);
+        assert_eq!(
+            sink_final,
+            sink_initial + base_total,
+            "sink should receive base fees"
+        );
+
+        Ok(())
     }
 }

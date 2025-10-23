@@ -439,7 +439,7 @@ mod tests {
         let proof1 = generate_ingress_proof(
             &signer1,
             data_root,
-            vec![vec![0_u8; 32]].into_iter().map(Ok),
+            [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
             config.chain_id,
         )
         .unwrap();
@@ -447,7 +447,7 @@ mod tests {
         let proof2 = generate_ingress_proof(
             &signer2,
             data_root,
-            vec![vec![0_u8; 32]].into_iter().map(Ok),
+            [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
             config.chain_id,
         )
         .unwrap();
@@ -539,7 +539,7 @@ mod tests {
                 generate_ingress_proof(
                     signer,
                     data_root,
-                    vec![vec![0_u8; 32]].into_iter().map(Ok),
+                    [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
                     config.chain_id,
                 )
                 .unwrap()

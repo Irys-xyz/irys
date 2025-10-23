@@ -1,14 +1,14 @@
 use crate::utils::IrysNodeTest;
 use alloy_genesis::GenesisAccount;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{irys::IrysSigner, DataLedger, IrysTransactionCommon as _, NodeConfig, U256};
+use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, U256};
 use reth::rpc::types::TransactionTrait as _;
 use tracing::{debug, info};
 
 /// Tests that permanent fees are refunded for unpromoted transactions when they expire.
 /// - User1's transaction remains unpromoted and receives full perm_fee refund at expiry
 /// - User2's transaction gets promoted (chunks uploaded) and does NOT receive perm_fee refund
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     // ==================== SETUP ====================
     // Configure node with short epochs for faster testing

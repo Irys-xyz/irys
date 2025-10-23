@@ -21,7 +21,7 @@ use crate::utils::IrysNodeTest;
 // 9. Upload the chunks of the data_tx to the genesis node and wait for promotion
 // 10. Start the two peers and let them sync with the network, but not mine
 // 11. Validate that they are syncing data chunks to their assigned partitions
-#[actix_web::test]
+#[tokio::test]
 async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
     initialize_tracing();

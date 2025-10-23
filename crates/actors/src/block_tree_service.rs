@@ -1,17 +1,14 @@
 use crate::{
     block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
-    broadcast_mining_service::{
-        BroadcastDifficultyUpdate, BroadcastMiningService, BroadcastPartitionsExpiration,
-    },
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
+    mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
     StorageModuleServiceMessage,
 };
-use actix::prelude::*;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
@@ -75,8 +72,6 @@ pub struct BlockTreeServiceInner {
     pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
-    /// Current actix system
-    pub system: System,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +116,6 @@ impl BlockTreeService {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
         let service_senders = service_senders.clone();
-        let system = System::current();
         let bi_guard = block_index_guard;
         let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
@@ -153,7 +147,6 @@ impl BlockTreeService {
                         block_index_guard: bi_guard,
                         config,
                         service_senders,
-                        system,
                         storage_submodules_config: storage_submodules_config.clone(),
                     },
                 };
@@ -243,7 +236,7 @@ impl BlockTreeServiceInner {
     /// This method:
     /// - Resolves the full `IrysBlockHeader` for the provided `block_hash` from the mempool or the database
     /// - Fetches the Submit and Publish data-transaction headers from the mempool
-    /// - Emits a `BlockMigrationMessage` to the `BlockIndexService` and `ChunkMigrationService`
+    /// - Emits a block migration message to the `BlockIndexService` and `ChunkMigrationService`
     ///
     /// Errors
     /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
@@ -416,7 +409,10 @@ impl BlockTreeServiceInner {
 
         // Create epoch snapshot for this block
         let arc_epoch_snapshot =
-            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus);
+            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus)
+                .map_err(|x| PreValidationError::InvalidEpochSnapshot {
+                    error: x.to_string(),
+                })?;
 
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
@@ -755,7 +751,7 @@ impl BlockTreeServiceInner {
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
-            self.send_epoch_events(&epoch_block);
+            self.send_epoch_events(&epoch_block)?;
         }
 
         // Now that the epoch events are sent, let the node know about the reorg
@@ -789,11 +785,8 @@ impl BlockTreeServiceInner {
             parent_block.diff != arc_block.diff
         };
         if parent_diff_changed {
-            // todo: good opportunity to get rid of actix here
-            // Ensure we are in the Actix system context before accessing the registry
-            System::set_current(self.system.clone());
-            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-            mining_broadcaster_addr.do_send(BroadcastDifficultyUpdate(arc_block.clone()));
+            self.service_senders
+                .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
         }
 
         let event = BlockStateUpdated {
@@ -808,23 +801,23 @@ impl BlockTreeServiceInner {
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height % self.config.consensus.epoch.num_blocks_in_epoch == 0
+        block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) {
+    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Get the epoch snapshot
+        let block_hash = epoch_block.block_hash();
         let epoch_snapshot = self
             .cache
             .read()
             .expect("cache read lock poisoned")
-            .get_epoch_snapshot(&epoch_block.block_hash);
-
-        let epoch_snapshot = epoch_snapshot.unwrap_or_else(|| {
-            panic!(
-                "Epoch block {} should have a snapshot in cache",
-                epoch_block.block_hash
-            )
-        });
+            .get_epoch_snapshot(&block_hash)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "epoch block should have a snapshot in cache {:?}",
+                    block_hash
+                )
+            })?;
 
         // Check for partitions expired at this epoch boundary
         if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
@@ -833,12 +826,11 @@ impl BlockTreeServiceInner {
                 .map(|i| i.partition_hash)
                 .collect();
 
-            // Let the mining actors know about expired partitions
-            System::set_current(self.system.clone());
-            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-            mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-                expired_partition_hashes,
-            )));
+            // Let miners know about expired partitions
+            self.service_senders
+                .send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
+                    expired_partition_hashes,
+                )));
 
             // Let the cache service know some term ledger slots expired
             if let Err(e) = self.service_senders.chunk_cache.send(
@@ -853,14 +845,13 @@ impl BlockTreeServiceInner {
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
-        if let Err(e) = self.service_senders.storage_modules.send(
+        self.service_senders.storage_modules.send(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
                 update_height: epoch_block.height,
             },
-        ) {
-            error!("Failed to send partition assignments update: {}", e);
-        }
+        )?;
+        Ok(())
     }
 
     /// Fetches full transaction headers from mempool using the txids from a ledger in a block

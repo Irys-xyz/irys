@@ -59,10 +59,7 @@ use irys_types::{
     PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath,
     UnpackedChunk, H256,
 };
-use nodit::{
-    interval::{ie, ii},
-    InclusiveInterval as _, Interval, NoditMap, NoditSet,
-};
+use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
 use reth_db::Database as _;
 use serde::{Deserialize, Serialize};
@@ -139,7 +136,6 @@ pub struct StorageModuleInfo {
     /// Hash of partition this storage module belongs to, if assigned
     pub partition_assignment: Option<PartitionAssignment>,
     /// Range of chunk offsets and path for each submodule
-    /// pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
     pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
 }
 
@@ -425,6 +421,30 @@ impl StorageModule {
                 partition_hash: Some(partition_assignment.partition_hash),
                 ledger: partition_assignment.ledger_id,
                 slot: partition_assignment.slot_index,
+                last_updated_height: Some(update_height),
+            };
+
+            let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            params.write_to_disk(&params_path);
+        }
+    }
+
+    /// Clears the current partition assignment and persists the change on disk.
+    ///
+    /// Writes `packing_params.toml` with `partition_hash = None`, `ledger = None`,
+    /// `slot = None`, and updates `last_updated_height`. In-memory assignment is set to `None`.
+    pub fn clear_assignment(&self, update_height: u64) {
+        // Clear in-memory assignment
+        let mut pa = self.partition_assignment.write().unwrap();
+        *pa = None;
+
+        // Persist to each submodule's packing params
+        for (_, submodule) in self.submodules.iter() {
+            let params = PackingParams {
+                packing_address: self.config.node_config.miner_address(),
+                partition_hash: None,
+                ledger: None,
+                slot: None,
                 last_updated_height: Some(update_height),
             };
 
@@ -1378,11 +1398,20 @@ impl StorageModule {
         let recent_chunk_times = self.recent_chunk_times.read().unwrap();
 
         if recent_chunk_times.is_empty() {
+            tracing::debug!("write_throughput_bps: empty buffer, returning 0");
             return 0;
         }
 
         let front = recent_chunk_times.front().unwrap();
         let back = recent_chunk_times.back().unwrap();
+
+        tracing::debug!(
+            "write_throughput_bps: buffer_len={} chunk_size={} front_start={:?} back_completion={:?}",
+            recent_chunk_times.len(),
+            chunk_size,
+            front.start_time,
+            back.completion_time
+        );
 
         // Calculate the actual time span covered by our records.
         //

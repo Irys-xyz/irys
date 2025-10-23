@@ -1,5 +1,5 @@
 use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
-use actix::Message;
+
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
@@ -97,20 +97,8 @@ impl Default for PeerListItem {
 }
 
 #[derive(
-    Message,
-    Debug,
-    Clone,
-    Copy,
-    Serialize,
-    Deserialize,
-    Arbitrary,
-    PartialOrd,
-    Ord,
-    Hash,
-    Eq,
-    PartialEq,
+    Debug, Clone, Copy, Serialize, Deserialize, Arbitrary, PartialOrd, Ord, Hash, Eq, PartialEq,
 )]
-#[rtype(result = "eyre::Result<()>")]
 #[serde(deny_unknown_fields)]
 pub struct RethPeerInfo {
     // Reth's PUBLICLY ACCESSIBLE peering port: https://reth.rs/run/ports.html#peering-ports
@@ -375,8 +363,7 @@ pub struct AnnouncementFinishedMessage {
     pub retry: bool,
 }
 
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
+#[derive(Debug)]
 pub enum PeerNetworkServiceMessage {
     Handshake(HandshakeMessage),
     AnnounceYourselfToPeer(PeerListItem),
@@ -407,7 +394,7 @@ pub enum PeerNetworkError {
 
 impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
     fn from(err: SendError<PeerNetworkServiceMessage>) -> Self {
-        Self::InternalSendError(format!("Failed to send a message: {:?}", err))
+        Self::InternalSendError(format!("Failed to send a message: {err:?}"))
     }
 }
 
@@ -480,8 +467,7 @@ impl PeerNetworkSender {
 
         receiver.await.map_err(|recv_error| {
             PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
+                "Failed to receive response: {recv_error:?}"
             ))
         })?
     }
@@ -502,8 +488,7 @@ impl PeerNetworkSender {
 
         receiver.await.map_err(|recv_error| {
             PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
+                "Failed to receive response: {recv_error:?}"
             ))
         })?
     }
@@ -524,8 +509,7 @@ impl PeerNetworkSender {
 
         receiver.await.map_err(|recv_error| {
             PeerNetworkError::OtherInternalError(format!(
-                "Failed to receive response: {:?}",
-                recv_error
+                "Failed to receive response: {recv_error:?}"
             ))
         })?
     }

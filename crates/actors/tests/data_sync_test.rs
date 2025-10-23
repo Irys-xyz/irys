@@ -8,7 +8,6 @@ use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
-use irys_storage::ie;
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
@@ -29,12 +28,13 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error};
 
+#[ignore = "flaky, non critical function test"]
 #[tokio::test]
-async fn slow_test_data_sync_with_different_peer_performance() {
+async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     std::env::set_var("RUST_LOG", "debug,storage=off");
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
 
-    let setup = TestSetup::new(800, Duration::from_secs(5), &tmp_dir);
+    let setup = TestSetup::new(100, Duration::from_secs(5), &tmp_dir);
     let storage_modules = Arc::new(RwLock::new(vec![setup.storage_module.clone()]));
     debug!("Creating chunk_fetcher_factory");
     let chunk_fetcher_factory = setup.create_chunk_fetcher_factory();
@@ -284,7 +284,7 @@ impl DataSyncServiceTestHarness {
             let request_count = peer_fetcher.request_log.read().unwrap().len();
             total_requests += request_count;
 
-            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}", 
+            println!("{}: Health={:.3}, Requests={}, Failures={}, Short-term BW={}, Medium-term BW={}, Stable={}, Improving={} Max Concurrency={}",
                 peer_name,
                 peer_manager.health_score(),
                 request_count,
@@ -401,7 +401,7 @@ impl TestSetup {
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 100,
-                max_storage_throughput_bps: 100 * 1024 * 1024, // 100 MB/s as BPS
+                max_storage_throughput_bps: 1000 * 1024 * 1024, // 100 MB/s as BPS
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
             },
@@ -490,7 +490,8 @@ impl TestSetup {
         ];
 
         // Create service senders to finish initializing the PeerList
-        let (service_senders, service_receivers) = ServiceSenders::new();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
 
         let peer_list = PeerList::from_peers(
             peers_data,

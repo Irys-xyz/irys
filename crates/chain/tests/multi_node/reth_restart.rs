@@ -11,7 +11,7 @@ const EXTRA_MINED_BLOCKS: u64 = 5;
 // latest/safe/finalized anchors purely from the block index using the expected migration and prune
 // depths. We then mine one extra block to confirm that the head advances while the safe/finalized
 // anchors stay pinned to the initial blocks from the block index.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn reth_restarts_use_block_index_before_sync() -> eyre::Result<()> {
     let genesis_config = NodeConfig::testing().with_consensus(|cons| {
         cons.block_migration_depth = 2;

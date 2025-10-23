@@ -190,7 +190,7 @@ impl BlockDiscoveryService {
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block discovery service");
                     break;
-                }
+                },
                 // Handle commands
                 cmd = self.msg_rx.recv() => {
                     match cmd {
@@ -202,7 +202,7 @@ impl BlockDiscoveryService {
                             break;
                         }
                     }
-                }
+                },
             }
         }
 
@@ -257,7 +257,6 @@ impl BlockDiscoveryServiceInner {
         let block_tree_guard = self.block_tree_guard.clone();
         let config = self.config.clone();
         let db = self.db.clone();
-        let block_header: IrysBlockHeader = (*new_block_header).clone();
         let epoch_config = self.config.consensus.epoch.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
@@ -526,8 +525,8 @@ impl BlockDiscoveryServiceInner {
         };
 
         let validation_result = prevalidate_block(
-            block_header,
-            previous_block_header,
+            (*new_block_header).clone(),
+            previous_block_header.clone(),
             parent_epoch_snapshot.clone(),
             config,
             reward_curve,
@@ -538,15 +537,6 @@ impl BlockDiscoveryServiceInner {
 
         match validation_result {
             Ok(()) => {
-                // add block to mempool
-                mempool_sender
-                    .send(MempoolServiceMessage::IngestBlocks {
-                        prevalidated_blocks: vec![new_block_header.clone()],
-                    })
-                    .map_err(|channel_error| {
-                        BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-                    })?;
-
                 // all txs
                 let mut all_txs = submit_txs;
                 all_txs.extend_from_slice(&publish_txs);
@@ -574,8 +564,11 @@ impl BlockDiscoveryServiceInner {
                     let expected_commitment_tx = parent_commitment_snapshot.get_epoch_commitments();
 
                     // Validate epoch block has expected commitments in correct order
-                    let commitments_match =
-                        expected_commitment_tx.iter().eq(arc_commitment_txs.iter());
+                    // Compare using Deref - versioned types deref to inner types
+                    let commitments_match = expected_commitment_tx
+                        .iter()
+                        .map(|c| &**c) // Deref to inner CommitmentTransaction
+                        .eq(arc_commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
@@ -589,9 +582,8 @@ impl BlockDiscoveryServiceInner {
                 } else {
                     // Validate and add each commitment transaction for non-epoch blocks
                     for commitment_tx in arc_commitment_txs.iter() {
-                        let is_staked = epoch_snapshot.is_staked(commitment_tx.signer);
                         let status = parent_commitment_snapshot
-                            .get_commitment_status(commitment_tx, is_staked);
+                            .get_commitment_status(commitment_tx, &epoch_snapshot);
 
                         // Ensure commitment is unknown (new) and from staked address
                         match status {
@@ -601,11 +593,6 @@ impl BlockDiscoveryServiceInner {
                                         "{:?} Commitment tx {:?} included in prior block",
                                         commitment_tx.commitment_type, commitment_tx.id
                                     ),
-                                ));
-                            }
-                            CommitmentSnapshotStatus::Unsupported => {
-                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
-                                    "Commitment tx of unsupported type".to_string(),
                                 ));
                             }
                             CommitmentSnapshotStatus::Unstaked => {
@@ -619,6 +606,27 @@ impl BlockDiscoveryServiceInner {
                             CommitmentSnapshotStatus::InvalidPledgeCount => {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     "Invalid pledge count in commitment transaction".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::Unowned => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unpledge target capacity partition not owned by signer"
+                                        .to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::UnpledgePending => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Duplicate unpledge for the same capacity partition in snapshot".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::UnstakePending => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unstake already pending for signer".to_string(),
+                                ));
+                            }
+                            CommitmentSnapshotStatus::HasActivePledges => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Unstake not allowed while pledges are active".to_string(),
                                 ));
                             }
                             CommitmentSnapshotStatus::Unknown => {} // Success case

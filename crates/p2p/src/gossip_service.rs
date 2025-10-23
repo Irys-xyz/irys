@@ -29,8 +29,9 @@ use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, P2PG
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{channel, error::SendError, Receiver, Sender};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{
+    channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+};
 use tracing::{debug, info, warn, Span};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;

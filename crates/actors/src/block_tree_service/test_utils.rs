@@ -121,7 +121,7 @@ impl TestCtx {
     ) -> (Self, ServiceReceivers) {
         let task_manager = TaskManager::new(tokio::runtime::Handle::current());
         let task_executor = task_manager.executor();
-        let (service_senders, service_rx) = ServiceSenders::new();
+        let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
 
         (
             Self {
@@ -173,7 +173,7 @@ pub fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<Pr
 }
 
 /// Adds fork to an existing block tree
-/// Returns (ReorgEvent, Vec<PriceInfo>) where the Vec contains all prices from genesis to the tip of the new fork
+/// Returns `(ReorgEvent, Vec<PriceInfo>)` where the Vec contains all prices from genesis to the tip of the new fork
 pub fn create_and_apply_fork(
     block_tree_guard: &BlockTreeReadGuard,
     fork_height: u64,

@@ -9,7 +9,10 @@ use reth::{
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
-use tokio::sync::{mpsc::UnboundedReceiver, mpsc::UnboundedSender, oneshot};
+use tokio::sync::{
+    mpsc::{UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
 use tracing::{debug, error, info, Instrument as _};
 
 #[derive(Debug)]

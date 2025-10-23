@@ -1,10 +1,10 @@
 use crate::utils::post_chunk;
 use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
+use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use awc::http::StatusCode;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
@@ -12,7 +12,7 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tracing::debug;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
@@ -46,12 +46,10 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let block1 = node.mine_block().await.expect("expected mined block");
 
@@ -180,7 +178,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
 
     let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
     let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    println!("1:{}", block_tx1);
+    println!("1:{:?}", block_tx1);
 
     // ==============================
     // Verify chunk ordering in publish ledger storage module
@@ -329,7 +327,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    println!("1:{}", block_tx1);
+    println!("1:{:?}", block_tx1);
     //     println!("2:{}", block_tx2);
 
     // ==============================

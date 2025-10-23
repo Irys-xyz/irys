@@ -16,8 +16,8 @@ pub enum ProxyError {
 impl std::fmt::Display for ProxyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RequestError(e) => write!(f, "Request error: {}", e),
-            Self::ParseError(e) => write!(f, "Parse error: {}", e),
+            Self::RequestError(e) => write!(f, "Request error: {e}"),
+            Self::ParseError(e) => write!(f, "Parse error: {e}"),
             Self::MethodNotAllowed => write!(f, "Method not allowed"),
         }
     }

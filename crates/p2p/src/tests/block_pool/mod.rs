@@ -140,7 +140,8 @@ impl MockedServices {
             block_status_provider: block_status_provider_mock.clone(),
             internal_message_bus: None,
         };
-        let (service_senders, service_receivers) = ServiceSenders::new();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
         let _reth_service_tx = service_senders.reth_service.clone();
         let mut vdf_receiver = service_receivers.vdf_fast_forward;
         let mut block_tree_receiver = service_receivers.block_tree;
@@ -209,7 +210,7 @@ impl MockedServices {
     }
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_process_block() {
     let config = create_test_config();
 
@@ -265,7 +266,7 @@ async fn should_process_block() {
     assert_eq!(block_header_in_discovery, test_header);
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_process_block_with_intermediate_block_in_api() {
     let config = create_test_config();
 
@@ -437,7 +438,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     assert_eq!(discovered_block3, block3);
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
     let config = create_test_config();
 
@@ -510,7 +511,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let config = create_test_config();
 
@@ -684,7 +685,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_not_fast_track_block_already_in_index() {
     let config = create_test_config();
 

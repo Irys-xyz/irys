@@ -23,6 +23,8 @@ members = [
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
   "crates/packing-worker",
+  "crates/tui",
+  "crates/macros/integer-tagged",
 ]
 resolver = "2"
 
@@ -59,10 +61,9 @@ irys-reth = { path = "./crates/irys-reth" }
 irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
 irys-packing-worker = { path = "./crates/packing-worker" }
-
+irys-tui = { path = "./crates/tui" }
+irys-macros-integer-tagged = { path = "./crates/macros/integer-tagged" }
 ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
-actix = "0.13.5"
-actix-rt = "2.10.0"
 actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"
@@ -83,6 +84,7 @@ sha2 = "0.10"
 rayon = "1.8.0"
 reqwest = "0.12.15"
 color-eyre = "0.6"
+dashmap = "6.0"
 itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
@@ -92,6 +94,7 @@ pretty_assertions = "1"
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
 openssl = { version = "0.10", features = ["vendored"] }
+proptest = "1.6"
 proptest-derive = "0.5"
 rust_decimal = "1"
 rust_decimal_macros = "1"
@@ -114,6 +117,14 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
   "json",
   "ansi",
 ] }
+
+# OpenTelemetry
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "http-proto"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio", "trace", "logs"] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
+tracing-opentelemetry = "0.32.0"
+opentelemetry-semantic-conventions = "0.31.0"
 tempfile = "3"
 csv = "1"
 jsonrpsee = "0.24"
@@ -442,6 +453,8 @@ doc-overindented-list-items = "allow"
 unused-async = "deny"
 large-enum-variant = "allow"
 doc-lazy-continuation = "allow"
+result-large-err = "allow"
+uninlined-format-args = "allow"
 # to enable in the future
 type-complexity = "allow"
 needless-range-loop = "allow"
@@ -510,4 +523,5 @@ default.extend-ignore-re = [
   "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
 ]
+default.extend-words = { ratatui = "ratatui" }
 files.extend-exclude = ["ext/*", "fixtures/*"]

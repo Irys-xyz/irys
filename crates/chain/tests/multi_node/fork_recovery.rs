@@ -1,19 +1,19 @@
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
-use irys_types::{DataLedger, DataTransaction, IrysTransactionCommon as _, NodeConfig, H256, U256};
+use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
 
-#[actix_web::test]
-async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
+#[tokio::test]
+async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var(
     //     "RUST_LOG",
     //     "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
     // );
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=debug,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=debug,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
@@ -342,7 +342,7 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 /// - Block index alignment with reth FCU state.
 /// - Reth FCU propagation (`Latest`, `Safe`, `Finalized`) matching the canonical/migrated blocks.
 /// - Reth latest tags on both nodes reflect their respective fork tips before the reorg.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let num_blocks_in_epoch = 3;
@@ -561,7 +561,7 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 ///    - all canonical blocks move to all peers
 ///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - TODO: new balance changes are applied based on the new canonical branch
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
@@ -876,8 +876,15 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///    - tests all canonical blocks move to all peers
 ///    - tests all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - tests new balance changes are applied based on the new canonical branch
-#[test_log::test(actix_web::test)]
-async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
+#[rstest::rstest]
+#[case::full_validation(true)]
+#[case::default(false)]
+#[test_log::test(tokio::test)]
+async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
+    #[case] enable_full_validation: bool,
+) -> eyre::Result<()> {
+    initialize_tracing();
+
     //
     // Stage 0: SETUP AND STARTUP
     //
@@ -892,6 +899,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = DATA_CHUNK_SIZE as u64;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    genesis_config
+        .consensus
+        .get_mut()
+        .enable_full_ingress_proof_validation = enable_full_validation;
 
     // create test data
     let data = vec![0_u8; DATA_CHUNK_SIZE];
@@ -1273,11 +1284,23 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         node_a.gossip_enable();
         node_b.gossip_enable();
         node_c.gossip_enable();
-        // Gossip all blocks so everyone syncs
-        node_b.gossip_block_to_peers(&b_block2)?;
-        node_b.gossip_block_to_peers(&b_block3)?;
-        node_c.gossip_block_to_peers(&c_block4)?;
-        node_a.gossip_block_to_peers(&a_block2)?;
+        if enable_full_validation {
+            // Use full block transfer so chunks arrive before validation
+            node_b.send_full_block(&node_a, &b_block2).await?;
+            node_b.send_full_block(&node_a, &b_block3).await?;
+            node_c.send_full_block(&node_a, &c_block4).await?;
+            // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
+            // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
+            // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
+            node_a.send_block_to_peer(&node_b, &a_block2).await?;
+            node_a.send_block_to_peer(&node_c, &a_block2).await?;
+        } else {
+            // Gossip all blocks so everyone syncs
+            node_b.gossip_block_to_peers(&b_block2)?;
+            node_b.gossip_block_to_peers(&b_block3)?;
+            node_c.gossip_block_to_peers(&c_block4)?;
+            node_a.gossip_block_to_peers(&a_block2)?;
+        }
     }
     //
     // Stage 9: FINAL STATE CHECKS
@@ -1451,7 +1474,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 /// while peer B mines one block short. This creates the longest possible
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables

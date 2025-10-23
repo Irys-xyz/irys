@@ -15,9 +15,8 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
-use tracing::{debug, warn, Instrument as _};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+use tracing::{debug, error, warn, Instrument as _};
 
 pub struct DataSyncService {
     shutdown: Shutdown,
@@ -97,17 +96,31 @@ impl DataSyncServiceInner {
                 chunk_offset,
                 peer_address: peer_addr,
                 chunk,
-            } => self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)?,
+            } => {
+                if let Err(e) =
+                    self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
+                {
+                    error!("Failed to handle chunk completion: {e:?}");
+                }
+            }
             DataSyncServiceMessage::ChunkFailed {
                 storage_module_id,
                 chunk_offset,
                 peer_addr,
-            } => self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr)?,
+            } => {
+                if let Err(e) = self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr) {
+                    error!("Failed to handle chunk failure: {e:?}");
+                }
+            }
             DataSyncServiceMessage::ChunkTimedOut {
                 storage_module_id,
                 chunk_offset,
                 peer_address: peer_addr,
-            } => self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr)?,
+            } => {
+                if let Err(e) = self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr) {
+                    error!("Failed to handle chunk timeout: {e:?}");
+                }
+            }
             DataSyncServiceMessage::PeerListUpdated => self.handle_peer_list_updated(),
             DataSyncServiceMessage::PeerDisconnected {
                 peer_address: peer_addr,
@@ -397,6 +410,15 @@ impl DataSyncServiceInner {
                 .cloned()
                 .collect()
         };
+
+        // Drop orchestrators for modules that no longer hold a data ledger assignment
+        self.chunk_orchestrators.retain(|sm_id, _| {
+            storage_modules
+                .get(*sm_id)
+                .and_then(|sm| sm.partition_assignment())
+                .and_then(|pa| pa.ledger_id)
+                .is_some()
+        });
 
         for sm in storage_modules {
             let sm_id = sm.id;

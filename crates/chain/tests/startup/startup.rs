@@ -3,7 +3,7 @@ use irys_domain::get_canonical_chain;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::NodeConfig;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<()> {
     // setup
     let config = NodeConfig::testing();
@@ -50,7 +50,7 @@ async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<(
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()> {
     // setup consistent test directory for this test
     let temp_dir = temporary_directory(None, false);

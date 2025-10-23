@@ -164,7 +164,8 @@ mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
     use crate::{
-        adjust_difficulty, calculate_difficulty, calculate_initial_difficulty, H256, U256,
+        adjust_difficulty, calculate_difficulty, calculate_initial_difficulty, u256_from_le_bytes,
+        H256, U256,
     };
     use openssl::sha;
     use rstest::{fixture, rstest};
@@ -337,9 +338,7 @@ mod tests {
         let diff_ms = (expected_ms - actual_ms).abs();
         assert!(
             diff_ms <= tolerance_ms,
-            "Difference {}ms exceeds tolerance {}ms",
-            diff_ms,
-            tolerance_ms
+            "Difference {diff_ms}ms exceeds tolerance {tolerance_ms}ms"
         );
     }
 
@@ -351,7 +350,7 @@ mod tests {
         let mut prev_hash = initial_hash;
         for i in 0..hashes_per_second {
             prev_hash = hash_sha256(&prev_hash.0);
-            let hash_val = hash_to_number(&prev_hash.0);
+            let hash_val = u256_from_le_bytes(&prev_hash.0);
             if hash_val >= difficulty {
                 // Return elapsed time within this one-second bucket in milliseconds.
                 // i hashes out of hashes_per_second ⇒ elapsed_ms = floor(i * 1000 / hashes_per_second)
@@ -371,10 +370,6 @@ mod tests {
         let mut hasher = sha::Sha256::new();
         hasher.update(message);
         H256::from(hasher.finish())
-    }
-
-    fn hash_to_number(hash: &[u8]) -> U256 {
-        U256::from_little_endian(hash)
     }
 
     fn mine_block(hashes_per_second: u64, seed: H256, difficulty: U256) -> (f64, H256) {
@@ -400,7 +395,7 @@ mod tests {
         seed: H256,
         difficulty: U256,
     ) -> (f64, H256) {
-        println!(" mining {} blocks...", num_blocks);
+        println!(" mining {num_blocks} blocks...");
         // Mine num_blocks an record their block times
         let mut block_times: Vec<f64> = Vec::new();
         let mut internal_seed = seed;
@@ -495,8 +490,7 @@ mod tests {
         // Verify adjustment status
         assert_eq!(
             stats.is_adjusted, should_adjust,
-            "Adjustment mismatch for {}% difference (time_multiplier: {})",
-            expected_percent, time_multiplier
+            "Adjustment mismatch for {expected_percent}% difference (time_multiplier: {time_multiplier})"
         );
 
         // Verify percent calculation

@@ -11,7 +11,7 @@ use crate::utils::IrysNodeTest;
 // 4. Verify the nodes capacity partition is now assigned to the submit ledger.
 // 5. Mine enough epochs to expire the first slot out of the submit ledger
 // 6. Verify the partition_hash is assigned to capacity and that the storage module matches
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",

@@ -5,27 +5,38 @@ use crate::mempool_service::{
 use crate::services::ServiceSenders;
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, Base64, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    H256,
+    chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
 };
-use irys_types::{Address, IngressProof};
+use irys_types::{Address, IngressProof, TxKnownStatus};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{broadcast, mpsc::UnboundedSender};
 
 #[async_trait::async_trait]
 pub trait MempoolFacade: Clone + Send + Sync + 'static {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError>;
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
+        &self,
+        tx_header: DataTransactionHeader,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction_ingress_api(
+        &self,
+        tx_header: CommitmentTransaction,
+    ) -> Result<(), TxIngressError>;
+    async fn handle_commitment_transaction_ingress_gossip(
         &self,
         tx_header: CommitmentTransaction,
     ) -> Result<(), TxIngressError>;
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError>;
-    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError>;
+    async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError>;
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> Result<TxKnownStatus, TxReadError>;
+
     async fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
@@ -39,8 +50,6 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         irys_block_header: Arc<IrysBlockHeader>,
     ) -> Result<usize, TxIngressError>;
-
-    async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()>;
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
 
@@ -81,25 +90,60 @@ impl From<&ServiceSenders> for MempoolServiceFacadeImpl {
 
 #[async_trait::async_trait]
 impl MempoolFacade for MempoolServiceFacadeImpl {
-    async fn handle_data_transaction_ingress(
+    async fn handle_data_transaction_ingress_api(
         &self,
         tx_header: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngestDataTx(tx_header, oneshot_tx))
+            .send(MempoolServiceMessage::IngestDataTxFromApi(
+                tx_header, oneshot_tx,
+            ))
             .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxIngressMessage")
     }
 
-    async fn handle_commitment_transaction_ingress(
+    async fn handle_data_transaction_ingress_gossip(
+        &self,
+        tx_header: DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::IngestDataTxFromGossip(
+                tx_header, oneshot_tx,
+            ))
+            .map_err(|_| TxIngressError::Other("Error sending TxIngressMessage ".to_owned()))?;
+
+        oneshot_rx.await.expect("to process TxIngressMessage")
+    }
+
+    async fn handle_commitment_transaction_ingress_api(
         &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::IngestCommitmentTx(
+            .send(MempoolServiceMessage::IngestCommitmentTxFromApi(
+                commitment_tx,
+                oneshot_tx,
+            ))
+            .map_err(|_| {
+                TxIngressError::Other("Error sending CommitmentTxIngressMessage ".to_owned())
+            })?;
+
+        oneshot_rx
+            .await
+            .expect("to process CommitmentTxIngressMessage")
+    }
+
+    async fn handle_commitment_transaction_ingress_gossip(
+        &self,
+        commitment_tx: CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                 commitment_tx,
                 oneshot_tx,
             ))
@@ -142,10 +186,22 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         oneshot_rx.await.expect("to process ChunkIngressMessage")
     }
 
-    async fn is_known_transaction(&self, tx_id: H256) -> Result<bool, TxReadError> {
+    async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))
+            .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
+
+        oneshot_rx.await.expect("to process TxExistenceQuery")
+    }
+
+    async fn is_known_commitment_transaction(
+        &self,
+        tx_id: H256,
+    ) -> Result<TxKnownStatus, TxReadError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::CommitmentTxExists(tx_id, oneshot_tx))
             .map_err(|_| TxReadError::Other("Error sending TxExistenceQuery ".to_owned()))?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
@@ -178,17 +234,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
                 block: irys_block_header,
             })
             .map_err(|e| TxIngressError::Other(format!("Failed to send BlockMigratedEvent: {}", e)))
-    }
-
-    async fn insert_poa_chunk(&self, block_hash: H256, chunk_data: Base64) -> eyre::Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.service
-            .send(MempoolServiceMessage::InsertPoAChunk(
-                block_hash, chunk_data, tx,
-            ))
-            .map_err(|send_error| eyre!("{send_error:?}"))?;
-
-        rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
     }
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {
