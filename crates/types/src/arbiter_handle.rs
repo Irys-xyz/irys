@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use tokio::task::JoinHandle as TokioJoinHandle;
 
 enum ServiceSetState {
-    Polling(Vec<ArbiterEnum>),
+    Polling(Vec<TokioServiceHandle>),
     ShuttingDown(BoxFuture<'static, ()>),
 }
 
@@ -16,7 +16,7 @@ pub struct ServiceSet {
 }
 
 impl ServiceSet {
-    pub fn new(services: Vec<ArbiterEnum>) -> Self {
+    pub fn new(services: Vec<TokioServiceHandle>) -> Self {
         Self {
             state: ServiceSetState::Polling(services),
         }
@@ -157,71 +157,41 @@ pub struct TokioServiceHandle {
     pub shutdown_signal: reth::tasks::shutdown::Signal,
 }
 
-#[derive(Debug)]
-pub enum ArbiterEnum {
-    TokioService(TokioServiceHandle),
-}
-
-impl ArbiterEnum {
-    pub fn new_tokio_service(
-        name: String,
-        handle: TokioJoinHandle<()>,
-        shutdown_signal: reth::tasks::shutdown::Signal,
-    ) -> Self {
-        Self::TokioService(TokioServiceHandle {
-            name,
-            handle,
-            shutdown_signal,
-        })
-    }
-
+impl TokioServiceHandle {
     pub fn name(&self) -> &str {
-        match self {
-            Self::TokioService(service) => &service.name,
-        }
+        &self.name
     }
 
     pub async fn stop_and_join(self) {
-        match self {
-            Self::TokioService(service) => {
-                // Fire the shutdown signal
-                service.shutdown_signal.fire();
+        // Fire the shutdown signal
+        self.shutdown_signal.fire();
 
-                // Wait for the task to complete
-                match service.handle.await {
-                    Ok(()) => {
-                        tracing::debug!("Tokio service '{}' shut down successfully", service.name)
-                    }
-                    Err(e) => {
-                        tracing::error!("Tokio service '{}' panicked: {:?}", service.name, e)
-                    }
-                }
+        // Wait for the task to complete
+        match self.handle.await {
+            Ok(()) => {
+                tracing::debug!("Tokio service '{}' shut down successfully", self.name)
+            }
+            Err(e) => {
+                tracing::error!("Tokio service '{}' panicked: {:?}", self.name, e)
             }
         }
     }
-
-    pub fn is_tokio_service(&self) -> bool {
-        matches!(self, Self::TokioService(_))
-    }
 }
 
-impl Future for ArbiterEnum {
+impl Future for TokioServiceHandle {
     type Output = eyre::Result<()>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        match self.get_mut() {
-            Self::TokioService(service) => {
-                // Poll the tokio join handle
-                match service.handle.poll_unpin(cx) {
-                    std::task::Poll::Ready(res) => {
-                        std::task::Poll::Ready(res.map_err(|err| eyre::Report::new(err)))
-                    }
-                    std::task::Poll::Pending => std::task::Poll::Pending,
-                }
+        // Poll the tokio join handle
+        let this = self.get_mut();
+        match this.handle.poll_unpin(cx) {
+            std::task::Poll::Ready(res) => {
+                std::task::Poll::Ready(res.map_err(|err| eyre::Report::new(err)))
             }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }
@@ -273,7 +243,7 @@ mod tests {
     fn create_controllable_service<F>(
         name: String,
         on_exit_behavior: F,
-    ) -> (ArbiterEnum, oneshot::Sender<()>)
+    ) -> (TokioServiceHandle, oneshot::Sender<()>)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -295,13 +265,17 @@ mod tests {
         });
 
         (
-            ArbiterEnum::new_tokio_service(name, handle, shutdown_tx),
+            TokioServiceHandle {
+                name,
+                handle,
+                shutdown_signal: shutdown_tx,
+            },
             exit_tx,
         )
     }
 
     /// Creates a service that runs until shutdown signal
-    fn create_long_running_service<F>(name: String, on_shutdown_behavior: F) -> ArbiterEnum
+    fn create_long_running_service<F>(name: String, on_shutdown_behavior: F) -> TokioServiceHandle
     where
         F: FnOnce() + Send + 'static,
     {
@@ -315,11 +289,15 @@ mod tests {
             on_shutdown_behavior();
         });
 
-        ArbiterEnum::new_tokio_service(name, handle, shutdown_tx)
+        TokioServiceHandle {
+            name,
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
     /// Creates a service that panics when triggered
-    fn create_panicking_service(name: String) -> (ArbiterEnum, oneshot::Sender<()>) {
+    fn create_panicking_service(name: String) -> (TokioServiceHandle, oneshot::Sender<()>) {
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let (panic_tx, panic_rx) = oneshot::channel();
 
@@ -335,7 +313,11 @@ mod tests {
         });
 
         (
-            ArbiterEnum::new_tokio_service(name, handle, shutdown_tx),
+            TokioServiceHandle {
+                name,
+                handle,
+                shutdown_signal: shutdown_tx,
+            },
             panic_tx,
         )
     }

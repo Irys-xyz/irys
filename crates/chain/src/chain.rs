@@ -54,7 +54,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::{
-    app_state::DatabaseProvider, calculate_initial_difficulty, ArbiterEnum, CloneableJoinHandle,
+    app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
     TokioServiceHandle, H256, U256,
@@ -80,11 +80,15 @@ use std::{
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::runtime::{Handle, Runtime};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::oneshot::{self};
-use tokio::time::sleep;
+use tokio::{
+    runtime::{Handle, Runtime},
+    sync::{
+        mpsc,
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        oneshot::{self},
+    },
+    time::sleep,
+};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 #[derive(Debug, Clone)]
@@ -776,11 +780,18 @@ impl IrysNode {
                 let irys_provider = Arc::clone(irys_provider);
                 let rt_handle = runtime_handle.clone();
                 move || {
-                    rt_handle.block_on(async move {
-                        let block_index = Arc::new(RwLock::new(block_index));
+                    rt_handle.block_on(
+                        async move {
+                            let block_index = Arc::new(RwLock::new(block_index));
 
-                        // start the rest of the services
-                        let (irys_node, actix_server, vdf_thread,  gossip_service_handle, service_set) = Self::init_services(
+                            // start the rest of the services
+                            let (
+                                irys_node,
+                                actix_server,
+                                vdf_thread,
+                                gossip_service_handle,
+                                service_set,
+                            ) = Self::init_services(
                                 &config,
                                 genesis_hash,
                                 reth_shutdown_sender,
@@ -799,40 +810,44 @@ impl IrysNode {
                             .instrument(tracing::Span::current())
                             .await
                             .expect("initializing services should not fail");
-                        service_set_sender.send(service_set).expect("ServiceSet must be sent");
-                        irys_node_ctx_tx
-                            .send(irys_node)
-                            .expect("irys node ctx sender should not be dropped. Is the reth node thread down?");
+                            service_set_sender
+                                .send(service_set)
+                                .expect("ServiceSet must be sent");
+                            irys_node_ctx_tx.send(irys_node).expect(
+                    "irys node ctx sender should not be dropped. Is the reth node thread down?",
+                );
 
-                        // await on actix web server
-                        let server_handle = actix_server.handle();
+                            // await on actix web server
+                            let server_handle = actix_server.handle();
 
-                        let server_stop_handle = tokio::spawn(async move {
-                            let _ = main_actor_thread_shutdown_rx.recv().await;
-                            info!("Main actor thread received shutdown signal");
+                            let server_stop_handle = tokio::spawn(async move {
+                                let _ = main_actor_thread_shutdown_rx.recv().await;
+                                info!("Main actor thread received shutdown signal");
 
-                            debug!("Stopping API server");
-                            server_handle.stop(true).await;
-                            info!("API server stopped");
-                        });
+                                debug!("Stopping API server");
+                                server_handle.stop(true).await;
+                                info!("API server stopped");
+                            });
 
-                        actix_server.await.unwrap();
-                        server_stop_handle.await.unwrap();
+                            actix_server.await.unwrap();
+                            server_stop_handle.await.unwrap();
 
-                        match gossip_service_handle.stop().await {
-                            Ok(()) => info!("Gossip service stopped"),
-                            Err(e) => warn!("Gossip service is already stopped: {:?}", e),
+                            match gossip_service_handle.stop().await {
+                                Ok(()) => info!("Gossip service stopped"),
+                                Err(e) => warn!("Gossip service is already stopped: {:?}", e),
+                            }
+
+                            // Send shutdown signal
+                            vdf_shutdown_sender.send(()).await.unwrap();
+
+                            debug!("Waiting for VDF thread to finish");
+                            // Wait for vdf thread to finish & save steps
+                            vdf_thread.join().unwrap();
+
+                            debug!("VDF thread finished");
                         }
-
-                        // Send shutdown signal
-                        vdf_shutdown_sender.send(()).await.unwrap();
-
-                        debug!("Waiting for VDF thread to finish");
-                        // Wait for vdf thread to finish & save steps
-                        vdf_thread.join().unwrap();
-
-                        debug!("VDF thread finished");
-                    }.instrument(span.clone()))
+                        .instrument(span.clone()),
+                    )
                 }
             })?;
         Ok(actor_main_thread_handle)
@@ -1376,40 +1391,36 @@ impl IrysNode {
             // Services are shut down in FIFO order (first added = first to shut down)
 
             // 1. Mining operations
-            services.extend(partition_handles.into_iter().map(ArbiterEnum::TokioService));
+            services.extend(partition_handles.into_iter());
             // Add packing controllers to services
-            services.extend(
-                packing_controller_handles
-                    .into_iter()
-                    .map(ArbiterEnum::TokioService),
-            );
+            services.extend(packing_controller_handles.into_iter());
 
             // 2. Block production flow
-            services.push(ArbiterEnum::TokioService(block_producer_handle));
-            services.push(ArbiterEnum::TokioService(block_discovery_handle));
+            services.push(block_producer_handle);
+            services.push(block_discovery_handle);
 
             // 3. Validation
-            services.push(ArbiterEnum::TokioService(validation_handle));
+            services.push(validation_handle);
 
             // 4. Storage operations
-            services.push(ArbiterEnum::TokioService(chunk_cache_handle));
-            services.push(ArbiterEnum::TokioService(storage_module_handle));
-            services.push(ArbiterEnum::TokioService(data_sync_handle));
-            services.push(ArbiterEnum::TokioService(chunk_migration_handle));
+            services.push(chunk_cache_handle);
+            services.push(storage_module_handle);
+            services.push(data_sync_handle);
+            services.push(chunk_migration_handle);
 
             // 5. Sync operations
-            services.push(ArbiterEnum::TokioService(sync_service_handle));
+            services.push(sync_service_handle);
 
             // 6. Chain management
-            services.push(ArbiterEnum::TokioService(block_tree_handle));
+            services.push(block_tree_handle);
 
             // 7. State management
-            services.push(ArbiterEnum::TokioService(block_index_handle));
-            services.push(ArbiterEnum::TokioService(mempool_handle));
+            services.push(block_index_handle);
+            services.push(mempool_handle);
 
             // 8. Core infrastructure (shutdown last)
-            services.push(ArbiterEnum::TokioService(peer_network_handle));
-            services.push(ArbiterEnum::TokioService(reth_service_task));
+            services.push(peer_network_handle);
+            services.push(reth_service_task);
         }
 
         let server = run_server(
@@ -1462,7 +1473,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
-        vdf_fast_forward_receiver: mpsc::UnboundedReceiver<VdfStep>,
+        vdf_fast_forward_receiver: UnboundedReceiver<VdfStep>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
@@ -1599,7 +1610,7 @@ impl IrysNode {
         mining_bus: MiningBus,
         price_oracle: Arc<IrysPriceOracle>,
         reth_node_adapter: IrysRethNodeAdapter,
-        block_producer_rx: mpsc::UnboundedReceiver<BlockProducerCommand>,
+        block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
         shadow_tx_store: ShadowTxStore,
         block_index: Arc<RwLock<BlockIndex>>,
@@ -1658,7 +1669,7 @@ impl IrysNode {
         block_tree_guard: &BlockTreeReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
-        block_discovery_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
+        block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
         runtime_handle: Handle,
     ) -> TokioServiceHandle {
         let block_discovery_inner = BlockDiscoveryServiceInner {
@@ -1704,7 +1715,7 @@ impl IrysNode {
             UnboundedSender<SyncChainServiceMessage>,
             UnboundedReceiver<SyncChainServiceMessage>,
         ),
-        reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
+        reth_service: UnboundedSender<RethServiceMessage>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> (SyncChainServiceFacade, TokioServiceHandle) {
         let facade = SyncChainServiceFacade::new(tx);
@@ -1751,7 +1762,7 @@ fn read_latest_block_data(
 fn init_peer_list_service(
     irys_db: &DatabaseProvider,
     config: &Config,
-    reth_service: tokio::sync::mpsc::UnboundedSender<RethServiceMessage>,
+    reth_service: UnboundedSender<RethServiceMessage>,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
     peer_events: tokio::sync::broadcast::Sender<irys_domain::PeerEvent>,
@@ -1802,8 +1813,8 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: tokio::sync::mpsc::UnboundedSender<MempoolServiceMessage>,
-    reth_rx: tokio::sync::mpsc::UnboundedReceiver<RethServiceMessage>,
+    mempool_sender: UnboundedSender<MempoolServiceMessage>,
+    reth_rx: UnboundedReceiver<RethServiceMessage>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {
     irys_actors::reth_service::RethService::spawn_service(
