@@ -42,6 +42,7 @@ use reth_node_ethereum::{
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
+use reth_transaction_pool::EthPooledTransaction;
 use reth_trie_db::MerklePatriciaTrie;
 use shadow_tx::ShadowTransaction;
 
