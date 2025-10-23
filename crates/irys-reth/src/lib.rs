@@ -353,8 +353,8 @@ where
         match crate::shadow_tx::detect_and_decode_from_parts(to, input) {
             Ok(Some(_)) | Err(_) => {
                 tracing::trace!(
-                    sender = ?tx.sender(),
-                    tx_hash = ?tx.hash(),
+                    shadow_tx.sender = ?tx.sender(),
+                    shadow_tx.hash = ?tx.hash(),
                     "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
                 );
                 return Err(TransactionValidationOutcome::Invalid(
@@ -398,7 +398,7 @@ where
             Err(outcome) => return outcome,
         };
 
-        tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
+        tracing::trace!(shadow_tx.hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
         self.eth_tx_validator.validate_one(origin, transaction)
     }
 

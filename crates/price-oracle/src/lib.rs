@@ -106,7 +106,10 @@ pub mod mock_oracle {
             {
                 guard.going_up = !guard.going_up;
                 guard.calls = 0;
-                tracing::debug!(new_direction_is_up =? guard.going_up, "inverting the delta direction");
+                tracing::debug!(
+                    price.new_direction_is_up =? guard.going_up,
+                    "inverting the delta direction"
+                );
             }
 
             // Update the price in the current direction

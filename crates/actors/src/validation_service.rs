@@ -226,7 +226,11 @@ impl ValidationService {
                                 // Valid VDF - task continues to concurrent validation
                             }
                             VdfValidationResult::Invalid(e) => {
-                                error!(block_hash = %hash, error = %e, "VDF validation failed");
+                                error!(
+                                    block.hash = %hash,
+                                    custom.error = %e,
+                                    "VDF validation failed"
+                                );
                                 // Send failure to block tree
                                 if let Err(e) = self.inner.service_senders.block_tree.send(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
@@ -234,7 +238,10 @@ impl ValidationService {
                                         validation_result: ValidationResult::Invalid,
                                     }
                                 ) {
-                                    error!(?e, "Failed to send VDF failure to block tree service");
+                                    error!(
+                                        custom.error = ?e,
+                                        "Failed to send VDF failure to block tree service"
+                                    );
                                 }
                             }
                             VdfValidationResult::Cancelled => {
@@ -256,11 +263,11 @@ impl ValidationService {
                                     validation_result: validation.validation_result,
                                 }
                             ) {
-                                error!(?e, "Failed to send validation result to block tree service");
+                                error!(custom.error = ?e, "Failed to send validation result to block tree service");
                             }
                         }
                         Some(Err(e)) => {
-                            error!(error = %e, "Concurrent task panicked");
+                            error!(custom.error = %e, "Concurrent task panicked");
                         }
                         None => {
                             // This shouldn't happen when we check is_empty()
@@ -283,11 +290,11 @@ impl ValidationService {
                         };
 
                     info!(
-                        vdf_running,
-                        vdf_block_hash = ?vdf_block_hash,
-                        vdf_block_height = ?vdf_block_height,
-                        vdf_pending,
-                        concurrent_active,
+                        vdf.running = vdf_running,
+                        vdf.vdf_block_hash = ?vdf_block_hash,
+                        vdf.vdf_block_height = ?vdf_block_height,
+                        vdf.pending = vdf_pending,
+                        vdf.concurrent_active = concurrent_active,
                         "Validation pipeline status"
                     );
                 }
@@ -310,8 +317,8 @@ impl ValidationServiceInner {
         loop {
             if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
                 warn!(
-                    desired_step = desired_step_number,
-                    current_step = self.vdf_state.read().global_step,
+                    vdf.desired_step = desired_step_number,
+                    vdf.current_step = self.vdf_state.read().global_step,
                     "VDF validation cancelled while waiting for step"
                 );
                 bail!("Cancelled");
@@ -329,7 +336,7 @@ impl ValidationServiceInner {
 
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
-    #[tracing::instrument(err, skip_all, fields(block_hash = ?block.block_hash, block_height = ?block.height))]
+    #[tracing::instrument(err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
     pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
         block: &IrysBlockHeader,
@@ -392,7 +399,7 @@ impl ValidationServiceInner {
             .await??;
         } else {
             debug!(
-                block_hash = ?block.block_hash,
+                block.hash = ?block.block_hash,
                 "Skipping vdf_steps_are_valid for block"
             );
         }
@@ -415,7 +422,7 @@ fn handle_broadcast_recv<T>(
             eyre::bail!("broadcast channel closed")
         }
         Err(broadcast::error::RecvError::Lagged(n)) => {
-            warn!(skipped_messages = ?n, "reorg lagged");
+            warn!(custom.skipped_messages = ?n, "reorg lagged");
             if n > 5 {
                 error!("reorg channel significantly lagged");
             }

@@ -107,7 +107,7 @@ impl MiningBus {
 
     /// Send partition expiration notice to all subscribers.
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
-        debug!(msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
+        debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         self.send_event(MiningBroadcastEvent::PartitionsExpiration(msg))
     }
 }

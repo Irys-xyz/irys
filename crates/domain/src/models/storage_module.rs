@@ -240,7 +240,7 @@ impl StorageModule {
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
             let sub_base_path = config.node_config.base_directory.join(dir.clone());
 
-            tracing::info!(?sub_base_path);
+            tracing::info!(custom.sub_base_path = ?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
 
             // Get a file handle to the chunks.data file in the submodule

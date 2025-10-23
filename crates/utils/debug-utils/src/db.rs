@@ -64,7 +64,7 @@ fn _check_db_for_commitments() -> eyre::Result<()> {
             })
             .unwrap_or_else(|err| {
                 tracing::warn!(
-                    ?err,
+                    custom.error = ?err,
                     "config file not provided, defaulting to testnet config"
                 );
                 NodeConfig::testnet()

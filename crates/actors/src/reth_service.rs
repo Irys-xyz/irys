@@ -62,7 +62,7 @@ async fn evm_block_hash_from_block_hash(
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
-    debug!(irys_hash = %irys_hash, "Resolving EVM block hash for Irys block");
+    debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block");
 
     let irys_header = {
         let (tx, rx) = oneshot::channel();
@@ -72,24 +72,24 @@ async fn evm_block_hash_from_block_hash(
         let mempool_response = rx.await?;
         match mempool_response {
             Some(h) => {
-                debug!(irys_hash = %irys_hash, "Found block in mempool");
+                debug!(block.hash = %irys_hash, "Found block in mempool");
                 h
             }
             None => {
-                debug!(irys_hash = %irys_hash, "Block not in mempool, checking database");
+                debug!(block.hash = %irys_hash, "Block not in mempool, checking database");
                 db
                     .view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?
                     .ok_or_else(|| {
-                        error!(irys_hash = %irys_hash, "Irys block not found in mempool or database");
+                        error!(block.hash = %irys_hash, "Irys block not found in mempool or database");
                         eyre!("Missing irys block {} in DB!", irys_hash)
                     })?
             }
         }
     };
     debug!(
-        irys_hash = %irys_hash,
-        evm_block_hash = %irys_header.evm_block_hash,
-        height = irys_header.height,
+        block.hash = %irys_hash,
+        block.evm_block_hash = %irys_header.evm_block_hash,
+        block.height = irys_header.height,
         "Resolved Irys block to EVM block"
     );
     Ok(irys_header.evm_block_hash)
@@ -116,7 +116,10 @@ impl RethService {
         let join_handle = runtime_handle.spawn(
             async move {
                 if let Err(err) = service.run().await {
-                    error!(error = %err, "Reth service terminated with error");
+                    error!(
+                        custom.error = %err,
+                        "Reth service terminated with error"
+                    );
                 }
             }
             .in_current_span(),
@@ -220,9 +223,9 @@ impl RethService {
         } = fcu;
 
         tracing::debug!(
-            head = %head_hash,
-            confirmed = %confirmed_hash,
-            finalized = %finalized_hash,
+            fcu.head = %head_hash,
+            fcu.confirmed = %confirmed_hash,
+            fcu.finalized = %finalized_hash,
             "Updating Reth fork choice"
         );
         let handle = self.handle.clone();
@@ -237,9 +240,9 @@ impl RethService {
         let (latest_before, safe_before, finalized_before) = get_blocks().await?;
 
         tracing::debug!(
-            latest_block = ?latest_before.as_ref().map(|b| (b.header.number, b.header.hash)),
-            safe_block = ?safe_before.as_ref().map(|b| (b.header.number, b.header.hash)),
-            finalized_block = ?finalized_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.latest_block = ?latest_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.safe_block = ?safe_before.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.finalized_block = ?finalized_before.as_ref().map(|b| (b.header.number, b.header.hash)),
             "Reth state before fork choice update"
         );
 
@@ -247,7 +250,11 @@ impl RethService {
             .update_forkchoice_full(head_hash, Some(confirmed_hash), Some(finalized_hash))
             .await
             .map_err(|e| {
-                error!(error = %e, ?fcu, "Failed to update Reth fork choice");
+                error!(
+                    custom.error = %e,
+                    fcu.message = ?fcu,
+                    "Failed to update Reth fork choice"
+                );
                 eyre!("Error updating reth with forkchoice {:?} - {}", &fcu, &e)
             })?;
 
@@ -255,9 +262,9 @@ impl RethService {
 
         let (latest_after, safe_after, finalized_after) = get_blocks().await?;
         tracing::debug!(
-            latest_block = ?latest_after.as_ref().map(|b| (b.header.number, b.header.hash)),
-            safe_block = ?safe_after.as_ref().map(|b| (b.header.number, b.header.hash)),
-            finalized_block = ?finalized_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.latest_block = ?latest_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.safe_block = ?safe_after.as_ref().map(|b| (b.header.number, b.header.hash)),
+            eth_api.finalized_block = ?finalized_after.as_ref().map(|b| (b.header.number, b.header.hash)),
             "Reth state after fork choice update"
         );
 
@@ -279,15 +286,15 @@ impl RethService {
 
     fn connect_to_peer(&self, peer: RethPeerInfo) -> eyre::Result<()> {
         info!(
-            peer_id = %peer.peer_id,
-            address = %peer.peering_tcp_addr,
+            reth_peer.id = %peer.peer_id,
+            reth_peer.address = %peer.peering_tcp_addr,
             "Connecting to peer"
         );
         self.handle
             .inner
             .network
             .add_peer(peer.peer_id, peer.peering_tcp_addr);
-        debug!(peer_id = %peer.peer_id, "Peer connection initiated");
+        debug!(reth_peer.id = %peer.peer_id, "Peer connection initiated");
         Ok(())
     }
 
@@ -297,8 +304,8 @@ impl RethService {
         let local_addr = handle.inner.network.local_addr();
 
         debug!(
-            peer_id = %peer_id,
-            local_address = %local_addr,
+            reth_peer.id = %peer_id,
+            reth_peer.local_address = %local_addr,
             "Returning peering info"
         );
 

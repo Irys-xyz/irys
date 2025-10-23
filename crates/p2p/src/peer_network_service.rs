@@ -23,7 +23,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::time::{interval, sleep, MissedTickBehavior};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -406,6 +406,8 @@ where
             (reth_peer_sender)(reth_peer_info).await;
         });
     }
+
+    #[instrument(skip(self, handshake), fields(peer.api_address = ?handshake.api_address))]
     async fn handle_handshake_request(&self, handshake: HandshakeMessage) {
         let task = {
             let mut state = self.inner.state.lock().await;
@@ -434,6 +436,7 @@ where
             let already_announcing = state.currently_running_announcements.contains(&api_address);
 
             debug!(
+                peer.api_address = ?api_address,
                 "Handshake request {:?}: already_in_cache={:?}, already_announcing={:?}, force={}",
                 api_address, already_in_cache, already_announcing, force_announce
             );
