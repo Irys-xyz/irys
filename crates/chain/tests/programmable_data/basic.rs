@@ -14,9 +14,9 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 use irys_api_server::routes::tx::TxOffset;
-use irys_primitives::precompile::IrysPrecompileOffsets;
-use irys_primitives::range_specifier::ChunkRangeSpecifier;
-use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
+use irys_types::precompile::IrysPrecompileOffsets;
+use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 

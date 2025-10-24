@@ -4964,7 +4964,6 @@ dependencies = [
  "irys-efficient-sampling",
  "irys-packing",
  "irys-price-oracle",
- "irys-primitives",
  "irys-reth",
  "irys-reth-node-bridge",
  "irys-reward-curve",
@@ -5045,7 +5044,6 @@ version = "0.1.0"
 dependencies = [
  "bindgen",
  "cc",
- "irys-primitives",
  "irys-types",
  "openssl",
  "openssl-src",
@@ -5089,7 +5087,6 @@ dependencies = [
  "irys-packing",
  "irys-packing-worker",
  "irys-price-oracle",
- "irys-primitives",
  "irys-reth-node-bridge",
  "irys-reward-curve",
  "irys-storage",
@@ -5209,7 +5206,6 @@ dependencies = [
  "irys-config",
  "irys-database",
  "irys-packing",
- "irys-primitives",
  "irys-reth-node-bridge",
  "irys-storage",
  "irys-testing-utils",
@@ -5265,7 +5261,6 @@ dependencies = [
  "irys-api-client",
  "irys-database",
  "irys-domain",
- "irys-primitives",
  "irys-reth-node-bridge",
  "irys-storage",
  "irys-testing-utils",
@@ -5328,25 +5323,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "irys-primitives"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "alloy-rlp",
- "arbitrary",
- "bytes",
- "derive_more",
- "eyre",
- "modular-bitfield",
- "reth-codecs",
- "rstest",
- "ruint",
- "serde",
- "test-fuzz",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "irys-reth"
 version = "0.1.0"
 dependencies = [
@@ -5367,7 +5343,7 @@ dependencies = [
  "bytes",
  "eyre",
  "futures",
- "irys-primitives",
+ "irys-types",
  "lru 0.14.0",
  "reth",
  "reth-basic-payload-builder",
@@ -5526,8 +5502,6 @@ dependencies = [
  "futures",
  "hex",
  "irys-macros-integer-tagged",
- "irys-primitives",
- "irys-reth",
  "k256",
  "modular-bitfield",
  "nodit",
@@ -5543,6 +5517,7 @@ dependencies = [
  "reth-primitives",
  "reth-transaction-pool",
  "rstest",
+ "ruint",
  "rust_decimal",
  "rust_decimal_macros",
  "semver 1.0.26",

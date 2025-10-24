@@ -4,7 +4,6 @@ members = [
   "crates/actors",
   "crates/c",
   "crates/chain",
-  "crates/primitives",
   "crates/reth-node-bridge",
   "crates/types",
   "crates/packing",
@@ -44,7 +43,6 @@ irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
 irys-api-client = { path = "./crates/api-client" }
 irys-c = { path = "./crates/c" }
-irys-primitives = { path = "./crates/primitives" }
 irys-config = { path = "./crates/config" }
 irys-reth-node-bridge = { path = "./crates/reth-node-bridge" }
 irys-types = { path = "./crates/types" }

@@ -5,11 +5,12 @@
 //! 2. Add an entry to the `IrysHardforksInConfig` struct. This is used in the chainspec (part of consensus config toml file, inlined and visible to the users)
 //! 3. If this hardfork maps to any Ethereum hardforks, add a corresponding entry to `ethereum_hardfork_mapping()`
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use alloy_eips::BlobScheduleBlobParams;
 use alloy_genesis::Genesis;
 use alloy_primitives::U256;
+use irys_types::chainspec::IrysHardforksInConfig;
 use reth_chainspec::{
     hardfork, make_genesis_header, BaseFeeParams, BaseFeeParamsKind, Chain, ChainHardforks,
     ChainSpec, EthereumHardfork, ForkCondition,
@@ -20,32 +21,6 @@ hardfork!(
     #[derive(serde::Serialize, serde::Deserialize)]
     IrysHardfork { Frontier }
 );
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct IrysHardforksInConfig {
-    // Frontier hardfork is always enabled by default, just like in Ethereum.
-    //
-    // Add new hardforks like this:
-    // ```rust
-    // ForkName: ForkCondition
-    // ````
-}
-
-impl From<IrysHardforksInConfig> for BTreeMap<String, serde_json::Value> {
-    fn from(val: IrysHardforksInConfig) -> Self {
-        let serialized = serde_json::to_value(val)
-            .expect("IrysHardforksInConfig must serialize to a JSON object");
-
-        match serialized {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => {
-                panic!(
-                    "IrysHardforksInConfig should serialize to a JSON object so it can be stored in OtherFields"
-                );
-            }
-        }
-    }
-}
 
 /// Hardfork schedule wrapper used across Irys components.
 #[derive(Clone, Debug, PartialEq, Eq)]

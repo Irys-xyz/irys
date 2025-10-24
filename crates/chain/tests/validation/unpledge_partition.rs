@@ -10,7 +10,7 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, NodeConfig, U256};
 use tokio::sync::oneshot;
 

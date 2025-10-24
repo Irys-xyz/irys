@@ -1,4 +1,4 @@
-use irys_primitives::Address;
+use irys_types::Address;
 use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
@@ -71,7 +71,7 @@ mod tests {
         capacity::{compute_entropy_chunk, compute_seed_hash, DATA_CHUNK_SIZE},
         capacity_single::{self, SHA_HASH_SIZE},
     };
-    use irys_primitives::Address;
+    use irys_types::Address;
     use irys_types::ConsensusConfig;
     use rand;
     use rand::Rng as _;

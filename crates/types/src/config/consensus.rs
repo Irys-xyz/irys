@@ -1,3 +1,4 @@
+use crate::chainspec::IrysHardforksInConfig;
 use crate::serde_utils;
 use crate::{
     storage_pricing::{
@@ -13,7 +14,6 @@ use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
 use alloy_primitives::Address;
 use eyre::Result;
-use irys_reth::chainspec::IrysHardforksInConfig;
 use reth::rpc::types::serde_helpers::OtherFields;
 use reth_chainspec::Chain;
 use rust_decimal::Decimal;

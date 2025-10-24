@@ -1,6 +1,6 @@
 use std::num::NonZeroU8;
 
-use irys_primitives::Address;
+use crate::Address;
 use serde::{Deserialize, Serialize};
 
 use crate::{PartitionChunkRange, H256};

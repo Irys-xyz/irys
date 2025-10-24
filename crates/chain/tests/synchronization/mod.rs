@@ -4,7 +4,7 @@ use alloy_genesis::GenesisAccount;
 
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, NodeConfig, H256,
 };
