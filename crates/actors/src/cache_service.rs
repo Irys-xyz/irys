@@ -1140,46 +1140,55 @@ mod tests {
     #[cfg(test)]
     mod fifo_properties {
         use super::*;
+        use irys_types::UnixTimestamp;
         use proptest::prelude::*;
 
-        proptest! {
-            #![proptest_config(ProptestConfig::with_cases(10))]
-            #[test]
-            fn slow_fifo_ordering_always_maintained(
-                timestamps in prop::collection::vec(100_u64..1_000_000, 5..20)
-            ) {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    let strategy = irys_types::CacheEvictionStrategy::SizeBased {
-                        max_cache_size_bytes: 10_000_000,
-                    };
-                    let service = setup_test_service_with_strategy(strategy)
-                        .await
-                        .unwrap();
-
-                    // Insert entries with random timestamps
-                    for ts in &timestamps {
-                        let timestamp = irys_types::UnixTimestamp::from_secs(*ts);
-                        insert_entry_with_timestamp(&service, timestamp)
-                            .unwrap();
-                    }
-
-                    // Collect entries and verify sorted
-                    let entries = service.collect_cache_entries_by_age().unwrap();
-
-                    for window in entries.windows(2) {
-                        prop_assert!(
-                            window[0].1.cached_at <= window[1].1.cached_at,
-                            "FIFO order violated: {} > {}",
-                            window[0].1.cached_at.as_secs(),
-                            window[1].1.cached_at.as_secs()
-                        );
-                    }
-
-                    Ok::<(), proptest::test_runner::TestCaseError>(())
-                })
-                .unwrap();
+        prop_compose! {
+            fn unix_timestamps()(
+                secs in 100_u64..1_000_000
+            ) -> UnixTimestamp {
+                UnixTimestamp::from_secs(secs)
             }
         }
+
+        proptest! {
+                #![proptest_config(ProptestConfig::with_cases(10))]
+                #[test]
+                fn slow_fifo_ordering_always_maintained(
+                    timestamps in prop::collection::vec(unix_timestamps(), 5..20)
+        .prop_map(|mut v| { v.sort_by_key(|t| t.as_secs()); v })
+                ) {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        let strategy = irys_types::CacheEvictionStrategy::SizeBased {
+                            max_cache_size_bytes: 10_000_000,
+                        };
+                        let service = setup_test_service_with_strategy(strategy)
+                            .await
+                            .unwrap();
+
+                        // Insert entries with random timestamps
+                        for timestamp in timestamps {
+                            insert_entry_with_timestamp(&service, timestamp)
+                                .unwrap();
+                        }
+
+                        // Collect entries and verify sorted
+                        let entries = service.collect_cache_entries_by_age().unwrap();
+
+                        for window in entries.windows(2) {
+                            prop_assert!(
+                                window[0].1.cached_at <= window[1].1.cached_at,
+                                "FIFO order violated: {} > {}",
+                                window[0].1.cached_at.as_secs(),
+                                window[1].1.cached_at.as_secs()
+                            );
+                        }
+
+                        Ok::<(), proptest::test_runner::TestCaseError>(())
+                    })
+                    .unwrap();
+                }
+            }
     }
 }
