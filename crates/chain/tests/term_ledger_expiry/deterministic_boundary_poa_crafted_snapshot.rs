@@ -198,9 +198,15 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
             .expect("migrate prelude block");
 
         // ensure the migration has occured
-        let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
-        let bi = block_index_guard.read();
-        while block_height_pre_migration == bi.num_blocks().saturating_sub(1) {
+        loop {
+            let current_height = {
+                let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
+                let bi = block_index_guard.read();
+                bi.num_blocks().saturating_sub(1)
+            };
+            if current_height != block_height_pre_migration {
+                break;
+            }
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
@@ -345,10 +351,13 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         &consensus,
         &miner_address,
     ) {
-        //todo are we not looking for a very specific form of a failure here? i.e. that the wrong epoch was used so the merkle prooff is wrong?
-        Err(PreValidationError::MerkleProofInvalid(_))
-        | Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)
-        | Err(PreValidationError::BlockBoundsLookupError(_)) => {
+        // The child snapshot must reject; depending on slot movement it may fail due to merkle mismatch
+        // or because the computed ledger offset is out of the synthetic block's bounds.
+        Err(
+            PreValidationError::MerkleProofInvalid(_)
+            | PreValidationError::PoAChunkOffsetOutOfBlockBounds
+            | PreValidationError::BlockBoundsLookupError(_),
+        ) => {
             info!("Child-like snapshot rejected PoA as expected due to slot change/out-of-bounds");
         }
         Ok(()) => panic!("Child-like snapshot unexpectedly validated crafted PoA"),
