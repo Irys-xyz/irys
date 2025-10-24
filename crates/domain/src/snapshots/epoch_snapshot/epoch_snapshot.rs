@@ -289,10 +289,10 @@ impl EpochSnapshot {
 
         self.expire_term_ledger_slots(new_epoch_block);
 
-        // Apply any unpledge operations contained in this epoch
         self.apply_unpledges(&new_epoch_commitments)?;
-        // Apply unstake operations after unpledges
+
         self.apply_unstakes(&new_epoch_commitments)?;
+
         self.backfill_missing_partitions();
 
         self.allocate_additional_capacity();
