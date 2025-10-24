@@ -2559,15 +2559,18 @@ mod tests {
     use crate::block_index_service::{BlockIndexService, BlockIndexServiceMessage};
 
     use irys_config::StorageSubmodulesConfig;
-    use irys_database::add_genesis_commitments;
+    use irys_database::add_test_commitments;
     use irys_domain::{BlockIndex, EpochSnapshot};
+    use irys_testing_utils::initialize_tracing;
     use irys_testing_utils::utils::temporary_directory;
-    use irys_types::TokioServiceHandle;
+    use irys_types::partition::PartitionHash;
     use irys_types::{
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
-        NodeConfig, Signature, H256, U256,
+        hash_sha256, irys::IrysSigner, Address, Base64, BlockHash, DataTransaction,
+        DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1, NodeConfig,
+        Signature, H256, U256,
     };
+    use irys_types::{PartitionChunkOffset, TokioServiceHandle};
+    use reth::revm::interpreter::instructions::stack::push;
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
     use tracing::{debug, info};
@@ -2579,48 +2582,83 @@ mod tests {
         pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
         pub epoch_snapshot: EpochSnapshot,
-        pub partition_hash: H256,
-        pub partition_assignment: PartitionAssignment,
-        pub consensus_config: ConsensusConfig,
-        #[expect(dead_code)]
         pub node_config: NodeConfig,
+    }
+
+    struct ChunkOffsetInfo {
+        pub slot_index: usize,
+        pub partition_hash: PartitionHash,
+        pub partition_chunk_offset: PartitionChunkOffset,
+        pub ledger_chunk_offset: LedgerChunkOffset,
+    }
+
+    impl TestContext {
+        fn consensus_config(&self) -> ConsensusConfig {
+            self.node_config.consensus_config()
+        }
+
+        fn get_partition_hash(&self, ledger_chunk_offset: LedgerChunkOffset) -> PartitionHash {
+            let partition_assignments = self
+                .epoch_snapshot
+                .get_partition_assignments(self.miner_address);
+
+            let slot_index = self.get_slot_index(ledger_chunk_offset);
+
+            let pa = partition_assignments
+                .iter()
+                .find(|pa| pa.slot_index == Some(slot_index))
+                .expect("to find a partition assignment for this slot");
+
+            pa.partition_hash
+        }
+
+        fn get_chunk_offset_info(&self, ledger_chunk_offset: LedgerChunkOffset) -> ChunkOffsetInfo {
+            let slot_index = self.get_slot_index(ledger_chunk_offset);
+            let partition_hash = self.get_partition_hash(ledger_chunk_offset);
+            let partition_start_offset =
+                slot_index as u64 * self.consensus_config().num_chunks_in_partition as u64;
+            let partition_chunk_offset =
+                PartitionChunkOffset::from(ledger_chunk_offset - partition_start_offset.into());
+
+            ChunkOffsetInfo {
+                slot_index,
+                partition_hash,
+                partition_chunk_offset,
+                ledger_chunk_offset,
+            }
+        }
+
+        fn get_slot_index(&self, ledger_chunk_offset: LedgerChunkOffset) -> usize {
+            (u64::from(ledger_chunk_offset) / self.consensus_config().num_chunks_in_partition)
+                as usize
+        }
     }
 
     async fn init() -> (TempDir, TestContext) {
         let data_dir = temporary_directory(Some("block_validation_tests"), false);
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 100,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: data_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new(node_config);
+
+        let chunk_size = 32_u64;
+
+        let mut node_config = NodeConfig::testing().with_consensus(|consensus| {
+            consensus.chunk_size = chunk_size;
+            consensus.num_partitions_per_slot = 3;
+            consensus.num_chunks_in_partition = 6;
+            consensus.num_chunks_in_recall_range = 2;
+            consensus.entropy_packing_iterations = 1_000;
+            consensus.block_migration_depth = 1;
+        });
+        node_config.base_directory = data_dir.path().to_path_buf();
+        let genesis_config = Config::new(node_config.clone());
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
-        let chunk_size = 32;
-        let mut node_config = NodeConfig::testing();
-        node_config.storage.num_writes_before_sync = 1;
-        node_config.base_directory = data_dir.path().to_path_buf();
-        let consensus_config = ConsensusConfig {
-            chunk_size,
-            num_chunks_in_partition: 10,
-            num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
-            entropy_packing_iterations: 1_000,
-            block_migration_depth: 1,
-            ..node_config.consensus_config()
-        };
 
         let (commitments, initial_treasury) =
-            add_genesis_commitments(&mut genesis_block, &config).await;
+            add_test_commitments(&mut genesis_block, 4, &genesis_config).await;
         genesis_block.treasury = initial_treasury;
 
         let arc_genesis = Arc::new(genesis_block.clone());
-        let signer = config.irys_signer();
+        let signer = genesis_config.irys_signer();
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
@@ -2635,12 +2673,12 @@ mod tests {
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
-            &consensus_config,
+            &node_config.consensus_config(),
             tokio::runtime::Handle::current(),
         );
 
         let storage_submodules_config =
-            StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
+            StorageSubmodulesConfig::load(genesis_config.node_config.base_directory.clone())
                 .expect("Expected to load storage submodules config");
 
         // Create an epoch snapshot for the genesis block
@@ -2648,11 +2686,9 @@ mod tests {
             &storage_submodules_config,
             genesis_block,
             commitments.clone(),
-            &config,
+            &genesis_config,
         );
         info!("Genesis Epoch tasks complete.");
-
-        let partition_hash = epoch_snapshot.ledgers.get_slots(DataLedger::Submit)[0].partitions[0];
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         block_index_tx
@@ -2662,15 +2698,10 @@ mod tests {
                 response: tx,
             })
             .expect("send migrate block");
+
         rx.await
             .expect("Failed to receive migration result")
             .expect("Failed to index genesis block");
-
-        let partition_assignment = epoch_snapshot
-            .get_data_partition_assignment(partition_hash)
-            .expect("Expected to get partition assignment");
-
-        debug!("Partition assignment {:?}", partition_assignment);
 
         (
             data_dir,
@@ -2680,9 +2711,6 @@ mod tests {
                 block_index_handle,
                 miner_address,
                 epoch_snapshot,
-                partition_hash,
-                partition_assignment,
-                consensus_config,
                 node_config,
             },
         )
@@ -2700,7 +2728,7 @@ mod tests {
 
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer(&context.consensus_config);
+        let signer = IrysSigner::random_signer(&context.consensus_config());
         let mut txs: Vec<DataTransaction> = Vec::new();
 
         for chunks in &data_chunks {
@@ -2717,6 +2745,10 @@ mod tests {
             txs.push(tx);
         }
 
+        // Put each TX in it's own block
+
+        // Make each new block an epoch block to force slot growth
+
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
@@ -2727,7 +2759,7 @@ mod tests {
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.consensus_config.chunk_size as usize,
+                    context.consensus_config().chunk_size as usize,
                 )
                 .await;
             }
@@ -2739,7 +2771,7 @@ mod tests {
         let (_tmp, context) = init().await;
 
         // Create a signed TX from the chunks
-        let signer = IrysSigner::random_signer(&context.consensus_config);
+        let signer = IrysSigner::random_signer(&context.consensus_config());
         let mut txs: Vec<DataTransaction> = Vec::new();
 
         let data = vec![3; 40]; //32 + 8 last incomplete chunk
@@ -2752,7 +2784,7 @@ mod tests {
         txs.push(tx);
 
         let poa_tx_num = 0;
-        let chunk_size = context.consensus_config.chunk_size as usize;
+        let chunk_size = context.consensus_config().chunk_size as usize;
         for poa_chunk_num in 0..2 {
             let mut poa_chunk: Vec<u8> = data[poa_chunk_num * (chunk_size)
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
@@ -2831,7 +2863,7 @@ mod tests {
         poa_chunk: &mut Vec<u8>,
         poa_tx_num: usize,
         poa_chunk_num: usize,
-        total_chunks_in_tx: usize,
+        max_ledger_offset: usize,
         chunk_size: usize,
     ) {
         // Initialize genesis block at height 0
@@ -2845,14 +2877,21 @@ mod tests {
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+        let partition_chunk_offset =
+            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64;
+        let partition_hash =
+            context.get_partition_hash(LedgerChunkOffset::from(partition_chunk_offset));
         compute_entropy_chunk(
             context.miner_address,
-            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
-            context.partition_hash.into(),
-            context.consensus_config.entropy_packing_iterations,
+            partition_chunk_offset,
+            partition_hash.into(),
+            context
+                .node_config
+                .consensus_config()
+                .entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
-            context.consensus_config.chain_id,
+            context.consensus_config().chain_id,
         );
 
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
@@ -2865,16 +2904,21 @@ mod tests {
 
         let (tx_root, tx_path) = DataTransactionLedger::merklize_tx_root(&tx_headers);
 
+        let ledger_chunk_offset = (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
+        let num_chunks_in_partition = context.consensus_config().num_chunks_in_partition;
+        let slot_index = ledger_chunk_offset / num_chunks_in_partition;
+        let partition_chunk_offset =
+            (ledger_chunk_offset - (slot_index * num_chunks_in_partition)) as u32;
+        let partition_hash =
+            context.get_partition_hash(LedgerChunkOffset::from(ledger_chunk_offset));
+
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(1),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                .try_into()
-                .expect("Value exceeds u32::MAX"),
-
-            partition_hash: context.partition_hash,
+            partition_chunk_offset: partition_chunk_offset as u32,
+            partition_hash,
         };
 
         // Create a block from the tx
@@ -2937,14 +2981,7 @@ mod tests {
             .expect("send get guard");
         let block_index_guard = rx.await.expect("receive block index guard");
 
-        let ledger_chunk_offset = context
-            .partition_assignment
-            .slot_index
-            .expect("Expected to have a slot index in the assignment")
-            as u64
-            * context.consensus_config.num_partitions_per_slot
-            * context.consensus_config.num_chunks_in_partition
-            + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
+        let ledger_chunk_offset = (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
         assert_eq!(
             ledger_chunk_offset,
@@ -2964,7 +3001,7 @@ mod tests {
 
         assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
         assert_eq!(
-            bb.end_chunk_offset, total_chunks_in_tx as u64,
+            bb.end_chunk_offset, max_ledger_offset as u64,
             "end_chunk_offset should be 9, tx has 9 chunks"
         );
 
@@ -2972,7 +3009,7 @@ mod tests {
             &poa,
             &block_index_guard,
             &context.epoch_snapshot,
-            &context.consensus_config,
+            &context.consensus_config(),
             &context.miner_address,
         );
 
@@ -2992,7 +3029,7 @@ mod tests {
 
         // Create a bunch of signed TX from the chunks
         // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer(&context.consensus_config);
+        let signer = IrysSigner::random_signer(&context.consensus_config());
         let mut txs: Vec<DataTransaction> = Vec::new();
 
         for chunks in &data_chunks {
@@ -3019,7 +3056,7 @@ mod tests {
                     poa_tx_num,
                     poa_chunk_num,
                     9,
-                    context.consensus_config.chunk_size as usize,
+                    context.consensus_config().chunk_size as usize,
                 )
                 .await;
             }
@@ -3050,14 +3087,19 @@ mod tests {
         }
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+        let ledger_chunk_offset =
+            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64;
+
+        let chunk_info = context.get_chunk_offset_info(ledger_chunk_offset.into());
+
         compute_entropy_chunk(
             context.miner_address,
-            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
-            context.partition_hash.into(),
-            context.consensus_config.entropy_packing_iterations,
+            chunk_info.partition_chunk_offset.into(),
+            chunk_info.partition_hash.into(),
+            context.consensus_config().entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
-            context.consensus_config.chain_id,
+            context.consensus_config().chain_id,
         );
 
         xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
@@ -3074,16 +3116,19 @@ mod tests {
         let mut hacked_data = vec![0xde, 0xad, 0xbe, 0xef];
         hacked_data.resize(chunk_size, 0); // Pad to chunk_size like normal chunks
 
+        let ledger_chunk_offset = (poa_tx_num * 3 + poa_chunk_num) as u64;
+        let chunk_info = context.get_chunk_offset_info(ledger_chunk_offset.into());
+
         // Calculate what the hash SHOULD BE after entropy packing
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             context.miner_address,
-            (poa_tx_num * 3 + poa_chunk_num) as u64,
-            context.partition_hash.into(),
-            context.consensus_config.entropy_packing_iterations,
+            chunk_info.partition_chunk_offset.into(),
+            chunk_info.partition_hash.into(),
+            context.consensus_config().entropy_packing_iterations,
             chunk_size,
             &mut entropy_chunk,
-            context.consensus_config.chain_id,
+            context.consensus_config().chain_id,
         );
 
         // Apply entropy packing to our hacked data to see what it becomes
@@ -3125,16 +3170,16 @@ mod tests {
         debug!("  Entropy-packed hash: {:?}", &entropy_packed_hash[..4]);
         debug!("  Chunk offset: {}", chunk_end_offset);
 
+        let ledger_chunk_offset = (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
+        let chunk_info = context.get_chunk_offset_info(ledger_chunk_offset.into());
+
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(hacked_data_path.clone())),
             chunk: Some(Base64(hacked_data.clone())), // Use RAW data, PoA validation will entropy-pack it
             ledger_id: Some(1),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                .try_into()
-                .expect("Value exceeds u32::MAX"),
-
-            partition_hash: context.partition_hash,
+            partition_chunk_offset: chunk_info.partition_chunk_offset.into(),
+            partition_hash: chunk_info.partition_hash,
         };
 
         // Create a block from the tx
@@ -3197,20 +3242,22 @@ mod tests {
             .expect("send get guard");
         let block_index_guard = rx.await.expect("receive block index guard");
 
-        let ledger_chunk_offset = context
-            .partition_assignment
-            .slot_index
-            .expect("Expected to get slot index") as u64
-            * context.consensus_config.num_partitions_per_slot
-            * context.consensus_config.num_chunks_in_partition
-            + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
+        // TODO: DMac make this useful
+        // let ledger_chunk_offset = context
+        //     .partition_assignment
+        //     .slot_index
+        //     .expect("Expected to get slot index") as u64
+        //     * context.consensus_config().num_partitions_per_slot
+        //     * context.consensus_config().num_chunks_in_partition
+        //     + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
-        assert_eq!(
-            ledger_chunk_offset,
-            (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64,
-            "ledger_chunk_offset mismatch"
-        );
+        // assert_eq!(
+        //     ledger_chunk_offset,
+        //     (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64,
+        //     "ledger_chunk_offset mismatch"
+        // );
 
+        let ledger_chunk_offset = (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
         // ledger data -> block
         let bb = block_index_guard
             .read()
@@ -3231,7 +3278,7 @@ mod tests {
             &poa,
             &block_index_guard,
             &context.epoch_snapshot,
-            &context.consensus_config,
+            &context.consensus_config(),
             &context.miner_address,
         );
 
