@@ -168,7 +168,8 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
             cached_data_root.block_set.push(block_header.block_hash);
         }
         // Clear any pre-confirmation expiry once the data_root is included in a block
-        cached_data_root.expiry_height = None;
+        // TESTNET MODIFICATION - expire after 200 blocks
+        cached_data_root.expiry_height = Some(block_header.height + 200);
     }
 
     // Update the database with the modified or new entry
