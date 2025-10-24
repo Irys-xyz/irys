@@ -31,12 +31,6 @@ pub enum PdPrecompileError {
     #[error("gas calculation overflow (base: {base}, operation: {operation})")]
     GasOverflow { base: u64, operation: u64 },
 
-    #[error("gas cost calculation overflow (chunk_count: {chunk_count}, per_chunk_cost: {per_chunk_cost})")]
-    GasCostOverflow {
-        chunk_count: u64,
-        per_chunk_cost: u64,
-    },
-
     #[error("failed to apply offset {offset} to byte range: {reason}")]
     OffsetTranslationFailed { offset: u32, reason: String },
 
