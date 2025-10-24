@@ -1017,7 +1017,7 @@ pub async fn reth_block_is_valid(
     }
 
     // 2.5. Validate PD chunk budget
-    let max_pd_chunks = config.consensus.mempool.max_pd_chunks_per_block;
+    let max_pd_chunks = config.consensus.programmable_data.max_pd_chunks_per_block;
     let mut total_pd_chunks: u64 = 0;
 
     for tx in evm_block.body.transactions.iter() {

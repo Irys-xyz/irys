@@ -474,9 +474,12 @@ mod tests {
         max_commitment_txs_per_block = 100
         anchor_expiry_depth = 20
         commitment_fee = 100
+
+        [programmable_data]
+        cost_per_mb = 0.01
+        minimum_tx_cost = 0.01
+        base_fee_floor = 0.01
         max_pd_chunks_per_block = 7500
-
-
 
         [difficulty_adjustment]
         block_time = 1

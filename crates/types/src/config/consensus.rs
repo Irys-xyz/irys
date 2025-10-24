@@ -387,6 +387,11 @@ pub struct ProgrammableDataConfig {
         serialize_with = "serde_utils::serializes_token_amount"
     )]
     pub base_fee_floor: Amount<Usd>,
+
+    /// Maximum number of PD (Programmable Data) chunks that can be included in a single block.
+    /// PD-aware transactions embed a PD header and list required data chunks in their access list.
+    /// This limit prevents exceeding the network's chunk processing capacity per block.
+    pub max_pd_chunks_per_block: u64,
 }
 
 /// # Mempool Configuration
@@ -407,11 +412,6 @@ pub struct MempoolConsensusConfig {
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
-
-    /// Maximum number of PD (Programmable Data) chunks that can be included in a single block.
-    /// PD-aware transactions embed a PD header and list required data chunks in their access list.
-    /// This limit prevents exceeding the network's chunk processing capacity per block.
-    pub max_pd_chunks_per_block: u64,
 }
 
 impl ConsensusConfig {
@@ -479,6 +479,7 @@ impl ConsensusConfig {
                 cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
                 minimum_tx_cost: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
                 base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
+                max_pd_chunks_per_block: 7_500,
             },
             ..base
         }
@@ -525,7 +526,6 @@ impl ConsensusConfig {
                 max_commitment_txs_per_block: 100,
                 anchor_expiry_depth: 20,
                 commitment_fee: 100,
-                max_pd_chunks_per_block: 7_500,
             },
             vdf: VdfConsensusConfig {
                 // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
@@ -631,6 +631,7 @@ impl ConsensusConfig {
                 cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
                 minimum_tx_cost: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
                 base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
+                max_pd_chunks_per_block: 7_500,
             },
         }
     }
