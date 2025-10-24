@@ -5515,6 +5515,7 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "reth-primitives",
+ "reth-primitives-traits",
  "reth-transaction-pool",
  "rstest",
  "ruint",
