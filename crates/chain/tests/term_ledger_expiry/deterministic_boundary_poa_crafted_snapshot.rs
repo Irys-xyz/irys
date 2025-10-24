@@ -97,7 +97,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     // PoA chunk and partition_chunk_offset will be computed after we migrate the prelude
     // once we can query actual block bounds from the BlockIndex.
     let mut partition_chunk_offset: u32 = 0;
-    let mut poa_chunk: Vec<u8> = Vec::new();
 
     // 5) Build two synthetic blocks:
     //    - Prelude block at height=1 adds exactly `ledger_chunk_offset` chunks so that the next
@@ -231,7 +230,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     partition_chunk_offset = 0;
 
     // Compute PoA chunk using the adjusted partition_chunk_offset
-    poa_chunk = data.clone();
+    let mut poa_chunk: Vec<u8> = data.clone();
     {
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
         compute_entropy_chunk(
