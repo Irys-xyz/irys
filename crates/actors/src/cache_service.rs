@@ -1145,7 +1145,8 @@ mod tests {
 
         prop_compose! {
             fn unix_timestamps()(
-                secs in 100_u64..1_000_000
+                // Realistic range: 2020-01-01 to 2030-01-01
+                secs in 1_577_836_800_u64..1_893_456_000_u64
             ) -> UnixTimestamp {
                 UnixTimestamp::from_secs(secs)
             }
