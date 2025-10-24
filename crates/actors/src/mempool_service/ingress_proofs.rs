@@ -1,10 +1,6 @@
-use irys_database::{
-    tables::{CompactCachedIngressProof, IngressProofs},
-    walk_all,
-};
+use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_types::{ingress::CachedIngressProof, GossipBroadcastMessage, IngressProof};
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
-use tracing::debug;
 
 use crate::mempool_service::{IngressProofError, Inner};
 
