@@ -17,7 +17,7 @@ use tracing::info;
 /// - Builds a synthetic block with a single Submit tx and a PoA chunk that is VALID when
 ///   using the PARENT epoch snapshot's slot assignment for the target partition.
 /// - Mutates a CLONED epoch snapshot to simulate the CHILD snapshot with a different slot index
-///   for the same partition so that PoA becomes INVALID (Merkle proof mismatch).
+///   for the same partition so that PoA becomes INVALID (e.g., merkle proof mismatch or out-of-bounds).
 ///
 /// This avoids any miner randomness and does not rely on the live validation path.
 /// It directly exercises `poa_is_valid` with controlled parent/child snapshots. On the buggy
@@ -99,7 +99,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     let mut partition_chunk_offset: u32 = 0;
 
     // 5) Build two synthetic blocks:
-    //    - Prelude block at height=1 adds exactly `ledger_chunk_offset` chunks so that the next
+    //    - Prelude block at height=1 adds exactly `slot_start` chunks so that the next
     //      block's PoA chunk is at block-relative offset 0 (ensuring tx_path alignment).
     //    - Boundary-like block at height=2 contains our crafted PoA chunk targeting partition_chunk_offset=0.
     //
