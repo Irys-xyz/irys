@@ -492,6 +492,9 @@ impl StorageModuleServiceInner {
         }
     }
 
+    /// Gets the maximum offset in the partition that has been assigned data chunks
+    /// by data transactions. Used for retrieving the  the maximum possible ledger offset
+    /// within a partition relative to the start of the partition.
     fn get_max_partition_offset(&self, storage_module: Arc<StorageModule>) -> PartitionChunkOffset {
         let ledger_id = storage_module
             .partition_assignment()
