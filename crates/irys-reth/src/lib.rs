@@ -42,7 +42,6 @@ use reth_node_ethereum::{
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
-use reth_transaction_pool::EthPooledTransaction;
 use reth_trie_db::MerklePatriciaTrie;
 use shadow_tx::ShadowTransaction;
 
@@ -2421,6 +2420,7 @@ pub mod test_utils {
     use alloy_primitives::{TxKind, U256};
     use alloy_rpc_types::engine::PayloadAttributes;
     use reth::providers::CanonStateSubscriptions;
+    use reth_transaction_pool::EthPooledTransaction;
 
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
