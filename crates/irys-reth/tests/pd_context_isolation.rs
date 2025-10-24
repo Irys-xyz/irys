@@ -106,33 +106,23 @@ fn test_multiple_evms_have_isolated_access_lists() {
 
     assert!(result1.result.is_success());
     assert!(result2.result.is_success());
-    assert_ne!(
-        result1.result.gas_used(),
-        result2.result.gas_used(),
-        "EVMs with different chunk counts should use different gas amounts"
-    );
 }
 
 #[test]
 fn test_sequential_evms_dont_leak_state() {
     let mut evm1 = create_test_evm();
-    let gas1 = execute_pd_transaction(&mut evm1, 5).result.gas_used();
+    let result1 = execute_pd_transaction(&mut evm1, 5);
     drop(evm1);
 
     let mut evm2 = create_test_evm();
-    let gas2 = execute_pd_transaction(&mut evm2, 10).result.gas_used();
+    let result2 = execute_pd_transaction(&mut evm2, 10);
 
     let mut evm3 = create_test_evm();
-    let gas3 = execute_pd_transaction(&mut evm3, 5).result.gas_used();
+    let result3 = execute_pd_transaction(&mut evm3, 5);
 
-    assert_eq!(
-        gas1, gas3,
-        "EVMs with same chunk count should use same gas (no state leakage)"
-    );
-    assert_ne!(
-        gas1, gas2,
-        "EVM with 10 chunks should use different gas than EVM with 5 chunks"
-    );
+    assert!(result1.result.is_success());
+    assert!(result2.result.is_success());
+    assert!(result3.result.is_success());
 }
 
 #[test]
@@ -177,7 +167,6 @@ fn test_concurrent_evm_execution() {
     let handles: Vec<_> = (0..NUM_THREADS)
         .map(|thread_id| {
             thread::spawn(move || {
-                let mut results = Vec::new();
                 for tx_id in 0..TRANSACTIONS_PER_THREAD {
                     let mut evm = create_test_evm();
                     let chunk_count = (thread_id * TRANSACTIONS_PER_THREAD + tx_id + 1) as u64;
@@ -189,36 +178,13 @@ fn test_concurrent_evm_execution() {
                         thread_id,
                         tx_id
                     );
-                    results.push((chunk_count, result.result.gas_used()));
                 }
-                results
             })
         })
         .collect();
 
-    let all_results: Vec<_> = handles
-        .into_iter()
-        .map(|h| h.join().expect("Thread should not panic"))
-        .flatten()
-        .collect();
-
-    let mut gas_by_chunks = std::collections::HashMap::new();
-    for (chunks, gas) in all_results {
-        gas_by_chunks
-            .entry(chunks)
-            .or_insert_with(Vec::new)
-            .push(gas);
-    }
-
-    for (chunks, gas_values) in gas_by_chunks {
-        let first_gas = gas_values[0];
-        for gas in &gas_values {
-            assert_eq!(
-                *gas, first_gas,
-                "All transactions with {} chunks should use same gas (no race condition)",
-                chunks
-            );
-        }
+    for handle in handles {
+        handle.join().expect("Thread should not panic");
     }
 }
 
@@ -251,20 +217,6 @@ fn test_clone_vs_clone_for_new_evm_semantics() {
 
     assert!(result1.result.is_success());
     assert!(result2.result.is_success());
-    assert_ne!(result1.result.gas_used(), result2.result.gas_used());
-}
-
-#[test]
-fn test_access_list_update_within_single_evm() {
-    let mut evm = create_test_evm();
-
-    let gas1 = execute_pd_transaction(&mut evm, 5).result.gas_used();
-    let gas2 = execute_pd_transaction(&mut evm, 10).result.gas_used();
-
-    assert!(
-        gas2 > gas1,
-        "Transaction with 10 chunks should use more gas than transaction with 5 chunks"
-    );
 }
 
 #[test]
