@@ -13,8 +13,7 @@ use tracing::{debug, warn};
 
 use super::constants::{
     INDEX_OFFSET, LENGTH_FIELD_OFFSET, LENGTH_SIZE, OFFSET_FIELD_OFFSET, OFFSET_SIZE,
-    PD_CHUNK_READ_COST, READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN,
-    READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN,
+    READ_BYTES_RANGE_BY_INDEX_CALLDATA_LEN, READ_PARTIAL_BYTE_RANGE_CALLDATA_LEN,
 };
 use super::context::PdContext;
 use super::error::PdPrecompileError;
@@ -331,28 +330,13 @@ pub fn read_bytes_range(
         .drain(offset_usize..offset_usize + length_usize)
         .collect();
 
-    let gas_used = (*chunk_count as u64)
-        .checked_mul(PD_CHUNK_READ_COST)
-        .ok_or_else(|| {
-            warn!(
-                chunk_count = chunk_count,
-                per_chunk_cost = PD_CHUNK_READ_COST,
-                "Gas calculation overflow: chunk_count * per_chunk_cost exceeds u64::MAX"
-            );
-            PdPrecompileError::GasCostOverflow {
-                chunk_count: *chunk_count as u64,
-                per_chunk_cost: PD_CHUNK_READ_COST,
-            }
-        })?;
-
     debug!(
         bytes_extracted = extracted.len(),
-        gas_cost = gas_used,
         "Byte range extraction successful"
     );
 
     Ok(PrecompileOutput {
-        gas_used,
+        gas_used: 0,
         bytes: extracted,
     })
 }
@@ -644,7 +628,7 @@ mod tests {
             assert!(result.is_ok(), "Valid read should succeed");
             let output = result.unwrap();
             assert_eq!(output.bytes.len(), 100);
-            assert_eq!(output.gas_used, PD_CHUNK_READ_COST);
+            assert_eq!(output.gas_used, 0);
         }
 
         #[test]
@@ -672,7 +656,7 @@ mod tests {
 
             assert!(result.is_ok());
             let output = result.unwrap();
-            assert_eq!(output.gas_used, 5 * PD_CHUNK_READ_COST);
+            assert_eq!(output.gas_used, 0);
         }
     }
 

@@ -211,17 +211,14 @@ mod tests {
         let result = execute_precompile(vec![0, 0], access_list);
         assert!(result.result.is_success(), "transaction should succeed");
 
-        // Verify gas cost includes both base and per-chunk costs
+        // Verify gas cost is at least the base cost
         // Note: total gas includes EVM overhead, so we check it's at least the precompile cost
-        use crate::precompiles::pd::constants::PD_CHUNK_READ_COST;
-        let min_expected_gas = PD_BASE_GAS_COST + PD_CHUNK_READ_COST;
+        let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
-            "Gas used ({}) should be at least {} (base) + {} (1 chunk) = {}",
+            "Gas used ({}) should be at least {} (base)",
             result.result.gas_used(),
-            PD_BASE_GAS_COST,
-            PD_CHUNK_READ_COST,
-            min_expected_gas
+            PD_BASE_GAS_COST
         );
 
         let out = result
@@ -345,9 +342,8 @@ mod tests {
             "ReadPartialByteRange should succeed"
         );
 
-        // Verify gas includes base + chunk costs
-        use crate::precompiles::pd::constants::PD_CHUNK_READ_COST;
-        let min_expected_gas = PD_BASE_GAS_COST + (2 * PD_CHUNK_READ_COST);
+        // Verify gas is at least the base cost
+        let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
             "Gas used should include precompile costs"
@@ -525,12 +521,11 @@ mod tests {
             "transaction should succeed with 20 chunks"
         );
 
-        // Verify gas cost scales with chunk count
-        use crate::precompiles::pd::constants::PD_CHUNK_READ_COST;
-        let min_expected_gas = PD_BASE_GAS_COST + (20 * PD_CHUNK_READ_COST);
+        // Verify gas cost is at least the base cost
+        let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
-            "Gas used ({}) should be at least {} for 20 chunks",
+            "Gas used ({}) should be at least {}",
             result.result.gas_used(),
             min_expected_gas
         );
@@ -598,16 +593,13 @@ mod tests {
         let result = evm.transact_raw(tx).unwrap();
         assert!(result.result.is_success(), "transaction should succeed");
 
-        // Verify gas cost for 5 chunks
-        use crate::precompiles::pd::constants::PD_CHUNK_READ_COST;
-        let min_expected_gas = PD_BASE_GAS_COST + (5 * PD_CHUNK_READ_COST);
+        // Verify gas cost is at least the base cost
+        let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
-            "Gas used ({}) should be at least {} (base) + {} (5 chunks) = {}",
+            "Gas used ({}) should be at least {} (base)",
             result.result.gas_used(),
-            PD_BASE_GAS_COST,
-            5 * PD_CHUNK_READ_COST,
-            min_expected_gas
+            PD_BASE_GAS_COST
         );
     }
 
@@ -750,9 +742,8 @@ mod tests {
             "transaction should succeed with large chunk count"
         );
 
-        // Verify gas calculation doesn't overflow
-        use crate::precompiles::pd::constants::PD_CHUNK_READ_COST;
-        let min_expected_gas = PD_BASE_GAS_COST + (1000 * PD_CHUNK_READ_COST);
+        // Verify gas cost is at least the base cost
+        let min_expected_gas = PD_BASE_GAS_COST;
         assert!(
             result.result.gas_used() >= min_expected_gas,
             "Gas used ({}) should be at least {}",
