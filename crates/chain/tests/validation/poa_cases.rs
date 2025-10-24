@@ -38,7 +38,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();
 
     // Create a bunch of TX chunks
-    let tx_datas = vec![
+    let tx_data = vec![
         vec![[0; 32], [1; 32], [2; 32]], // tx0
         vec![[3; 32], [4; 32], [5; 32]], // tx1
         vec![[6; 32], [7; 32], [8; 32]], // tx2
@@ -47,7 +47,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
     // Build a vec of signed data transactions from the chunks
     let mut txs: Vec<DataTransaction> = Vec::new();
 
-    for tx_data_chunks in &tx_datas {
+    for tx_data_chunks in &tx_data {
         let mut data: Vec<u8> = Vec::new();
         for chunk in tx_data_chunks {
             data.extend_from_slice(chunk);
@@ -108,7 +108,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
         for chunk_index in 0..3 {
             // Calculate the various chunk offsets
             let ledger_chunk_offset = tx_index as u64 * 3 /*chunks per tx */ + chunk_index as u64;
-            let slot_index = (ledger_chunk_offset as u64 / num_chunks_in_partition) as usize;
+            let slot_index = (ledger_chunk_offset / num_chunks_in_partition) as usize;
             let partition_chunk_offset =
                 (ledger_chunk_offset - (slot_index as u64 * num_chunks_in_partition)) as u32;
 
