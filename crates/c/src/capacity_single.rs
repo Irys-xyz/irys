@@ -6,7 +6,7 @@ pub const SHA_HASH_SIZE: usize = 32;
 #[inline]
 pub fn compute_seed_hash(
     address: Address,
-    offset: std::ffi::c_ulong,
+    partition_offset: std::ffi::c_ulong,
     hash: [u8; SHA_HASH_SIZE],
     irys_chain_id: u64,
 ) -> [u8; SHA_HASH_SIZE] {
@@ -15,7 +15,7 @@ pub fn compute_seed_hash(
     hasher.update(&address_buffer);
     hasher.update(&hash);
     hasher.update(&irys_chain_id.to_le_bytes());
-    hasher.update(&offset.to_le_bytes());
+    hasher.update(&partition_offset.to_le_bytes());
     hasher.finish()
 }
 
@@ -25,15 +25,19 @@ pub fn compute_seed_hash(
 #[inline]
 pub fn compute_entropy_chunk(
     mining_address: Address,
-    chunk_offset: std::ffi::c_ulong,
+    partition_chunk_offset: std::ffi::c_ulong,
     partition_hash: [u8; SHA_HASH_SIZE],
     iterations: u32,
     chunk_size: usize,
     out_entropy_chunk: &mut Vec<u8>,
     irys_chain_id: u64,
 ) {
-    let mut previous_segment =
-        compute_seed_hash(mining_address, chunk_offset, partition_hash, irys_chain_id);
+    let mut previous_segment = compute_seed_hash(
+        mining_address,
+        partition_chunk_offset,
+        partition_hash,
+        irys_chain_id,
+    );
     out_entropy_chunk.clear();
     // Phase 1: sequential hashing
     for _i in 0..(chunk_size / SHA_HASH_SIZE) {

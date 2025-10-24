@@ -804,8 +804,7 @@ pub fn poa_is_valid(
             }
         })?;
         let ledger_chunk_offset =
-            slot_index_u64 * config.num_partitions_per_slot * config.num_chunks_in_partition
-                + u64::from(poa.partition_chunk_offset);
+            slot_index_u64 * config.num_chunks_in_partition + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)
@@ -2942,7 +2941,6 @@ mod tests {
             .slot_index
             .expect("Expected to have a slot index in the assignment")
             as u64
-            * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
@@ -3201,7 +3199,6 @@ mod tests {
             .partition_assignment
             .slot_index
             .expect("Expected to get slot index") as u64
-            * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
