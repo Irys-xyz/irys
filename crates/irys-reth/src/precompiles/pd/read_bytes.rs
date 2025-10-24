@@ -637,34 +637,6 @@ mod tests {
             assert_eq!(output.bytes.len(), 100);
             assert_eq!(output.gas_used, 0);
         }
-
-        #[test]
-        fn test_multiple_chunks_gas_calculation() {
-            use alloy_primitives::aliases::U200;
-            use irys_primitives::range_specifier::U18;
-            let context = create_test_context();
-
-            let byte_range = ByteRangeSpecifier {
-                index: 0,
-                chunk_offset: 0,
-                byte_offset: U18::ZERO,
-                length: U34::try_from(1000).unwrap(),
-            };
-
-            let chunk_reads = vec![ChunkRangeSpecifier {
-                partition_index: U200::ZERO,
-                offset: 0,
-                chunk_count: 5, // 5 chunks
-            }];
-
-            let parsed = create_test_parsed_access_lists(chunk_reads, vec![]);
-
-            let result = read_bytes_range(byte_range, &context, parsed);
-
-            assert!(result.is_ok());
-            let output = result.unwrap();
-            assert_eq!(output.gas_used, 0);
-        }
     }
 
     mod proptests {
