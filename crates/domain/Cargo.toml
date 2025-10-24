@@ -16,7 +16,6 @@ irys-types = { workspace = true, features = ["test-utils"] }
 irys-config.workspace = true
 irys-database.workspace = true
 irys-packing.workspace = true
-irys-primitives.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
 nodit.workspace = true

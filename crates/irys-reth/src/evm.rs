@@ -1529,7 +1529,7 @@ mod tests {
         let key2 = encode_pd_storage_key([0_u8; 26], 1, 1);
         let key3 = encode_pd_storage_key([0_u8; 26], 2, 1);
         let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
-            address: irys_primitives::precompile::PD_PRECOMPILE_ADDRESS,
+            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
             storage_keys: vec![key1, key2, key3],
         }]);
 
