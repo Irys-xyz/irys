@@ -13,9 +13,20 @@ use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
 use tokio::sync::oneshot;
 
+fn default_true() -> bool {
+    true
+}
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GetBlockQuery {
+    #[serde(default = "default_true")]
+    poa: bool,
+}
+
 pub async fn get_block(
     state: web::Data<ApiState>,
     path: web::Path<String>,
+    query: web::Query<GetBlockQuery>,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let tag_param = BlockParam::from_str(&path).map_err(|_| ApiError::ErrNoId {
         id: path.to_string(),
@@ -60,18 +71,21 @@ pub async fn get_block(
         }
         BlockParam::Hash(hash) => hash,
     };
-    get_block_by_hash(&state, block_hash).await
+    get_block_by_hash(&state, block_hash, query.poa).await
 }
 
 async fn get_block_by_hash(
     state: &web::Data<ApiState>,
     block_hash: H256,
+    with_poa: bool,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let irys_header = {
         let (tx, rx) = oneshot::channel();
         state
             .mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, true, tx))
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block_hash, with_poa, tx,
+            ))
             .expect("expected send to mempool to succeed");
         let mempool_response = rx.await.map_err(|e| {
             tracing::error!("Mempool response error: {}", e);
@@ -83,7 +97,7 @@ async fn get_block_by_hash(
             Some(h) => h,
             None => state
                 .db
-                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, with_poa))
                 .map_err(|e| {
                     tracing::error!("DB error when reading block header: {}", e);
                     ApiError::Internal {

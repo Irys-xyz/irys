@@ -1,14 +1,15 @@
 //! endpoint tests
 use crate::{
     api::{
-        block_index_endpoint_request, chunk_endpoint_request, info_endpoint_request,
-        network_config_endpoint_request, peer_list_endpoint_request, version_endpoint_request,
+        block_index_endpoint_request, chunk_endpoint_request, client_request,
+        info_endpoint_request, network_config_endpoint_request, peer_list_endpoint_request,
+        version_endpoint_request,
     },
     utils::IrysNodeTest,
 };
 use actix_web::http::header::ContentType;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{BlockIndexItem, NodeInfo};
+use irys_types::{BlockIndexItem, IrysBlockHeader, NodeInfo};
 use reqwest::StatusCode;
 use tracing::info;
 
@@ -99,6 +100,10 @@ async fn heavy_external_api() -> eyre::Result<()> {
             remaining.min(limit)
         }
     }
+
+    let response = client_request(&format!("{}/v1/block/1?poa=false", &address)).await;
+    let json: IrysBlockHeader = response.json().await.unwrap();
+    assert!(json.poa.chunk.is_none());
 
     // tests should check total number of json objects returned are equal to the expected number.
     for limit in 0..2 {
