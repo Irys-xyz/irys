@@ -1176,57 +1176,11 @@ pub trait BlockProdStrategy {
         prev_evm_block: &reth_ethereum_primitives::Block,
         prev_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-        use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
-        use irys_reth::shadow_tx::{detect_and_decode, TransactionPacket};
-        use alloy_consensus::Transaction as _;
-
-        // Extract current PD base fee from parent block's 2nd shadow transaction (PdBaseFeeUpdate)
-        // The ordering is: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs
-        let second_tx = prev_evm_block
-            .body
-            .transactions
-            .get(1)
-            .ok_or_eyre("Parent block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)")?;
-
-        let shadow_tx = detect_and_decode(second_tx)
-            .map_err(|e| eyre!("Failed to decode 2nd transaction as shadow tx: {}", e))?
-            .ok_or_eyre("2nd transaction in parent block is not a shadow transaction")?;
-
-        let current_pd_base_fee_irys = match &shadow_tx {
-            irys_reth::shadow_tx::ShadowTransaction::V1 { packet, .. } => {
-                match packet {
-                    TransactionPacket::PdBaseFeeUpdate(update) => {
-                        // Convert alloy U256 to irys U256
-                        Amount::new(update.per_chunk.into())
-                    }
-                    _ => {
-                        eyre::bail!(
-                            "2nd transaction in parent block is not a PdBaseFeeUpdate (found: {:?})",
-                            packet
-                        );
-                    }
-                }
-            }
-            _ => {
-                eyre::bail!(
-                    "Unsupported shadow transaction version in parent block's 2nd transaction"
-                );
-            }
-        };
+        // Extract current PD base fee from parent block's 2nd shadow transaction
+        let current_pd_base_fee_irys = pd_base_fee::extract_pd_base_fee_from_block(prev_evm_block)?;
 
         // Count PD chunks used in parent block
-        let mut total_pd_chunks: u64 = 0;
-        for tx in prev_evm_block.body.transactions.iter() {
-            // Try to detect PD header in transaction input
-            let input = tx.input();
-            if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
-                // This is a PD transaction, sum chunks from access list if present
-                if let Some(access_list) = tx.access_list() {
-                    let chunks = sum_pd_chunks_in_access_list(access_list);
-                    total_pd_chunks = total_pd_chunks.saturating_add(chunks);
-                }
-            }
-        }
+        let total_pd_chunks = pd_base_fee::count_pd_chunks_in_block(prev_evm_block);
 
         debug!(
             prev_block_height = prev_block_header.height,
@@ -1235,6 +1189,7 @@ pub trait BlockProdStrategy {
             "Calculated PD metrics from parent block"
         );
 
+        // Calculate the new PD base fee based on utilization
         pd_base_fee::calculate_pd_base_fee_for_new_block(
             prev_block_ema_snapshot,
             total_pd_chunks as u32,

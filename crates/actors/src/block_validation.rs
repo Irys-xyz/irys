@@ -915,7 +915,9 @@ pub async fn reth_block_is_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
+    reth_adapter: &IrysRethNodeAdapter,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: Arc<EmaSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<ExecutionData> {
@@ -1066,7 +1068,9 @@ pub async fn reth_block_is_valid(
         service_senders,
         block,
         db,
+        reth_adapter,
         parent_epoch_snapshot,
+        parent_ema_snapshot,
         parent_commitment_snapshot,
         block_index,
     )
@@ -1188,7 +1192,9 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
+    reth_adapter: &IrysRethNodeAdapter,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: Arc<EmaSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
@@ -1261,6 +1267,48 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         Vec::new()
     };
 
+    // Calculate PD base fee from parent block
+    let pd_base_fee_per_chunk = {
+        use reth::providers::BlockReader as _;
+        use alloy_eips::BlockHashOrNumber;
+
+        // Fetch parent EVM block
+        let prev_evm_block = {
+            let mut attempts = 0;
+            loop {
+                if attempts > 50 {
+                    eyre::bail!("Failed to get parent EVM block {} after 50 attempts", prev_block.evm_block_hash);
+                }
+                let result = reth_adapter.reth_node.inner.provider
+                    .block(BlockHashOrNumber::Hash(prev_block.evm_block_hash))?;
+                match result {
+                    Some(block) => break block,
+                    None => {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        };
+
+        // Extract current PD base fee from parent block's 2nd shadow transaction
+        let current_pd_base_fee_irys = crate::block_producer::pd_base_fee::extract_pd_base_fee_from_block(&prev_evm_block)?;
+
+        // Count PD chunks used in parent block
+        let total_pd_chunks = crate::block_producer::pd_base_fee::count_pd_chunks_in_block(&prev_evm_block);
+
+        // Calculate the new PD base fee based on utilization
+        let pd_base_fee = crate::block_producer::pd_base_fee::calculate_pd_base_fee_for_new_block(
+            &parent_ema_snapshot,
+            total_pd_chunks as u32,
+            current_pd_base_fee_irys,
+            &config.consensus.programmable_data,
+            config.consensus.chunk_size,
+        )?;
+
+        pd_base_fee.amount
+    };
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1272,6 +1320,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         &data_txs,
         &publish_ledger_with_txs,
         initial_treasury_balance,
+        pd_base_fee_per_chunk,
         &expired_ledger_fees,
         &commitment_refund_events,
         &unstake_refund_events,
