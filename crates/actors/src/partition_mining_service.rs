@@ -106,7 +106,7 @@ impl PartitionMiningServiceInner {
             if expired.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
                     debug!(
-                        storage_module.partintion_hash = ?partition_hash,
+                        storage_module.partition_hash = ?partition_hash,
                         storage_module.packing_interval = ?interval,
                         "Expiring partition hash"
                     );
@@ -119,7 +119,7 @@ impl PartitionMiningServiceInner {
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                 warn!(
                                     storage_module.id = %self.storage_module.id,
-                                    storage_module.partintion_hash = ?partition_hash,
+                                    storage_module.partition_hash = ?partition_hash,
                                     storage_module.packing_interval = ?interval,
                                     "Dropping packing request due to a saturated channel"
                                 );
@@ -127,7 +127,7 @@ impl PartitionMiningServiceInner {
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                                 error!(
                                     storage_module.id = %self.storage_module.id,
-                                    storage_module.partintion_hash = ?partition_hash,
+                                    storage_module.partition_hash = ?partition_hash,
                                     storage_module.packing_interval = ?interval,
                                     "Packing channel closed; failed to enqueue repacking request"
                                 );
@@ -136,7 +136,7 @@ impl PartitionMiningServiceInner {
                     }
                 } else {
                     error!(
-                        storage_module.partintion_hash = ?partition_hash,
+                        storage_module.partition_hash = ?partition_hash,
                         "Expiring partition hash, could not reset its storage module!"
                     );
                 }
