@@ -132,12 +132,32 @@ mod tests {
     use crate::evm::IrysEvmFactory;
     use alloy_eips::eip2930::AccessList;
     use alloy_evm::{Evm as _, EvmFactory as _};
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, Bytes};
     use reth_evm::EvmEnv;
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
     use revm::primitives::{hardfork::SpecId, TxKind, U256};
     use std::sync::Arc;
+
+    /// Creates a default TxEnv for testing PD precompile.
+    fn tx_env_default(data: Bytes, access_list: AccessList) -> TxEnv {
+        TxEnv {
+            caller: Address::random(),
+            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
+            nonce: 0,
+            gas_limit: 30_000_000,
+            value: U256::ZERO,
+            data,
+            gas_price: 0,
+            chain_id: Some(1),
+            gas_priority_fee: None,
+            access_list,
+            blob_hashes: Vec::new(),
+            max_fee_per_blob_gas: 0,
+            tx_type: 1,
+            authorization_list: Default::default(),
+        }
+    }
 
     /// Helper to execute PD precompile with given input and access list.
     fn execute_precompile(
@@ -159,22 +179,7 @@ mod tests {
 
         let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
 
-        let tx = TxEnv {
-            caller: Address::random(),
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input.into(),
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list,
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input.into(), access_list);
 
         evm.transact_raw(tx).unwrap()
     }
@@ -235,7 +240,6 @@ mod tests {
     fn test_insufficient_input_data() {
         use alloy_eips::eip2930::AccessList;
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -244,25 +248,8 @@ mod tests {
         let block_env = BlockEnv::default();
         let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
 
-        let caller = Address::random();
         let input = Bytes::from(vec![0]); // Only 1 byte (need at least 2)
-
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList::default(),
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input, AccessList::default());
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -279,7 +266,6 @@ mod tests {
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -309,29 +295,12 @@ mod tests {
             ],
         }];
 
-        let caller = Address::random();
         // Use function ID 1 (ReadPartialByteRange) with index 0, offset 100, length 200
         let mut input = vec![1, 0]; // function_id=1, index=0
         input.extend_from_slice(&100_u32.to_be_bytes()); // offset=100
         input.extend_from_slice(&200_u32.to_be_bytes()); // length=200
-        let input = Bytes::from(input);
 
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList(access_list_items),
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(Bytes::from(input), AccessList(access_list_items));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -351,7 +320,6 @@ mod tests {
     fn test_no_access_list() {
         use alloy_eips::eip2930::AccessList;
         use alloy_evm::{Evm as _, EvmFactory as _};
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -360,25 +328,8 @@ mod tests {
         let block_env = BlockEnv::default();
         let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv { cfg_env, block_env });
 
-        let caller = Address::random();
         let input = Bytes::from(vec![0, 0]);
-
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList::default(), // Empty access list
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input, AccessList::default()); // Empty access list
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -395,7 +346,6 @@ mod tests {
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -424,25 +374,8 @@ mod tests {
             ],
         }];
 
-        let caller = Address::random();
         let input = Bytes::from(vec![99, 0]); // Function ID 99 doesn't exist
-
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList(access_list_items),
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input, AccessList(access_list_items));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -459,7 +392,6 @@ mod tests {
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -489,25 +421,8 @@ mod tests {
             ],
         }];
 
-        let caller = Address::random();
         let input = Bytes::from(vec![0, 0]);
-
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList(access_list_items),
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input, AccessList(access_list_items));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -533,7 +448,6 @@ mod tests {
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -563,25 +477,8 @@ mod tests {
             ],
         }];
 
-        let caller = Address::random();
         let input = Bytes::from(vec![0, 0]);
-
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList(access_list_items),
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input, AccessList(access_list_items));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
@@ -606,7 +503,6 @@ mod tests {
         use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
-        use revm::primitives::{TxKind, U256};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
@@ -636,25 +532,8 @@ mod tests {
             ],
         }];
 
-        let caller = Address::random();
         let input = Bytes::from(vec![0, 0]);
-
-        let tx = revm::context::TxEnv {
-            caller,
-            kind: TxKind::Call(PD_PRECOMPILE_ADDRESS),
-            nonce: 0,
-            gas_limit: 30_000_000,
-            value: U256::ZERO,
-            data: input,
-            gas_price: 0,
-            chain_id: Some(1),
-            gas_priority_fee: None,
-            access_list: AccessList(access_list_items),
-            blob_hashes: Vec::new(),
-            max_fee_per_blob_gas: 0,
-            tx_type: 1,
-            authorization_list: Default::default(),
-        };
+        let tx = tx_env_default(input, AccessList(access_list_items));
 
         let result = evm.transact_raw(tx).unwrap();
         assert!(
