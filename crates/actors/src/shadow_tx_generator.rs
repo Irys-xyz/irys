@@ -829,15 +829,26 @@ mod tests {
         let solution_hash = H256::zero();
 
         // Create expected shadow transactions
-        let expected_shadow_txs: Vec<ShadowMetadata> = vec![ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(
-                TransactionPacket::BlockReward(BlockRewardIncrement {
-                    amount: reward_amount.into(),
-                }),
-                solution_hash.into(),
-            ),
-            transaction_fee: 0,
-        }];
+        let expected_shadow_txs: Vec<ShadowMetadata> = vec![
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
+                        amount: reward_amount.into(),
+                    }),
+                    solution_hash.into(),
+                ),
+                transaction_fee: 0,
+            },
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
+                    }),
+                    solution_hash.into(),
+                ),
+                transaction_fee: 0,
+            },
+        ];
 
         let empty_fees = LedgerExpiryBalanceDelta {
             miner_balance_increment: BTreeMap::new(),
@@ -855,6 +866,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &empty_fees,
             &[],
             &[],
@@ -917,6 +929,16 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::BlockReward(BlockRewardIncrement {
                         amount: reward_amount.into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
+            // PD Base Fee Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -986,6 +1008,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &empty_fees,
             &[],
             &[],
@@ -1035,6 +1058,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // PD Base Fee Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
             // Storage fee for the submit transaction (treasury amount only)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -1068,6 +1101,7 @@ mod tests {
             &submit_txs,
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &empty_fees,
             &[],
             &[],
@@ -1188,6 +1222,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // PD Base Fee Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
             // Storage fee for the publish transaction (treasury amount + perm_fee)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -1255,6 +1299,7 @@ mod tests {
             &submit_txs,
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &empty_fees,
             &[],
             &[],
@@ -1321,6 +1366,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // PD Base Fee Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
         ];
 
         // Add miner rewards in sorted order (BTreeMap guarantees this)
@@ -1350,6 +1405,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &expired_fees,
             &[],
             &[],
@@ -1422,6 +1478,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // PD Base Fee Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
         ];
 
         // Add user refunds in sorted order (already sorted by tx_id)
@@ -1451,6 +1517,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &expired_fees,
             &[],
             &[],
@@ -1491,16 +1558,27 @@ mod tests {
             proofs: None,
         };
 
-        // Only expect block reward
-        let expected_shadow_txs = vec![ShadowMetadata {
-            shadow_tx: ShadowTransaction::new_v1(
-                TransactionPacket::BlockReward(BlockRewardIncrement {
-                    amount: reward_amount.into(),
-                }),
-                H256::zero().into(),
-            ),
-            transaction_fee: 0,
-        }];
+        // Only expect block reward and PD base fee update
+        let expected_shadow_txs = vec![
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
+                        amount: reward_amount.into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                        per_chunk: U256::from(1000000u64).into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
+        ];
 
         let solution_hash = H256::zero();
         let mut generator = ShadowTxGenerator::new(
@@ -1514,6 +1592,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
+            U256::from(1000000u64),
             &expired_fees,
             &[],
             &[],
