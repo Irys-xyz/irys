@@ -83,9 +83,17 @@ pub fn calculate_pd_base_fee_for_new_block(
 /// The PD base fee is stored in the PdBaseFeeUpdate transaction, which is always
 /// the 2nd transaction in a block (after BlockReward at position 0).
 ///
+/// # Special Cases
+///
+/// - **Genesis Block** (height 0): Returns the minimum allowed base fee from PD config
+///   since the genesis block doesn't have the standard transaction structure.
+///
 /// # Arguments
 ///
+/// * `irys_block_header` - The Irys block header (used to check if this is genesis)
 /// * `evm_block` - The EVM block to extract the fee from
+/// * `pd_config` - The PD configuration (used for genesis block floor value)
+/// * `chunk_size` - The chunk size configuration
 ///
 /// # Returns
 ///
@@ -94,14 +102,36 @@ pub fn calculate_pd_base_fee_for_new_block(
 /// # Errors
 ///
 /// Returns an error if:
-/// - The block has fewer than 2 transactions
+/// - The block has fewer than 2 transactions (except for genesis)
 /// - The 2nd transaction is not a valid shadow transaction
 /// - The 2nd transaction is not a PdBaseFeeUpdate
 pub fn extract_pd_base_fee_from_block(
+    irys_block_header: &irys_types::IrysBlockHeader,
     evm_block: &reth_ethereum_primitives::Block,
+    pd_config: &ProgrammableDataConfig,
+    chunk_size: u64,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
     use eyre::{eyre, OptionExt};
     use irys_reth::shadow_tx::{detect_and_decode, TransactionPacket};
+
+    // Special case: Genesis block (height 0) should use the minimum base fee
+    // The genesis block doesn't have the standard transaction structure
+    // TODO: instead of using the genesis block, we MUST hardcode the block height/timestamp in our hardfork config
+    if irys_block_header.height == 0 {
+        // Convert the floor from per-MB to per-chunk
+        const MB_SIZE: u64 = 1024 * 1024;
+        let floor_per_chunk_usd = Amount::new(mul_div(
+            pd_config.base_fee_floor.amount,
+            U256::from(chunk_size),
+            U256::from(MB_SIZE),
+        )?);
+
+        // For genesis, we return the floor as the initial fee
+        // This will be in USD, so ideally we'd convert to Irys, but since we don't have
+        // an EMA price at genesis, we just return the floor value directly.
+        // The caller will need to handle the USD->Irys conversion if needed.
+        return Ok(floor_per_chunk_usd);
+    }
 
     // Extract current PD base fee from block's 2nd shadow transaction (PdBaseFeeUpdate)
     // The ordering is: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs

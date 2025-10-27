@@ -1177,7 +1177,12 @@ pub trait BlockProdStrategy {
         prev_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
         // Extract current PD base fee from parent block's 2nd shadow transaction
-        let current_pd_base_fee_irys = pd_base_fee::extract_pd_base_fee_from_block(prev_evm_block)?;
+        let current_pd_base_fee_irys = pd_base_fee::extract_pd_base_fee_from_block(
+            prev_block_header,
+            prev_evm_block,
+            &self.inner().config.consensus.programmable_data,
+            self.inner().config.consensus.chunk_size,
+        )?;
 
         // Count PD chunks used in parent block
         let total_pd_chunks = pd_base_fee::count_pd_chunks_in_block(prev_evm_block);

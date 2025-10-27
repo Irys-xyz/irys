@@ -1292,7 +1292,12 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         };
 
         // Extract current PD base fee from parent block's 2nd shadow transaction
-        let current_pd_base_fee_irys = crate::block_producer::pd_base_fee::extract_pd_base_fee_from_block(&prev_evm_block)?;
+        let current_pd_base_fee_irys = crate::block_producer::pd_base_fee::extract_pd_base_fee_from_block(
+            &prev_block,
+            &prev_evm_block,
+            &config.consensus.programmable_data,
+            config.consensus.chunk_size,
+        )?;
 
         // Count PD chunks used in parent block
         let total_pd_chunks = crate::block_producer::pd_base_fee::count_pd_chunks_in_block(&prev_evm_block);
