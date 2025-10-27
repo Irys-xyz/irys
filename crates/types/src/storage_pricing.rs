@@ -173,6 +173,38 @@ impl<T: std::fmt::Debug> Amount<T> {
             })?;
         Ok(res)
     }
+
+    /// Add a percentage multiplier to the amount.
+    /// Percentage must be expressed using PRECISION_SCALE.
+    ///
+    /// Formula: result = amount * (1 + percentage)
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 + percentage) / PRECISION_SCALE
+        let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_plus, PRECISION_SCALE)?;
+        Ok(Self::new(total))
+    }
+
+    /// Subtract a percentage multiplier from the amount.
+    /// Percentage must be expressed using PRECISION_SCALE.
+    ///
+    /// Formula: result = amount * (1 - percentage)
+    ///
+    /// # Errors
+    ///
+    /// Whenever any of the math operations fail due to bounds checks.
+    #[tracing::instrument(err)]
+    pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
+        // total = amount * (1 - percentage) / PRECISION_SCALE
+        let one_minus = safe_sub(PRECISION_SCALE, percentage.amount)?;
+        let total = mul_div(self.amount, one_minus, PRECISION_SCALE)?;
+        Ok(Self::new(total))
+    }
 }
 
 // Phantom markers for type safety.
@@ -374,23 +406,6 @@ impl Amount<(CostPerChunkDurationAdjusted, Usd)> {
 }
 
 impl Amount<(NetworkFee, Irys)> {
-    /// Add additional network fee for storing data to increase incentivization.
-    /// Percentage must be expressed using PRECISION_SCALE.
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
-    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = amount * (1 + percentage) / SCALE
-        let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, PRECISION_SCALE)?;
-        Ok(Self {
-            amount: total,
-            _t: PhantomData,
-        })
-    }
-
     /// Add ingress proof rewards to the base network fee.
     ///
     /// According to business rules:
@@ -472,34 +487,6 @@ impl Amount<(IrysPrice, Usd)> {
         let ema_value = safe_add(scaled_current, scaled_last)?;
 
         Ok(Self::new(ema_value))
-    }
-
-    /// Add extra percentage on top of the existing price.
-    /// Percentage must be expressed using PRECISION_SCALE.
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
-    pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = amount * (1 + percentage) / SCALE
-        let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_plus, PRECISION_SCALE)?;
-        Ok(Self::new(total))
-    }
-
-    /// Remove extra percentage on top of the existing price.
-    /// Percentage must be expressed using PRECISION_SCALE.
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
-    pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
-        // total = (amount * (1 - percentage)) / PRECISION_SCALE
-        let one_minus = safe_sub(PRECISION_SCALE, percentage.amount)?;
-        let total = mul_div(self.amount, one_minus, PRECISION_SCALE)?;
-        Ok(Self::new(total))
     }
 }
 
