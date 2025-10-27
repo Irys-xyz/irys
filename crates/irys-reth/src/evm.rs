@@ -409,7 +409,7 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     >,
     inspect: bool,
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
-    //Shared context for accessing Irys data
+    // Shared context for accessing Irys data
     context: PdContext,
 }
 
